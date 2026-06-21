@@ -10,6 +10,8 @@ import {
 } from "@/shared/constants/kinds";
 
 const HOME_FEED_ACTION_KINDS = [KIND_APPROVAL_REQUEST, KIND_REMINDER] as const;
+const LIVE_HOME_FEED_RETRY_BASE_MS = 1_000;
+const LIVE_HOME_FEED_RETRY_MAX_MS = 30_000;
 
 export function useLiveHomeFeedActions(
   pubkey: string | undefined,
@@ -36,58 +38,91 @@ export function useLiveHomeFeedActions(
 
     let isCancelled = false;
     let disposers: Array<() => Promise<void>> = [];
+    let retryTimer: ReturnType<typeof globalThis.setTimeout> | null = null;
+    let retryAttempt = 0;
     const since = Math.floor(Date.now() / 1_000);
 
-    void Promise.allSettled([
-      relayClient.subscribeLive(
-        {
-          kinds: [...HOME_FEED_ACTION_KINDS],
-          "#p": [normalizedPubkey],
-          limit: 50,
-          since,
-        },
-        handleLiveHomeFeedEvent,
-      ),
-      relayClient.subscribeLive(
-        {
-          authors: [normalizedPubkey],
-          kinds: [KIND_EVENT_REMINDER],
-          limit: 50,
-          since,
-        },
-        () => {
-          handleLiveReminderEvent(normalizedPubkey);
-        },
-      ),
-    ]).then((results) => {
-      const nextDisposers = results.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : [],
-      );
-      for (const result of results) {
-        if (result.status === "rejected") {
-          console.error(
-            "Failed to subscribe to live home feed actions",
-            result.reason,
-          );
-        }
-      }
-
-      if (nextDisposers.length === 0) {
+    const disposeAll = (currentDisposers: Array<() => Promise<void>>) => {
+      void Promise.allSettled(currentDisposers.map((dispose) => dispose()));
+    };
+    const scheduleRetry = () => {
+      if (isCancelled) {
         return;
       }
 
+      const delay = Math.min(
+        LIVE_HOME_FEED_RETRY_MAX_MS,
+        LIVE_HOME_FEED_RETRY_BASE_MS * 2 ** Math.min(retryAttempt, 5),
+      );
+      retryAttempt += 1;
+      retryTimer = globalThis.setTimeout(startSubscriptions, delay);
+    };
+    const startSubscriptions = () => {
       if (isCancelled) {
-        void Promise.allSettled(nextDisposers.map((dispose) => dispose()));
-      } else {
-        disposers = nextDisposers;
+        return;
       }
-    });
+
+      void Promise.allSettled([
+        relayClient.subscribeLive(
+          {
+            kinds: [...HOME_FEED_ACTION_KINDS],
+            "#p": [normalizedPubkey],
+            limit: 50,
+            since,
+          },
+          handleLiveHomeFeedEvent,
+        ),
+        relayClient.subscribeLive(
+          {
+            authors: [normalizedPubkey],
+            kinds: [KIND_EVENT_REMINDER],
+            limit: 50,
+            since,
+          },
+          () => {
+            handleLiveReminderEvent(normalizedPubkey);
+          },
+        ),
+      ]).then((results) => {
+        const nextDisposers = results.flatMap((result) =>
+          result.status === "fulfilled" ? [result.value] : [],
+        );
+        const rejectedResults = results.filter(
+          (result) => result.status === "rejected",
+        );
+        for (const result of rejectedResults) {
+          console.error(
+            "Failed to subscribe to live home feed actions; retrying",
+            result.reason,
+          );
+        }
+
+        if (isCancelled) {
+          disposeAll(nextDisposers);
+          return;
+        }
+
+        if (rejectedResults.length > 0 || nextDisposers.length === 0) {
+          disposeAll(nextDisposers);
+          scheduleRetry();
+          return;
+        }
+
+        retryAttempt = 0;
+        disposers = nextDisposers;
+      });
+    };
+
+    startSubscriptions();
 
     return () => {
       isCancelled = true;
+      if (retryTimer !== null) {
+        globalThis.clearTimeout(retryTimer);
+      }
       const currentDisposers = disposers;
       disposers = [];
-      void Promise.allSettled(currentDisposers.map((dispose) => dispose()));
+      disposeAll(currentDisposers);
     };
   }, [pubkey]);
 }
