@@ -39,8 +39,6 @@ const overrides = new Map([
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1295],
-  ["src/app/AppShell.tsx", 1080],
-  ["src/features/channels/useUnreadChannels.ts", 1660],
 ]);
 
 await runFileSizeCheck({

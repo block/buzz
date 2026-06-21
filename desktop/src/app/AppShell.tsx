@@ -16,8 +16,10 @@ import {
 import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
+import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import {
   channelsQueryKey,
@@ -66,7 +68,6 @@ import {
   isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
-import { remindersQueryKey } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
@@ -79,27 +80,15 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
-import type {
-  Channel,
-  FeedItem,
-  RelayEvent,
-  SearchHit,
-} from "@/shared/api/types";
+import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
-import {
-  KIND_APPROVAL_REQUEST,
-  KIND_EVENT_REMINDER,
-  KIND_REMINDER,
-} from "@/shared/constants/kinds";
 import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
-
-const HOME_FEED_ACTION_KINDS = [KIND_APPROVAL_REQUEST, KIND_REMINDER] as const;
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -183,77 +172,10 @@ export function AppShell() {
   const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
   });
-  React.useEffect(() => {
-    const pubkey = identityQuery.data?.pubkey?.trim().toLowerCase() ?? "";
-    if (!pubkey) {
-      return;
-    }
-
-    let isCancelled = false;
-    let disposers: Array<() => Promise<void>> = [];
-    const since = Math.floor(Date.now() / 1_000);
-    const handleLiveHomeFeedEvent = () => {
-      refetchHomeFeedFromLiveSignal();
-    };
-    const handleLiveReminderEvent = () => {
-      refetchHomeFeedFromLiveSignal();
-      void queryClient.invalidateQueries({
-        queryKey: remindersQueryKey(pubkey),
-      });
-    };
-
-    void Promise.allSettled([
-      relayClient.subscribeLive(
-        {
-          kinds: [...HOME_FEED_ACTION_KINDS],
-          "#p": [pubkey],
-          limit: 50,
-          since,
-        },
-        handleLiveHomeFeedEvent,
-      ),
-      relayClient.subscribeLive(
-        {
-          authors: [pubkey],
-          kinds: [KIND_EVENT_REMINDER],
-          limit: 50,
-          since,
-        },
-        handleLiveReminderEvent,
-      ),
-    ]).then((results) => {
-      const nextDisposers = results.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : [],
-      );
-      for (const result of results) {
-        if (result.status === "rejected") {
-          console.error(
-            "Failed to subscribe to live home feed actions",
-            result.reason,
-          );
-        }
-      }
-
-      if (nextDisposers.length === 0) {
-        return;
-      }
-
-      if (isCancelled) {
-        for (const dispose of nextDisposers) {
-          void dispose().catch(() => {});
-        }
-        return;
-      }
-      disposers = nextDisposers;
-    });
-
-    return () => {
-      isCancelled = true;
-      for (const dispose of disposers) {
-        void dispose().catch(() => {});
-      }
-    };
-  }, [identityQuery.data?.pubkey, queryClient]);
+  useLiveHomeFeedActions(
+    identityQuery.data?.pubkey,
+    refetchHomeFeedFromLiveSignal,
+  );
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, _event: RelayEvent) => {
       if (!notificationSettings.settings.desktopEnabled) return;
@@ -445,28 +367,11 @@ export function AppShell() {
     },
     [markChannelRead],
   );
-  const mutedRootIdsKey = [...mutedRootIds].sort().join("\0");
-  const threadActivityFeedItems = React.useMemo<FeedItem[]>(() => {
-    // mutedRootIds is a mutable Set; this key invalidates when contents change.
-    void mutedRootIdsKey;
-    return threadActivityItems
-      .filter((item) => {
-        const rootId = getThreadReference(item.tags).rootId;
-        return !rootId || !mutedRootIds.has(rootId);
-      })
-      .map((item) => ({
-        id: item.id,
-        kind: item.kind,
-        pubkey: item.pubkey,
-        content: item.content,
-        createdAt: item.createdAt,
-        channelId: item.channelId,
-        channelName: item.channelName,
-        channelType: undefined,
-        tags: item.tags,
-        category: "activity" as const,
-      }));
-  }, [mutedRootIds, mutedRootIdsKey, threadActivityItems]);
+  const threadActivityFeedItems = useThreadActivityFeedItems(
+    threadActivityItems,
+    mutedRootIds,
+    channels,
+  );
 
   // Badge count is computed here (rather than inside useHomeFeedNotifications)
   // so it can consume the NIP-RS read-state lifted from the single
