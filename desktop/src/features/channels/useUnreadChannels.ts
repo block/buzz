@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   EMPTY_SET,
+  shouldRouteChannelUnreadEvent,
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
@@ -691,20 +692,24 @@ export function useUnreadChannels(
               continue;
             }
             const evtRef = getThreadReference(event.tags);
-            if (event.created_at > maxExternal) {
-              maxExternal = event.created_at;
+            const isThreadedReply =
+              evtRef.parentId !== null && !isBroadcastReply(event.tags);
+            if (shouldRouteChannelUnreadEvent(ch, isThreadedReply)) {
+              if (event.created_at > maxExternal) {
+                maxExternal = event.created_at;
+              }
+              const isHighPriority =
+                chType === "dm" ||
+                (normalizedPubkey !== null &&
+                  isHighPriorityEventForUser(event, normalizedPubkey));
+              unreadEvents.push({
+                id: event.id,
+                createdAt: event.created_at,
+                rootId: resolveObservedUnreadRootId(event.tags),
+                highPriority: isHighPriority,
+              });
             }
-            const isHighPriority =
-              chType === "dm" ||
-              (normalizedPubkey !== null &&
-                isHighPriorityEventForUser(event, normalizedPubkey));
-            unreadEvents.push({
-              id: event.id,
-              createdAt: event.created_at,
-              rootId: resolveObservedUnreadRootId(event.tags),
-              highPriority: isHighPriority,
-            });
-            if (evtRef.parentId !== null && !isBroadcastReply(event.tags)) {
+            if (isThreadedReply) {
               threadReplies.push({
                 id: event.id,
                 kind: event.kind,

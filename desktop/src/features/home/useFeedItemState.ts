@@ -43,19 +43,23 @@ export function useFeedItemState(pubkey: string | undefined) {
   const [unreadIds, setUnreadIds] = React.useState<string[]>(() =>
     readStoredIds(unreadStorageKey(normalizedPubkey)),
   );
+  const [loadedPubkey, setLoadedPubkey] = React.useState(normalizedPubkey);
 
   React.useEffect(() => {
     setDoneIds(readStoredIds(doneStorageKey(normalizedPubkey)));
     setUnreadIds(readStoredIds(unreadStorageKey(normalizedPubkey)));
+    setLoadedPubkey(normalizedPubkey);
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
+    if (loadedPubkey !== normalizedPubkey) return;
     writeStoredIds(doneStorageKey(normalizedPubkey), doneIds);
-  }, [normalizedPubkey, doneIds]);
+  }, [loadedPubkey, normalizedPubkey, doneIds]);
 
   React.useEffect(() => {
+    if (loadedPubkey !== normalizedPubkey) return;
     writeStoredIds(unreadStorageKey(normalizedPubkey), unreadIds);
-  }, [normalizedPubkey, unreadIds]);
+  }, [loadedPubkey, normalizedPubkey, unreadIds]);
 
   const doneSet = React.useMemo(() => new Set(doneIds), [doneIds]);
   const unreadSet = React.useMemo(() => new Set(unreadIds), [unreadIds]);
