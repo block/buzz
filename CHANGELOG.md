@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.27
+
+- chore: remove block team id from Xcode ([#1156](https://github.com/block/buzz/pull/1156)) ([`67fcf41b`](https://github.com/block/buzz/commit/67fcf41b53e081d1bed950257a3372683905a81c))
+- fix(desktop): keep channel chrome clear of window controls ([#1159](https://github.com/block/buzz/pull/1159)) ([`fa10871d`](https://github.com/block/buzz/commit/fa10871df61f4426441e887839772e49f4e03196))
+- desktop: polish sidebar search dialog ([#1155](https://github.com/block/buzz/pull/1155)) ([`5f79830e`](https://github.com/block/buzz/commit/5f79830e191102b4884487474ea70e1e522788a2))
+- desktop: fix scrollback paging and visible history depth ([#1153](https://github.com/block/buzz/pull/1153)) ([`6cca7599`](https://github.com/block/buzz/commit/6cca75993be9b61c9a50159130492c183fcd2304))
+- Fix ACP activity tool title detection ([#1149](https://github.com/block/buzz/pull/1149)) ([`4c7df9b0`](https://github.com/block/buzz/commit/4c7df9b0b3ea6884d0d9f59d7d1b244542885495))
+- fix(desktop): clear channel unread badges from thread reads ([#1148](https://github.com/block/buzz/pull/1148)) ([`7c3e411f`](https://github.com/block/buzz/commit/7c3e411fa8df14ef706bfd657899de6ec1f976ff))
+- desktop: move global search into sidebar header and remove vestigial top band ([#1150](https://github.com/block/buzz/pull/1150)) ([`c488d845`](https://github.com/block/buzz/commit/c488d8452c50f882a28b3f09224f3c6a30fb1b47))
+- Update README.md ([`7c67dfa6`](https://github.com/block/buzz/commit/7c67dfa66d38c1f25d7fab185ea1b2584bb82898))
+- Hide channel intro actions until history start ([#1151](https://github.com/block/buzz/pull/1151)) ([`7aa6daa4`](https://github.com/block/buzz/commit/7aa6daa4967c88dcda45560f6d4c5d2a0a2a63da))
+- fix(desktop): remount timeline scroll node per channel ([#1147](https://github.com/block/buzz/pull/1147)) ([`0c5dbf34`](https://github.com/block/buzz/commit/0c5dbf3452802a0370c1bdb445efa602c98c4148))
+- Render custom emoji in the inbox; DRY up emoji derivation ([#1146](https://github.com/block/buzz/pull/1146)) ([`39626197`](https://github.com/block/buzz/commit/39626197c0c80ae29dbb9814b6f3b6a603b174d0))
+- desktop: open thread pane optimistically ([#1143](https://github.com/block/buzz/pull/1143)) ([`663b554c`](https://github.com/block/buzz/commit/663b554c7c42371aac66fa2d6cb9524280f88600))
+- fix(desktop): keep channel header search/add icons always visible ([#1144](https://github.com/block/buzz/pull/1144)) ([`9c685282`](https://github.com/block/buzz/commit/9c6852824eecceecb5d504ce61a4906dd6a2aab9))
+- fix(desktop): show skeleton during channel switch ([#1141](https://github.com/block/buzz/pull/1141)) ([`d1c3574b`](https://github.com/block/buzz/commit/d1c3574ba73b2febb8ee8306b58fddffce6001bf))
+- Avoid duplicate thread event fetches ([#1129](https://github.com/block/buzz/pull/1129)) ([`959f2598`](https://github.com/block/buzz/commit/959f25982bbd135182c7c9f0d9c810a0324f1b2e))
+- desktop: restore channel browse button ([#1140](https://github.com/block/buzz/pull/1140)) ([`cc8958f5`](https://github.com/block/buzz/commit/cc8958f5cc0421c1cabe7cee882da898fc09e1f0))
+- desktop: make date dividers pill shaped ([#1139](https://github.com/block/buzz/pull/1139)) ([`bee41597`](https://github.com/block/buzz/commit/bee41597157eec63ec631caf3b1b6fb6e114e268))
+- fix(desktop): align sidebar unread pills ([#1138](https://github.com/block/buzz/pull/1138)) ([`59754218`](https://github.com/block/buzz/commit/5975421889f2cdf31f353deb0b401ddfc78b86c4))
+- Fix display names flashing to pubkeys when loading older messages ([#1137](https://github.com/block/buzz/pull/1137)) ([`c448f1c7`](https://github.com/block/buzz/commit/c448f1c72966b045f7d9b84560b3c1d04ca8b72c))
+- desktop: keep sidebar unread pill below top chrome strip ([#1136](https://github.com/block/buzz/pull/1136)) ([`aeafb0b0`](https://github.com/block/buzz/commit/aeafb0b0b2623789a47be78cbd35782866fb00b3))
+- fix(desktop): restore sticky date divider handoff ([#1135](https://github.com/block/buzz/pull/1135)) ([`3e9d7ff4`](https://github.com/block/buzz/commit/3e9d7ff4d6a152c944cf45ecfa70b641eac0f393))
+- desktop: drop redundant post-subscribe history refetch ([#1130](https://github.com/block/buzz/pull/1130)) ([`b2bf471e`](https://github.com/block/buzz/commit/b2bf471ea581e768647f3f3ad055bffbf7803f08))
+
+
 ## v0.3.26
 
 - ci: cache Flutter pub packages in the Mobile job ([#1128](https://github.com/block/buzz/pull/1128)) ([`ceb5eff53`](https://github.com/block/buzz/commit/ceb5eff53717a18afb9ac6cd3f3a93f01394b5bc))
