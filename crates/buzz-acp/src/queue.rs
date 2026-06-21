@@ -80,8 +80,9 @@ pub struct FlushBatch {
     /// [`cancel_reason`](Self::cancel_reason).
     pub cancelled_events: Vec<BatchEvent>,
     /// How the prior turn was cancelled, when [`cancelled_events`] is non-empty.
-    /// `None` for normal (non-merge) batches; treated as `Interrupt`-style
-    /// supersede framing if a merge somehow lacks a reason.
+    /// `None` for normal (non-merge) batches; falls back to the gentler
+    /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
+    /// (see [`MergeFraming::for_reason`]).
     pub cancel_reason: Option<CancelReason>,
 }
 
@@ -1733,6 +1734,69 @@ mod tests {
         };
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("New messages — arrived while you were working — 2 events]"));
+        assert!(!prompt.contains("supersedes"));
+    }
+
+    /// Cross-thread steering: original work in thread A (cancelled), steering
+    /// message in thread B (new). Pins Perci's edge — the reply instruction
+    /// targets the *steering* message (the one the agent is responding to, where
+    /// the mentioner is waiting), while the steer framing still says "continue
+    /// your in-progress work." This is intended behavior, not a mismatch.
+    #[test]
+    fn test_steer_cross_thread_reply_targets_steering_message() {
+        let ch = Uuid::new_v4();
+        let thread_a = "a".repeat(64);
+        let thread_b = "b".repeat(64);
+
+        let original = make_event_with_tags(
+            "@bot keep working on thread A",
+            vec![vec![
+                "e".into(),
+                thread_a.clone(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let steering = make_event_with_tags(
+            "@bot note from thread B",
+            vec![vec![
+                "e".into(),
+                thread_b.clone(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let steering_id = steering.id.to_hex();
+
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: steering,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: original,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        // Reply instruction points at the steering message's own event id.
+        assert!(
+            prompt.contains(&format!("--reply-to {steering_id}")),
+            "reply instruction should target the steering message: {prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {thread_a}")),
+            "reply instruction must NOT target the original thread: {prompt}"
+        );
+        // Steer framing still frames the original as in-progress work to continue.
+        assert!(prompt.contains("[What you were working on]"));
+        assert!(prompt.contains("arrived while you were working"));
         assert!(!prompt.contains("supersedes"));
     }
 

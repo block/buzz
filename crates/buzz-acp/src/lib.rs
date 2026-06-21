@@ -2258,9 +2258,11 @@ fn handle_prompt_result(
                 // merges them into the next FlushBatch.cancelled_events,
                 // enabling the annotated merged-prompt format. The batch's
                 // cancel_reason (set by the pool task per the control signal)
-                // selects steer vs interrupt framing; default to interrupt if
-                // somehow unset.
-                let reason = batch.cancel_reason.unwrap_or(CancelReason::Interrupt);
+                // selects steer vs interrupt framing. It is always set on this
+                // path; if somehow unset, fall back to the gentler Steer framing
+                // — consistent with MergeFraming::for_reason(None) and the
+                // system default — rather than telling the agent to supersede.
+                let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
             } else {
                 queue.requeue(batch);
