@@ -10,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import type * as React from "react";
+import { toast } from "sonner";
 
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
@@ -99,6 +100,16 @@ export function ChatHeader({
   const clearCollapsedTopChromeControls =
     belowSystemChrome && sidebar?.state === "collapsed" && !sidebar.isMobile;
 
+  function handleTitleClick() {
+    const value = title.trim();
+    if (!value) return;
+
+    void navigator.clipboard
+      .writeText(value)
+      .then(() => toast.success("Channel name copied"))
+      .catch(() => toast.error("Failed to copy channel name"));
+  }
+
   const header = (
     <header
       className={cn(
@@ -130,7 +141,15 @@ export function ChatHeader({
             data-testid="chat-title"
             title={trimmedDescription || undefined}
           >
-            {title}
+            <button
+              aria-label="Copy channel name"
+              className="max-w-full cursor-copy truncate text-left"
+              onClick={handleTitleClick}
+              title="Click to copy channel name"
+              type="button"
+            >
+              {title}
+            </button>
           </h1>
           {statusBadge ? (
             <div className="flex shrink-0 flex-wrap items-center gap-1">
