@@ -145,8 +145,6 @@ export function ChannelScreen({
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
       : optimisticOpenThreadHeadId;
-  const isNotifiedForOpenThread =
-    openThreadHeadId != null ? isNotifiedForThread(openThreadHeadId) : false;
   const isNotifiedForEffectiveThread =
     effectiveOpenThreadHeadId != null
       ? isNotifiedForThread(effectiveOpenThreadHeadId)
@@ -399,7 +397,6 @@ export function ChannelScreen({
     openThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
-    isNotifiedForCurrentThread: isNotifiedForOpenThread,
     getChannelReadAt,
     getThreadReadAt,
     markChannelUnread,

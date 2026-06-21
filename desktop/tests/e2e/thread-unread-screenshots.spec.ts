@@ -262,6 +262,14 @@ test.describe("thread unread indicator screenshots", () => {
     await page.screenshot({
       path: `${SHOTS}/03-thread-badge-casual-browse.png`,
     });
+
+    // Opening a casual, unmuted thread should clear its local badge too. The
+    // badge render gate and read-on-open gate must stay aligned.
+    await page.locator(`[data-thread-head-id="${rootEvent.id}"]`).click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+    await expect(badges).toHaveCount(0);
   });
 
   test("04-thread-deep-nested-unread", async ({ page }) => {
