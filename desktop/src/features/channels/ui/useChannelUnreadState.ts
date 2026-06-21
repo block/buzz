@@ -31,7 +31,7 @@ type UseChannelUnreadStateOptions = {
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
   getChannelReadAt: (channelId: string) => number | null;
-  getThreadReadAt: (rootId: string) => number | null;
+  getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
   markChannelUnread: (channelId: string) => void;
   markThreadRead: (rootId: string, timestamp: number) => void;
   isThreadMuted: (rootId: string) => boolean;
@@ -204,7 +204,7 @@ export function useChannelUnreadState({
   ) {
     threadOpenFrontierRef.current.set(
       openThreadHeadId,
-      getThreadReadAt(openThreadHeadId),
+      getThreadReadAt(openThreadHeadId, activeChannelId),
     );
   }
   const threadOpenFrontierSeconds = openThreadHeadId
@@ -309,7 +309,7 @@ export function useChannelUnreadState({
       timelineMessages,
       directRepliesByParentId,
       (rootId) => !isThreadMuted(rootId),
-      getThreadReadAt,
+      (rootId) => getThreadReadAt(rootId, activeChannelId),
     );
   }
   // Clear the thread badge frontiers on channel leave (same cleanup as
