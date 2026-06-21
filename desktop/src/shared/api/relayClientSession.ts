@@ -7,8 +7,6 @@ import {
 } from "@/shared/api/tauri";
 import type { PresenceStatus, RelayEvent } from "@/shared/api/types";
 import {
-  CHANNEL_EVENT_KINDS,
-  HOME_MENTION_EVENT_KINDS,
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
@@ -21,6 +19,15 @@ import {
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
+import {
+  AUX_BACKFILL_CHUNK_SIZE,
+  buildChannelAuxDeletionFilter,
+  buildChannelAuxFilter,
+  buildChannelFilter,
+  buildChannelHistoryFilter,
+  buildChannelMentionFilter,
+  buildGlobalStreamFilter,
+} from "@/shared/api/relayChannelFilters";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
@@ -148,7 +155,7 @@ export class RelayClient {
   }
 
   async fetchChannelHistory(channelId: string, limit = 50) {
-    return this.fetchHistory(this.buildChannelFilter(channelId, limit));
+    return this.fetchHistory(buildChannelHistoryFilter(channelId, limit));
   }
 
   async fetchChannelHistoryBefore(
@@ -156,11 +163,62 @@ export class RelayClient {
     before: number,
     limit = 50,
   ) {
-    return this.fetchHistory(this.buildChannelFilter(channelId, limit, before));
+    return this.fetchHistory(
+      buildChannelHistoryFilter(channelId, limit, before),
+    );
+  }
+
+  async fetchAuxEventsForMessages(
+    channelId: string,
+    messageIds: string[],
+  ): Promise<RelayEvent[]> {
+    return this.fetchChunkedAuxEvents(
+      channelId,
+      messageIds,
+      buildChannelAuxFilter,
+    );
+  }
+
+  async fetchAuxDeletionEventsForAuxEvents(
+    channelId: string,
+    auxEventIds: string[],
+  ): Promise<RelayEvent[]> {
+    return this.fetchChunkedAuxEvents(
+      channelId,
+      auxEventIds,
+      buildChannelAuxDeletionFilter,
+    );
   }
 
   async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
     return this.fetchHistory(filter);
+  }
+
+  private async fetchChunkedAuxEvents(
+    channelId: string,
+    eventIds: string[],
+    buildFilter: (
+      channelId: string,
+      eventIds: string[],
+    ) => RelaySubscriptionFilter,
+  ): Promise<RelayEvent[]> {
+    if (eventIds.length === 0) {
+      return [];
+    }
+
+    await this.ensureConnected();
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < eventIds.length; i += AUX_BACKFILL_CHUNK_SIZE) {
+      chunks.push(eventIds.slice(i, i + AUX_BACKFILL_CHUNK_SIZE));
+    }
+
+    const batches: RelayEvent[][] = [];
+    for (const ids of chunks) {
+      batches.push(await this.requestHistory(buildFilter(channelId, ids)));
+    }
+
+    return batches.flat();
   }
 
   private async fetchHistory(filter: RelaySubscriptionFilter) {
@@ -269,7 +327,7 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(this.buildChannelFilter(channelId, 50), onEvent);
+    return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
   }
 
   /**
@@ -357,7 +415,7 @@ export class RelayClient {
   }
 
   async subscribeToAllStreamMessages(onEvent: (event: RelayEvent) => void) {
-    return this.subscribe(this.buildGlobalStreamFilter(50), onEvent);
+    return this.subscribe(buildGlobalStreamFilter(50), onEvent);
   }
 
   async subscribeLive(
@@ -373,7 +431,7 @@ export class RelayClient {
     onEvent: (event: RelayEvent) => void,
   ) {
     return this.subscribe(
-      this.buildChannelMentionFilter(channelId, pubkey, 50),
+      buildChannelMentionFilter(channelId, pubkey, 50),
       onEvent,
     );
   }
@@ -485,45 +543,6 @@ export class RelayClient {
     this.connectionStateEmitter.set("connected");
     this.stallWatchdog.start();
     this.emitReconnectIfNeeded();
-  }
-
-  private buildChannelFilter(
-    channelId: string,
-    limit: number,
-    until?: number,
-  ): RelaySubscriptionFilter {
-    const filter: RelaySubscriptionFilter = {
-      kinds: [...CHANNEL_EVENT_KINDS],
-      "#h": [channelId],
-      limit,
-    };
-
-    if (until !== undefined) {
-      filter.until = until;
-    }
-
-    return filter;
-  }
-
-  private buildGlobalStreamFilter(limit: number): RelaySubscriptionFilter {
-    return {
-      kinds: [...CHANNEL_EVENT_KINDS],
-      limit,
-    };
-  }
-
-  private buildChannelMentionFilter(
-    channelId: string,
-    pubkey: string,
-    limit: number,
-  ): RelaySubscriptionFilter {
-    return {
-      kinds: [...HOME_MENTION_EVENT_KINDS],
-      "#h": [channelId],
-      "#p": [pubkey],
-      limit,
-      since: Math.floor(Date.now() / 1_000),
-    };
   }
 
   private async subscribe(

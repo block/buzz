@@ -1,7 +1,34 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
+
+async function expectThreadReplyUnobscured(row: Locator) {
+  await expect
+    .poll(async () =>
+      row.evaluate((element) => {
+        const threadBody = element.closest(
+          '[data-testid="message-thread-body"]',
+        ) as HTMLElement | null;
+        const threadPanel = element.closest(
+          '[data-testid="message-thread-panel"]',
+        ) as HTMLElement | null;
+        const composer = threadPanel?.querySelector<HTMLElement>(
+          '[data-testid="message-input"]',
+        );
+        if (!threadBody || !composer) return false;
+
+        const rowRect = element.getBoundingClientRect();
+        const bodyRect = threadBody.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const visibleBottom = Math.min(bodyRect.bottom, composerRect.top);
+        return (
+          rowRect.top >= bodyRect.top - 1 && rowRect.bottom <= visibleBottom + 1
+        );
+      }),
+    )
+    .toBe(true);
+}
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -444,7 +471,6 @@ test("opens a single-level thread panel with inline expansion", async ({
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
-  const nestedReplyVisibleTopMaxPx = 300;
   const fillerReplies = Array.from(
     { length: 14 },
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
@@ -613,22 +639,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     threadReplies.getByTestId("message-row").filter({ hasText: siblingReply }),
   ).toHaveCount(1);
-  await expect
-    .poll(async () => {
-      return nestedReplyRow.evaluate((row) => {
-        const threadBody = row.closest(
-          '[data-testid="message-thread-body"]',
-        ) as HTMLElement | null;
-        if (!threadBody) {
-          return Number.POSITIVE_INFINITY;
-        }
-
-        const rowRect = row.getBoundingClientRect();
-        const bodyRect = threadBody.getBoundingClientRect();
-        return rowRect.top - bodyRect.top;
-      });
-    })
-    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
+  await expectThreadReplyUnobscured(nestedReplyRow);
 
   const firstReplyId = await firstReplyRow.getAttribute("data-message-id");
   if (!firstReplyId) {
@@ -678,22 +689,7 @@ test("opens a single-level thread panel with inline expansion", async ({
     )
     .toBe("1,2");
 
-  await expect
-    .poll(async () => {
-      return nestedReplyRow.evaluate((row) => {
-        const threadBody = row.closest(
-          '[data-testid="message-thread-body"]',
-        ) as HTMLElement | null;
-        if (!threadBody) {
-          return Number.POSITIVE_INFINITY;
-        }
-
-        const rowRect = row.getBoundingClientRect();
-        const bodyRect = threadBody.getBoundingClientRect();
-        return rowRect.top - bodyRect.top;
-      });
-    })
-    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
+  await expectThreadReplyUnobscured(nestedReplyRow);
 
   await firstReplySummaryRow.click();
   await expect(

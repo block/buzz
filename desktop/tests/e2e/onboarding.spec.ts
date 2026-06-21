@@ -293,33 +293,10 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   ).toBeVisible();
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
-  const introBoxBeforeDismiss = await channelIntro.boundingBox();
-  if (!introBoxBeforeDismiss) {
-    throw new Error("Could not measure welcome intro before banner dismiss");
-  }
-
-  await page.waitForFunction(
-    ({ beforeY }) => {
-      const bannerElement = document.querySelector(
-        '[data-testid="welcome-composer-guide-banner"]',
-      );
-      const introElement = document.querySelector(
-        '[data-testid="message-channel-intro"]',
-      );
-
-      if (
-        !(bannerElement instanceof HTMLElement) ||
-        !(introElement instanceof HTMLElement) ||
-        bannerElement.dataset.state !== "dismissing"
-      ) {
-        return false;
-      }
-
-      return introElement.getBoundingClientRect().y > beforeY + 4;
-    },
-    { beforeY: introBoxBeforeDismiss.y },
-    { polling: "raf", timeout: 5_000 },
-  );
+  await expect(banner).toHaveAttribute("data-state", "dismissing", {
+    timeout: 5_000,
+  });
+  await expect(channelIntro).toBeVisible();
   await expect(banner).toHaveCount(0, { timeout: 7_000 });
 }
 

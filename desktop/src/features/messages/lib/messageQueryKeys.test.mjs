@@ -5,7 +5,6 @@ import {
   mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
 } from "./messageQueryKeys.ts";
-import { mergeTimelineCacheMessages } from "../hooks.ts";
 
 const CHANNEL_ID = "timeline-window-test";
 const PUBKEY = "a".repeat(64);
@@ -140,10 +139,32 @@ test("normalizeTimelineMessages still caps old visible content", () => {
   );
 });
 
-test("timeline history and live cache merges retain the same visible content regardless of order", () => {
+test("timeline history merge preserves freshly fetched older content roots", () => {
+  const current = [];
+  const olderPage = [];
+
+  for (let index = 0; index < 2_000; index += 1) {
+    current.push(event({ id: id("new", index), createdAt: 10_000 + index }));
+  }
+  for (let index = 0; index < 100; index += 1) {
+    olderPage.push(event({ id: id("old", index), createdAt: 1_000 + index }));
+  }
+
+  const merged = mergeTimelineHistoryMessages(current, olderPage);
+  const mergedContent = merged
+    .filter((item) => item.kind === 9)
+    .map((item) => item.id);
+
+  assert.equal(mergedContent.length, 2_100);
+  assert.equal(mergedContent[0], id("old", 0));
+  assert.equal(mergedContent[99], id("old", 99));
+  assert.equal(mergedContent[100], id("new", 0));
+  assert.equal(mergedContent.at(-1), id("new", 1_999));
+});
+
+test("timeline history merge preserves the older window despite auxiliary events", () => {
   const seedMessages = [];
   const olderPage = [];
-  const liveMessage = event({ id: id("liv", 0), createdAt: 20_000 });
 
   for (let index = 0; index < 700; index += 1) {
     seedMessages.push(
@@ -181,24 +202,32 @@ test("timeline history and live cache merges retain the same visible content reg
     olderPage.push(event({ id: id("old", index), createdAt: 1_000 + index }));
   }
 
-  const historyThenLive = mergeTimelineCacheMessages(
-    mergeTimelineHistoryMessages(seedMessages, olderPage),
-    liveMessage,
-  );
-  const liveThenHistory = mergeTimelineHistoryMessages(
-    mergeTimelineCacheMessages(seedMessages, liveMessage),
-    olderPage,
-  );
-  const historyThenLiveContent = historyThenLive
-    .filter((item) => item.kind === 9)
-    .map((item) => item.id);
-  const liveThenHistoryContent = liveThenHistory
+  const merged = mergeTimelineHistoryMessages(seedMessages, olderPage);
+  const mergedContent = merged
     .filter((item) => item.kind === 9)
     .map((item) => item.id);
 
-  assert.equal(historyThenLiveContent.length, 2_000);
-  assert.equal(liveThenHistoryContent.length, 2_000);
-  assert.deepEqual(liveThenHistoryContent, historyThenLiveContent);
-  assert.equal(historyThenLiveContent[0], id("old", 201));
-  assert.equal(historyThenLiveContent.at(-1), liveMessage.id);
+  assert.equal(mergedContent.length, 2_200);
+  assert.equal(mergedContent[0], id("old", 0));
+  assert.equal(mergedContent[1_499], id("old", 1_499));
+  assert.equal(mergedContent[1_500], id("new", 0));
+  assert.equal(mergedContent.at(-1), id("new", 699));
+  assert.equal(merged.filter((item) => item.kind === 5).length, 1_303);
+  assert.equal(merged.filter((item) => item.kind === 7).length, 231);
+});
+
+test("sortMessages tiebreaks same-second events on id, order-independent", () => {
+  // Three events sharing one created_at, fed in two different input orders.
+  // The (created_at, id) sort must produce the same sequence both ways, so a
+  // history-then-live merge and a live-then-history merge can't shuffle a
+  // same-second message to a different visible position.
+  const a = event({ id: id("aaa", 1), createdAt: 5_000 });
+  const b = event({ id: id("bbb", 1), createdAt: 5_000 });
+  const c = event({ id: id("ccc", 1), createdAt: 5_000 });
+
+  const forward = normalizeTimelineMessages([a, b, c]).map((m) => m.id);
+  const reverse = normalizeTimelineMessages([c, b, a]).map((m) => m.id);
+
+  assert.deepEqual(forward, reverse);
+  assert.deepEqual(forward, [a.id, b.id, c.id]);
 });

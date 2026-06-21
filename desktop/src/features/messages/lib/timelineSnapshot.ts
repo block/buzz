@@ -217,6 +217,18 @@ export function isDeferredTimelineSnapshotStale({
   return deferredSnapshot.channelId !== liveSnapshot.channelId;
 }
 
+// True when an older page merged into the live cache but the deferred render
+// hasn't painted it yet; false on the initial empty-to-loaded settle.
+export function isRenderedTimelineBehindHistoryPrepend(
+  rendered: TimelineMessage[],
+  live: TimelineMessage[],
+): boolean {
+  if (rendered.length === 0 || rendered.length >= live.length) {
+    return false;
+  }
+  return rendered[0]?.id !== live[0]?.id;
+}
+
 export type TimelineIntroSurface =
   | "direct-message-intro"
   | "channel-intro"

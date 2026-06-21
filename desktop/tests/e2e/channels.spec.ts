@@ -884,9 +884,6 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
-  await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
-  ).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );

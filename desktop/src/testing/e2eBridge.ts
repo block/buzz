@@ -466,6 +466,7 @@ type MockSubscription = {
 
 type MockFilter = {
   "#d"?: string[];
+  "#e"?: string[];
   "#h"?: string[];
   authors?: string[];
   kinds?: number[];
@@ -2370,8 +2371,22 @@ function emitMockHistory(
   // `history-` subscriptions — the prefix `relayClientSession` uses for
   // older-message pagination — so live/initial subscriptions stay instant.
   const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
-  if (delayMs > 0 && subId.startsWith("history-")) {
-    window.setTimeout(emit, delayMs);
+  const isVisibleOlderHistoryPage =
+    subId.startsWith("history-") && filter.until !== undefined && !filter["#e"];
+  if (delayMs > 0 && isVisibleOlderHistoryPage) {
+    const probe = window as unknown as {
+      __HISTORY_INFLIGHT__?: number;
+      __HISTORY_INFLIGHT_PEAK__?: number;
+    };
+    probe.__HISTORY_INFLIGHT__ = (probe.__HISTORY_INFLIGHT__ ?? 0) + 1;
+    probe.__HISTORY_INFLIGHT_PEAK__ = Math.max(
+      probe.__HISTORY_INFLIGHT_PEAK__ ?? 0,
+      probe.__HISTORY_INFLIGHT__,
+    );
+    window.setTimeout(() => {
+      probe.__HISTORY_INFLIGHT__ = (probe.__HISTORY_INFLIGHT__ ?? 1) - 1;
+      emit();
+    }, delayMs);
     return;
   }
 

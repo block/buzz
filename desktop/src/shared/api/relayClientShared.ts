@@ -64,7 +64,16 @@ export type PendingEvent = {
 export type RelaySubscription = HistorySubscription | LiveSubscription;
 
 export function sortEvents(events: RelayEvent[]) {
-  return [...events].sort((left, right) => left.created_at - right.created_at);
+  return [...events].sort((left, right) => {
+    if (left.created_at !== right.created_at) {
+      return left.created_at - right.created_at;
+    }
+    // Same (created_at, id) tiebreak as the cache sort (sortMessages) so a
+    // history REQ resolves same-second events in a stable, relay-matching
+    // order. Currently every consumer re-sorts downstream, but keeping the
+    // two sorts on one invariant avoids a latent ordering drift.
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
 }
 
 export function getTextPayload(message: unknown) {

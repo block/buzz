@@ -15,14 +15,13 @@ import {
 import type { Channel, SearchHit } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import {
-  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
-  POPOVER_SHADOW_STYLE,
-  POPOVER_SURFACE_CLASS,
-} from "@/shared/ui/popoverSurface";
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogTrigger,
+} from "@/shared/ui/dialog";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-
-type SearchPlacement = "topbar" | "sidebar";
 
 type TopbarSearchProps = {
   channels: Channel[];
@@ -31,18 +30,6 @@ type TopbarSearchProps = {
   focusRequest?: number;
   onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
-  /**
-   * Controls how the results popover is anchored. `topbar` centers a wide
-   * panel under the input; `sidebar` left-anchors a narrower panel that fits
-   * within the persistent sidebar column.
-   */
-  placement?: SearchPlacement;
-};
-
-const RESULTS_POPOVER_CLASS: Record<SearchPlacement, string> = {
-  topbar:
-    "left-1/2 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 slide-in-from-top-1",
-  sidebar: "left-0 right-0 w-auto slide-in-from-top-1",
 };
 
 function describeSearchHit(hit: SearchHit) {
@@ -159,12 +146,11 @@ export function TopbarSearch({
   focusRequest = 0,
   onOpenChannel,
   onOpenResult,
-  placement = "topbar",
 }: TopbarSearchProps) {
   const [isOpen, setIsOpen] = React.useState(false);
   const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
-  const inputRef = React.useRef<HTMLInputElement>(null);
-  const rootRef = React.useRef<HTMLDivElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
+  const dialogInputRef = React.useRef<HTMLInputElement>(null);
   const {
     channelLookup,
     debouncedQuery,
@@ -175,8 +161,6 @@ export function TopbarSearch({
     setQuery,
   } = useSearchResults({ channels, enabled: isOpen, limit: 8 });
   const trimmedQuery = query.trim();
-  const showSuggestions = isOpen;
-  const selectableCount = showSuggestions ? results.length : 0;
 
   const openResult = React.useCallback(
     (result: SearchResult) => {
@@ -194,198 +178,219 @@ export function TopbarSearch({
   );
 
   React.useEffect(() => {
-    function handlePointerDown(event: PointerEvent) {
-      if (
-        event.target instanceof Node &&
-        rootRef.current?.contains(event.target)
-      ) {
-        return;
-      }
-
-      setIsOpen(false);
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-    };
-  }, []);
-
-  React.useEffect(() => {
     if (focusRequest === 0) {
       return;
     }
 
     setIsOpen(true);
-    inputRef.current?.focus();
-    inputRef.current?.select();
+    triggerRef.current?.focus();
   }, [focusRequest]);
 
   React.useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    const animationFrame = window.requestAnimationFrame(() => {
+      dialogInputRef.current?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+    };
+  }, [isOpen]);
+
+  React.useEffect(() => {
     setSelectedMenuIndex((current) => {
-      if (selectableCount === 0) {
+      if (results.length === 0) {
         return 0;
       }
 
-      return Math.min(current, selectableCount - 1);
+      return Math.min(current, results.length - 1);
     });
-  }, [selectableCount]);
+  }, [results]);
 
-  return (
-    <div className={cn("relative", className)} ref={rootRef}>
-      <div className="group/search flex h-7 items-center gap-2 rounded-lg border border-border/70 bg-background px-2.5 text-xs text-muted-foreground shadow-xs transition-colors duration-150 ease-out focus-within:border-border focus-within:bg-muted/70 focus-within:text-foreground hover:bg-muted/70">
-        <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-focus-within/search:text-foreground group-hover/search:text-muted-foreground" />
-        <input
-          aria-label="Search everything"
-          autoCapitalize="none"
-          autoCorrect="off"
-          className="min-w-0 translate-y-px flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/55 outline-none transition-colors duration-150 ease-out group-focus-within/search:placeholder:text-foreground group-hover/search:placeholder:text-muted-foreground"
-          data-testid="open-search"
-          ref={inputRef}
-          onChange={(event) => {
-            setIsOpen(true);
-            setQuery(event.target.value);
-            setSelectedMenuIndex(0);
-          }}
-          onFocus={() => setIsOpen(true)}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowDown" && selectableCount > 0) {
-              event.preventDefault();
-              setSelectedMenuIndex((current) =>
-                Math.min(current + 1, selectableCount - 1),
-              );
-              return;
-            }
+  const handleDialogInputKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "ArrowDown" && results.length > 0) {
+        event.preventDefault();
+        setSelectedMenuIndex((current) =>
+          Math.min(current + 1, results.length - 1),
+        );
+        return;
+      }
 
-            if (event.key === "ArrowUp" && selectableCount > 0) {
-              event.preventDefault();
-              setSelectedMenuIndex((current) => Math.max(current - 1, 0));
-              return;
-            }
+      if (event.key === "ArrowUp" && results.length > 0) {
+        event.preventDefault();
+        setSelectedMenuIndex((current) => Math.max(current - 1, 0));
+        return;
+      }
 
-            if (event.key === "Escape") {
-              event.preventDefault();
-              setIsOpen(false);
-              return;
-            }
+      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+        event.preventDefault();
+        const result = results[selectedMenuIndex];
+        if (result) {
+          openResult(result);
+        }
+      }
+    },
+    [openResult, results, selectedMenuIndex],
+  );
 
-            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              const result = results[selectedMenuIndex];
-              if (result) {
-                openResult(result);
-              }
-            }
-          }}
-          placeholder="Search everything"
-          spellCheck={false}
-          value={query}
-        />
-        <kbd className="shrink-0 text-2xs text-muted-foreground/70">
-          &#x2318;K
-        </kbd>
+  const searchResultContent =
+    debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH ? (
+      <div className="px-4 py-5 text-sm text-muted-foreground">
+        <p>Type at least two characters for live suggestions.</p>
       </div>
-
-      {showSuggestions ? (
-        <div
-          aria-busy={searchQuery.isLoading && results.length === 0}
-          className={cn(
-            "absolute top-full z-50 mt-1 origin-top overflow-hidden rounded-xl",
-            RESULTS_POPOVER_CLASS[placement],
-            POPOVER_CUSTOM_ENTER_MOTION_CLASS,
-            POPOVER_SURFACE_CLASS,
-          )}
-          data-testid="search-results"
-          style={POPOVER_SHADOW_STYLE}
-        >
-          {debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH ? (
-            <div className="px-3 py-3 text-2xs text-muted-foreground">
-              <p>Type at least two characters for live suggestions.</p>
-            </div>
-          ) : searchQuery.isLoading && results.length === 0 ? (
-            <SearchResultsSkeleton />
-          ) : searchQuery.error instanceof Error && results.length === 0 ? (
-            <p className="px-3 py-3 text-xs text-destructive">
-              {searchQuery.error.message}
-            </p>
-          ) : results.length === 0 ? (
-            <p className="px-3 py-3 text-xs text-muted-foreground">
-              No matches for{" "}
-              <span className="font-semibold">{trimmedQuery}</span>.
-            </p>
-          ) : (
-            <div className="max-h-[360px] overflow-y-auto p-1">
-              {results.map((result, index) => (
-                <button
-                  className={cn(
-                    "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors",
-                    index === selectedMenuIndex
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-accent/70",
-                  )}
-                  key={resultKey(result)}
-                  onClick={() => openResult(result)}
-                  onMouseEnter={() => setSelectedMenuIndex(index)}
-                  type="button"
-                  data-testid={resultTestId(result)}
-                >
-                  {result.kind === "message" ? (
-                    <UserAvatar
-                      avatarUrl={
-                        resultProfiles?.[result.hit.pubkey.toLowerCase()]
-                          ?.avatarUrl ?? null
-                      }
-                      className="h-7 w-7"
-                      displayName={resolveUserLabel({
+    ) : searchQuery.isLoading && results.length === 0 ? (
+      <SearchResultsSkeleton />
+    ) : searchQuery.error instanceof Error && results.length === 0 ? (
+      <p className="px-4 py-5 text-sm text-destructive">
+        {searchQuery.error.message}
+      </p>
+    ) : results.length === 0 ? (
+      <p className="px-4 py-5 text-sm text-muted-foreground">
+        No matches for <span className="font-semibold">{trimmedQuery}</span>.
+      </p>
+    ) : (
+      <div className="max-h-[420px] overflow-y-auto p-1.5" role="listbox">
+        {results.map((result, index) => (
+          <button
+            aria-selected={index === selectedMenuIndex}
+            className={cn(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
+              index === selectedMenuIndex
+                ? "bg-accent text-accent-foreground"
+                : "hover:bg-accent/70",
+            )}
+            key={resultKey(result)}
+            onClick={() => openResult(result)}
+            onMouseEnter={() => setSelectedMenuIndex(index)}
+            role="option"
+            type="button"
+            data-testid={resultTestId(result)}
+          >
+            {result.kind === "message" ? (
+              <UserAvatar
+                avatarUrl={
+                  resultProfiles?.[result.hit.pubkey.toLowerCase()]
+                    ?.avatarUrl ?? null
+                }
+                className="h-7 w-7"
+                displayName={resolveUserLabel({
+                  currentPubkey,
+                  profiles: resultProfiles,
+                  pubkey: result.hit.pubkey,
+                  preferResolvedSelfLabel: true,
+                })}
+                size="sm"
+              />
+            ) : (
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
+                {React.createElement(resultIcon(result, channelLookup), {
+                  className: "h-4 w-4",
+                })}
+              </span>
+            )}
+            <span className="min-w-0 flex-1">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate text-sm font-semibold">
+                  {result.kind === "channel"
+                    ? result.channel.name
+                    : resolveUserLabel({
                         currentPubkey,
                         profiles: resultProfiles,
                         pubkey: result.hit.pubkey,
                         preferResolvedSelfLabel: true,
                       })}
-                      size="sm"
-                    />
-                  ) : (
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
-                      {React.createElement(resultIcon(result, channelLookup), {
-                        className: "h-4 w-4",
-                      })}
-                    </span>
-                  )}
-                  <span className="min-w-0 flex-1">
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="truncate text-sm font-semibold">
-                        {result.kind === "channel"
-                          ? result.channel.name
-                          : resolveUserLabel({
-                              currentPubkey,
-                              profiles: resultProfiles,
-                              pubkey: result.hit.pubkey,
-                              preferResolvedSelfLabel: true,
-                            })}
-                      </span>
-                      <span className="truncate text-xs text-muted-foreground">
-                        {result.kind === "channel"
-                          ? result.channel.channelType
-                          : `in #${result.hit.channelName ?? "unknown"}`}
-                      </span>
-                    </span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {result.kind === "channel"
-                        ? result.channel.description || "Channel"
-                        : truncateResultText(result.hit.content)}
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-2xs text-muted-foreground/75">
-                    {result.kind === "channel"
-                      ? "Channel"
-                      : `${describeSearchHit(result.hit)} · ${formatRelativeTime(result.hit.createdAt)}`}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      ) : null}
+                </span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {result.kind === "channel"
+                    ? result.channel.channelType
+                    : `in #${result.hit.channelName ?? "unknown"}`}
+                </span>
+              </span>
+              <span className="block truncate text-xs text-muted-foreground">
+                {result.kind === "channel"
+                  ? result.channel.description || "Channel"
+                  : truncateResultText(result.hit.content)}
+              </span>
+            </span>
+            <span className="shrink-0 text-2xs text-muted-foreground/75">
+              {result.kind === "channel"
+                ? "Channel"
+                : `${describeSearchHit(result.hit)} · ${formatRelativeTime(result.hit.createdAt)}`}
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+
+  return (
+    <div className={cn("relative", className)}>
+      <Dialog open={isOpen} onOpenChange={setIsOpen}>
+        <DialogTrigger asChild>
+          <button
+            aria-label="Search everything"
+            className="group/search flex h-7 w-full items-center gap-2 rounded-lg border border-border/70 bg-background px-2.5 text-left text-xs text-muted-foreground shadow-xs transition-colors duration-150 ease-out hover:bg-muted/70 hover:text-foreground focus-visible:border-border focus-visible:bg-muted/70 focus-visible:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+            data-testid="open-search"
+            ref={triggerRef}
+            type="button"
+          >
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-visible/search:text-foreground" />
+            <span
+              className={cn(
+                "min-w-0 flex-1 translate-y-px truncate transition-colors duration-150 ease-out",
+                query ? "text-foreground" : "text-muted-foreground/55",
+              )}
+            >
+              {query || "Search everything"}
+            </span>
+            <kbd className="shrink-0 text-2xs text-muted-foreground/70">
+              &#x2318;K
+            </kbd>
+          </button>
+        </DialogTrigger>
+        <DialogContent
+          aria-busy={searchQuery.isLoading && results.length === 0}
+          className="mt-[18vh] max-w-2xl self-start gap-0 overflow-hidden rounded-2xl p-0 shadow-2xl data-[state=closed]:zoom-out-100 data-[state=open]:zoom-in-100"
+          data-testid="search-results"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            dialogInputRef.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            triggerRef.current?.focus();
+          }}
+          showCloseButton={false}
+        >
+          <DialogTitle className="sr-only">Search everything</DialogTitle>
+          <div className="flex h-12 items-center gap-3 border-b border-border/70 px-4">
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <input
+              aria-label="Search everything"
+              autoCapitalize="none"
+              autoCorrect="off"
+              className="min-w-0 flex-1 bg-transparent text-base text-foreground placeholder:text-muted-foreground outline-none"
+              data-testid="search-dialog-input"
+              ref={dialogInputRef}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setSelectedMenuIndex(0);
+              }}
+              onKeyDown={handleDialogInputKeyDown}
+              placeholder="Search everything"
+              spellCheck={false}
+              value={query}
+            />
+            <kbd className="shrink-0 rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
+              ESC
+            </kbd>
+          </div>
+          {searchResultContent}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
