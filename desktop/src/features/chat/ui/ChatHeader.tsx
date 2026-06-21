@@ -14,7 +14,8 @@ import type * as React from "react";
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
-import { channelChrome, topChromeInset } from "@/shared/layout/chromeLayout";
+import { channelChrome } from "@/shared/layout/chromeLayout";
+import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
@@ -94,6 +95,9 @@ export function ChatHeader({
   statusBadge,
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
+  const sidebar = useOptionalSidebar();
+  const clearCollapsedTopChromeControls =
+    belowSystemChrome && sidebar?.state === "collapsed" && !sidebar.isMobile;
 
   const header = (
     <header
@@ -105,6 +109,7 @@ export function ChatHeader({
             : "min-h-8 py-0"
           : "min-h-11 py-1.5",
         overlaysContent && !belowSystemChrome && "-mb-11",
+        clearCollapsedTopChromeControls && "pl-[176px]",
       )}
       data-testid="chat-header"
       data-tauri-drag-region
@@ -151,7 +156,6 @@ export function ChatHeader({
       ref={chromeWrapperRef}
       className={cn(
         "pointer-events-none relative z-30 bg-background/80 backdrop-blur-md after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border/35 after:content-[''] supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-        topChromeInset.padding,
         channelChrome.negativeMargin,
       )}
     >
