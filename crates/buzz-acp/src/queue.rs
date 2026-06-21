@@ -1333,8 +1333,11 @@ impl MergeFraming {
             // Default to steer framing if a merge somehow lacks a reason: the
             // gentler "continue your work" wording is the safer fallback.
             None | Some(CancelReason::Steer) => MergeFraming {
-                prior_header:
-                    "[Your in-progress work — you were mid-task when a new message arrived]",
+                // We never capture the agent's partial work — session/cancel is
+                // terminal and returns nothing — so this section holds the
+                // *original request*, not a transcript. The header must not
+                // overclaim preserved state (per Dawn's framing review).
+                prior_header: "[What you were working on]",
                 new_header_single: "[New message — arrived while you were working]",
                 new_header_multi_prefix: "[New messages — arrived while you were working",
                 closing_note: "Note: A new message arrived while you were working. Continue your \
@@ -1647,6 +1650,60 @@ mod tests {
             "unset reason should default to steer framing: {prompt}"
         );
         assert!(!prompt.contains("supersedes"));
+    }
+
+    /// Full steering path, queue mechanics through to rendered prompt.
+    ///
+    /// The framing tests above hand-build a `FlushBatch`; this one drives the
+    /// *real* queue output through the *real* renderer so a regression in how
+    /// `flush_next` assembles the merged batch (which events land where, whether
+    /// the reason rides through) is caught against the actual prompt string —
+    /// the seam the split unit tests don't cover on their own.
+    #[test]
+    fn test_steer_end_to_end_queue_to_rendered_prompt() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Original turn is in flight: push the work, flush it into a batch.
+        q.push(make_queued(ch, "draft the migration plan"));
+        let batch = q.flush_next().unwrap();
+        assert!(any_in_flight(&q));
+
+        // A steering-eligible mention arrives mid-turn.
+        q.push(make_queued(ch, "actually scope it to v2 only"));
+
+        // The mode gate fires Steer → cancel → requeue as cancelled, carrying
+        // the steer reason (exactly the lib.rs requeue path).
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+
+        // The re-prompt the agent actually receives.
+        let merged = q.flush_next().unwrap();
+        assert_eq!(merged.cancel_reason, Some(CancelReason::Steer));
+        let prompt = format_prompt(&merged, &FormatPromptArgs::default()).join("\n\n");
+
+        // Steer framing — "arrived while you were working" / "Continue", never
+        // supersede — survives the full queue→render path.
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "end-to-end steer prompt must carry steer framing: {prompt}"
+        );
+        assert!(
+            prompt.contains("Continue your"),
+            "end-to-end steer prompt must instruct continue: {prompt}"
+        );
+        assert!(
+            !prompt.contains("supersedes"),
+            "end-to-end steer prompt must NOT supersede: {prompt}"
+        );
+        // The honest prior header (no overclaimed partial-work capture).
+        assert!(
+            prompt.contains("[What you were working on]"),
+            "steer prior header must be the honest variant: {prompt}"
+        );
+        // Both the original work and the steering message survive the merge.
+        assert!(prompt.contains("draft the migration plan"));
+        assert!(prompt.contains("actually scope it to v2 only"));
     }
 
     #[test]

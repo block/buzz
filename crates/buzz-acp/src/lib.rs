@@ -3174,6 +3174,44 @@ mod author_gate_tests {
             "the owner must always be accepted under Allowlist"
         );
     }
+
+    // The default `respond-to` is OwnerOnly. Under steering, "an ineligible
+    // author must NOT steer" is enforced *here* — author_allowed drops the
+    // event before it reaches the mode gate — not in the gate itself. These
+    // pin that invariant against the default mode.
+    #[tokio::test]
+    async fn test_owner_only_rejects_stranger_so_no_steer() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                STRANGER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "under the default OwnerOnly, a stranger must be dropped — so it can never reach the mode gate to steer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_owner_only_admits_owner_and_sibling_to_steer() {
+        let cache = cache_with_sibling();
+        for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+            assert!(
+                author_allowed(
+                    &RespondTo::OwnerOnly,
+                    &HashSet::new(),
+                    who,
+                    &cache,
+                    &dummy_rest_client()
+                )
+                .await,
+                "under default OwnerOnly, the {label} must be admitted so steering can fire"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
