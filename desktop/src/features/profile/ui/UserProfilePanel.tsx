@@ -501,6 +501,8 @@ export function UserProfilePanel({
           setPersonaDialogState(null);
           void personasQuery.refetch();
         },
+        previousPersona: resolvedPersona,
+        runtimes: acpRuntimesQuery.data ?? [],
         updateManagedAgent: updateManagedAgentMutation.mutateAsync,
         updatePersona: updatePersonaMutation.mutateAsync,
       });
@@ -510,6 +512,8 @@ export function UserProfilePanel({
       createManagedAgentForPersona,
       managedAgent,
       personasQuery.refetch,
+      resolvedPersona,
+      acpRuntimesQuery.data,
       updateManagedAgentMutation.mutateAsync,
       updatePersonaMutation.mutateAsync,
     ],

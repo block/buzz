@@ -420,6 +420,24 @@ You are Goosey.
     assert_eq!(result.avatar_data_url, None);
     assert_eq!(result.avatar_ref.as_deref(), Some("app-avatar:gloopies-19"));
     assert_eq!(result.model.as_deref(), Some("claude-sonnet-4"));
+    assert_eq!(result.provider.as_deref(), Some("anthropic"));
+    assert_eq!(result.runtime.as_deref(), Some("goose"));
+}
+
+#[test]
+fn parse_lenient_md_persona_preserves_model_provider_prefix() {
+    let md = r#"---
+display_name: Lenient Agent
+model: databricks:gpt-5
+runtime: goose
+---
+You are lenient.
+"#;
+
+    let result = parse_lenient_md_persona(md).unwrap();
+    assert_eq!(result.display_name, "Lenient Agent");
+    assert_eq!(result.model.as_deref(), Some("gpt-5"));
+    assert_eq!(result.provider.as_deref(), Some("databricks"));
     assert_eq!(result.runtime.as_deref(), Some("goose"));
 }
 

@@ -59,6 +59,24 @@ function persona(overrides = {}) {
   };
 }
 
+function runtime(overrides = {}) {
+  return {
+    id: "claude",
+    label: "Claude Code",
+    avatarUrl: "app-avatar://claude",
+    availability: "available",
+    command: "claude",
+    binaryPath: "/usr/local/bin/claude",
+    defaultArgs: ["mcp", "serve"],
+    mcpCommand: "claude-mcp",
+    installHint: "",
+    installInstructionsUrl: "",
+    canAutoInstall: false,
+    underlyingCliPath: null,
+    ...overrides,
+  };
+}
+
 test("personaManagedAgentUpdate syncs edited persona identity to linked agent", () => {
   assert.deepEqual(personaManagedAgentUpdate(agent(), persona()), {
     pubkey: "deadbeef".repeat(8),
@@ -85,6 +103,47 @@ test("personaManagedAgentUpdate skips unrelated or unchanged agents", () => {
         envVars: { NEW_KEY: "2" },
       }),
       persona(),
+    ),
+    null,
+  );
+});
+
+test("personaManagedAgentUpdate maps changed persona runtime to linked agent commands", () => {
+  assert.deepEqual(
+    personaManagedAgentUpdate(agent(), persona({ runtime: "claude" }), {
+      previousPersona: persona({ runtime: "goose" }),
+      runtimes: [runtime()],
+    }),
+    {
+      pubkey: "deadbeef".repeat(8),
+      name: "Fizz Prime",
+      avatarUrl: null,
+      systemPrompt: "New prompt",
+      model: "new-model",
+      envVars: { NEW_KEY: "2" },
+      agentCommand: "claude",
+      agentArgs: ["mcp", "serve"],
+      mcpCommand: "claude-mcp",
+    },
+  );
+});
+
+test("personaManagedAgentUpdate leaves runtime fields alone when runtime is unchanged", () => {
+  assert.equal(
+    personaManagedAgentUpdate(
+      agent({
+        name: "Fizz Prime",
+        avatarUrl: null,
+        systemPrompt: "New prompt",
+        model: "new-model",
+        envVars: { NEW_KEY: "2" },
+        agentArgs: ["custom"],
+      }),
+      persona({ runtime: "goose" }),
+      {
+        previousPersona: persona({ runtime: "goose" }),
+        runtimes: [runtime({ id: "goose", command: "goose" })],
+      },
     ),
     null,
   );

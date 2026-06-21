@@ -1,5 +1,6 @@
 import * as React from "react";
 import type {
+  AcpRuntimeCatalogEntry,
   AgentPersona,
   Channel,
   ManagedAgent,
@@ -162,6 +163,10 @@ export function resolveAgentInstruction(
 export function personaManagedAgentUpdate(
   agent: ManagedAgent,
   persona: AgentPersona,
+  options: {
+    previousPersona?: AgentPersona;
+    runtimes?: readonly AcpRuntimeCatalogEntry[];
+  } = {},
 ): UpdateManagedAgentInput | null {
   if (agent.personaId !== persona.id) return null;
 
@@ -193,7 +198,37 @@ export function personaManagedAgentUpdate(
     hasChanges = true;
   }
 
+  const runtimeChanged =
+    options.previousPersona !== undefined &&
+    options.previousPersona.runtime !== persona.runtime;
+  const runtime = runtimeChanged
+    ? options.runtimes?.find((candidate) => candidate.id === persona.runtime)
+    : undefined;
+  if (runtime?.command) {
+    if (runtime.command !== agent.agentCommand) {
+      input.agentCommand = runtime.command;
+      hasChanges = true;
+    }
+
+    if (!stringArrayEqual(runtime.defaultArgs, agent.agentArgs)) {
+      input.agentArgs = [...runtime.defaultArgs];
+      hasChanges = true;
+    }
+
+    const mcpCommand = runtime.mcpCommand ?? "";
+    if (mcpCommand !== agent.mcpCommand) {
+      input.mcpCommand = mcpCommand;
+      hasChanges = true;
+    }
+  }
+
   return hasChanges ? input : null;
+}
+
+function stringArrayEqual(left: readonly string[], right: readonly string[]) {
+  if (left.length !== right.length) return false;
+
+  return left.every((value, index) => value === right[index]);
 }
 
 function stringRecordEqual(

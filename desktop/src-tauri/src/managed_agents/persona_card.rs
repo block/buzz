@@ -301,14 +301,7 @@ pub fn parse_md_persona(md_bytes: &[u8]) -> Result<ParsedPersonaPreview, String>
 fn parsed_preview_from_md_config(
     config: buzz_persona_pkg::persona::PersonaConfig,
 ) -> ParsedPersonaPreview {
-    // Split "provider:model" into separate fields for the preview.
-    let model = match config.model.as_deref() {
-        Some(s) if !s.is_empty() => {
-            let (_prov, id) = buzz_persona_pkg::persona::split_model(s);
-            Some(id.to_owned())
-        }
-        _ => None,
-    };
+    let (provider, model) = split_preview_model(config.model.as_deref());
 
     ParsedPersonaPreview {
         display_name: config.display_name,
@@ -317,9 +310,19 @@ fn parsed_preview_from_md_config(
         avatar_ref: config.avatar,
         runtime: config.runtime,
         model,
-        provider: None, // Markdown persona format does not carry llmProvider
+        provider,
         name_pool: Vec::new(),
         source_file: String::new(),
+    }
+}
+
+fn split_preview_model(model: Option<&str>) -> (Option<String>, Option<String>) {
+    match model.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw_model) => {
+            let (provider, id) = buzz_persona_pkg::persona::split_model(raw_model);
+            (provider.map(str::to_owned), Some(id.to_owned()))
+        }
+        None => (None, None),
     }
 }
 
@@ -343,14 +346,7 @@ fn parse_lenient_md_persona(content: &str) -> Result<ParsedPersonaPreview, Strin
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| "Missing display name".to_string())?;
-    // Split "provider:model" into separate fields for the preview.
-    let model = match fields.model.as_deref() {
-        Some(s) if !s.is_empty() => {
-            let (_prov, id) = buzz_persona_pkg::persona::split_model(s);
-            Some(id.to_owned())
-        }
-        _ => None,
-    };
+    let (provider, model) = split_preview_model(fields.model.as_deref());
 
     Ok(ParsedPersonaPreview {
         display_name,
@@ -359,7 +355,7 @@ fn parse_lenient_md_persona(content: &str) -> Result<ParsedPersonaPreview, Strin
         avatar_ref: fields.avatar,
         runtime: fields.runtime,
         model,
-        provider: None, // Markdown persona format does not carry llmProvider
+        provider,
         name_pool: Vec::new(),
         source_file: String::new(),
     })

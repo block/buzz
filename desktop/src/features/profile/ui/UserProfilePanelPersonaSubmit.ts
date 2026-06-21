@@ -2,6 +2,7 @@ import { toast } from "sonner";
 
 import { personaManagedAgentUpdate } from "@/features/profile/ui/UserProfilePanelUtils";
 import type {
+  AcpRuntimeCatalogEntry,
   AgentPersona,
   CreateManagedAgentResponse,
   CreatePersonaInput,
@@ -18,6 +19,8 @@ type SubmitProfilePersonaDialogOptions = {
   input: CreatePersonaInput | UpdatePersonaInput;
   managedAgent: ManagedAgent | undefined;
   onDone: () => void;
+  previousPersona?: AgentPersona;
+  runtimes?: readonly AcpRuntimeCatalogEntry[];
   updateManagedAgent: (
     input: UpdateManagedAgentInput,
   ) => Promise<{ agent: ManagedAgent; profileSyncError: string | null }>;
@@ -30,6 +33,8 @@ export async function submitProfilePersonaDialog({
   input,
   managedAgent,
   onDone,
+  previousPersona,
+  runtimes,
   updateManagedAgent,
   updatePersona,
 }: SubmitProfilePersonaDialogOptions) {
@@ -37,7 +42,10 @@ export async function submitProfilePersonaDialog({
     if ("id" in input) {
       const persona = await updatePersona(input);
       const agentUpdate = managedAgent
-        ? personaManagedAgentUpdate(managedAgent, persona)
+        ? personaManagedAgentUpdate(managedAgent, persona, {
+            previousPersona,
+            runtimes,
+          })
         : null;
       const result = agentUpdate ? await updateManagedAgent(agentUpdate) : null;
       if (result?.profileSyncError) {
