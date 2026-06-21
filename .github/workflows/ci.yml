@@ -556,7 +556,7 @@ jobs:
   mobile:
     name: Mobile
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
     permissions:
@@ -564,9 +564,29 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - name: Compute Hermit cache key
+        id: hermit-bin-hash
+        run: |
+          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+      - name: Restore Hermit package cache
+        id: hermit-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
-          cache: "true"
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+          restore-keys: ${{ runner.os }}-hermit-cache-
+      - name: Prime Flutter SDK
+        run: flutter --version
+      - name: Save Hermit package cache
+        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        continue-on-error: true
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
       - name: Restore pub cache
+        id: pub-cache
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.pub-cache
@@ -574,18 +594,19 @@ jobs:
           restore-keys: pub-${{ runner.os }}-
       - name: Install dependencies
         run: cd mobile && flutter pub get
+      - name: Save pub cache
+        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        continue-on-error: true
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
       - name: Format check
         run: cd mobile && dart format --output=none --set-exit-if-changed .
       - name: Analyze
         run: cd mobile && flutter analyze
       - name: Test
         run: cd mobile && flutter test
-      - name: Save pub cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
 
   security:
     name: Security
