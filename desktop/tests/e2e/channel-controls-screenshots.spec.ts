@@ -175,7 +175,7 @@ test.describe("channel controls screenshots", () => {
     await expect(
       page.getByTestId("channel-management-ephemeral-toggle"),
     ).toHaveAttribute("data-state", "checked");
-    await expect(page.getByTestId("channel-management-ttl")).toHaveValue("1d");
+    await expect(page.getByTestId("channel-management-ttl")).toHaveValue("7d");
     await settle(page);
 
     await lifecycle.screenshot({

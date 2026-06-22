@@ -570,7 +570,7 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     .fill("Auto-cleaned test stream");
   await page.getByRole("button", { name: "Channel duration: Ongoing" }).click();
   await page
-    .getByLabel("Ephemeral - auto-archives after 1 day of inactivity")
+    .getByLabel("Ephemeral - auto-archives after 7 days of inactivity")
     .click();
   await page.getByTestId("create-channel-submit").click();
 
@@ -614,7 +614,7 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
       .getByRole("button", { name: "Channel duration: Ongoing" })
       .click();
     await page
-      .getByLabel("Ephemeral - auto-archives after 1 day of inactivity")
+      .getByLabel("Ephemeral - auto-archives after 7 days of inactivity")
       .click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toContainText(channelName);
@@ -1210,7 +1210,7 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
       expect.objectContaining({
         command: "update_channel",
         payload: expect.objectContaining({
-          input: expect.objectContaining({ ttlSeconds: 86400 }),
+          input: expect.objectContaining({ ttlSeconds: 604800 }),
         }),
       }),
     );
@@ -1224,7 +1224,7 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
     channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
   });
   expect(channelAfterEnable).toMatchObject({
-    ttl_seconds: 86400,
+    ttl_seconds: 604800,
     visibility: "private",
   });
 
@@ -1237,7 +1237,7 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
   await expect(
     page.getByTestId("channel-management-ephemeral-toggle"),
   ).toHaveAttribute("data-state", "checked");
-  await expect(page.getByTestId("channel-management-ttl")).toHaveValue("1d");
+  await expect(page.getByTestId("channel-management-ttl")).toHaveValue("7d");
 
   await page.getByTestId("channel-management-private-toggle").click();
   await page.getByTestId("channel-management-ephemeral-toggle").click();
