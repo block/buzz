@@ -245,6 +245,11 @@ pub async fn update_managed_agent(
             .find(|r| r.pubkey == input.pubkey)
             .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
 
+        // Publish the edit to the relay. After-save, inside the lock, before
+        // any .await. The retention upsert hashes the opt-IN projection, so an
+        // update that touched only runtime/local fields is a no-op publish.
+        super::agents::retain_managed_agent_pending(&app, &state, record);
+
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;

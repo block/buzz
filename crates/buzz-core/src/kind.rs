@@ -128,6 +128,15 @@ pub const KIND_PERSONA: u32 = 30175;
 /// authoritative across clients and reboots, mirroring `KIND_PERSONA`.
 pub const KIND_TEAM: u32 = 30176;
 
+/// NIP-AP: Managed Agent (parameterized replaceable, owner-authored).
+///
+/// Managed-agent definition event published by the workspace owner. Addressed
+/// by `(pubkey, kind, d_tag)` where `d_tag` is the agent's pubkey. Content is
+/// an explicit opt-IN allowlist projection of the agent record — it MUST never
+/// carry the agent's secret key, NIP-OA auth tag, env vars, or runtime fields,
+/// since these events are world-readable on the relay.
+pub const KIND_MANAGED_AGENT: u32 = 30177;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -411,6 +420,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_EVENT_REMINDER,
     KIND_PERSONA,
     KIND_TEAM,
+    KIND_MANAGED_AGENT,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -595,6 +605,7 @@ pub fn event_kind_i32(event: &nostr::Event) -> i32 {
 const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–19999
 const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MESH_LLM_RELAY_STATUS)); // 30621 ∈ 30000–39999

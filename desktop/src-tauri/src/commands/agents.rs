@@ -26,6 +26,121 @@ fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     Ok(keys.public_key().to_hex())
 }
 
+/// Retain a freshly authored managed-agent event in the local store, flagged
+/// for relay sync. MUST be called inside the `managed_agents_store_lock`-held
+/// body after `save_managed_agents`, NEVER across an `.await`: it acquires
+/// `state.keys` and a retention-db connection, both `std::sync` guards, and
+/// drops them before returning.
+///
+/// Owner-authored, mirroring `commands::personas::retain_persona_pending`: the
+/// owner keys sign, the d_tag is the agent's pubkey, so the coordinate is
+/// `30177:<owner>:<agent_pubkey>`. The event content is the opt-IN
+/// [`agent_event_content`] projection — the retention upsert's content-equality
+/// guard compares this projection, so an operational start/stop that mutates
+/// only runtime fields produces an identical row and never re-enqueues a
+/// publish. Best-effort: a failure here is logged and swallowed so a retention
+/// hiccup never blocks the disk-authoritative write.
+pub(super) fn retain_managed_agent_pending(
+    app: &AppHandle,
+    state: &AppState,
+    record: &ManagedAgentRecord,
+) {
+    use crate::managed_agents::{
+        agent_events::build_agent_event,
+        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
+    };
+    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+    use nostr::JsonUtil;
+
+    let result = (|| -> Result<(), String> {
+        let (owner_pubkey, event) = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let event = build_agent_event(record)?
+                .sign_with_keys(&keys)
+                .map_err(|e| format!("failed to sign managed-agent event: {e}"))?;
+            (keys.public_key().to_hex(), event)
+        };
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        // Skip re-publishing when the projection is unchanged: compare the new
+        // event's content (the opt-IN projection JSON) against the retained
+        // row's. A start/stop or any edit that touched only excluded
+        // runtime/local fields produces an identical projection, so it is a
+        // no-op here — operational churn never re-enqueues a publish.
+        if let Some(existing) =
+            get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?
+        {
+            if existing.content == event.content.as_str() {
+                return Ok(());
+            }
+        }
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_MANAGED_AGENT,
+                pubkey: owner_pubkey,
+                d_tag: record.pubkey.clone(),
+                content: event.content.to_string(),
+                created_at: event.created_at.as_secs() as i64,
+                raw_event: event.as_json(),
+                pending_sync: true,
+            },
+        )
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: agent-retain: {e}");
+    }
+}
+
+/// Purge a deleted agent's pending row and enqueue a NIP-09 tombstone, both
+/// inside the `managed_agents_store_lock`-held delete body and NEVER across an
+/// `.await`.
+///
+/// Mirrors `commands::personas::tombstone_persona_pending`: the agent row at
+/// `(30177, owner, agent_pubkey)` is purged first so an unpublished edit can
+/// never resurrect it after the tombstone publishes, then the kind:5 tombstone
+/// is retained at its own `(5, owner, agent_pubkey)` coordinate with
+/// `pending_sync = 1`. The `d_tag` is the agent's pubkey. Best-effort: a
+/// failure is logged and swallowed so a retention hiccup never blocks the
+/// disk-authoritative delete.
+fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubkey: &str) {
+    use crate::managed_agents::{
+        agent_events::build_agent_delete,
+        retention::{delete_retained_event, open_retention_db, retain_event, RetainedEvent},
+    };
+    use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+    use nostr::JsonUtil;
+
+    const KIND_DELETE: u32 = 5;
+
+    let result = (|| -> Result<(), String> {
+        let (owner_pubkey, event) = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let owner_pubkey = keys.public_key().to_hex();
+            let event = build_agent_delete(agent_pubkey, &owner_pubkey)?
+                .sign_with_keys(&keys)
+                .map_err(|e| format!("failed to sign managed-agent tombstone: {e}"))?;
+            (owner_pubkey, event)
+        };
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        delete_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, agent_pubkey)?;
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_DELETE,
+                pubkey: owner_pubkey,
+                d_tag: agent_pubkey.to_string(),
+                content: event.content.to_string(),
+                created_at: event.created_at.as_secs() as i64,
+                raw_event: event.as_json(),
+                pending_sync: true,
+            },
+        )
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: agent-tombstone: {e}");
+    }
+}
+
 fn normalize_relay_mesh(
     config: Option<&RelayMeshConfig>,
     backend: &BackendKind,
@@ -586,6 +701,10 @@ pub async fn create_managed_agent(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
+        // Publish the agent to the relay. Inside the Phase-3 lock, after save,
+        // before any .await — owner-authored, every agent (Will's ruling: no
+        // is_builtin/persona-membership gate).
+        retain_managed_agent_pending(&app, &state, record);
         let personas = load_personas(&app).unwrap_or_default();
         (
             build_managed_agent_summary(&app, record, &runtimes, &personas)?,
@@ -1062,6 +1181,11 @@ pub fn delete_managed_agent(
             return Err(format!("agent {pubkey} not found"));
         }
         save_managed_agents(&app, &records)?;
+        // Tombstone-after-validation: only reached past the deployed-remote
+        // guard above and a confirmed removal — never orphan a live remote
+        // deployment's relay record. Inside the lock, before the block closes
+        // (no .await here). Every agent published, so every delete tombstones.
+        tombstone_managed_agent_pending(&app, &state, &pubkey);
     }
     try_regenerate_nest(&app);
     Ok(())

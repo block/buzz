@@ -1,3 +1,4 @@
+pub(crate) mod agent_events;
 mod backend;
 mod discovery;
 mod env_vars;
