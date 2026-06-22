@@ -88,9 +88,16 @@ pub struct ManagedAgentRecord {
     pub name: String,
     #[serde(default)]
     pub persona_id: Option<String>,
-    /// `#[serde(default)]` so an old build still parses a store whose inline
-    /// key was stripped after a keyring build migrated it into the Keychain.
-    #[serde(default)]
+    /// nsec private key. Held in memory but persisted to the OS keyring (keyed
+    /// by `pubkey`) rather than serialized to `managed-agents.json`. The
+    /// storage layer blanks this before writing JSON once the key is safely in
+    /// the keyring, and re-hydrates it from the keyring on load.
+    ///
+    /// It is only serialized inline (the `0o600` JSON fallback) when the
+    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
+    /// the normal keyring-backed case. `default` also lets an old build parse a
+    /// store whose inline key was already migrated out and blanked.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,
     /// NIP-OA auth tag JSON. Computed at agent creation time.
     ///
@@ -1005,5 +1012,85 @@ mod tests {
         assert!(!record.is_symlink);
         assert_eq!(record.symlink_target, None);
         assert_eq!(record.version, None);
+    }
+
+    /// A record whose in-memory key was blanked (because it lives in the
+    /// keyring) must NOT serialize `private_key_nsec` into JSON.
+    #[test]
+    fn managed_agent_record_omits_empty_key_from_json() {
+        let mut record = sample_agent_record();
+        record.private_key_nsec = String::new();
+
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(
+            !json.contains("private_key_nsec"),
+            "blanked key must be skipped from JSON, got: {json}"
+        );
+    }
+
+    /// A record with an inline key (the keyringless `0o600` JSON fallback)
+    /// serializes the key and round-trips it back.
+    #[test]
+    fn managed_agent_record_serializes_inline_key_for_fallback() {
+        let mut record = sample_agent_record();
+        record.private_key_nsec = "nsec1fallback".to_string();
+
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(json.contains("nsec1fallback"));
+
+        let back: ManagedAgentRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.private_key_nsec, "nsec1fallback");
+    }
+
+    /// A keyring-backed record on disk lacks `private_key_nsec`; it must
+    /// deserialize with an empty key (to be hydrated from the keyring).
+    #[test]
+    fn managed_agent_record_without_key_deserializes_empty() {
+        let record: ManagedAgentRecord = serde_json::from_str(
+            r#"{
+                "pubkey": "abcd1234",
+                "name": "test-agent",
+                "relay_url": "wss://localhost:3000",
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "system_prompt": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "last_started_at": null,
+                "last_stopped_at": null,
+                "last_exit_code": null,
+                "last_error": null
+            }"#,
+        )
+        .expect("keyring-backed record without inline key should deserialize");
+
+        assert_eq!(record.private_key_nsec, "");
+    }
+
+    fn sample_agent_record() -> ManagedAgentRecord {
+        serde_json::from_str(
+            r#"{
+                "pubkey": "abcd1234",
+                "name": "test-agent",
+                "private_key_nsec": "nsec1fake",
+                "relay_url": "wss://localhost:3000",
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "system_prompt": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "last_started_at": null,
+                "last_stopped_at": null,
+                "last_exit_code": null,
+                "last_error": null
+            }"#,
+        )
+        .expect("sample record")
     }
 }

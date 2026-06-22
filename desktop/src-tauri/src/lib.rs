@@ -11,6 +11,7 @@ mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
 mod relay;
+mod secret_store;
 mod templates;
 mod util;
 

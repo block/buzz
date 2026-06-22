@@ -6,7 +6,25 @@ use std::{
 
 use tauri::{AppHandle, Manager};
 
+use crate::app_state::KEYRING_SERVICE;
 use crate::managed_agents::ManagedAgentRecord;
+use crate::secret_store::{KeyringProbe, SecretStore};
+
+/// Keyring key name for an agent's nsec, namespaced from the human identity
+/// key (`"identity"`) which shares the service.
+fn agent_keyring_name(pubkey: &str) -> String {
+    format!("agent:{pubkey}")
+}
+
+/// The agent secret store. `None` when the build has no keyring backend, in
+/// which case agent keys stay inline in the `0o600` JSON file.
+fn agent_secret_store() -> Option<SecretStore> {
+    if cfg!(feature = "system-keyring") {
+        Some(SecretStore::keyring(KEYRING_SERVICE))
+    } else {
+        None
+    }
+}
 
 pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -40,7 +58,41 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read agent store: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| format!("failed to parse agent store: {error}"))
+    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content)
+        .map_err(|error| format!("failed to parse agent store: {error}"))?;
+
+    hydrate_keys(&mut records);
+    Ok(records)
+}
+
+/// Fill in each record's in-memory `private_key_nsec` from the keyring when it
+/// was not serialized inline. A record loaded with a non-empty key came from
+/// the JSON file-fallback (keyring was unreachable when it was written) — leave
+/// it as-is. A record with an empty key has its secret in the keyring.
+fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
+    let Some(store) = agent_secret_store() else {
+        return;
+    };
+    for record in records.iter_mut() {
+        if !record.private_key_nsec.is_empty() {
+            continue;
+        }
+        match store.load(&agent_keyring_name(&record.pubkey)) {
+            Ok(Some(nsec)) => record.private_key_nsec = nsec,
+            Ok(None) => {
+                eprintln!(
+                    "buzz-desktop: agent {} has no key in JSON or keyring",
+                    record.pubkey
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "buzz-desktop: failed to read agent {} key from keyring: {e}",
+                    record.pubkey
+                );
+            }
+        }
+    }
 }
 
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
@@ -52,11 +104,95 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
             .then_with(|| left.pubkey.cmp(&right.pubkey))
     });
 
+    // Persist each key to the keyring; on success blank the inline copy so it
+    // is skipped from JSON (`skip_serializing_if = "String::is_empty"`). If the
+    // keyring is unreachable, the key stays inline and the JSON gets 0o600.
+    let mut any_inline_key = false;
+    persist_agent_keys(&mut sorted, &mut any_inline_key);
+
     let path = managed_agents_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
-    atomic_write_json(&path, &payload)
+    atomic_write_json(&path, &payload)?;
+
+    // The JSON only carries plaintext keys in the keyringless fallback; lock it
+    // down to owner-only in that case.
+    if any_inline_key {
+        restrict_json_permissions(&path);
+    }
+    Ok(())
+}
+
+/// Write each record's in-memory key to the keyring and blank the inline copy
+/// on success. Sets `any_inline_key` if any key had to stay in the JSON because
+/// the keyring was unreachable. Mutates `records` (a save-local clone) — the
+/// caller's in-memory records keep their keys.
+fn persist_agent_keys(records: &mut [ManagedAgentRecord], any_inline_key: &mut bool) {
+    let Some(store) = agent_secret_store() else {
+        // No keyring backend: keys stay inline.
+        *any_inline_key = records.iter().any(|r| !r.private_key_nsec.is_empty());
+        return;
+    };
+    for record in records.iter_mut() {
+        if record.private_key_nsec.is_empty() {
+            continue;
+        }
+        let name = agent_keyring_name(&record.pubkey);
+        match store.probe(&name) {
+            KeyringProbe::Unreachable => {
+                // Keep the key inline (file fallback); do not migrate.
+                *any_inline_key = true;
+            }
+            KeyringProbe::Present | KeyringProbe::ReachableButEmpty => {
+                match write_and_verify(&store, &name, &record.private_key_nsec) {
+                    Ok(()) => record.private_key_nsec.clear(),
+                    Err(e) => {
+                        eprintln!(
+                            "buzz-desktop: keyring write for agent {} failed ({e}), keeping inline",
+                            record.pubkey
+                        );
+                        *any_inline_key = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write `value` to the keyring and read it back to confirm before the caller
+/// strips the inline copy.
+fn write_and_verify(store: &SecretStore, name: &str, value: &str) -> Result<(), String> {
+    store.store(name, value)?;
+    match store.load(name)? {
+        Some(stored) if stored == value => Ok(()),
+        _ => Err("keyring read-back verify failed".to_string()),
+    }
+}
+
+#[cfg(unix)]
+fn restrict_json_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Err(e) = std::fs::set_permissions(&resolved, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!(
+            "buzz-desktop: failed to restrict {} permissions: {e}",
+            resolved.display()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_json_permissions(_path: &Path) {}
+
+/// Remove an agent's key from the keyring (best-effort). Called when an agent
+/// is deleted so its secret does not linger in the OS store.
+pub fn delete_agent_key(pubkey: &str) {
+    if let Some(store) = agent_secret_store() {
+        if let Err(e) = store.delete(&agent_keyring_name(pubkey)) {
+            eprintln!("buzz-desktop: failed to delete agent {pubkey} key from keyring: {e}");
+        }
+    }
 }
 
 /// Atomic, symlink-preserving JSON write.

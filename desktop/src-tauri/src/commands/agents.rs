@@ -1149,6 +1149,8 @@ pub fn delete_managed_agent(
             return Err(format!("agent {pubkey} not found"));
         }
         save_managed_agents(&app, &records)?;
+        // Remove the agent's nsec from the keyring after the record is gone.
+        crate::managed_agents::delete_agent_key(&pubkey);
     }
     try_regenerate_nest(&app);
     Ok(())

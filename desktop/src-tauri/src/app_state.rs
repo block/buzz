@@ -45,30 +45,41 @@ pub struct AppState {
     pub mesh_coordinator: AsyncMutex<Option<crate::mesh_llm::MeshCoordinator>>,
 }
 
-pub fn build_app_state() -> AppState {
-    // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
-    // in setup() will replace the ephemeral placeholder with a persisted key.
-    let (keys, source) = match std::env::var("BUZZ_PRIVATE_KEY") {
+/// Parse the `BUZZ_PRIVATE_KEY` env var into identity keys. `Some` means the
+/// env var was present and valid and MUST win over any persisted/keyring key
+/// (the dev/CI/harness override). `None` means absent or malformed — callers
+/// fall through to persisted resolution. A malformed value is logged and
+/// treated as absent rather than left on an ephemeral identity.
+fn identity_from_env() -> Option<Keys> {
+    match std::env::var("BUZZ_PRIVATE_KEY") {
         Ok(nsec) => match Keys::parse(nsec.trim()) {
-            Ok(keys) => (keys, "configured"),
+            Ok(keys) => Some(keys),
             Err(error) => {
                 eprintln!("buzz-desktop: invalid BUZZ_PRIVATE_KEY: {error}");
-                (Keys::generate(), "ephemeral")
+                None
             }
         },
         Err(std::env::VarError::NotUnicode(_)) => {
             eprintln!("buzz-desktop: BUZZ_PRIVATE_KEY contains invalid UTF-8");
-            (Keys::generate(), "ephemeral")
+            None
         }
-        Err(std::env::VarError::NotPresent) => (Keys::generate(), "ephemeral"),
-    };
-
-    if source == "configured" {
-        eprintln!(
-            "buzz-desktop: configured identity pubkey {}",
-            keys.public_key().to_hex()
-        );
+        Err(std::env::VarError::NotPresent) => None,
     }
+}
+
+pub fn build_app_state() -> AppState {
+    // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
+    // in setup() will replace the ephemeral placeholder with a persisted key.
+    let keys = match identity_from_env() {
+        Some(keys) => {
+            eprintln!(
+                "buzz-desktop: configured identity pubkey {}",
+                keys.public_key().to_hex()
+            );
+            keys
+        }
+        None => Keys::generate(),
+    };
 
     AppState {
         keys: Mutex::new(keys),
@@ -135,10 +146,8 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     // Only skip file-based resolution if the env var was present AND parsed
     // successfully. A malformed env var should fall through to the persisted
     // key rather than leaving the app on an ephemeral identity.
-    if let Ok(nsec) = std::env::var("BUZZ_PRIVATE_KEY") {
-        if Keys::parse(nsec.trim()).is_ok() {
-            return Ok(());
-        }
+    if identity_from_env().is_some() {
+        return Ok(());
     }
 
     let data_dir = app
@@ -146,48 +155,201 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
         .app_data_dir()
         .map_err(|e| format!("app data dir: {e}"))?;
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
-    let key_path = data_dir.join("identity.key");
 
-    // Try to load an existing key.
-    if key_path.exists() {
-        match load_key_file(&key_path) {
+    let keys = load_or_create_identity(&data_dir)?;
+    *state.keys.lock().map_err(|e| e.to_string())? = keys;
+    Ok(())
+}
+
+/// Service name for the desktop OS keyring. Shared by the human identity key
+/// and managed-agent keys (each addressed by a distinct key name within it).
+pub(crate) const KEYRING_SERVICE: &str = "buzz-desktop";
+
+/// Keyring key name for the human identity nsec.
+const IDENTITY_KEY_NAME: &str = "identity";
+
+/// Resolve the human identity key: migrate a legacy `identity.key` into the
+/// keyring when safe, otherwise load from whichever backend holds it, else
+/// generate-and-save.
+///
+/// Migration rule (prevents stale-key resurrection): only import the plaintext
+/// file when the keyring is REACHABLE-but-empty. If the keyring is UNREACHABLE
+/// this boot, fall back to reading the file directly and do NOT migrate — a
+/// later import from a leftover (possibly rotated) file could resurrect an old
+/// key.
+fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
+    use crate::secret_store::KeyringProbe;
+
+    let legacy_path = data_dir.join("identity.key");
+
+    // No keyring available in this build: the `0o600` file is the only store.
+    if !cfg!(feature = "system-keyring") {
+        return load_file_or_generate(&legacy_path, data_dir);
+    }
+
+    let store = crate::secret_store::SecretStore::keyring(KEYRING_SERVICE);
+
+    match store.probe(IDENTITY_KEY_NAME) {
+        KeyringProbe::Present => {
+            if let Some(nsec) = store.load(IDENTITY_KEY_NAME)? {
+                return parse_or_quarantine(&nsec, &legacy_path, data_dir);
+            }
+            // Probe said Present but load found nothing — treat as empty.
+        }
+        KeyringProbe::ReachableButEmpty => {
+            // One-time migration: import the legacy plaintext file, read-back
+            // verify, THEN delete it.
+            if legacy_path.exists() {
+                if let Some(keys) = migrate_identity_file(&store, &legacy_path)? {
+                    return Ok(keys);
+                }
+            }
+        }
+        KeyringProbe::Unreachable => {
+            // Keyring down this boot — read the file directly, do NOT migrate.
+            return load_file_or_generate(&legacy_path, data_dir);
+        }
+    }
+
+    generate_and_persist(&store, &legacy_path)
+}
+
+/// Load the `0o600` identity file, quarantining corruption, else generate and
+/// save a fresh key to the file. Used when no keyring is available.
+fn load_file_or_generate(
+    legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<Keys, String> {
+    if legacy_path.exists() {
+        match load_key_file(legacy_path) {
             Ok(keys) => {
                 eprintln!(
                     "buzz-desktop: persisted identity pubkey {}",
                     keys.public_key().to_hex()
                 );
-                *state.keys.lock().map_err(|e| e.to_string())? = keys;
-                return Ok(());
+                return Ok(keys);
             }
-            Err(error) => {
-                // Corrupted — quarantine with a timestamp so prior backups
-                // are never overwritten.
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let bad_name = format!("identity.key.bad.{ts}");
-                eprintln!(
-                    "buzz-desktop: corrupt identity.key ({error}), quarantining to {bad_name}"
-                );
-                let bad_path = data_dir.join(bad_name);
-                if std::fs::rename(&key_path, &bad_path).is_err() {
-                    let _ = std::fs::remove_file(&key_path);
-                }
-            }
+            Err(error) => quarantine_corrupt_key(legacy_path, data_dir, &error),
         }
     }
-
-    // First run (or recovery from corruption): generate and save.
     let keys = Keys::generate();
-    save_key_file(&key_path, &keys)?;
-
+    save_key_file(legacy_path, &keys)?;
     eprintln!(
         "buzz-desktop: generated and saved identity pubkey {}",
         keys.public_key().to_hex()
     );
-    *state.keys.lock().map_err(|e| e.to_string())? = keys;
-    Ok(())
+    Ok(keys)
+}
+
+/// Import the plaintext `identity.key` into the store, verify the round-trip,
+/// then delete the file. Returns `Ok(None)` if the file was corrupt (caller
+/// continues to generate-and-save).
+fn migrate_identity_file(
+    store: &crate::secret_store::SecretStore,
+    legacy_path: &std::path::Path,
+) -> Result<Option<Keys>, String> {
+    let keys = match load_key_file(legacy_path) {
+        Ok(keys) => keys,
+        Err(error) => {
+            eprintln!("buzz-desktop: corrupt identity.key during migration ({error}), skipping");
+            return Ok(None);
+        }
+    };
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .map_err(|e| format!("encode nsec: {e}"))?;
+
+    store.store(IDENTITY_KEY_NAME, &nsec)?;
+    // Read-back verify before deleting the plaintext file.
+    match store.load(IDENTITY_KEY_NAME)? {
+        Some(stored) if stored == nsec => {
+            if let Err(e) = std::fs::remove_file(legacy_path) {
+                eprintln!("buzz-desktop: keyring import ok but failed to delete identity.key: {e}");
+            } else {
+                eprintln!("buzz-desktop: migrated identity key into OS keyring");
+            }
+            Ok(Some(keys))
+        }
+        _ => Err("keyring read-back verify failed for identity key".to_string()),
+    }
+}
+
+/// Generate a fresh identity, persist it through the store, return it.
+fn generate_and_persist(
+    store: &crate::secret_store::SecretStore,
+    legacy_path: &std::path::Path,
+) -> Result<Keys, String> {
+    let keys = Keys::generate();
+    persist_identity(store, &keys, legacy_path)?;
+    eprintln!(
+        "buzz-desktop: generated and saved identity pubkey {}",
+        keys.public_key().to_hex()
+    );
+    Ok(keys)
+}
+
+/// Persist `keys` through the store, falling back to the `0o600` file when the
+/// keyring write fails on an availability error.
+fn persist_identity(
+    store: &crate::secret_store::SecretStore,
+    keys: &Keys,
+    legacy_path: &std::path::Path,
+) -> Result<(), String> {
+    let nsec = keys
+        .secret_key()
+        .to_bech32()
+        .map_err(|e| format!("encode nsec: {e}"))?;
+    match store.store(IDENTITY_KEY_NAME, &nsec) {
+        Ok(()) => Ok(()),
+        Err(keyring_err) => {
+            eprintln!("buzz-desktop: keyring write failed ({keyring_err}), using file fallback");
+            save_key_file(legacy_path, keys)
+        }
+    }
+}
+
+fn parse_or_quarantine(
+    nsec: &str,
+    legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<Keys, String> {
+    match Keys::parse(nsec.trim()) {
+        Ok(keys) => {
+            eprintln!(
+                "buzz-desktop: persisted identity pubkey {}",
+                keys.public_key().to_hex()
+            );
+            Ok(keys)
+        }
+        Err(error) => {
+            quarantine_corrupt_key(
+                legacy_path,
+                data_dir,
+                &format!("parse keyring nsec: {error}"),
+            );
+            let store = crate::secret_store::SecretStore::keyring(KEYRING_SERVICE);
+            generate_and_persist(&store, legacy_path)
+        }
+    }
+}
+
+/// Quarantine a corrupt `identity.key` with a timestamp so prior backups are
+/// never overwritten.
+fn quarantine_corrupt_key(key_path: &std::path::Path, data_dir: &std::path::Path, error: &str) {
+    if !key_path.exists() {
+        return;
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bad_name = format!("identity.key.bad.{ts}");
+    eprintln!("buzz-desktop: corrupt identity.key ({error}), quarantining to {bad_name}");
+    let bad_path = data_dir.join(bad_name);
+    if std::fs::rename(key_path, &bad_path).is_err() {
+        let _ = std::fs::remove_file(key_path);
+    }
 }
 
 fn load_key_file(path: &std::path::Path) -> Result<Keys, String> {
@@ -239,6 +401,50 @@ mod tests {
 
     fn assert_key_eq(a: &Keys, b: &Keys) {
         assert_eq!(a.public_key().to_hex(), b.public_key().to_hex());
+    }
+
+    /// `BUZZ_PRIVATE_KEY` is process-global; serialize the env-mutating tests
+    /// so they don't race each other under the parallel test runner.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with `BUZZ_PRIVATE_KEY` set to `value` (or unset when `None`),
+    /// restoring the prior value afterward.
+    fn with_env_key<T>(value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("BUZZ_PRIVATE_KEY").ok();
+        match value {
+            Some(v) => std::env::set_var("BUZZ_PRIVATE_KEY", v),
+            None => std::env::remove_var("BUZZ_PRIVATE_KEY"),
+        }
+        let out = body();
+        match prior {
+            Some(v) => std::env::set_var("BUZZ_PRIVATE_KEY", v),
+            None => std::env::remove_var("BUZZ_PRIVATE_KEY"),
+        }
+        out
+    }
+
+    #[test]
+    fn identity_from_env_wins_when_valid() {
+        let configured = Keys::generate();
+        let nsec = configured.secret_key().to_bech32().unwrap();
+
+        let resolved =
+            with_env_key(Some(&nsec), identity_from_env).expect("valid env key must resolve");
+
+        assert_key_eq(&configured, &resolved);
+    }
+
+    #[test]
+    fn identity_from_env_none_when_absent() {
+        assert!(with_env_key(None, identity_from_env).is_none());
+    }
+
+    #[test]
+    fn identity_from_env_none_when_malformed() {
+        // A malformed env var falls through to persisted resolution rather than
+        // winning — otherwise a typo'd key would silently shadow the real one.
+        assert!(with_env_key(Some("not-a-valid-nsec"), identity_from_env).is_none());
     }
 
     #[test]
