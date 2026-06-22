@@ -1,15 +1,22 @@
-import {
-  isThreadActivityItem,
-  type InboxFilter,
-} from "@/features/home/lib/inbox";
+import type { InboxFilter } from "@/features/home/lib/inbox";
 import {
   getChannelIdFromTags,
   getThreadReference,
+  isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
 
+function hasThreadReplyTags(tags: string[][]) {
+  const thread = getThreadReference(tags);
+  return thread.parentId !== null && !isBroadcastReply(tags);
+}
+
 export function matchesInboxFilter(
-  item: { categories: readonly string[]; item?: FeedItem },
+  item: {
+    categories: readonly string[];
+    groupItems?: readonly FeedItem[];
+    item?: FeedItem;
+  },
   filter: InboxFilter,
 ) {
   if (filter === "all") {
@@ -17,9 +24,9 @@ export function matchesInboxFilter(
   }
 
   if (filter === "thread") {
-    return item.item
-      ? isThreadActivityItem(item.item)
-      : item.categories.includes(filter);
+    return [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
+      groupItem ? hasThreadReplyTags(groupItem.tags) : false,
+    );
   }
 
   return item.categories.includes(filter);

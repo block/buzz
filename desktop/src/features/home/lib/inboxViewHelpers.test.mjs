@@ -31,25 +31,61 @@ test("matchesInboxFilter is false when the category is absent", () => {
 });
 
 test("matchesInboxFilter matches thread rows by thread tags", () => {
+  const replyItem = {
+    id: "reply",
+    kind: 9,
+    pubkey: "author",
+    content: "reply",
+    createdAt: 2,
+    channelId: "channel",
+    channelName: "bugs",
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "root"],
+      ["e", "parent", "", "reply"],
+    ],
+    category: "activity",
+  };
+  const rootItem = {
+    id: "root",
+    kind: 9,
+    pubkey: "author",
+    content: "root",
+    createdAt: 1,
+    channelId: "channel",
+    channelName: "bugs",
+    tags: [["h", "channel"]],
+    category: "activity",
+  };
+
   assert.equal(
     matchesInboxFilter(
       {
         categories: ["activity"],
-        item: {
-          id: "reply",
-          kind: 9,
-          pubkey: "author",
-          content: "reply",
-          createdAt: 2,
-          channelId: "channel",
-          channelName: "bugs",
-          tags: [
-            ["h", "channel"],
-            ["e", "root", "", "root"],
-            ["e", "parent", "", "reply"],
-          ],
-          category: "activity",
-        },
+        item: replyItem,
+      },
+      "thread",
+    ),
+    true,
+  );
+
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["mention", "activity"],
+        item: { ...replyItem, category: "mention" },
+      },
+      "thread",
+    ),
+    true,
+  );
+
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["mention", "activity"],
+        groupItems: [rootItem, replyItem],
+        item: { ...rootItem, category: "mention" },
       },
       "thread",
     ),
@@ -60,17 +96,7 @@ test("matchesInboxFilter matches thread rows by thread tags", () => {
     matchesInboxFilter(
       {
         categories: ["activity"],
-        item: {
-          id: "root",
-          kind: 9,
-          pubkey: "author",
-          content: "root",
-          createdAt: 1,
-          channelId: "channel",
-          channelName: "bugs",
-          tags: [["h", "channel"]],
-          category: "activity",
-        },
+        item: rootItem,
       },
       "thread",
     ),
