@@ -106,6 +106,10 @@ const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
 const DEFAULT_PLAYBACK_SPEED = 1;
 const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
 const PLAYBACK_SPEEDS = [2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25];
+const TIMECODE_ACCENT_CLASS =
+  "bg-[hsl(var(--buzz-video-review-accent,var(--primary))/0.15)] text-[hsl(var(--buzz-video-review-accent-foreground,var(--buzz-video-review-accent,var(--primary))))]";
+const TIMECODE_ACCENT_HOVER_CLASS =
+  "hover:bg-[hsl(var(--buzz-video-review-accent,var(--primary))/0.3)]";
 
 /**
  * Frosted-glass backing layer for floating media controls. The parent must
@@ -1941,7 +1945,7 @@ function VideoReviewDialog({
                       className={cn(
                         "rounded-md px-2 py-1 font-mono text-xs font-semibold transition-colors",
                         !replyTarget && postAtCurrentFrame
-                          ? "bg-amber-400/15 text-amber-300"
+                          ? TIMECODE_ACCENT_CLASS
                           : "bg-muted text-muted-foreground/70",
                       )}
                       data-testid="video-review-composer-timecode"
@@ -2107,7 +2111,11 @@ function VideoReviewCommentBody({
     item.seconds !== null && item.timecode ? (
       <button
         aria-label={`Jump to ${item.timecode}`}
-        className="inline-flex h-5 shrink-0 items-center rounded bg-amber-400/15 px-1.5 align-middle font-mono text-2xs font-semibold text-amber-300 outline-hidden transition-colors hover:bg-amber-400/30 focus-visible:ring-2 focus-visible:ring-white/60"
+        className={cn(
+          "inline-flex h-5 shrink-0 items-center rounded px-1.5 align-middle font-mono text-2xs font-semibold outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-white/60",
+          TIMECODE_ACCENT_CLASS,
+          TIMECODE_ACCENT_HOVER_CLASS,
+        )}
         data-testid="video-review-comment-timecode"
         type="button"
         onClick={() => onSeek(item.seconds ?? 0)}

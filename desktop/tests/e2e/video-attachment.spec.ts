@@ -8,6 +8,13 @@ const PORTRAIT_VIDEO_SHA = "c".repeat(64);
 const PORTRAIT_VIDEO_URL = `http://localhost:3000/media/${PORTRAIT_VIDEO_SHA}.mp4`;
 const CONSTRAINED_LANDSCAPE_VIDEO_SHA = "d".repeat(64);
 const CONSTRAINED_LANDSCAPE_VIDEO_URL = `http://localhost:3000/media/${CONSTRAINED_LANDSCAPE_VIDEO_SHA}.mp4`;
+const VIDEO_REVIEW_NEUTRAL_ACCENT = "neutral";
+const VIDEO_REVIEW_LIGHT_THEME = "catppuccin-latte";
+const VIDEO_REVIEW_ACCENT = "#ec4899";
+const VIDEO_REVIEW_ACCENT_FOREGROUND_RGB = "rgb(240, 115, 177)";
+const VIDEO_REVIEW_INDIGO_ACCENT = "#6366f1";
+const VIDEO_REVIEW_INDIGO_FOREGROUND_RGB = "rgb(141, 143, 245)";
+const VIDEO_REVIEW_NEUTRAL_DARK_RGB = "rgb(250, 250, 250)";
 const POSTER_DATA_URL =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgODAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iODAiIGZpbGw9IiMyNjQ2NTMiLz48Y2lyY2xlIGN4PSI1NCIgY3k9IjQwIiByPSIyMiIgZmlsbD0iI2YyYzE0ZSIvPjxwYXRoIGQ9Ik05MiAyNGg0NHYzMkg5MnoiIGZpbGw9IiNmNzgxNTQiLz48L3N2Zz4=";
 
@@ -55,67 +62,81 @@ function emitMockMessage(
   );
 }
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    type MediaState = {
-      currentTime: number;
-      paused: boolean;
-    };
-    const mediaState = new WeakMap<HTMLMediaElement, MediaState>();
-    const getMediaState = (element: HTMLMediaElement) => {
-      let state = mediaState.get(element);
-      if (!state) {
-        state = { currentTime: 0, paused: true };
-        mediaState.set(element, state);
+async function installVideoReviewHarness(
+  page: Page,
+  {
+    accentColor = VIDEO_REVIEW_ACCENT,
+    themeName,
+  }: { accentColor?: string; themeName?: string } = {},
+) {
+  await page.addInitScript(
+    ({ accentColor, themeName }) => {
+      if (themeName) {
+        window.localStorage.setItem("buzz-theme", themeName);
       }
-      return state;
-    };
+      window.localStorage.setItem("buzz-accent-color", accentColor);
 
-    Object.defineProperty(HTMLMediaElement.prototype, "load", {
-      configurable: true,
-      value() {
-        getMediaState(this as HTMLMediaElement).currentTime = 0;
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "play", {
-      configurable: true,
-      value() {
-        getMediaState(this as HTMLMediaElement).paused = false;
-        this.dispatchEvent(new Event("play"));
-        return Promise.resolve();
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "pause", {
-      configurable: true,
-      value() {
-        getMediaState(this as HTMLMediaElement).paused = true;
-        this.dispatchEvent(new Event("pause"));
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "paused", {
-      configurable: true,
-      get() {
-        return getMediaState(this as HTMLMediaElement).paused;
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
-      configurable: true,
-      get() {
-        return getMediaState(this as HTMLMediaElement).currentTime;
-      },
-      set(value) {
-        getMediaState(this as HTMLMediaElement).currentTime =
-          Number(value) || 0;
-        this.dispatchEvent(new Event("seeked"));
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "duration", {
-      configurable: true,
-      get() {
-        return 12.5;
-      },
-    });
-  });
+      type MediaState = {
+        currentTime: number;
+        paused: boolean;
+      };
+      const mediaState = new WeakMap<HTMLMediaElement, MediaState>();
+      const getMediaState = (element: HTMLMediaElement) => {
+        let state = mediaState.get(element);
+        if (!state) {
+          state = { currentTime: 0, paused: true };
+          mediaState.set(element, state);
+        }
+        return state;
+      };
+
+      Object.defineProperty(HTMLMediaElement.prototype, "load", {
+        configurable: true,
+        value() {
+          getMediaState(this as HTMLMediaElement).currentTime = 0;
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "play", {
+        configurable: true,
+        value() {
+          getMediaState(this as HTMLMediaElement).paused = false;
+          this.dispatchEvent(new Event("play"));
+          return Promise.resolve();
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "pause", {
+        configurable: true,
+        value() {
+          getMediaState(this as HTMLMediaElement).paused = true;
+          this.dispatchEvent(new Event("pause"));
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "paused", {
+        configurable: true,
+        get() {
+          return getMediaState(this as HTMLMediaElement).paused;
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+        configurable: true,
+        get() {
+          return getMediaState(this as HTMLMediaElement).currentTime;
+        },
+        set(value) {
+          getMediaState(this as HTMLMediaElement).currentTime =
+            Number(value) || 0;
+          this.dispatchEvent(new Event("seeked"));
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "duration", {
+        configurable: true,
+        get() {
+          return 12.5;
+        },
+      });
+    },
+    { accentColor, themeName },
+  );
 
   await installMockBridge(page, {
     uploadDescriptors: [
@@ -132,11 +153,65 @@ test.beforeEach(async ({ page }) => {
       },
     ],
   });
-});
+}
+
+async function openReviewWithPostedTimecode(
+  page: Page,
+  commentText = "Neutral accent check",
+) {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.getByRole("button", { name: "Attach image" }).click();
+  await expect(
+    page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
+  ).toBeVisible();
+  await page.getByTestId("send-message").click();
+  await expect(page.getByText("Sending")).toHaveCount(0);
+
+  const reviewButton = page
+    .getByRole("button", { name: "Open video review" })
+    .last();
+  await expect(reviewButton).toBeVisible();
+  await page.waitForFunction(() => {
+    const launcher = document.querySelector("[data-video-review-launcher]");
+    const row = launcher?.closest("[data-message-id]");
+    const messageId = row?.getAttribute("data-message-id") ?? "";
+    return Boolean(messageId) && !messageId.startsWith("optimistic");
+  });
+  await reviewButton.evaluate((button) =>
+    (button as HTMLButtonElement).click(),
+  );
+
+  const reviewDialog = page.getByTestId("video-review-dialog");
+  await expect(reviewDialog).toBeVisible();
+  await reviewDialog.locator("video").evaluate((video) => {
+    const el = video as HTMLVideoElement;
+    el.currentTime = 10;
+    el.dispatchEvent(new Event("timeupdate"));
+  });
+  await expect(page.getByTestId("video-review-composer-timecode")).toHaveText(
+    "00:10",
+  );
+
+  const commentBox = reviewDialog.getByTestId("message-input");
+  await commentBox.click();
+  await commentBox.fill(commentText);
+  await reviewDialog.getByTestId("send-message").click();
+  await expect(page.getByTestId("video-review-comments")).toContainText(
+    commentText,
+  );
+
+  return reviewDialog;
+}
 
 test("video upload previews use poster frames and inline videos open review mode", async ({
   page,
 }) => {
+  await installVideoReviewHarness(page);
+
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -517,6 +592,9 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(
     reviewDialog.getByTestId("video-review-comment-timecode").first(),
   ).toHaveText("00:10");
+  await expect(
+    reviewDialog.getByTestId("video-review-comment-timecode").first(),
+  ).toHaveCSS("color", VIDEO_REVIEW_ACCENT_FOREGROUND_RGB);
 
   // Regression: a timeline re-render (live message arriving in the channel)
   // must not remount the review dialog or wipe an in-progress comment draft.
@@ -670,6 +748,8 @@ test("video upload previews use poster frames and inline videos open review mode
 });
 
 test("narrow inline videos hide playback speed control", async ({ page }) => {
+  await installVideoReviewHarness(page);
+
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -713,6 +793,8 @@ test("narrow inline videos hide playback speed control", async ({ page }) => {
 test("constrained landscape inline videos measure rendered width before showing speed", async ({
   page,
 }) => {
+  await installVideoReviewHarness(page);
+
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -762,4 +844,40 @@ test("constrained landscape inline videos measure rendered width before showing 
   await expect(landscapePlayer.getByTestId("video-inline-speed")).toHaveCount(
     0,
   );
+});
+
+test("neutral accent uses the forced-dark review foreground", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page, {
+    accentColor: VIDEO_REVIEW_NEUTRAL_ACCENT,
+    themeName: VIDEO_REVIEW_LIGHT_THEME,
+  });
+
+  const reviewDialog = await openReviewWithPostedTimecode(page);
+
+  await expect(
+    reviewDialog.getByTestId("video-review-composer-timecode"),
+  ).toHaveCSS("color", VIDEO_REVIEW_NEUTRAL_DARK_RGB);
+  await expect(
+    reviewDialog.getByTestId("video-review-comment-timecode").first(),
+  ).toHaveCSS("color", VIDEO_REVIEW_NEUTRAL_DARK_RGB);
+});
+
+test("dark accent uses a contrast-safe review foreground", async ({ page }) => {
+  await installVideoReviewHarness(page, {
+    accentColor: VIDEO_REVIEW_INDIGO_ACCENT,
+  });
+
+  const reviewDialog = await openReviewWithPostedTimecode(
+    page,
+    "Indigo contrast check",
+  );
+
+  await expect(
+    reviewDialog.getByTestId("video-review-composer-timecode"),
+  ).toHaveCSS("color", VIDEO_REVIEW_INDIGO_FOREGROUND_RGB);
+  await expect(
+    reviewDialog.getByTestId("video-review-comment-timecode").first(),
+  ).toHaveCSS("color", VIDEO_REVIEW_INDIGO_FOREGROUND_RGB);
 });
