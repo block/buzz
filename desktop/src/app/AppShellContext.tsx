@@ -2,6 +2,7 @@ import * as React from "react";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
+import type { FeedItem } from "@/shared/api/types";
 
 const EMPTY_SET = new Set<string>();
 
@@ -36,6 +37,7 @@ type AppShellContextValue = {
   isNotifiedForThread: (rootId: string) => boolean;
   isThreadMuted: (rootId: string) => boolean;
   threadActivityItems: ThreadActivityItem[];
+  threadActivityFeedItems: FeedItem[];
   feedItemState: FeedItemState;
 };
 
@@ -56,6 +58,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   isNotifiedForThread: () => false,
   isThreadMuted: () => false,
   threadActivityItems: [],
+  threadActivityFeedItems: [],
   feedItemState: {
     doneSet: EMPTY_SET,
     markDone: () => {},

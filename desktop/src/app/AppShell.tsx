@@ -735,6 +735,7 @@ export function AppShell() {
             isNotifiedForThread,
             isThreadMuted: (rootId) => mutedRootIds.has(rootId),
             threadActivityItems,
+            threadActivityFeedItems,
             feedItemState,
           }}
         >
