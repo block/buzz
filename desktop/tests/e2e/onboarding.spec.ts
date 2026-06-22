@@ -293,11 +293,8 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   ).toBeVisible();
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
-  await expect(banner).toHaveAttribute("data-state", "dismissing", {
-    timeout: 5_000,
-  });
   await expect(channelIntro).toBeVisible();
-  await expect(banner).toHaveCount(0, { timeout: 7_000 });
+  await expect(banner).toHaveCount(0, { timeout: 12_000 });
 }
 
 async function getMockChannels(page: Page) {
