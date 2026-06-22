@@ -459,58 +459,56 @@ export const MessageRow = React.memo(
               const isHighlighted =
                 Boolean(collapseAction?.active) ||
                 Boolean(highlightThreadLineDepths?.includes(depth));
-              const lineClassName = cn(
-                "absolute bottom-0 left-1/2 top-0 border-l transition-[border-color]",
-                isHighlighted
-                  ? "border-primary"
-                  : "border-border group-hover/thread-guide:border-primary group-focus-visible/thread-guide:border-primary",
-              );
-
               if (collapseAction) {
                 return (
-                  <button
-                    aria-label={collapseAction.label}
-                    className="group/thread-guide absolute bottom-0 top-0 z-20 w-5 -translate-x-1/2 cursor-pointer rounded-full focus-visible:outline-hidden"
-                    data-thread-head-id={collapseAction.message.id}
-                    data-testid="thread-collapse-guide"
-                    key={`${message.id}-depth-guide-${offset}`}
-                    onBlur={() =>
-                      handleCollapseDepthGuideHoverChange(
-                        collapseAction.message,
-                        false,
-                      )
-                    }
-                    onClick={(event) =>
-                      handleCollapseDepthGuide(event, collapseAction.message)
-                    }
-                    onFocus={() =>
-                      handleCollapseDepthGuideHoverChange(
-                        collapseAction.message,
-                        true,
-                      )
-                    }
-                    onMouseEnter={() =>
-                      handleCollapseDepthGuideHoverChange(
-                        collapseAction.message,
-                        true,
-                      )
-                    }
-                    onMouseLeave={() =>
-                      handleCollapseDepthGuideHoverChange(
-                        collapseAction.message,
-                        false,
-                      )
-                    }
-                    style={{ left: `${offset}px` }}
-                    type="button"
-                  >
-                    <span
-                      className={lineClassName}
+                  <React.Fragment key={`${message.id}-depth-guide-${offset}`}>
+                    <div
+                      aria-hidden
+                      className={cn(
+                        "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
+                        isHighlighted ? "border-primary" : "border-border",
+                      )}
                       style={{
                         borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
+                        left: `${offset}px`,
                       }}
                     />
-                  </button>
+                    <button
+                      aria-label={collapseAction.label}
+                      className="absolute bottom-0 top-0 z-20 w-5 -translate-x-1/2 cursor-pointer rounded-full focus-visible:outline-hidden"
+                      data-thread-head-id={collapseAction.message.id}
+                      data-testid="thread-collapse-guide"
+                      onBlur={() =>
+                        handleCollapseDepthGuideHoverChange(
+                          collapseAction.message,
+                          false,
+                        )
+                      }
+                      onClick={(event) =>
+                        handleCollapseDepthGuide(event, collapseAction.message)
+                      }
+                      onFocus={() =>
+                        handleCollapseDepthGuideHoverChange(
+                          collapseAction.message,
+                          true,
+                        )
+                      }
+                      onMouseEnter={() =>
+                        handleCollapseDepthGuideHoverChange(
+                          collapseAction.message,
+                          true,
+                        )
+                      }
+                      onMouseLeave={() =>
+                        handleCollapseDepthGuideHoverChange(
+                          collapseAction.message,
+                          false,
+                        )
+                      }
+                      style={{ left: `${offset}px` }}
+                      type="button"
+                    />
+                  </React.Fragment>
                 );
               }
 
