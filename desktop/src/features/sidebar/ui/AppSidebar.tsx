@@ -3,8 +3,8 @@ import {
   Activity,
   Bot,
   FolderGit2,
-  Home,
-  Plus,
+  Inbox,
+  MessageCirclePlus,
   Zap,
 } from "lucide-react";
 import * as React from "react";
@@ -540,11 +540,11 @@ export function AppSidebar({
                 <SidebarMenuButton
                   isActive={selectedView === "home"}
                   onClick={onSelectHome}
-                  tooltip="Home"
+                  tooltip="Inbox"
                   type="button"
                 >
-                  <Home className="h-4 w-4" />
-                  <span>Home</span>
+                  <Inbox className="h-4 w-4" />
+                  <span>Inbox</span>
                 </SidebarMenuButton>
                 {homeBadgeCount > 0 ? (
                   <SidebarMenuBadge
@@ -780,7 +780,7 @@ export function AppSidebar({
                       title="Compose new message"
                       type="button"
                     >
-                      <Plus className="h-4 w-4" />
+                      <MessageCirclePlus className="h-4 w-4" />
                     </button>
                   </div>
                 }

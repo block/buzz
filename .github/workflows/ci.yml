@@ -556,7 +556,7 @@ jobs:
   mobile:
     name: Mobile
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
     permissions:
@@ -564,7 +564,29 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - name: Compute Hermit cache key
+        id: hermit-bin-hash
+        run: |
+          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+      - name: Restore Hermit package cache
+        id: hermit-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+          restore-keys: ${{ runner.os }}-hermit-cache-
+      - name: Prime Flutter SDK
+        run: flutter --version
+      - name: Save Hermit package cache
+        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        continue-on-error: true
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
       - name: Restore pub cache
+        id: pub-cache
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ~/.pub-cache
@@ -572,18 +594,19 @@ jobs:
           restore-keys: pub-${{ runner.os }}-
       - name: Install dependencies
         run: cd mobile && flutter pub get
+      - name: Save pub cache
+        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        continue-on-error: true
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
       - name: Format check
         run: cd mobile && dart format --output=none --set-exit-if-changed .
       - name: Analyze
         run: cd mobile && flutter analyze
       - name: Test
         run: cd mobile && flutter test
-      - name: Save pub cache
-        if: github.event_name == 'push'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
 
   security:
     name: Security
@@ -704,22 +727,88 @@ jobs:
         # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
         # only gate if this crate is tested ON Windows.
         run: cargo test -p buzz-dev-mcp --target $env:TARGET
-      # The bundled-bash staging (PortableGit download, SFX extract, mingw64 drop)
-      # runs only in release.yml on tag — so without this step the agent's only
-      # Windows transport would ship UNEXERCISED until a tagged release hits users.
-      # Stage the tree and spawn the staged bash on a real coreutils pipeline: this
-      # gates the SFX `-o` POSIX-path extraction, that bash.exe still spawns after
-      # mingw64/ is dropped, and that the lazily-loaded MSYS DLL closure (msys-2.0.dll,
-      # coreutils) survives — the exact behaviors unconfirmable off a non-Windows host.
-      - name: Smoke-test bundled bash staging
+      # The bundled-bash staging (PortableGit download + SFX extract of the WHOLE
+      # tree, including mingw64/) runs only in release.yml on tag — so without this
+      # step the agent's only Windows transport would ship UNEXERCISED until a
+      # tagged release hits users. Stage the tree and spawn the LAUNCHER bash
+      # (bin/bash.exe, the entry the resolver now uses) to prove all of: the SFX
+      # `-o` POSIX-path extraction works; the launcher spawns and sets up
+      # MSYSTEM/PATH; the lazily-loaded MSYS DLL closure survives; and — the whole
+      # point of bundling the full toolchain — git/jq/curl resolve from the bundled
+      # mingw64/bin and git is functional (a real commit round-trips). The launcher
+      # prepending mingw64/bin to PATH under `-c` is the load-bearing behavior that
+      # only a real Windows host can confirm; this gate is where it gets proven.
+      # (End-to-end nostr-SIGNED commits compose build_git_env's GIT_CONFIG_* with
+      # the git-sign-nostr helper — covered by buzz-dev-mcp unit tests + a bare-host
+      # check, not here, since this job stages only empty sidecar placeholders.)
+      - name: Smoke-test bundled bash + git toolchain staging
         shell: bash
         run: |
           set -euo pipefail
           stage_dir="$RUNNER_TEMP/git-bash"
           scripts/stage-windows-bash.sh "$stage_dir"
-          out=$("$stage_dir/usr/bin/bash.exe" -c 'echo hello | tr a-z A-Z')
+          launcher="$stage_dir/bin/bash.exe"
+          [[ -f "$launcher" ]] || { echo "launcher bash missing: $launcher" >&2; exit 1; }
+
+          # Faithfulness to the agent: shell.rs spawns the launcher with PATH set
+          # wholesale to the shim PATH (shim tempdir + the MCP process's inherited
+          # PATH). We strip PATH down to just the Windows system dir before
+          # spawning — stricter than a bare host (ambient PATH stripped to force
+          # resolution through the launcher). This stops the runner's ambient
+          # git/jq from masking the launcher's own mingw64/bin prepend, so anything
+          # that resolves had to come from the launcher itself. The fidelity gap is
+          # benign: the real shim tempdir only ever holds rg/tree/buzz and the two
+          # nostr helpers, never git/jq/curl, so a richer real PATH cannot shadow
+          # mingw64/bin for these three tools.
+          win_root="${SYSTEMROOT:-${SystemRoot:-C:\\Windows}}"
+          bare_path="$win_root\\System32;$win_root"
+
+          # Coreutils pipeline through the launcher (the resolver's entry point).
+          out=$(PATH="$bare_path" "$launcher" -c 'echo hello | tr a-z A-Z')
           [[ "$out" == "HELLO" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
-          echo "staged bash spawned and ran a coreutils pipeline"
+
+          # The full-toolchain payoff: git/jq/curl must resolve from the bundle's
+          # mingw64/bin or usr/bin. Use NON-login `-c` to match the agent's actual
+          # invocation (shell.rs spawns `bash -c`): if the launcher only fixes PATH
+          # under a login shell, `-lc` would pass here while the real agent stays
+          # broken — the exact green-but-broken trap this gate guards.
+          #
+          # Anchor to the ACTUAL staged tree, not a mount-shape: command -v reports
+          # the MSYS mount path (/mingw64/bin/git), so we cygpath -m it back to the
+          # real Windows location and assert it sits under $stage_dir. A bare
+          # `/mingw64/*` shape check would pass for any /mingw64-rooted mount; the
+          # cygpath round-trip proves the tool is literally inside the bundle we
+          # just staged. cygpath ships in the bundle's usr/bin (MSYS2 core, same
+          # tier as the `tr` proven above), so it resolves under the launcher.
+          #
+          # curl is the one tool of the three with a System32 twin
+          # (C:\Windows\System32\curl.exe, on $bare_path) — if a future PortableGit
+          # ever drops curl from mingw64/bin, the launcher would resolve the
+          # System32 twin and this REDs on a non-bug; git/jq have no such twin.
+          stage_m=$("$launcher" -c "cygpath -m '$stage_dir'")
+          for tool in git jq curl; do
+            located=$(PATH="$bare_path" "$launcher" -c "command -v $tool >/dev/null 2>&1 && cygpath -m \"\$(command -v $tool)\"" || true)
+            [[ -n "$located" ]] || { echo "$tool did not resolve in bundled bash" >&2; exit 1; }
+            case "$located" in
+              "$stage_m"/*) ;;
+              *) echo "$tool resolved outside the staged bundle: $located (stage: $stage_m)" >&2; exit 1 ;;
+            esac
+            echo "$tool -> $located"
+          done
+
+          # git is not just present but functional: a real commit round-trips,
+          # again through non-login `-c` with the bare PATH. Single-quoted on
+          # purpose — this script body runs in the launcher's shell, not ours.
+          # shellcheck disable=SC2016
+          PATH="$bare_path" "$launcher" -c '
+            set -euo pipefail
+            repo=$(mktemp -d)
+            cd "$repo"
+            git init -q
+            git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
+            git log -1 --format=%s | grep -qx smoke
+          ' || { echo "bundled git failed a commit round-trip" >&2; exit 1; }
+          echo "staged launcher bash spawned; git/jq/curl resolve from the bundle; git commit works"
       - name: Check (Tauri crate)
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
         env:

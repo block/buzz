@@ -60,15 +60,29 @@ async function waitForBadgeState(
     );
 }
 
+async function getSettledBadgeState(page: import("@playwright/test").Page) {
+  // The mock bridge seeds a couple of unread items during app startup. Let
+  // those settle before asserting deltas from newly emitted messages.
+  await page.waitForTimeout(2000);
+  return getBadgeState(page);
+}
+
+function withAdditionalBadgeCount(baseline: { count: number }, count: number) {
+  return { state: "count", count: baseline.count + count };
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
-test("dot badge for regular message in inactive channel", async ({ page }) => {
+test("numeric badge increments for regular message in inactive channel", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
+  const baselineBadge = await getSettledBadgeState(page);
 
   await page.evaluate(
     ({ pubkey }) => {
@@ -83,14 +97,17 @@ test("dot badge for regular message in inactive channel", async ({ page }) => {
   );
 
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
-  await waitForBadgeState(page, { state: "dot" });
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
-test("numeric badge for @mention in inactive channel", async ({ page }) => {
+test("numeric badge increments for @mention in inactive channel", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
+  const baselineBadge = await getSettledBadgeState(page);
 
   await page.evaluate(
     ({ pubkey, mentionPubkey }) => {
@@ -109,14 +126,15 @@ test("numeric badge for @mention in inactive channel", async ({ page }) => {
   );
 
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
-  await waitForBadgeState(page, { state: "count", count: 1 });
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
-test("numeric badge for DM message", async ({ page }) => {
+test("numeric badge increments for DM message", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "alice-tyler");
+  const baselineBadge = await getSettledBadgeState(page);
 
   await page.evaluate((pubkey) => {
     window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -127,16 +145,17 @@ test("numeric badge for DM message", async ({ page }) => {
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("channel-unread-alice-tyler")).toBeVisible();
-  await waitForBadgeState(page, { state: "count", count: 1 });
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
-test("numeric badge for broadcast reply in inactive channel", async ({
+test("numeric badge increments for broadcast reply in inactive channel", async ({
   page,
 }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
+  const baselineBadge = await getSettledBadgeState(page);
 
   await page.evaluate(
     ({ pubkey }) => {
@@ -155,7 +174,7 @@ test("numeric badge for broadcast reply in inactive channel", async ({
   );
 
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
-  await waitForBadgeState(page, { state: "count", count: 1 });
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
 test("mark-as-read via context menu clears channel unread indicator", async ({
@@ -189,24 +208,27 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
   await page.getByText("Mark as read").click();
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await waitForBadgeState(page, { state: baselineBadge.state });
+  await waitForBadgeState(page, baselineBadge);
 });
 
-test("mark-as-unread via context menu shows dot badge", async ({ page }) => {
+test("mark-as-unread via context menu increments numeric badge", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  const baselineBadge = await getSettledBadgeState(page);
 
   await page.getByTestId("channel-random").click({ button: "right" });
   await page.getByText("Mark unread").click();
 
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
-  await waitForBadgeState(page, { state: "dot" });
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
-test("remote read-state rollback is ignored while local mark-unread still shows dot", async ({
+test("remote read-state rollback is ignored while local mark-unread still increments badge", async ({
   page,
 }) => {
   await page.goto("/");
@@ -215,6 +237,7 @@ test("remote read-state rollback is ignored while local mark-unread still shows 
 
   // Baseline: random has no unread dot
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  const baselineBadge = await getSettledBadgeState(page);
 
   // Wait for ReadStateManager's live subscription (kind:30078) to be
   // established before injecting events.
@@ -307,7 +330,7 @@ test("remote read-state rollback is ignored while local mark-unread still shows 
   await page.getByTestId("channel-random").click({ button: "right" });
   await page.getByText("Mark unread").click();
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
-  await waitForBadgeState(page, { state: "dot" });
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 
   // Step 3: remote advance clears the local forced-unread dot.
   await page.evaluate(

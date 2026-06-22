@@ -1,6 +1,10 @@
 import * as React from "react";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
+import type { FeedItemState } from "@/features/home/useFeedItemState";
+import type { FeedItem } from "@/shared/api/types";
+
+const EMPTY_SET = new Set<string>();
 
 type AppShellContextValue = {
   markAllChannelsRead: () => void;
@@ -18,7 +22,7 @@ type AppShellContextValue = {
   getChannelReadAt: (channelId: string) => number | null;
   // Thread read frontier as unix-seconds timestamp, or null when never read.
   // Uses `thread:<rootId>` context keys in the same ReadStateManager.
-  getThreadReadAt: (rootId: string) => number | null;
+  getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
   // Advance the thread read frontier to the given unix-seconds timestamp.
   markThreadRead: (rootId: string, timestamp: number) => void;
   // Bump-counter that invalidates whenever the read marker changes. Include
@@ -31,7 +35,10 @@ type AppShellContextValue = {
   unfollowThread: (rootId: string) => void;
   isFollowingThread: (rootId: string) => boolean;
   isNotifiedForThread: (rootId: string) => boolean;
+  isThreadMuted: (rootId: string) => boolean;
   threadActivityItems: ThreadActivityItem[];
+  threadActivityFeedItems: FeedItem[];
+  feedItemState: FeedItemState;
 };
 
 const AppShellContext = React.createContext<AppShellContextValue>({
@@ -49,7 +56,17 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   unfollowThread: () => {},
   isFollowingThread: () => false,
   isNotifiedForThread: () => false,
+  isThreadMuted: () => false,
   threadActivityItems: [],
+  threadActivityFeedItems: [],
+  feedItemState: {
+    doneSet: EMPTY_SET,
+    markDone: () => {},
+    markUnread: () => {},
+    undoDone: () => {},
+    undoUnread: () => {},
+    unreadSet: EMPTY_SET,
+  },
 });
 
 export function AppShellProvider({

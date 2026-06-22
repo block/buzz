@@ -95,6 +95,7 @@ export function ChannelScreen({
     unfollowThread,
     isFollowingThread,
     isNotifiedForThread,
+    isThreadMuted,
     readStateVersion,
   } = useAppShell();
   const {
@@ -144,8 +145,6 @@ export function ChannelScreen({
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
       : optimisticOpenThreadHeadId;
-  const isNotifiedForOpenThread =
-    openThreadHeadId != null ? isNotifiedForThread(openThreadHeadId) : false;
   const isNotifiedForEffectiveThread =
     effectiveOpenThreadHeadId != null
       ? isNotifiedForThread(effectiveOpenThreadHeadId)
@@ -189,9 +188,9 @@ export function ChannelScreen({
   // No `lastMessageAt` fallback: that timestamp is reply-inclusive (the backend
   // takes MAX(created_at) over kind-9 events without a parent filter), so using
   // it when the window has no top-level message would advance the channel
-  // marker past an unread reply and clear its thread/sidebar unread — the exact
-  // regression Fix A prevents. null suppresses the marker advance (markChannelRead
-  // early-returns on markAt === null) until a real top-level position is known.
+  // marker past an unread reply and clear its thread unread. null suppresses
+  // the marker advance (markChannelRead early-returns on markAt === null) until
+  // a real top-level position is known.
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : null;
@@ -200,10 +199,9 @@ export function ChannelScreen({
       return;
     }
     // Passive channel-open: advance the marker to the newest top-level message
-    // only (NIP-RS Option 1). `topLevelOnly` stops the read-state layer folding
-    // in observed thread replies, so opening a channel clears the timeline but
-    // leaves thread badges intact until each thread is opened — and leaves the
-    // channel's sidebar dot lit (the reply is still unread for the channel).
+    // only (NIP-RS Option 1). Opening a channel clears the main timeline while
+    // leaving thread badges and Home inbox thread activity intact until each
+    // thread itself is read.
     markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
   // Install the NIP-RS parent resolver: every `thread:<root>` context evaluated
@@ -399,12 +397,11 @@ export function ChannelScreen({
     openThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
-    isNotifiedForCurrentThread: isNotifiedForOpenThread,
     getChannelReadAt,
     getThreadReadAt,
     markChannelUnread,
     markThreadRead,
-    isNotifiedForThread,
+    isThreadMuted,
     readStateVersion,
   });
   const editTargetMessage = React.useMemo(

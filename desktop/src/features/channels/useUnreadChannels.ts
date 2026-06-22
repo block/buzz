@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   EMPTY_SET,
+  shouldRouteChannelUnreadEvent,
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
@@ -133,6 +134,31 @@ function writeActivityToStorage(
   } catch {
     // Ignore storage errors.
   }
+}
+
+export function addThreadActivityItems(
+  existing: ThreadActivityItem[],
+  items: ThreadActivityItem[],
+) {
+  if (items.length === 0) {
+    return { didAdd: false, items: existing };
+  }
+
+  const existingIds = new Set(existing.map((item) => item.id));
+  const newItems = items.filter((item) => !existingIds.has(item.id));
+  if (newItems.length === 0) {
+    return { didAdd: false, items: existing };
+  }
+
+  const merged = [...existing, ...newItems].sort(
+    (left, right) => left.createdAt - right.createdAt,
+  );
+  const capped =
+    merged.length > MAX_ACTIVITY_ITEMS
+      ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
+      : merged;
+
+  return { didAdd: true, items: capped };
 }
 
 function parseTimestamp(value: string | null | undefined) {
@@ -489,20 +515,19 @@ export function useUnreadChannels(
         channelName,
         tags: [...event.tags],
       };
-      const existing = threadActivityRef.current;
-      if (existing.some((e) => e.id === item.id)) return;
-      const next = [...existing, item];
-      const capped =
-        next.length > MAX_ACTIVITY_ITEMS
-          ? next.slice(next.length - MAX_ACTIVITY_ITEMS)
-          : next;
-      threadActivityRef.current = capped;
+      const added = addThreadActivityItems(threadActivityRef.current, [item]);
+      if (!added.didAdd) return;
+      const didRecordMentionedRoot = recordMentionedRoot(event);
+      threadActivityRef.current = added.items;
       if (normalizedPubkey !== null) {
-        writeActivityToStorage(normalizedPubkey, capped);
+        writeActivityToStorage(normalizedPubkey, added.items);
+      }
+      if (didRecordMentionedRoot) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
-    [channels, normalizedPubkey],
+    [channels, normalizedPubkey, recordMentionedRoot],
   );
 
   const muteThread = React.useCallback(
@@ -667,20 +692,24 @@ export function useUnreadChannels(
               continue;
             }
             const evtRef = getThreadReference(event.tags);
-            if (event.created_at > maxExternal) {
-              maxExternal = event.created_at;
+            const isThreadedReply =
+              evtRef.parentId !== null && !isBroadcastReply(event.tags);
+            if (shouldRouteChannelUnreadEvent(ch, isThreadedReply)) {
+              if (event.created_at > maxExternal) {
+                maxExternal = event.created_at;
+              }
+              const isHighPriority =
+                chType === "dm" ||
+                (normalizedPubkey !== null &&
+                  isHighPriorityEventForUser(event, normalizedPubkey));
+              unreadEvents.push({
+                id: event.id,
+                createdAt: event.created_at,
+                rootId: resolveObservedUnreadRootId(event.tags),
+                highPriority: isHighPriority,
+              });
             }
-            const isHighPriority =
-              chType === "dm" ||
-              (normalizedPubkey !== null &&
-                isHighPriorityEventForUser(event, normalizedPubkey));
-            unreadEvents.push({
-              id: event.id,
-              createdAt: event.created_at,
-              rootId: resolveObservedUnreadRootId(event.tags),
-              highPriority: isHighPriority,
-            });
-            if (evtRef.parentId !== null && !isBroadcastReply(event.tags)) {
+            if (isThreadedReply) {
               threadReplies.push({
                 id: event.id,
                 kind: event.kind,
@@ -737,19 +766,14 @@ export function useUnreadChannels(
         }
       }
       if (allThreadReplies.length > 0) {
-        const existingIds = new Set(threadActivityRef.current.map((e) => e.id));
-        const newItems = allThreadReplies.filter(
-          (item) => !existingIds.has(item.id),
+        const added = addThreadActivityItems(
+          threadActivityRef.current,
+          allThreadReplies,
         );
-        if (newItems.length > 0) {
-          const merged = [...threadActivityRef.current, ...newItems];
-          const capped =
-            merged.length > MAX_ACTIVITY_ITEMS
-              ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
-              : merged;
-          threadActivityRef.current = capped;
+        if (added.didAdd) {
+          threadActivityRef.current = added.items;
           if (normalizedPubkey) {
-            writeActivityToStorage(normalizedPubkey, capped);
+            writeActivityToStorage(normalizedPubkey, added.items);
           }
           didAdvance = true;
         }
@@ -895,6 +919,9 @@ export function useUnreadChannels(
     ? prevUnreadCountsRef.current
     : rawUnread.unreadChannelCounts;
   prevUnreadCountsRef.current = unreadChannelCounts;
+  const unreadChannelNotificationCount = [
+    ...unreadChannelCounts.values(),
+  ].reduce((total, count) => total + count, 0);
 
   const unreadChannelIdsRef = React.useRef(unreadChannelIds);
   unreadChannelIdsRef.current = unreadChannelIds;
@@ -939,6 +966,7 @@ export function useUnreadChannels(
     unreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
+    unreadChannelNotificationCount,
     markAllChannelsRead,
     markChannelRead,
     markChannelUnread,
@@ -947,6 +975,7 @@ export function useUnreadChannels(
     // ReadStateManager. readStateVersion is the invalidation signal callers
     // should include in memo deps.
     getEffectiveTimestamp,
+    getOwnTimestamp,
     readStateVersion,
     setContextParentResolver,
     participatedRootIds,

@@ -80,6 +80,13 @@ export function CreateChannelDialog({
 
     // Small delay to let dialog animation start before focusing
     const timerId = globalThis.setTimeout(() => {
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLElement &&
+        activeElement.closest("#create-channel-form")
+      ) {
+        return;
+      }
       nameInputRef.current?.focus();
     }, 50);
     return () => globalThis.clearTimeout(timerId);

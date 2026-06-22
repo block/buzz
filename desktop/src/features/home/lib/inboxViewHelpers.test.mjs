@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getContextMessageDepth,
   getReactionTargetId,
+  isInboxThreadContextEvent,
   matchesInboxFilter,
 } from "./inboxViewHelpers.ts";
 
@@ -27,6 +28,80 @@ test("matchesInboxFilter is false when the category is absent", () => {
     false,
   );
   assert.equal(matchesInboxFilter({ categories: [] }, "mentions"), false);
+});
+
+test("matchesInboxFilter matches thread rows by thread tags", () => {
+  const replyItem = {
+    id: "reply",
+    kind: 9,
+    pubkey: "author",
+    content: "reply",
+    createdAt: 2,
+    channelId: "channel",
+    channelName: "bugs",
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "root"],
+      ["e", "parent", "", "reply"],
+    ],
+    category: "activity",
+  };
+  const rootItem = {
+    id: "root",
+    kind: 9,
+    pubkey: "author",
+    content: "root",
+    createdAt: 1,
+    channelId: "channel",
+    channelName: "bugs",
+    tags: [["h", "channel"]],
+    category: "activity",
+  };
+
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["activity"],
+        item: replyItem,
+      },
+      "thread",
+    ),
+    true,
+  );
+
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["mention", "activity"],
+        item: { ...replyItem, category: "mention" },
+      },
+      "thread",
+    ),
+    true,
+  );
+
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["mention", "activity"],
+        groupItems: [rootItem, replyItem],
+        item: { ...rootItem, category: "mention" },
+      },
+      "thread",
+    ),
+    true,
+  );
+
+  assert.equal(
+    matchesInboxFilter(
+      {
+        categories: ["activity"],
+        item: rootItem,
+      },
+      "thread",
+    ),
+    false,
+  );
 });
 
 // --- getReactionTargetId ---
@@ -107,4 +182,77 @@ test("getContextMessageDepth does not loop forever on a cycle", () => {
   ]);
   // From a: hop to b (depth 1); b's parent is a, already seen -> stop.
   assert.equal(getContextMessageDepth(a, map), 1);
+});
+
+// --- isInboxThreadContextEvent ---
+
+function channelEvent(id, tags = []) {
+  return {
+    id,
+    pubkey: "x",
+    created_at: 0,
+    kind: 9,
+    tags: [["h", "channel-a"], ...tags],
+    content: "",
+    sig: "",
+  };
+}
+
+test("isInboxThreadContextEvent rejects stale events from a different thread", () => {
+  const selection = {
+    selectedChannelId: "channel-a",
+    selectedEventId: "selected-reply",
+    selectedParentId: "selected-parent",
+    selectedThreadRootId: "selected-root",
+  };
+
+  assert.equal(
+    isInboxThreadContextEvent(
+      channelEvent("old-root", [["e", "old-root", "", "root"]]),
+      selection,
+    ),
+    false,
+  );
+  assert.equal(
+    isInboxThreadContextEvent(
+      channelEvent("old-reply", [
+        ["e", "old-root", "", "root"],
+        ["e", "old-parent", "", "reply"],
+      ]),
+      selection,
+    ),
+    false,
+  );
+});
+
+test("isInboxThreadContextEvent keeps selected thread root, parent, selected event, and descendants", () => {
+  const selection = {
+    selectedChannelId: "channel-a",
+    selectedEventId: "selected-reply",
+    selectedParentId: "selected-parent",
+    selectedThreadRootId: "selected-root",
+  };
+
+  assert.equal(
+    isInboxThreadContextEvent(channelEvent("selected-root"), selection),
+    true,
+  );
+  assert.equal(
+    isInboxThreadContextEvent(channelEvent("selected-parent"), selection),
+    true,
+  );
+  assert.equal(
+    isInboxThreadContextEvent(channelEvent("selected-reply"), selection),
+    true,
+  );
+  assert.equal(
+    isInboxThreadContextEvent(
+      channelEvent("descendant", [
+        ["e", "selected-root", "", "root"],
+        ["e", "selected-reply", "", "reply"],
+      ]),
+      selection,
+    ),
+    true,
+  );
 });

@@ -94,7 +94,7 @@ export function InboxMessageRow({
         }
       >
         {canReply || canToggleReactions ? (
-          <div className="absolute right-2 top-1 z-10">
+          <div className="absolute right-2 top-1 z-10 sm:top-0 sm:-translate-y-1/2">
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}

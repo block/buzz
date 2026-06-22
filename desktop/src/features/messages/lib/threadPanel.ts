@@ -41,6 +41,12 @@ export type ThreadPanelIndex = {
 
 const MAX_SUMMARY_PARTICIPANTS = 3;
 
+type SummaryParticipantCandidate = {
+  index: number;
+  participant: TimelineThreadSummaryParticipant;
+  timestamp: number;
+};
+
 function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
   return {
     ...message,
@@ -217,6 +223,97 @@ function buildSummaryForDirectReplies(
   };
 }
 
+function participantFromMessage(
+  message: TimelineMessage,
+): TimelineThreadSummaryParticipant {
+  return {
+    id: message.pubkey ?? message.id,
+    author: message.author,
+    avatarUrl: message.avatarUrl ?? null,
+  };
+}
+
+export function buildThreadSummaryFromVisibleEntries(
+  threadHeadId: string,
+  entries: readonly MainTimelineEntry[],
+): TimelineThreadSummary | null {
+  let replyCount = 0;
+  let lastReplyAt: number | null = null;
+  const participantCandidates: SummaryParticipantCandidate[] = [];
+
+  const addParticipantCandidate = (
+    participant: TimelineThreadSummaryParticipant,
+    timestamp: number,
+  ) => {
+    participantCandidates.push({
+      index: participantCandidates.length,
+      participant,
+      timestamp,
+    });
+  };
+
+  for (const entry of entries) {
+    replyCount += 1;
+    lastReplyAt = Math.max(lastReplyAt ?? 0, entry.message.createdAt);
+    addParticipantCandidate(
+      participantFromMessage(entry.message),
+      entry.message.createdAt,
+    );
+
+    if (entry.summary) {
+      replyCount += entry.summary.replyCount;
+      if (entry.summary.lastReplyAt != null) {
+        lastReplyAt = Math.max(lastReplyAt ?? 0, entry.summary.lastReplyAt);
+      }
+
+      const summaryTimestamp =
+        entry.summary.lastReplyAt ?? entry.message.createdAt;
+      for (const participant of entry.summary.participants) {
+        addParticipantCandidate(participant, summaryTimestamp);
+      }
+    }
+  }
+
+  if (replyCount === 0) {
+    return null;
+  }
+
+  const recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[] = [];
+  for (const candidate of [...participantCandidates].sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+
+    return right.index - left.index;
+  })) {
+    if (
+      recentParticipantsNewestFirst.some(
+        (participant) => participant.id === candidate.participant.id,
+      )
+    ) {
+      continue;
+    }
+
+    recentParticipantsNewestFirst.push(candidate.participant);
+    if (recentParticipantsNewestFirst.length >= MAX_SUMMARY_PARTICIPANTS) {
+      break;
+    }
+  }
+
+  return {
+    threadHeadId,
+    replyCount,
+    lastReplyAt,
+    participants: recentParticipantsNewestFirst.reverse(),
+  };
+}
+
+export function hasNestedThreadBranches(entries: readonly MainTimelineEntry[]) {
+  return entries.some(
+    (entry) => entry.message.depth > 1 || entry.summary !== null,
+  );
+}
+
 function appendExpandedReplies(params: {
   entries: MainTimelineEntry[];
   parentId: string;
@@ -236,15 +333,15 @@ function appendExpandedReplies(params: {
   const directReplies = directChildrenByParentId.get(parentId) ?? [];
 
   for (const reply of directReplies) {
+    const isExpanded = expandedReplyIds.has(reply.id);
     entries.push({
       message: normalizeInlineReplyMessage(reply, depth),
-      summary: buildSummaryForDirectReplies(
-        reply.id,
-        descendantStatsByMessageId,
-      ),
+      summary: isExpanded
+        ? null
+        : buildSummaryForDirectReplies(reply.id, descendantStatsByMessageId),
     });
 
-    if (expandedReplyIds.has(reply.id)) {
+    if (isExpanded) {
       appendExpandedReplies({
         entries,
         parentId: reply.id,
@@ -274,7 +371,7 @@ function buildVisibleThreadReplies(params: {
   appendExpandedReplies({
     entries,
     parentId: openThreadHeadId,
-    depth: 0,
+    depth: 1,
     directChildrenByParentId,
     descendantStatsByMessageId,
     expandedReplyIds,

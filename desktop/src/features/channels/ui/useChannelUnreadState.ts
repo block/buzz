@@ -30,12 +30,11 @@ type UseChannelUnreadStateOptions = {
   openThreadHeadId: string | null;
   threadReplyTargetId: string | null;
   expandedThreadReplyIds: ReadonlySet<string>;
-  isNotifiedForCurrentThread: boolean;
   getChannelReadAt: (channelId: string) => number | null;
-  getThreadReadAt: (rootId: string) => number | null;
+  getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
   markChannelUnread: (channelId: string) => void;
   markThreadRead: (rootId: string, timestamp: number) => void;
-  isNotifiedForThread: (rootId: string) => boolean;
+  isThreadMuted: (rootId: string) => boolean;
   readStateVersion: number;
 };
 
@@ -58,12 +57,11 @@ export function useChannelUnreadState({
   openThreadHeadId,
   threadReplyTargetId,
   expandedThreadReplyIds,
-  isNotifiedForCurrentThread,
   getChannelReadAt,
   getThreadReadAt,
   markChannelUnread,
   markThreadRead,
-  isNotifiedForThread,
+  isThreadMuted,
   readStateVersion,
 }: UseChannelUnreadStateOptions) {
   // Capture the read frontier as it stood the instant this channel was opened,
@@ -206,7 +204,7 @@ export function useChannelUnreadState({
   ) {
     threadOpenFrontierRef.current.set(
       openThreadHeadId,
-      getThreadReadAt(openThreadHeadId),
+      getThreadReadAt(openThreadHeadId, activeChannelId),
     );
   }
   const threadOpenFrontierSeconds = openThreadHeadId
@@ -222,29 +220,22 @@ export function useChannelUnreadState({
   }, [openThreadHeadId]);
   // Mark thread read when the panel opens, advancing the frontier to the max
   // createdAt over the head and its ENTIRE subtree — every reply, including
-  // ones nested in collapsed branches. Opening a notified thread means engaging
-  // with it, so the badge must collapse the instant the panel opens (not wait
-  // for a channel change or for each branch to be expanded). The badge counts
-  // the whole subtree (computeThreadBadgeCounts), so marking only the visible
-  // direct replies would leave it lit whenever the unread lives in a nested
-  // reply — the reported bug. Consuming collapsed branches here is not lossy:
-  // a NEWER reply re-raises the badge, because the unread comparison is strictly
-  // `createdAt > frontier` (computeThreadUnreadMarker) and the badge snapshot
-  // advances toward the live marker (nextThreadBadgeFrontier).
-  // Only persist read state for threads the user has notification interest in
-  // (participated, authored, or followed) to avoid bloating the context blob.
+  // ones nested in collapsed branches. Opening a badge-eligible thread means
+  // engaging with it, so the badge must collapse the instant the panel opens
+  // (not wait for a channel change or for each branch to be expanded). The
+  // badge counts the whole subtree (computeThreadBadgeCounts), so marking only
+  // the visible direct replies would leave it lit whenever the unread lives in
+  // a nested reply — the reported bug. Consuming collapsed branches here is not
+  // lossy: a NEWER reply re-raises the badge, because the unread comparison is
+  // strictly `createdAt > frontier` (computeThreadUnreadMarker) and the badge
+  // snapshot advances toward the live marker (nextThreadBadgeFrontier).
   React.useEffect(() => {
     if (!openThreadHeadId) return;
-    if (!isNotifiedForCurrentThread) return;
+    if (isThreadMuted(openThreadHeadId)) return;
     const openReadCeiling = getSubtreeMaxCreatedAt(openThreadHeadId);
     if (openReadCeiling === null) return;
     markThreadRead(openThreadHeadId, openReadCeiling);
-  }, [
-    openThreadHeadId,
-    getSubtreeMaxCreatedAt,
-    markThreadRead,
-    isNotifiedForCurrentThread,
-  ]);
+  }, [openThreadHeadId, getSubtreeMaxCreatedAt, markThreadRead, isThreadMuted]);
   // Compute the in-thread "New" divider position from the open-time frontier.
   const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(() => {
     if (!openThreadHeadId || threadMessages.length === 0) {
@@ -317,8 +308,8 @@ export function useChannelUnreadState({
       channelFrontiers,
       timelineMessages,
       directRepliesByParentId,
-      isNotifiedForThread,
-      getThreadReadAt,
+      (rootId) => !isThreadMuted(rootId),
+      (rootId) => getThreadReadAt(rootId, activeChannelId),
     );
   }
   // Clear the thread badge frontiers on channel leave (same cleanup as
@@ -343,7 +334,7 @@ export function useChannelUnreadState({
         activeChannelId
           ? threadBadgeFrontiersRef.current.get(activeChannelId)
           : undefined,
-        isNotifiedForThread,
+        (rootId) => !isThreadMuted(rootId),
         currentPubkey,
       ),
     [
@@ -351,7 +342,7 @@ export function useChannelUnreadState({
       currentPubkey,
       timelineMessages,
       directRepliesByParentId,
-      isNotifiedForThread,
+      isThreadMuted,
       readStateVersion,
     ],
   );

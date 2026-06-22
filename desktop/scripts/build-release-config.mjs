@@ -52,16 +52,18 @@ const releaseConfig = {
   },
 };
 
-// Windows-only: bundle the PortableGit bash runtime as a resource so the MCP shell
-// tool always has a genuine, non-WSL bash to spawn on a bare host (the app must
-// be self-contained — we cannot assume Git for Windows is installed).
+// Windows-only: bundle the full PortableGit toolchain (bash runtime + git +
+// curl/coreutils in mingw64/, plus a vendored standalone jq.exe) as a resource so
+// the MCP shell tool always has a genuine, non-WSL bash AND a real dev toolchain
+// to spawn on a bare host (the app must be self-contained — we cannot assume Git
+// for Windows is installed).
 //
 // This is emitted ONLY on the Windows runner because the static tauri.conf.json
 // uses `targets: "all"` with a shared bundle block — a bare `resources` entry
-// there would ship the ~184MB tree into the macOS .dmg and Linux packages too.
-// The release build runs THIS generator on each platform's own runner and merges
-// the output via --config, so guarding on process.platform keeps the tree off
-// mac/Linux.
+// there would ship the (now ~350MB+) tree into the macOS .dmg and Linux packages
+// too. The release build runs THIS generator on each platform's own runner and
+// merges the output via --config, so guarding on process.platform keeps the tree
+// off mac/Linux.
 //
 // PATH CONTRACT (keep byte-identical across three files):
 //   - source `binaries/git-bash` (relative to src-tauri/) is staged by

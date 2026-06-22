@@ -19,6 +19,10 @@ export const THEME_STORAGE_KEY = "buzz-theme";
 const CACHE_KEY = "buzz-theme-cache";
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
+const VIDEO_REVIEW_NEUTRAL_ACCENT = "0 0% 98%";
+const VIDEO_REVIEW_CHIP_SURFACE = "#161616";
+const VIDEO_REVIEW_TEXT_CONTRAST = 4.5;
+const VIDEO_REVIEW_CHIP_BACKGROUND_ALPHAS = [0.15, 0.3] as const;
 
 export const ACCENT_COLORS = [
   { name: "Neutral", value: NEUTRAL_ACCENT },
@@ -77,12 +81,98 @@ function getContrastColor(hex: string): string {
   return lum > 0.5 ? "#000000" : "#ffffff";
 }
 
+type Rgb = {
+  r: number;
+  g: number;
+  b: number;
+};
+
+function hexToRgb(hex: string): Rgb {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})/i.exec(hex);
+  if (!m) return { r: 255, g: 255, b: 255 };
+  return {
+    r: parseInt(m[1], 16),
+    g: parseInt(m[2], 16),
+    b: parseInt(m[3], 16),
+  };
+}
+
+function mixRgb(from: Rgb, to: Rgb, factor: number): Rgb {
+  return {
+    r: from.r + (to.r - from.r) * factor,
+    g: from.g + (to.g - from.g) * factor,
+    b: from.b + (to.b - from.b) * factor,
+  };
+}
+
+function compositeRgb(foreground: Rgb, background: Rgb, alpha: number): Rgb {
+  return mixRgb(background, foreground, alpha);
+}
+
+function relativeLuminance({ r, g, b }: Rgb): number {
+  const [rs, gs, bs] = [r, g, b].map((channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+}
+
+function contrastRatio(a: Rgb, b: Rgb): number {
+  const aLum = relativeLuminance(a);
+  const bLum = relativeLuminance(b);
+  return (Math.max(aLum, bLum) + 0.05) / (Math.min(aLum, bLum) + 0.05);
+}
+
+function getReviewAccentForeground(hex: string): string {
+  const accent = hexToRgb(hex);
+  const surface = hexToRgb(VIDEO_REVIEW_CHIP_SURFACE);
+  const white = { r: 255, g: 255, b: 255 };
+  const backgrounds = VIDEO_REVIEW_CHIP_BACKGROUND_ALPHAS.map((alpha) =>
+    compositeRgb(accent, surface, alpha),
+  );
+  let low = 0;
+  let high = 1;
+
+  for (let i = 0; i < 20; i++) {
+    const mid = (low + high) / 2;
+    const candidate = mixRgb(accent, white, mid);
+    const minContrast = Math.min(
+      ...backgrounds.map((background) => contrastRatio(candidate, background)),
+    );
+
+    if (minContrast >= VIDEO_REVIEW_TEXT_CONTRAST) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+
+  return hexToHsl(rgbToHex(mixRgb(accent, white, high)));
+}
+
+function rgbToHex({ r, g, b }: Rgb): string {
+  const clamp = (value: number) =>
+    Math.max(0, Math.min(255, Math.round(value)));
+  return `#${[r, g, b]
+    .map((channel) => clamp(channel).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 function applyAccentColor(value: string) {
   const root = document.documentElement;
   if (value === NEUTRAL_ACCENT) {
     const styles = window.getComputedStyle(root);
     const foreground = styles.getPropertyValue("--foreground").trim();
     const background = styles.getPropertyValue("--background").trim();
+    root.style.setProperty("--buzz-selected-accent", foreground);
+    root.style.setProperty(
+      "--buzz-video-review-accent",
+      VIDEO_REVIEW_NEUTRAL_ACCENT,
+    );
+    root.style.setProperty(
+      "--buzz-video-review-accent-foreground",
+      VIDEO_REVIEW_NEUTRAL_ACCENT,
+    );
     root.style.setProperty("--primary", foreground);
     root.style.setProperty("--primary-foreground", background);
     root.style.setProperty("--sidebar-primary", foreground);
@@ -95,6 +185,12 @@ function applyAccentColor(value: string) {
   const hex = value;
   const accentHsl = hexToHsl(hex);
   const fgHsl = hexToHsl(getContrastColor(hex));
+  root.style.setProperty("--buzz-selected-accent", accentHsl);
+  root.style.setProperty("--buzz-video-review-accent", accentHsl);
+  root.style.setProperty(
+    "--buzz-video-review-accent-foreground",
+    getReviewAccentForeground(hex),
+  );
   root.style.setProperty("--primary", accentHsl);
   root.style.setProperty("--primary-foreground", fgHsl);
   root.style.setProperty("--sidebar-primary", accentHsl);

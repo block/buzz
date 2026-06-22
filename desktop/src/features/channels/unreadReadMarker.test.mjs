@@ -9,6 +9,7 @@ import {
   recordObservedUnreadEvent,
 } from "./unreadChannelCounts.ts";
 import {
+  addThreadActivityItems,
   resolveChannelReadMarker,
   resolveObservedUnreadRootId,
 } from "./useUnreadChannels.ts";
@@ -269,4 +270,27 @@ test("highPriorityObservedEvents_countOnlyUnreadHighPriorityItems", () => {
 
   assert.equal(countUnreadObservedEvents(events, getReadAt), 2);
   assert.equal(countUnreadHighPriorityObservedEvents(events, getReadAt), 1);
+});
+
+test("addThreadActivityItems keeps newest items when input is newest-first", () => {
+  const newestFirst = Array.from({ length: 101 }, (_, index) => {
+    const createdAt = 100 - index;
+    return {
+      id: `reply-${createdAt}`,
+      kind: 9,
+      pubkey: "author",
+      content: "reply",
+      createdAt,
+      channelId: "channel",
+      channelName: "general",
+      tags: [["h", "channel"]],
+    };
+  });
+
+  const result = addThreadActivityItems([], newestFirst);
+
+  assert.equal(result.didAdd, true);
+  assert.equal(result.items.length, 100);
+  assert.equal(result.items[0].id, "reply-1");
+  assert.equal(result.items.at(-1).id, "reply-100");
 });

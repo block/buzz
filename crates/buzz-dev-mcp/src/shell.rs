@@ -314,20 +314,21 @@ pub async fn run(
 ///   2. `desktop/scripts/build-release-config.mjs` — emits the Windows-only
 ///      `bundle.resources` Map `{ "binaries/git-bash": "git-bash" }`, whose TARGET
 ///      (`git-bash`) is what Tauri's NSIS/MSI installer stages next to the exe.
-///   3. this resolver — joins `current_exe().parent()` + `git-bash\usr\bin\bash.exe`.
+///   3. this resolver — joins `current_exe().parent()` + `git-bash\bin\bash.exe`.
 ///
 /// Drift between (2)'s target and this string ships a working bundle but a broken
 /// runtime path. Keep all three in lockstep.
 ///
-/// The bundled constant points at `usr\bin\bash.exe` (the real MSYS2 bash, which
-/// boots from its co-located `msys-2.0.dll` and needs only `usr/`, no `mingw64/`)
-/// — NOT the `bin\bash.exe` launcher shim, which refuses to start without a sibling
-/// `mingw64\bin` marker the bundle deliberately drops. The installed-Git branch
-/// below stays on `bin\bash.exe` on purpose: a real Git-for-Windows install has
-/// `mingw64/`, so its launcher is the correct entry and sets up MSYSTEM/PATH.
-/// Different tree shape -> different correct entry point.
+/// The bundled constant points at `bin\bash.exe` — the git-for-windows launcher,
+/// NOT `usr\bin\bash.exe`. The bundle now ships the WHOLE PortableGit tree
+/// (including `mingw64/`), so it has the sibling `mingw64\bin` the launcher needs:
+/// the launcher is the correct entry because it sets `MSYSTEM=MINGW64` and prepends
+/// `mingw64\bin` to the in-shell PATH, which is what makes `git`/`jq`/`curl` resolve
+/// inside the agent's shell with no Rust-side PATH injection. The installed-Git
+/// branch below uses the SAME `bin\bash.exe` entry for the same reason — same tree
+/// shape, same correct entry point.
 #[cfg(windows)]
-const BUNDLED_BASH_REL: &str = r"git-bash\usr\bin\bash.exe";
+const BUNDLED_BASH_REL: &str = r"git-bash\bin\bash.exe";
 
 /// Resolve a genuine, non-WSL bash to an absolute path so we spawn it directly
 /// instead of letting `Command::new("bash")` re-enter PATH search — on Windows

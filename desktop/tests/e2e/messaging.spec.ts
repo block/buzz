@@ -496,7 +496,7 @@ test("opens a single-level thread panel with inline expansion", async ({
     throw new Error("Expected root message row to have a data-message-id.");
   }
   const rootSummaryRow = timeline.locator(
-    `[data-thread-head-id="${rootMessageId}"]`,
+    `[data-testid="message-thread-summary"][data-thread-head-id="${rootMessageId}"]`,
   );
 
   await rootMessage.hover();
@@ -668,10 +668,13 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(nestedReplyFromBobRow).toBeVisible();
 
   const firstReplySummaryRow = threadReplies.locator(
-    `[data-thread-head-id="${firstReplyId}"]`,
+    `[data-testid="message-thread-summary"][data-thread-head-id="${firstReplyId}"]`,
   );
-  await expect(firstReplySummaryRow).toHaveCount(1);
-  await expect(firstReplySummaryRow).toContainText("2 replies");
+  await expect(firstReplySummaryRow).toHaveCount(0);
+  const firstReplyBranchRail = threadReplies.locator(
+    `[data-testid="thread-collapse-rail"][data-thread-head-id="${firstReplyId}"]`,
+  );
+  await expect(firstReplyBranchRail).toHaveCount(1);
 
   await expect(rootSummaryRow).toContainText("18 replies");
   await expect(
@@ -691,7 +694,9 @@ test("opens a single-level thread panel with inline expansion", async ({
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
-  await firstReplySummaryRow.click();
+  await firstReplyBranchRail.click();
+  await expect(firstReplySummaryRow).toHaveCount(1);
+  await expect(firstReplySummaryRow).toContainText("2 replies");
   await expect(
     threadReplies.getByTestId("message-row").filter({ hasText: nestedReply }),
   ).toHaveCount(0);
@@ -968,7 +973,8 @@ test("ArrowUp in an empty composer edits your last message right after sending",
   // Edit mode is entered for the just-sent message.
   const editBanner = page.getByTestId("edit-target");
   await expect(editBanner).toBeVisible();
-  await expect(editBanner).toContainText(message);
+  await expect(editBanner).toContainText("Editing message");
+  await expect(editBanner).not.toContainText(message);
   await expect(input).toHaveText(message);
 });
 
@@ -1034,7 +1040,8 @@ test("ArrowUp edits your last thread reply right after sending it", async ({
 
   const editBanner = threadPanel.getByTestId("edit-target");
   await expect(editBanner).toBeVisible();
-  await expect(editBanner).toContainText(reply);
+  await expect(editBanner).toContainText("Editing message");
+  await expect(editBanner).not.toContainText(reply);
   await expect(threadInput).toHaveText(reply);
 });
 

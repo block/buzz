@@ -1,13 +1,32 @@
 import type { InboxFilter } from "@/features/home/lib/inbox";
-import { getThreadReference } from "@/features/messages/lib/threading";
-import type { RelayEvent } from "@/shared/api/types";
+import {
+  getChannelIdFromTags,
+  getThreadReference,
+  isBroadcastReply,
+} from "@/features/messages/lib/threading";
+import type { FeedItem, RelayEvent } from "@/shared/api/types";
+
+function hasThreadReplyTags(tags: string[][]) {
+  const thread = getThreadReference(tags);
+  return thread.parentId !== null && !isBroadcastReply(tags);
+}
 
 export function matchesInboxFilter(
-  item: { categories: InboxFilter[] },
+  item: {
+    categories: readonly string[];
+    groupItems?: readonly FeedItem[];
+    item?: FeedItem;
+  },
   filter: InboxFilter,
 ) {
   if (filter === "all") {
     return true;
+  }
+
+  if (filter === "thread") {
+    return [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
+      groupItem ? hasThreadReplyTags(groupItem.tags) : false,
+    );
   }
 
   return item.categories.includes(filter);
@@ -28,6 +47,46 @@ export function getContextMessageDepth(
   }
 
   return depth;
+}
+
+export function isInboxThreadContextEvent(
+  event: RelayEvent,
+  selection: {
+    selectedChannelId: string | null;
+    selectedEventId: string;
+    selectedParentId: string | null;
+    selectedThreadRootId: string | null;
+  },
+): boolean {
+  if (
+    selection.selectedChannelId &&
+    getChannelIdFromTags(event.tags) !== selection.selectedChannelId
+  ) {
+    return false;
+  }
+
+  if (event.id === selection.selectedEventId) {
+    return true;
+  }
+
+  if (
+    selection.selectedThreadRootId &&
+    event.id === selection.selectedThreadRootId
+  ) {
+    return true;
+  }
+
+  if (selection.selectedParentId && event.id === selection.selectedParentId) {
+    return true;
+  }
+
+  const thread = getThreadReference(event.tags);
+  return (
+    (selection.selectedThreadRootId !== null &&
+      (thread.rootId === selection.selectedThreadRootId ||
+        thread.parentId === selection.selectedThreadRootId)) ||
+    thread.parentId === selection.selectedEventId
+  );
 }
 
 export function getReactionTargetId(tags: string[][]) {

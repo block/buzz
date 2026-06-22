@@ -18,6 +18,16 @@ pub(crate) const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 /// the result. Returns an error string suitable for `ErrorData::invalid_params`
 /// if the path cannot be resolved.
 pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    // The agent runs inside MSYS bash and naturally hands us MSYS-form absolute
+    // paths (`/c/Users/...`). On Windows those are NOT `is_absolute()` (a leading
+    // `/` has no drive `Prefix`), so without translation they'd take the relative
+    // branch and `root.join` would double the drive (`C:/c/Users/...`) and fail.
+    // The `shell` tool avoids this because bash translates internally; the MCP
+    // file tools call `canonicalize` directly, so we mirror that translation here
+    // to keep the same posture. No-op on the already-resolved path on Unix.
+    #[cfg(windows)]
+    let path = &msys_to_windows(path);
+
     let raw = Path::new(path);
     let candidate: PathBuf = if raw.is_absolute() {
         raw.to_path_buf()
@@ -29,6 +39,61 @@ pub(crate) fn resolve_path(root: &Path, path: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("path not accessible: {} ({e})", candidate.display()))?;
 
     Ok(resolved)
+}
+
+/// Translate the MSYS/Cygwin absolute path forms bash would accept into a
+/// native Windows path, matching `cygpath -w` semantics so the file tools
+/// resolve the same inputs the `shell` tool does. Anything that is not a
+/// recognized MSYS-absolute form is returned unchanged.
+///
+/// Two forms are translated natively because they are deterministic with no
+/// external state:
+///   - cygdrive: `/c/Users/x` -> `C:\Users\x` (the form that bit the agent).
+///   - UNC:      `//server/share/x` -> `\\server\share\x`.
+///
+/// A third form — root-anchored `/tmp`, `/usr/...`, `/bin` — maps under the
+/// MSYS install root (the bundled `git-bash` dir), which this process does not
+/// reliably know. We deliberately do NOT guess it: such a path falls through
+/// untranslated and fails with the clear `path not accessible` error rather than
+/// being silently mis-mapped to the wrong location. Resolving it correctly would
+/// require shelling out to the bundled `cygpath`; that is out of scope here and
+/// these paths are not a normal target for agent file I/O.
+#[cfg(windows)]
+fn msys_to_windows(path: &str) -> String {
+    // UNC: exactly two leading slashes then a non-empty host segment.
+    if let Some(rest) = path.strip_prefix("//") {
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return format!(r"\\{}", rest.replace('/', r"\"));
+        }
+        return path.to_string();
+    }
+
+    // cygdrive: `/<letter>` optionally followed by `/...`. The drive segment is
+    // a single ASCII letter; `/cc/...` (two letters) is a root-anchored path,
+    // not a drive, and must NOT match.
+    if let Some(rest) = path.strip_prefix('/') {
+        let mut chars = rest.chars();
+        if let Some(drive) = chars.next() {
+            if drive.is_ascii_alphabetic() {
+                let after = chars.as_str();
+                if after.is_empty() {
+                    // `/c` -> `C:\`
+                    return format!(r"{}:\", drive.to_ascii_uppercase());
+                }
+                if let Some(tail) = after.strip_prefix('/') {
+                    // `/c/Users/x` -> `C:\Users\x`
+                    return format!(
+                        r"{}:\{}",
+                        drive.to_ascii_uppercase(),
+                        tail.replace('/', r"\")
+                    );
+                }
+            }
+        }
+    }
+
+    // Root-anchored (`/tmp`, `/usr/...`) or anything else: leave untouched.
+    path.to_string()
 }
 
 /// Resolve a user-supplied path within the workspace, read the file, and
@@ -141,5 +206,74 @@ mod tests {
         // Resolves a normal path inside.
         let p = resolve_path(dir.path(), "file.txt").expect("resolve");
         assert!(p.ends_with("file.txt"));
+    }
+
+    // Windows MSYS-absolute path translation. These test `msys_to_windows`
+    // directly (the pure rewrite) rather than `resolve_path`, because the latter
+    // canonicalizes against the real filesystem and we want deterministic
+    // assertions that don't depend on `C:\Users\x` existing on the runner.
+    #[cfg(windows)]
+    mod windows_msys {
+        use super::super::*;
+        use std::path::Path;
+
+        #[test]
+        fn cygdrive_path_becomes_drive_letter() {
+            assert_eq!(msys_to_windows("/c/Users/x"), r"C:\Users\x");
+            assert_eq!(msys_to_windows("/d/a/_temp/repo"), r"D:\a\_temp\repo");
+        }
+
+        #[test]
+        fn cygdrive_root_becomes_drive_root() {
+            assert_eq!(msys_to_windows("/c"), r"C:\");
+        }
+
+        #[test]
+        fn unc_path_becomes_backslash_unc() {
+            assert_eq!(msys_to_windows("//server/share/x"), r"\\server\share\x");
+        }
+
+        #[test]
+        fn windows_absolute_passes_through_unchanged() {
+            // Already a native Windows path — must not be mangled.
+            assert_eq!(msys_to_windows(r"C:\Users\x"), r"C:\Users\x");
+        }
+
+        #[test]
+        fn relative_path_passes_through_unchanged() {
+            // No leading slash — left for the caller's `root.join`.
+            assert_eq!(msys_to_windows("file.txt"), "file.txt");
+            assert_eq!(msys_to_windows("sub/file.txt"), "sub/file.txt");
+        }
+
+        #[test]
+        fn root_anchored_msys_path_is_left_untranslated() {
+            // Form 3: maps under the MSYS install root we don't know — must NOT
+            // be guessed. Returned unchanged so it fails cleanly downstream
+            // rather than being silently mis-mapped.
+            assert_eq!(msys_to_windows("/tmp/scratch"), "/tmp/scratch");
+            assert_eq!(msys_to_windows("/usr/bin/git"), "/usr/bin/git");
+            // Two-letter leading segment is root-anchored, not a drive.
+            assert_eq!(msys_to_windows("/cc/x"), "/cc/x");
+        }
+
+        #[test]
+        fn degenerate_slash_inputs_are_left_untranslated() {
+            assert_eq!(msys_to_windows("/"), "/");
+            assert_eq!(msys_to_windows("//"), "//");
+        }
+
+        #[test]
+        fn cygdrive_path_resolves_against_drive_not_doubled() {
+            // Integration: a cygdrive path resolves to a real Windows-absolute
+            // candidate (the system root always exists), proving the drive is
+            // not doubled into C:/c/... as the pre-fix bug did.
+            let resolved = resolve_path(Path::new(r"C:\does\not\matter"), "/c/Windows")
+                .expect("cygdrive path resolves");
+            assert!(resolved
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(r"c:\windows"));
+        }
     }
 }

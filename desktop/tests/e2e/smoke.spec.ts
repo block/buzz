@@ -74,7 +74,7 @@ async function selectHomeInboxFilter(
   await page
     .getByTestId("home-inbox")
     .getByRole("button", {
-      name: /^(All|Mentions|Needs Action|Activity|Agents)$/,
+      name: /^Filter inbox:/,
     })
     .click();
   await page.getByRole("menuitemradio", { name: label }).click();
@@ -145,7 +145,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(inlineLog).toContainText("system prompt override configured");
 });
 
-test("opens a mocked channel from the home feed", async ({ page }) => {
+test("opens a mocked channel from the inbox feed", async ({ page }) => {
   const inboxList = page.getByTestId("home-inbox-list");
 
   await page.goto("/");
@@ -153,19 +153,17 @@ test("opens a mocked channel from the home feed", async ({ page }) => {
   await expectHomeView(page);
   await expect(inboxList).toContainText("Please review the release checklist.");
 
-  await inboxList
-    .getByText("Please review the release checklist.")
-    .first()
-    .click();
-  await page.getByRole("button", { name: "Open channel" }).click();
+  const releaseRow = page.getByTestId("home-inbox-item-mock-feed-mention");
+  await releaseRow.hover();
+  await releaseRow.getByRole("button", { name: "Open in channel" }).click();
 
   await expect(page).toHaveURL(
-    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
+    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50\?messageId=mock-feed-mention$/,
   );
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("home feed shows channel and agent activity sections", async ({
+test("inbox feed shows channel and agent activity sections", async ({
   page,
 }) => {
   const inboxList = page.getByTestId("home-inbox-list");
@@ -187,7 +185,7 @@ test("home feed shows channel and agent activity sections", async ({
   );
 });
 
-test("opens a mocked forum activity item from the home feed", async ({
+test("opens a mocked forum activity item from the inbox feed", async ({
   page,
 }) => {
   await page.goto("/");
@@ -205,7 +203,7 @@ test("opens a mocked forum activity item from the home feed", async ({
   );
 });
 
-test("home feed renders resolved author labels", async ({ page }) => {
+test("inbox feed renders resolved author labels", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("home-inbox-list")).toContainText("alice");

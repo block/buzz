@@ -6,6 +6,14 @@ import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
+import {
+  getThreadReplyAvatarCenterPx,
+  getThreadReplyAvatarCenterYPx,
+  getThreadReplyDescendantRailStartYPx,
+  getThreadReplyConnectorLayout,
+  getThreadReplyIndentPx,
+  THREAD_REPLY_LINE_WIDTH_PX,
+} from "@/features/messages/lib/threadTreeLayout";
 import { KIND_STREAM_MESSAGE_DIFF } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -27,18 +35,33 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
 
-const MESSAGE_TEXT_OFFSET_PX = 54;
-const NESTED_REPLY_OFFSET_PX = 28;
+export type ThreadDepthGuideAction = {
+  active?: boolean;
+  depth: number;
+  label: string;
+  message: TimelineMessage;
+};
 
 export const MessageRow = React.memo(
   function MessageRow({
     channelId = null,
+    collapseDepthGuideActions,
+    connectDescendants = false,
+    depthGuideDepths,
     highlighted = false,
+    highlightDescendantRail = false,
+    highlightReplyConnector = false,
+    highlightThreadLineDepths,
     hoverBackground = true,
     actionBarPlacement = "floating",
+    collapseDescendantsLabel,
     isFollowingThread,
     layoutVariant = "default",
     message,
+    onCollapseDepthGuide,
+    onCollapseDepthGuideHoverChange,
+    onCollapseDescendants,
+    onCollapseDescendantsHoverChange,
     onDelete,
     onEdit,
     onFollowThread,
@@ -54,12 +77,29 @@ export const MessageRow = React.memo(
   }: {
     agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
+    collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
+    connectDescendants?: boolean;
+    depthGuideDepths?: ReadonlyArray<number>;
     highlighted?: boolean;
+    highlightDescendantRail?: boolean;
+    highlightReplyConnector?: boolean;
+    highlightThreadLineDepths?: ReadonlyArray<number>;
     hoverBackground?: boolean;
     actionBarPlacement?: "floating" | "inside";
+    collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
+    onCollapseDepthGuide?: (message: TimelineMessage) => void;
+    onCollapseDepthGuideHoverChange?: (
+      message: TimelineMessage,
+      hovered: boolean,
+    ) => void;
+    onCollapseDescendants?: (message: TimelineMessage) => void;
+    onCollapseDescendantsHoverChange?: (
+      message: TimelineMessage,
+      hovered: boolean,
+    ) => void;
     onDelete?: (message: TimelineMessage) => void;
     onEdit?: (message: TimelineMessage) => void;
     onFollowThread?: (message: TimelineMessage) => void;
@@ -142,24 +182,63 @@ export const MessageRow = React.memo(
       [channels],
     );
 
-    const visibleDepth = Math.min(message.depth, 6);
-    const indentPx =
-      visibleDepth > 0
-        ? MESSAGE_TEXT_OFFSET_PX + (visibleDepth - 1) * NESTED_REPLY_OFFSET_PX
-        : 0;
-    const depthGuideOffsets = React.useMemo(() => {
-      if (visibleDepth === 0) {
-        return [];
+    const indentPx = getThreadReplyIndentPx(message.depth);
+    const descendantGuideOffsetPx = connectDescendants
+      ? getThreadReplyAvatarCenterPx(message.depth)
+      : null;
+    const replyConnector = React.useMemo(() => {
+      return getThreadReplyConnectorLayout(message.depth);
+    }, [message.depth]);
+    const depthGuideItems = React.useMemo(() => {
+      const depths =
+        depthGuideDepths ??
+        Array.from({ length: message.depth }, (_, depth) => depth);
+
+      return depths.map((depth) => ({
+        depth,
+        offset: getThreadReplyAvatarCenterPx(depth),
+      }));
+    }, [depthGuideDepths, message.depth]);
+    const handleCollapseDescendants = React.useCallback(
+      (event: React.MouseEvent<HTMLButtonElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onCollapseDescendants?.(message);
+      },
+      [message, onCollapseDescendants],
+    );
+    const handleCollapseDescendantsHoverChange = React.useCallback(
+      (hovered: boolean) => {
+        onCollapseDescendantsHoverChange?.(message, hovered);
+      },
+      [message, onCollapseDescendantsHoverChange],
+    );
+    const handleCollapseDepthGuide = React.useCallback(
+      (
+        event: React.MouseEvent<HTMLButtonElement>,
+        targetMessage: TimelineMessage,
+      ) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onCollapseDepthGuide?.(targetMessage);
+      },
+      [onCollapseDepthGuide],
+    );
+    const handleCollapseDepthGuideHoverChange = React.useCallback(
+      (targetMessage: TimelineMessage, hovered: boolean) => {
+        onCollapseDepthGuideHoverChange?.(targetMessage, hovered);
+      },
+      [onCollapseDepthGuideHoverChange],
+    );
+    const collapseDepthGuideActionsByDepth = React.useMemo(() => {
+      if (!collapseDepthGuideActions?.length) {
+        return new Map<number, ThreadDepthGuideAction>();
       }
 
-      return Array.from({ length: visibleDepth }, (_, index) =>
-        index === 0
-          ? MESSAGE_TEXT_OFFSET_PX / 2
-          : MESSAGE_TEXT_OFFSET_PX +
-            NESTED_REPLY_OFFSET_PX / 2 +
-            (index - 1) * NESTED_REPLY_OFFSET_PX,
+      return new Map(
+        collapseDepthGuideActions.map((action) => [action.depth, action]),
       );
-    }, [visibleDepth]);
+    }, [collapseDepthGuideActions]);
     const getTag = (name: string) =>
       message.tags?.find((tag) => tag[0] === name)?.[1];
 
@@ -359,34 +438,163 @@ export const MessageRow = React.memo(
         className="relative"
         style={indentPx > 0 ? { paddingLeft: `${indentPx}px` } : undefined}
       >
-        {showDepthGuides && depthGuideOffsets.length > 0 ? (
+        {showDepthGuides && depthGuideItems.length > 0 ? (
           <div
-            aria-hidden
-            className="pointer-events-none absolute left-0"
+            aria-hidden={
+              collapseDepthGuideActionsByDepth.size > 0 ? undefined : true
+            }
+            className={cn(
+              "absolute left-0",
+              collapseDepthGuideActionsByDepth.size === 0 &&
+                "pointer-events-none",
+            )}
             style={{
               bottom: `${-guideBleedPx}px`,
               top: `${-guideBleedPx}px`,
             }}
           >
-            {depthGuideOffsets.map((offset, index) => (
-              <div
-                className="absolute bottom-0 top-0 border-l border-border/70"
-                key={`${message.id}-depth-guide-${offset}`}
-                style={{
-                  left: `${offset}px`,
-                  opacity: index === depthGuideOffsets.length - 1 ? 0.9 : 0.55,
-                }}
-              />
-            ))}
+            {depthGuideItems.map(({ depth, offset }) => {
+              const collapseAction =
+                collapseDepthGuideActionsByDepth.get(depth);
+              const isHighlighted =
+                Boolean(collapseAction?.active) ||
+                Boolean(highlightThreadLineDepths?.includes(depth));
+              const lineClassName = cn(
+                "absolute bottom-0 left-1/2 top-0 border-l transition-[border-color]",
+                isHighlighted
+                  ? "border-primary"
+                  : "border-border group-hover/thread-guide:border-primary group-focus-visible/thread-guide:border-primary",
+              );
+
+              if (collapseAction) {
+                return (
+                  <button
+                    aria-label={collapseAction.label}
+                    className="group/thread-guide absolute bottom-0 top-0 z-20 w-5 -translate-x-1/2 cursor-pointer rounded-full focus-visible:outline-hidden"
+                    data-thread-head-id={collapseAction.message.id}
+                    data-testid="thread-collapse-guide"
+                    key={`${message.id}-depth-guide-${offset}`}
+                    onBlur={() =>
+                      handleCollapseDepthGuideHoverChange(
+                        collapseAction.message,
+                        false,
+                      )
+                    }
+                    onClick={(event) =>
+                      handleCollapseDepthGuide(event, collapseAction.message)
+                    }
+                    onFocus={() =>
+                      handleCollapseDepthGuideHoverChange(
+                        collapseAction.message,
+                        true,
+                      )
+                    }
+                    onMouseEnter={() =>
+                      handleCollapseDepthGuideHoverChange(
+                        collapseAction.message,
+                        true,
+                      )
+                    }
+                    onMouseLeave={() =>
+                      handleCollapseDepthGuideHoverChange(
+                        collapseAction.message,
+                        false,
+                      )
+                    }
+                    style={{ left: `${offset}px` }}
+                    type="button"
+                  >
+                    <span
+                      className={lineClassName}
+                      style={{
+                        borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
+                      }}
+                    />
+                  </button>
+                );
+              }
+
+              return (
+                <div
+                  aria-hidden
+                  className={cn(
+                    "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
+                    isHighlighted ? "border-primary" : "border-border",
+                  )}
+                  key={`${message.id}-depth-guide-${offset}`}
+                  style={{
+                    borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
+                    left: `${offset}px`,
+                  }}
+                />
+              );
+            })}
           </div>
+        ) : null}
+        {showDepthGuides && descendantGuideOffsetPx !== null ? (
+          <>
+            <div
+              aria-hidden
+              className={cn(
+                "pointer-events-none absolute bottom-0 z-0 border-l transition-[border-color]",
+                highlightDescendantRail ? "border-primary" : "border-border",
+              )}
+              style={{
+                bottom: `${-guideBleedPx}px`,
+                borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
+                left: `${descendantGuideOffsetPx}px`,
+                top: `${getThreadReplyDescendantRailStartYPx()}px`,
+              }}
+            />
+            {onCollapseDescendants ? (
+              <button
+                aria-label={
+                  collapseDescendantsLabel ?? "Collapse replies to this message"
+                }
+                className="absolute bottom-0 z-20 w-5 -translate-x-1/2 cursor-pointer rounded-full p-0 focus-visible:outline-hidden"
+                data-thread-head-id={message.id}
+                data-testid="thread-collapse-rail"
+                onBlur={() => handleCollapseDescendantsHoverChange(false)}
+                onClick={handleCollapseDescendants}
+                onFocus={() => handleCollapseDescendantsHoverChange(true)}
+                onMouseEnter={() => handleCollapseDescendantsHoverChange(true)}
+                onMouseLeave={() => handleCollapseDescendantsHoverChange(false)}
+                style={{
+                  left: `${descendantGuideOffsetPx}px`,
+                  top: `${getThreadReplyAvatarCenterYPx()}px`,
+                }}
+                type="button"
+              />
+            ) : null}
+          </>
+        ) : null}
+        {showDepthGuides && replyConnector ? (
+          <div
+            aria-hidden
+            className={cn(
+              "pointer-events-none absolute left-0 top-0 rounded-bl-2xl border-b border-l transition-[border-color]",
+              highlightReplyConnector ? "border-primary" : "border-border",
+            )}
+            style={{
+              borderBottomWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
+              borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
+              height: `${replyConnector.heightPx + guideBleedPx}px`,
+              left: `${replyConnector.parentOffsetPx}px`,
+              top: `${-guideBleedPx}px`,
+              width: `${replyConnector.widthPx}px`,
+            }}
+          />
         ) : null}
 
         <article
           className={cn(
-            "group/message relative rounded-2xl py-2 transition-colors",
+            "group/message relative z-10 rounded-2xl transition-colors",
+            isThreadReplyLayout ? "py-1.5" : "py-2",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
-              : "px-2",
+              : isThreadReplyLayout
+                ? "mx-1 px-2"
+                : "px-2",
             "flex items-start gap-2.5",
             hasActiveReminder ? "bg-blue-500/10" : "",
             highlighted
@@ -520,10 +728,23 @@ export const MessageRow = React.memo(
     prev.message.tags === next.message.tags &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
+    prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
+    prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&
+    prev.connectDescendants === next.connectDescendants &&
+    prev.depthGuideDepths === next.depthGuideDepths &&
+    prev.highlightDescendantRail === next.highlightDescendantRail &&
     prev.highlighted === next.highlighted &&
+    prev.highlightReplyConnector === next.highlightReplyConnector &&
+    prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
     prev.hoverBackground === next.hoverBackground &&
     prev.isFollowingThread === next.isFollowingThread &&
     prev.layoutVariant === next.layoutVariant &&
+    prev.onCollapseDepthGuide === next.onCollapseDepthGuide &&
+    prev.onCollapseDepthGuideHoverChange ===
+      next.onCollapseDepthGuideHoverChange &&
+    prev.onCollapseDescendants === next.onCollapseDescendants &&
+    prev.onCollapseDescendantsHoverChange ===
+      next.onCollapseDescendantsHoverChange &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,
