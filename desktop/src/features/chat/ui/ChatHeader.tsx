@@ -130,7 +130,7 @@ export function ChatHeader({
       data-tauri-drag-region
     >
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-[4px] overflow-hidden">
+        <div className="group/title flex min-w-0 items-center gap-[4px] overflow-hidden">
           <div className="shrink-0">
             {leadingContent ?? (
               <ChannelIcon
@@ -149,7 +149,7 @@ export function ChatHeader({
           </h1>
           <Button
             aria-label={`Copy channel name: ${title}`}
-            className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+            className="h-6 w-6 shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
             onClick={() => void handleCopyTitle()}
             size="icon-xs"
             title="Copy channel name"
