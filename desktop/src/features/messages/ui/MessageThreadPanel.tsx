@@ -45,7 +45,6 @@ type MessageThreadPanelProps = {
   channelName: string;
   currentPubkey?: string;
   disabled?: boolean;
-  /** Event id of the first unread reply, or null/undefined if all read. */
   firstUnreadReplyId?: string | null;
   layout?: "standalone" | "split";
   editTarget?: {
@@ -82,7 +81,7 @@ type MessageThreadPanelProps = {
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
-  /** Subtree unread counts for collapsed summary rows, keyed by reply id. */
+  threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
   threadHeadVideoReviewContext?: VideoReviewContext;
@@ -93,10 +92,7 @@ type MessageThreadPanelProps = {
   onUnfollowThread?: () => void;
 };
 
-/** Stable empty reference used as the `useDeferredValue` initial value so the
- *  first render when a thread opens stays light instead of blocking on the full
- *  reply list. Must be module-level so its identity never changes. Mirrors
- *  `EMPTY_MESSAGES` in MessageTimeline. */
+/** Stable `useDeferredValue` initial value; mirrors `EMPTY_MESSAGES`. */
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
 const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";
@@ -372,6 +368,7 @@ export function MessageThreadPanel({
   threadHead,
   threadHeadVideoReviewContext,
   threadReplies,
+  threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
   toolbarExtraActions,
@@ -694,6 +691,7 @@ export function MessageThreadPanel({
                   onOpenThread={expandThreadHeadReplies}
                   summary={visibleThreadHeadSummary}
                   summaryIndentOffsetPx={THREAD_PANEL_SUMMARY_INDENT_OFFSET_PX}
+                  unreadCount={threadUnreadCount}
                 />
               </div>
             ) : (
