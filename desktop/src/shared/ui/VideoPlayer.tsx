@@ -104,6 +104,7 @@ const TIMECODE_RE =
   /^\s*\[((?:(?:\d{1,2}:)?\d{1,2}:)?\d{2}(?:\.\d{1,3})?)\]\s*/;
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
 const DEFAULT_PLAYBACK_SPEED = 1;
+const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
 const PLAYBACK_SPEEDS = [2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25];
 
 /**
@@ -928,10 +929,13 @@ export function VideoPlayer({
     [reviewContext?.comments],
   );
   const inlineAspectRatio = aspectRatio ?? naturalAspectRatio ?? 16 / 9;
+  const inlineSurfaceWidth = getInlineSurfaceWidth(inlineAspectRatio);
+  const showInlineSpeedControl =
+    inlineSurfaceWidth >= INLINE_SPEED_CONTROL_MIN_WIDTH;
   const inlineSurfaceStyle: React.CSSProperties = {
     aspectRatio: String(inlineAspectRatio),
     maxHeight: 256,
-    width: getInlineSurfaceWidth(inlineAspectRatio),
+    width: inlineSurfaceWidth,
   };
   const showControls = started && !hasError;
 
@@ -1100,11 +1104,13 @@ export function VideoPlayer({
                 >
                   {formatTimecode(duration)}
                 </span>
-                <PlaybackSpeedControl
-                  playbackSpeed={playbackSpeed}
-                  testId="video-inline-speed"
-                  onPlaybackSpeedChange={handlePlaybackSpeedChange}
-                />
+                {showInlineSpeedControl ? (
+                  <PlaybackSpeedControl
+                    playbackSpeed={playbackSpeed}
+                    testId="video-inline-speed"
+                    onPlaybackSpeedChange={handlePlaybackSpeedChange}
+                  />
+                ) : null}
                 <VolumeControl
                   muted={muted}
                   volume={volume}

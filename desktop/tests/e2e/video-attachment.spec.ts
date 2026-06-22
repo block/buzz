@@ -4,6 +4,8 @@ import { installMockBridge } from "../helpers/bridge";
 
 const VIDEO_SHA = "b".repeat(64);
 const VIDEO_URL = `http://localhost:3000/media/${VIDEO_SHA}.mp4`;
+const PORTRAIT_VIDEO_SHA = "c".repeat(64);
+const PORTRAIT_VIDEO_URL = `http://localhost:3000/media/${PORTRAIT_VIDEO_SHA}.mp4`;
 const POSTER_DATA_URL =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgODAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iODAiIGZpbGw9IiMyNjQ2NTMiLz48Y2lyY2xlIGN4PSI1NCIgY3k9IjQwIiByPSIyMiIgZmlsbD0iI2YyYzE0ZSIvPjxwYXRoIGQ9Ik05MiAyNGg0NHYzMkg5MnoiIGZpbGw9IiNmNzgxNTQiLz48L3N2Zz4=";
 
@@ -25,23 +27,29 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
     .toBe(true);
 }
 
-function emitMockMessage(page: Page, channelName: string, content: string) {
+function emitMockMessage(
+  page: Page,
+  channelName: string,
+  content: string,
+  options: { extraTags?: string[][] } = {},
+) {
   return page.evaluate(
-    ({ channelName, content }) => {
+    ({ channelName, content, extraTags }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            extraTags?: string[][];
           }) => unknown;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
       if (!emit) {
         throw new Error("Mock message emitter is unavailable.");
       }
-      emit({ channelName, content });
+      emit({ channelName, content, extraTags });
     },
-    { channelName, content },
+    { channelName, content, extraTags: options.extraTags },
   );
 }
 
@@ -657,4 +665,45 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(
     threadReviewDialog.getByTestId("video-review-comments"),
   ).toContainText("Color pass looks right");
+});
+
+test("narrow inline videos hide playback speed control", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${PORTRAIT_VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${PORTRAIT_VIDEO_URL}`,
+        "m video/mp4",
+        `x ${PORTRAIT_VIDEO_SHA}`,
+        "size 987654",
+        "dim 80x160",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename portrait-demo.mp4",
+      ],
+    ],
+  });
+
+  const portraitPlayer = page.getByTestId("video-player").last();
+  await expect(portraitPlayer).toBeVisible();
+  const portraitBox = await portraitPlayer.boundingBox();
+  expect(portraitBox?.width).toBeLessThan(220);
+
+  await portraitPlayer.getByRole("button", { name: "Play video" }).click();
+  await expect(
+    portraitPlayer.getByTestId("video-inline-controls"),
+  ).toBeVisible();
+  await expect(portraitPlayer.getByTestId("video-inline-speed")).toHaveCount(0);
+
+  await portraitPlayer
+    .getByRole("button", { name: "Open video review" })
+    .click();
+  const reviewDialog = page.getByTestId("video-review-dialog");
+  await expect(reviewDialog).toBeVisible();
+  await expect(reviewDialog.getByTestId("video-review-speed")).toHaveText("1x");
 });
