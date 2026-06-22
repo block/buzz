@@ -41,7 +41,12 @@ export function buildHomeBadgeFeedItems(
 export function shouldCountTowardHomeBadgeSubtotal(
   item: Pick<FeedItem, "channelId" | "channelType" | "tags">,
   highPriorityChannelIds: ReadonlySet<string>,
+  forceHomeCount = false,
 ): boolean {
+  if (forceHomeCount) {
+    return true;
+  }
+
   if (item.channelId === null || !highPriorityChannelIds.has(item.channelId)) {
     return true;
   }

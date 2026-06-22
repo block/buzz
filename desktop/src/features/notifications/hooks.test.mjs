@@ -109,3 +109,16 @@ test("home badge subtotal still counts non-DM thread-only rows", () => {
     true,
   );
 });
+
+test("home badge subtotal counts locally unread rows before channel exclusion", () => {
+  const highPriorityChannelIds = new Set(["stream-channel"]);
+
+  assert.equal(
+    shouldCountTowardHomeBadgeSubtotal(
+      { channelId: "stream-channel", channelType: "stream", tags: [] },
+      highPriorityChannelIds,
+      true,
+    ),
+    true,
+  );
+});

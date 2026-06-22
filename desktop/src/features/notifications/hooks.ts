@@ -465,7 +465,13 @@ export function useHomeFeedNotificationState(
       }
       if (!isUnread) continue;
       total++;
-      if (shouldCountTowardHomeBadgeSubtotal(item, highPriorityChannelIds)) {
+      if (
+        shouldCountTowardHomeBadgeSubtotal(
+          item,
+          highPriorityChannelIds,
+          isLocallyUnread,
+        )
+      ) {
         excludingHighPriority++;
       }
     }
