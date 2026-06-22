@@ -560,6 +560,23 @@ export function MessageThreadPanel({
         index,
         message: entry.message,
       });
+      const collapseDepthGuideAncestors = ancestors.filter((ancestor) =>
+        continuationDepths.includes(ancestor.message.depth),
+      );
+      const collapseDepthGuideActions: ThreadDepthGuideAction[] | undefined =
+        collapseDepthGuideAncestors.length > 0
+          ? collapseDepthGuideAncestors.map((ancestor) => ({
+              active:
+                hoveredCollapseBranchId === ancestor.message.id &&
+                entry.message.depth === ancestor.message.depth + 1,
+              depth: ancestor.message.depth,
+              label:
+                ancestor.message.id === threadHead.id
+                  ? "Collapse thread"
+                  : "Collapse replies",
+              message: ancestor.message,
+            }))
+          : undefined;
       const nextEntry = deferredThreadReplies[index + 1];
       const connectsToVisibleChild =
         nextEntry != null && nextEntry.message.depth > entry.message.depth;
@@ -569,20 +586,19 @@ export function MessageThreadPanel({
       }
 
       return {
-        ancestors,
+        collapseDepthGuideActions,
         connectsToVisibleChild,
         continuationDepths,
         entry,
         index,
       };
     });
-  }, [deferredThreadReplies, threadHead]);
+  }, [deferredThreadReplies, hoveredCollapseBranchId, threadHead]);
 
   const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
     useAnchoredScroll({
       channelId: threadHeadId,
       contentRef: threadContentRef,
-      // Wait for deferred replies to commit before scroll-init (else rows mount un-scrolled).
       isLoading: repliesRenderState === "pending",
       messages: threadMessages,
       onTargetReached: onScrollTargetResolved,
@@ -687,7 +703,7 @@ export function MessageThreadPanel({
               >
                 {threadReplyRenderItems.map((item) => {
                   const {
-                    ancestors,
+                    collapseDepthGuideActions,
                     connectsToVisibleChild,
                     continuationDepths,
                     entry,
@@ -713,22 +729,6 @@ export function MessageThreadPanel({
                     highlightedBranch
                       ? [highlightedBranch.depth]
                       : undefined;
-                  const collapseDepthGuideActions: ThreadDepthGuideAction[] =
-                    ancestors
-                      .filter((ancestor) =>
-                        continuationDepths.includes(ancestor.message.depth),
-                      )
-                      .map((ancestor) => ({
-                        active:
-                          hoveredCollapseBranchId === ancestor.message.id &&
-                          entry.message.depth === ancestor.message.depth + 1,
-                        depth: ancestor.message.depth,
-                        label:
-                          ancestor.message.id === threadHead.id
-                            ? "Collapse thread"
-                            : "Collapse replies",
-                        message: ancestor.message,
-                      }));
                   return (
                     <div
                       className={cn(
