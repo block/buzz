@@ -88,7 +88,7 @@ type ChannelManagementSheetProps = {
   open: boolean;
 };
 
-const DEFAULT_EPHEMERAL_TTL_SECONDS = 24 * 60 * 60;
+const DEFAULT_EPHEMERAL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export function ChannelManagementSheet({
   channel,
