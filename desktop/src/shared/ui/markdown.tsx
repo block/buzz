@@ -816,8 +816,8 @@ function ImageZoomOverlay({
   const displayBox = imageLightboxZoomBox(targetBox, zoom);
   const transform =
     prefersReducedMotion || isOpen
-      ? imageLightboxTransform(sourceBox, displayBox)
-      : "translate3d(0, 0, 0) scale(1)";
+      ? imageLightboxTransform(targetBox, displayBox)
+      : imageLightboxTransform(targetBox, sourceBox);
   const imageTransitionDuration = prefersReducedMotion
     ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
     : isClosing
@@ -921,7 +921,7 @@ function ImageZoomOverlay({
       <div
         className="absolute z-10 origin-top-left overflow-visible transition-[opacity,transform] will-change-transform"
         style={{
-          ...imageLightboxStyle(sourceBox),
+          ...imageLightboxStyle(targetBox),
           opacity: prefersReducedMotion && isClosing ? 0 : 1,
           transform,
           transitionDuration: `${imageTransitionDuration}ms`,
