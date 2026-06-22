@@ -394,7 +394,6 @@ export function MessageThreadPanel({
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
   const threadHeadId = threadHead?.id ?? null;
-  const isThreadHeadRepliesCollapsed = collapsedThreadHeadId === threadHeadId;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
   useComposerHeightPadding(
     threadBodyRef,
@@ -447,22 +446,30 @@ export function MessageThreadPanel({
         }
       : null;
 
-  // The thread side pane renders its reply list straight into heavy
-  // `react-markdown` rows (`MessageRow`), so opening a deep thread would block
-  // the main thread and the OS would show the busy cursor. Gate the reply render
-  // behind `useDeferredValue`. `initialValue: []` keeps even the FIRST render on
-  // thread-open light; the heavy list streams in on a deferred, interruptible
-  // commit. We deliberately drive BOTH the scroll manager and the rendered list
-  // off the SAME deferred value — sticky-bottom / deep-link logic reads the DOM
-  // (`scrollIntoView`), so it must stay consistent with what's actually painted.
-  // You can't scroll to a reply that hasn't committed yet. The thread pane gets
-  // this no-tearing guarantee for free by routing through the same
-  // `useAnchoredScroll` primitive as the main timeline.
+  // Keep heavy markdown rows deferred, and drive scroll from the same list so
+  // deep-link targets only resolve after the matching DOM row has committed.
   const deferredThreadReplies = React.useDeferredValue(
     threadReplies,
     EMPTY_THREAD_REPLIES,
   );
   const isRepliesPending = deferredThreadReplies !== threadReplies;
+  const scrollTargetIsVisibleReply = React.useMemo(
+    () =>
+      scrollTargetId !== null &&
+      scrollTargetId !== threadHeadId &&
+      deferredThreadReplies.some(
+        (entry) => entry.message.id === scrollTargetId,
+      ),
+    [deferredThreadReplies, scrollTargetId, threadHeadId],
+  );
+  const isThreadHeadRepliesCollapsed =
+    collapsedThreadHeadId === threadHeadId && !scrollTargetIsVisibleReply;
+
+  React.useLayoutEffect(() => {
+    if (scrollTargetIsVisibleReply && collapsedThreadHeadId === threadHeadId) {
+      setCollapsedThreadHeadId(null);
+    }
+  }, [collapsedThreadHeadId, scrollTargetIsVisibleReply, threadHeadId]);
 
   // Which of the three states the reply region paints this frame. Delegated to
   // a pure helper so the "don't flash empty over an incoming list" rule is
