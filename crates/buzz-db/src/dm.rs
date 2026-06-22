@@ -72,7 +72,7 @@ pub async fn find_dm_by_participants(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, encryption_activated_at
         FROM channels
         WHERE participant_hash = $1
           AND channel_type = 'dm'
@@ -85,6 +85,18 @@ pub async fn find_dm_by_participants(
     .await?;
 
     row.map(row_to_channel_record).transpose()
+}
+
+/// Whether a newly created DM with `participant_count` members is latched as
+/// end-to-end encrypted at creation.
+///
+/// Phase 1 encryption is pairwise NIP-44, which only has a single peer for a
+/// 2-party DM. Group DMs (3-9) have no single pairwise peer, so they stay
+/// unlatched (legacy plaintext) until Phase 2 introduces group keys; latching
+/// them would make them unsendable because ingest rule 15c rejects every
+/// non-ciphertext kind:9 in a latched channel.
+fn dm_latches_at_creation(participant_count: usize) -> bool {
+    participant_count == 2
 }
 
 /// Create a new DM channel for the given participant pubkeys, or return the
@@ -130,7 +142,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, encryption_activated_at
         FROM channels
         WHERE participant_hash = $1
           AND channel_type = 'dm'
@@ -156,17 +168,25 @@ pub async fn create_dm(
 
     let id = Uuid::new_v4();
 
+    // Latch 2-party DMs as E2E at creation (see `dm_latches_at_creation`). The
+    // latch is set only here, server-side via NOW(); it is relay-owned, never
+    // client-writable, and has no UPDATE path (`ChannelUpdate` has no such
+    // field), so the encryption-start boundary can't be backdated or moved.
+    let latch_at_creation = dm_latches_at_creation(participants.len());
     sqlx::query(
         r#"
         INSERT INTO channels
-            (id, name, channel_type, visibility, created_by, participant_hash)
-        VALUES ($1, $2, 'dm', 'private', $3, $4)
+            (id, name, channel_type, visibility, created_by, participant_hash,
+             encryption_activated_at)
+        VALUES ($1, $2, 'dm', 'private', $3, $4,
+                CASE WHEN $5 THEN NOW() ELSE NULL END)
         "#,
     )
     .bind(id)
     .bind(&name)
     .bind(created_by)
     .bind(hash.as_slice())
+    .bind(latch_at_creation)
     .execute(&mut *tx)
     .await?;
 
@@ -196,7 +216,7 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at, encryption_activated_at
         FROM channels WHERE id = $1
         "#,
     )
@@ -467,6 +487,7 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         purpose_set_at: row.try_get("purpose_set_at").unwrap_or(None),
         ttl_seconds: row.try_get("ttl_seconds").unwrap_or(None),
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
+        encryption_activated_at: row.try_get("encryption_activated_at").unwrap_or(None),
     })
 }
 
@@ -509,5 +530,23 @@ mod tests {
         let b = [255u8; 32];
         let h = compute_participant_hash(&[&a, &b]);
         assert_eq!(h.len(), 32);
+    }
+
+    #[test]
+    fn two_party_dm_latches_at_creation() {
+        assert!(
+            dm_latches_at_creation(2),
+            "2-party DMs are E2E-by-default and must latch at creation"
+        );
+    }
+
+    #[test]
+    fn group_dm_does_not_latch_at_creation() {
+        for count in 3..=9 {
+            assert!(
+                !dm_latches_at_creation(count),
+                "group DM of {count} must stay unlatched (Phase 1 has no group key)"
+            );
+        }
     }
 }

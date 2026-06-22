@@ -269,3 +269,37 @@ pub async fn nip44_decrypt_from_self(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
+
+/// NIP-44 v2 encrypt `plaintext` to a DM peer. The private key never leaves the
+/// Rust backend — the frontend only sends plaintext + peer pubkey and gets the
+/// ciphertext back to embed in the kind:9 it signs. Used for DM encrypt-on-send.
+#[tauri::command]
+pub fn nip44_encrypt_to_peer(
+    peer_pubkey: String,
+    plaintext: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let peer =
+        PublicKey::from_hex(peer_pubkey.trim()).map_err(|e| format!("invalid peer pubkey: {e}"))?;
+    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    nip44::encrypt(keys.secret_key(), &peer, &plaintext, nip44::Version::V2)
+        .map_err(|e| format!("nip44 encrypt failed: {e}"))
+}
+
+/// NIP-44 v2 decrypt DM `ciphertext` from a peer. The peer pubkey is the other
+/// party in a 2-party DM (the sender for an inbound message, the recipient for
+/// our own echoed message — pairwise ECDH is symmetric, so the same conversation
+/// key decrypts both). Used for DM decrypt-on-render; on failure the frontend
+/// shows the mixed-version placeholder rather than blank or garbled content.
+#[tauri::command]
+pub fn nip44_decrypt_from_peer(
+    peer_pubkey: String,
+    ciphertext: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let peer =
+        PublicKey::from_hex(peer_pubkey.trim()).map_err(|e| format!("invalid peer pubkey: {e}"))?;
+    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    nip44::decrypt(keys.secret_key(), &peer, &ciphertext)
+        .map_err(|e| format!("nip44 decrypt failed: {e}"))
+}

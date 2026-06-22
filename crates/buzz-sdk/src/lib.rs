@@ -107,4 +107,7 @@ pub enum SdkError {
     /// Input failed validation (e.g. malformed pubkey).
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// NIP-44 encryption failed.
+    #[error("encryption failed: {0}")]
+    Encryption(String),
 }

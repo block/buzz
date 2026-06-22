@@ -1170,6 +1170,28 @@ export async function nip44DecryptFromSelf(
   return invokeTauri<string>("nip44_decrypt_from_self", { ciphertext });
 }
 
+// ── NIP-44 DM peer encryption ────────────────────────────────────────────────
+
+export async function nip44EncryptToPeer(
+  peerPubkey: string,
+  plaintext: string,
+): Promise<string> {
+  return invokeTauri<string>("nip44_encrypt_to_peer", {
+    peerPubkey,
+    plaintext,
+  });
+}
+
+export async function nip44DecryptFromPeer(
+  peerPubkey: string,
+  ciphertext: string,
+): Promise<string> {
+  return invokeTauri<string>("nip44_decrypt_from_peer", {
+    peerPubkey,
+    ciphertext,
+  });
+}
+
 // ── NIP-AB device pairing ───────────────────────────────────────────────────
 
 export async function startPairing(): Promise<string> {

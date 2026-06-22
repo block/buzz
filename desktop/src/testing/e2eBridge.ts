@@ -6947,6 +6947,10 @@ export function maybeInstallE2eTauriMocks() {
         return (payload as { plaintext: string }).plaintext;
       case "nip44_decrypt_from_self":
         return (payload as { ciphertext: string }).ciphertext;
+      case "nip44_encrypt_to_peer":
+        return (payload as { plaintext: string }).plaintext;
+      case "nip44_decrypt_from_peer":
+        return (payload as { ciphertext: string }).ciphertext;
       case "create_auth_event":
         if (identity) {
           return JSON.stringify(

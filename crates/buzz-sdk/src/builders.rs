@@ -16,7 +16,7 @@ use buzz_core::{
         OBSERVER_FRAME_TELEMETRY,
     },
 };
-use nostr::{EventBuilder, Kind, Tag};
+use nostr::{nips::nip44, EventBuilder, Keys, Kind, PublicKey, Tag};
 use uuid::Uuid;
 
 use crate::{
@@ -222,16 +222,64 @@ pub fn build_message(
     media_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
+    let mut tags = message_tags(channel_id, thread_ref, mentions, media_tags)?;
+    if broadcast {
+        tags.push(tag(&["broadcast", "1"])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+}
+
+/// Assemble the common kind:9 tag set: channel `h`, NIP-10 thread context,
+/// mention `p`-tags, and `imeta` media tags. Shared by [`build_message`] and
+/// [`build_dm_message`] so the two stay in lockstep.
+fn message_tags(
+    channel_id: Uuid,
+    thread_ref: Option<&ThreadRef>,
+    mentions: &[&str],
+    media_tags: &[Vec<String>],
+) -> Result<Vec<Tag>, SdkError> {
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
         thread_tags(tr, &mut tags)?;
     }
     mention_tags(mentions, &mut tags)?;
-    if broadcast {
-        tags.push(tag(&["broadcast", "1"])?);
-    }
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+    Ok(tags)
+}
+
+// ── Builder: build_dm_message ────────────────────────────────────────────────
+
+/// Build an end-to-end encrypted DM message (kind 9).
+///
+/// NIP-44-encrypts `content` to `peer_pubkey` using `sender_keys`, then builds
+/// the kind:9 with the same tag set as [`build_message`] (channel `h`, thread
+/// context, mentions, media) — the relay routes and audits on those cleartext
+/// tags and never sees the plaintext. Mentions and thread refs are derived from
+/// cleartext at send time, so they survive encryption.
+///
+/// - `sender_keys`: the sender's keypair (its secret key derives the NIP-44
+///   conversation key).
+/// - `peer_pubkey`: the DM peer's 64-char hex pubkey (the other participant).
+/// - `content`: plaintext message text (max 64 KiB before encryption).
+///
+/// DMs are never broadcast, so there is no `broadcast` parameter.
+pub fn build_dm_message(
+    sender_keys: &Keys,
+    peer_pubkey: &str,
+    channel_id: Uuid,
+    content: &str,
+    thread_ref: Option<&ThreadRef>,
+    mentions: &[&str],
+    media_tags: &[Vec<String>],
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let peer = check_pubkey_hex(peer_pubkey, "peer_pubkey")?;
+    let peer = PublicKey::from_hex(&peer)
+        .map_err(|e| SdkError::InvalidInput(format!("peer_pubkey is not a valid pubkey: {e}")))?;
+    let encrypted = nip44::encrypt(sender_keys.secret_key(), &peer, content, nip44::Version::V2)
+        .map_err(|e| SdkError::Encryption(e.to_string()))?;
+    let tags = message_tags(channel_id, thread_ref, mentions, media_tags)?;
+    Ok(EventBuilder::new(Kind::Custom(9), encrypted).tags(tags))
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -3132,6 +3180,91 @@ mod tests {
             ..Default::default()
         };
         let err = build_git_pr_update(&pr_repo(), "", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── build_dm_message ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_build_dm_message_produces_encrypted_kind9() {
+        let sender = keys();
+        let peer = keys();
+        let cid = uuid();
+        let ev = build_dm_message(
+            &sender,
+            &peer.public_key().to_hex(),
+            cid,
+            "secret",
+            None,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .sign_with_keys(&sender)
+        .expect("sign");
+
+        assert_eq!(ev.kind.as_u16(), 9);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert_ne!(
+            ev.content, "secret",
+            "content must be ciphertext, not plaintext"
+        );
+        assert_eq!(
+            buzz_core::observer::validate_nip44_v2(&ev.content),
+            Ok(()),
+            "content must pass the relay's strong NIP-44 validator"
+        );
+    }
+
+    #[test]
+    fn test_build_dm_message_round_trips_to_peer() {
+        let sender = keys();
+        let peer = keys();
+        let ev = build_dm_message(
+            &sender,
+            &peer.public_key().to_hex(),
+            uuid(),
+            "hello peer",
+            None,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .sign_with_keys(&sender)
+        .expect("sign");
+
+        let decrypted =
+            nostr::nips::nip44::decrypt(peer.secret_key(), &sender.public_key(), &ev.content)
+                .expect("peer decrypts");
+        assert_eq!(decrypted, "hello peer");
+    }
+
+    #[test]
+    fn test_build_dm_message_keeps_mention_tags_in_cleartext() {
+        let sender = keys();
+        let peer = keys();
+        let mentioned = peer.public_key().to_hex();
+        let ev = build_dm_message(
+            &sender,
+            &peer.public_key().to_hex(),
+            uuid(),
+            "@peer hi",
+            None,
+            &[&mentioned],
+            &[],
+        )
+        .unwrap()
+        .sign_with_keys(&sender)
+        .expect("sign");
+        // Mentions survive encryption because they are cleartext p-tags.
+        assert!(tag_values(&ev, "p").contains(&mentioned));
+    }
+
+    #[test]
+    fn test_build_dm_message_rejects_malformed_peer_pubkey() {
+        let sender = keys();
+        let err =
+            build_dm_message(&sender, "not-a-pubkey", uuid(), "x", None, &[], &[]).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 }

@@ -934,73 +934,14 @@ fn validate_persona_envelope(event: &Event) -> Result<(), String> {
 
 /// Validate that `content` is a syntactically plausible NIP-44 v2 ciphertext.
 ///
-/// Checks:
-/// - Non-empty.
-/// - Standard base64 alphabet only (A-Z, a-z, 0-9, +, /, =), with padding only
-///   at the end and total length a multiple of 4.
-/// - Decoded length >= 99 bytes (1 version + 32 nonce + 32 MAC + minimum 34
-///   bytes of length-prefixed padded ciphertext required by NIP-44 v2).
-/// - First decoded byte is `0x02` (NIP-44 version 2).
-///
-/// This is an envelope sanity check, not full validation: the MAC and actual
-/// decryption happen at the reader. The intent is to refuse obvious junk so a
-/// malformed event cannot win NIP-33 replacement against a valid head and then
-/// be silently skipped by `validate_and_decrypt`. Mirrors the validator in
-/// `buzz-pair-relay::validate_nip44_content`.
+/// Delegates to [`buzz_core::observer::validate_nip44_v2`] — the single source
+/// of truth for the NIP-44 v2 envelope check — and prefixes the error with
+/// engram context. We do not (and cannot) verify the MAC at the relay, but we
+/// reject obvious garbage so a malformed event cannot supersede a valid head
+/// via NIP-33 replacement and then be silently discarded by readers.
 fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
-    if content.is_empty() {
-        return Err("agent-engram content must not be empty (NIP-44 ciphertext)".to_string());
-    }
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    if !len.is_multiple_of(4) {
-        return Err("agent-engram content is not valid base64 (length)".to_string());
-    }
-    let mut pad_count = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
-                if pad_count > 0 {
-                    return Err("agent-engram content is not valid base64".to_string());
-                }
-            }
-            b'=' => {
-                if i < len - 2 {
-                    return Err("agent-engram content is not valid base64".to_string());
-                }
-                pad_count += 1;
-                if pad_count > 2 {
-                    return Err("agent-engram content is not valid base64".to_string());
-                }
-            }
-            _ => return Err("agent-engram content is not valid base64".to_string()),
-        }
-    }
-    let decoded_len = (len / 4) * 3 - pad_count;
-    if decoded_len < 99 {
-        return Err("agent-engram content too short for NIP-44 v2".to_string());
-    }
-    let b64_val = |c: u8| -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    };
-    let v0 =
-        b64_val(bytes[0]).ok_or_else(|| "agent-engram content is not valid base64".to_string())?;
-    let v1 =
-        b64_val(bytes[1]).ok_or_else(|| "agent-engram content is not valid base64".to_string())?;
-    let first_byte = (v0 << 2) | (v1 >> 4);
-    if first_byte != 0x02 {
-        return Err(
-            "agent-engram content is not NIP-44 v2 (expected 0x02 version prefix)".to_string(),
-        );
-    }
-    Ok(())
+    buzz_core::observer::validate_nip44_v2(content)
+        .map_err(|e| format!("agent-engram content invalid: {e}"))
 }
 
 /// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
@@ -1505,6 +1446,50 @@ pub async fn ingest_event(
     if kind_u32 == KIND_PERSONA {
         validate_persona_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    // ── 15c. E2E DM ciphertext enforcement (D2) ──────────────────────────
+    // A DM channel with the encryption latch set (`encryption_activated_at`)
+    // is end-to-end encrypted. The relay cannot decrypt, so it enforces the
+    // boundary syntactically: in a latched channel, EVERY incoming kind:9 MUST
+    // be NIP-44 v2 ciphertext, or it is rejected fail-visible — never silently
+    // stored as plaintext. We use the strong validator, not the length-only
+    // check, or a long plaintext message in range would pass.
+    //
+    // Enforcement is latch-PRESENCE only — it deliberately does NOT compare the
+    // event's `created_at` against the latch timestamp. A `created_at >= latch`
+    // comparator at ingest would be backdateable: the relay clamps `created_at`
+    // to ±15 min of server time, and `proxy:submit` events skip that clamp
+    // entirely, so a member could backdate a plaintext message below the latch
+    // and dodge enforcement. Since legacy plaintext is already stored and
+    // nothing new should legitimately land pre-latch, "latched ⇒ must be
+    // NIP-44" is the safe, time-independent rule. The `created_at >= latch`
+    // comparison belongs to the read/render path (deciding how to display
+    // already-stored events), where untrusted client time is harmless.
+    //
+    // Fail-visible on lookup error: a genuine DB error must NOT let the message
+    // through, or plaintext could be silently stored into a latched channel —
+    // the exact leak this guard prevents. A `ChannelNotFound` is different: the
+    // channel cannot have a latch, and the event is rejected downstream at
+    // insert, so it falls through here to keep that existing not-found behavior.
+    if kind_u32 == KIND_STREAM_MESSAGE {
+        if let Some(ch_id) = channel_id {
+            match state.db.get_channel(ch_id).await {
+                Ok(channel) => {
+                    if channel.encryption_activated_at.is_some() {
+                        buzz_core::observer::validate_nip44_v2(&event.content).map_err(|_| {
+                            IngestError::Rejected(
+                                "invalid: private-channel content must be NIP-44 encrypted".into(),
+                            )
+                        })?;
+                    }
+                }
+                Err(buzz_db::DbError::ChannelNotFound(_)) => {}
+                Err(e) => {
+                    return Err(IngestError::Rejected(format!("error: database error: {e}")));
+                }
+            }
+        }
     }
 
     // Track pre-created channel UUID for compensation on insert failure.
