@@ -28,7 +28,10 @@ import {
   useFeedDesktopNotifications,
   writeStoredSeenFeedIds,
 } from "./use-feed-desktop-notifications";
-import { shouldCountTowardHomeBadgeSubtotal } from "./lib/homeBadge";
+import {
+  buildHomeBadgeFeedItems,
+  shouldCountTowardHomeBadgeSubtotal,
+} from "./lib/homeBadge";
 
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
 
@@ -37,19 +40,6 @@ export type { DesktopNotificationPermissionState } from "./lib/desktop";
 const NOTIFICATION_SETTINGS_STORAGE_KEY = "buzz-notification-settings.v2";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 const EMPTY_FEED_ID_SET: ReadonlySet<string> = new Set();
-
-export function dedupeFeedItemsById(items: readonly FeedItem[]): FeedItem[] {
-  const seen = new Set<string>();
-  const result: FeedItem[] = [];
-  for (const item of items) {
-    if (seen.has(item.id)) {
-      continue;
-    }
-    seen.add(item.id);
-    result.push(item);
-  }
-  return result;
-}
 
 export type NotificationSettings = {
   desktopEnabled: boolean;
@@ -398,11 +388,8 @@ export function useHomeFeedNotificationState(
     readStoredSeenFeedIds(normalizedPubkey),
   );
   const currentFeedItems = React.useMemo(() => {
-    const items = feed
-      ? [...feed.feed.mentions, ...feed.feed.needsAction, ...extraInboxItems]
-      : [...extraInboxItems];
-    return dedupeFeedItemsById(items);
-  }, [extraInboxItems, feed]);
+    return buildHomeBadgeFeedItems(feed, extraInboxItems, localUnreadFeedIds);
+  }, [extraInboxItems, feed, localUnreadFeedIds]);
   const currentFeedIds = React.useMemo(
     () => currentFeedItems.map((item) => item.id),
     [currentFeedItems],
