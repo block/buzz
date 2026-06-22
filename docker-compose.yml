@@ -2,7 +2,7 @@ name: buzz
 
 services:
   postgres:
-    image: postgres:18-alpine
+    image: postgres:17-alpine
     container_name: buzz-postgres
     environment:
       POSTGRES_USER: buzz
@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
 
   redis:
-    image: redis:8-alpine
+    image: redis:7-alpine
     container_name: buzz-redis
     ports:
       - "6379:6379"
