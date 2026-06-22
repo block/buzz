@@ -53,11 +53,12 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import {
-  AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
   auxiliaryPanelContentPaddingClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
+import { channelChrome } from "@/shared/layout/chromeLayout";
+import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,
   PANEL_BASE_CLASS,
@@ -347,7 +348,7 @@ export function ChannelManagementSheet({
             leaveChannelMutation={leaveChannelMutation}
             memberCount={memberCount}
             membersError={membersQuery.error}
-            onOpenChange={onOpenChange}
+            onOpenChange={handlePanelOpenChange}
             resolvedChannel={resolvedChannel}
             setActiveView={setActiveView}
             setIsEditDialogOpen={setIsEditDialogOpen}
@@ -391,7 +392,7 @@ export function ChannelManagementSheet({
               leaveChannelMutation={leaveChannelMutation}
               memberCount={memberCount}
               membersError={membersQuery.error}
-              onOpenChange={onOpenChange}
+              onOpenChange={handlePanelOpenChange}
               resolvedChannel={resolvedChannel}
               setActiveView={setActiveView}
               setIsEditDialogOpen={setIsEditDialogOpen}
@@ -663,6 +664,9 @@ function ChannelManagementPanelContent({
   setIsEditDialogOpen,
   unarchiveChannelMutation,
 }: ChannelManagementPanelContentProps) {
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  useScrollBoundaryLock(scrollRef);
+
   const showModerationActions =
     activeView === "summary" &&
     canManageChannel &&
@@ -671,41 +675,54 @@ function ChannelManagementPanelContent({
   return (
     <>
       {isSplitLayout ? (
-        <AuxiliaryPanelHeader>
-          <AuxiliaryPanelHeaderGroup>
-            {activeView === "canvas" ? (
-              <Button
-                aria-label="Back to channel"
-                data-testid="channel-management-back"
-                onClick={() => setActiveView("summary")}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <ChevronLeft />
-              </Button>
-            ) : null}
-            <DialogPrimitive.Title asChild>
-              <AuxiliaryPanelTitle>
-                {activeView === "canvas" ? "Canvas" : "Channel"}
-              </AuxiliaryPanelTitle>
-            </DialogPrimitive.Title>
-          </AuxiliaryPanelHeaderGroup>
-          <DialogPrimitive.Close asChild>
+        <div
+          className={cn(
+            "pointer-events-none relative z-30 bg-background/80 backdrop-blur-md after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border/35 after:content-[''] supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+            channelChrome.negativeMargin,
+          )}
+        >
+          <div className="pointer-events-auto relative z-30 flex min-h-8 shrink-0 cursor-default select-none items-center gap-2.5 px-4 py-1.5 sm:pr-3">
+            <AuxiliaryPanelHeaderGroup className="gap-0.5">
+              {activeView === "canvas" ? (
+                <Button
+                  aria-label="Back to channel"
+                  className="-ml-2 h-7 w-7"
+                  data-testid="channel-management-back"
+                  onClick={() => setActiveView("summary")}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ChevronLeft />
+                </Button>
+              ) : null}
+              <DialogPrimitive.Title asChild>
+                <AuxiliaryPanelTitle>
+                  {activeView === "canvas" ? "Canvas" : "Channel"}
+                </AuxiliaryPanelTitle>
+              </DialogPrimitive.Title>
+            </AuxiliaryPanelHeaderGroup>
             <Button
               aria-label="Close channel management"
+              className="relative z-[60]"
               data-testid="channel-management-close"
+              onClick={() => onOpenChange(false)}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenChange(false);
+              }}
               size="icon"
               type="button"
               variant="ghost"
             >
               <X />
             </Button>
-          </DialogPrimitive.Close>
-          <DialogPrimitive.Description className="sr-only">
-            Channel settings
-          </DialogPrimitive.Description>
-        </AuxiliaryPanelHeader>
+            <DialogPrimitive.Description className="sr-only">
+              Channel settings
+            </DialogPrimitive.Description>
+          </div>
+        </div>
       ) : (
         <div
           className={cn(
@@ -732,17 +749,22 @@ function ChannelManagementPanelContent({
               {activeView === "canvas" ? "Canvas" : "Channel"}
             </DialogPrimitive.Title>
           </div>
-          <DialogPrimitive.Close asChild>
-            <Button
-              aria-label="Close channel management"
-              data-testid="channel-management-close"
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <X />
-            </Button>
-          </DialogPrimitive.Close>
+          <Button
+            aria-label="Close channel management"
+            className="relative z-[60]"
+            data-testid="channel-management-close"
+            onClick={() => onOpenChange(false)}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenChange(false);
+            }}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            <X />
+          </Button>
           <DialogPrimitive.Description className="sr-only">
             Channel settings
           </DialogPrimitive.Description>
@@ -751,10 +773,11 @@ function ChannelManagementPanelContent({
 
       <div
         className={cn(
-          "flex-1 overflow-y-auto bg-background px-4",
+          "flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-background px-4 [overflow-anchor:none]",
           showModerationActions ? "pb-20" : "pb-8",
           isSplitLayout ? auxiliaryPanelContentPaddingClass : "pt-4",
         )}
+        ref={scrollRef}
       >
         {activeView === "summary" ? (
           <div className="space-y-6 pt-3">

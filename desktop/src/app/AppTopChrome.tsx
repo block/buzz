@@ -19,6 +19,7 @@ type AppTopChromeProps = {
 const TOP_CHROME_ICON_BUTTON_CLASS =
   "h-7 w-7 rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground [&_svg]:size-4";
 const TOP_CHROME_WHEEL_GUARD_HEIGHT = 40;
+const TOP_CHROME_RIGHT_PANEL_SAFE_AREA_PX = 420;
 
 function TopChromeSidebarTrigger() {
   const sidebar = useOptionalSidebar();
@@ -68,8 +69,9 @@ export function AppTopChrome({
     <>
       <div
         aria-hidden="true"
-        className="fixed inset-x-0 top-0 z-20 h-10 cursor-default select-none"
+        className="fixed left-0 top-0 z-20 h-10 cursor-default select-none"
         data-tauri-drag-region
+        style={{ right: TOP_CHROME_RIGHT_PANEL_SAFE_AREA_PX }}
       />
       <div className="fixed left-[80px] top-[6px] z-45 flex items-center gap-0.5">
         <TopChromeSidebarTrigger />
