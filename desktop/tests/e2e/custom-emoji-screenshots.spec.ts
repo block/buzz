@@ -97,6 +97,7 @@ test("message list renders inline and emoji-only messages with Slack-style emoji
   const emojiOnlyRow = rows
     .filter({
       has: page.locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`),
+      hasText: "😀",
     })
     .last();
 

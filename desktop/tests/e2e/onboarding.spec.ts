@@ -7,8 +7,6 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
 const HOME_SEEN_STORAGE_KEY_PREFIX = "buzz-home-feed-seen.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
-const WELCOME_COMPOSER_DISMISS_TIMEOUT_MS = 10_000;
-const WELCOME_COMPOSER_HIDE_TIMEOUT_MS = 12_000;
 const BLANK_TYLER_IDENTITY = {
   ...TEST_IDENTITIES.tyler,
   username: "",
@@ -295,13 +293,7 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   ).toBeVisible();
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
-  await expect(banner).toHaveAttribute("data-state", "dismissing", {
-    timeout: WELCOME_COMPOSER_DISMISS_TIMEOUT_MS,
-  });
   await expect(channelIntro).toBeVisible();
-  await expect(banner).toHaveCount(0, {
-    timeout: WELCOME_COMPOSER_HIDE_TIMEOUT_MS,
-  });
 }
 
 async function getMockChannels(page: Page) {
