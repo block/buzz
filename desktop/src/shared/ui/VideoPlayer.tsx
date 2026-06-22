@@ -701,6 +701,7 @@ export function VideoPlayer({
 }: VideoPlayerProps) {
   const persistedReviewKey = reviewKey ?? src;
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const inlineSurfaceRef = React.useRef<HTMLDivElement | null>(null);
   const reviewVideoRef = React.useRef<HTMLVideoElement>(null);
   const [started, setStarted] = React.useState(false);
   const [isPlaying, setIsPlaying] = React.useState(false);
@@ -726,6 +727,9 @@ export function VideoPlayer({
     () => getReviewPlaybackPosition(persistedReviewKey) ?? 0,
   );
   const [pendingSeekSeconds, setPendingSeekSeconds] = React.useState<
+    number | null
+  >(null);
+  const [inlineRenderedWidth, setInlineRenderedWidth] = React.useState<
     number | null
   >(null);
 
@@ -809,6 +813,34 @@ export function VideoPlayer({
     applyPlaybackSpeed(videoRef.current);
     applyPlaybackSpeed(reviewVideoRef.current);
   }, [applyPlaybackSpeed]);
+
+  React.useLayoutEffect(() => {
+    const element = inlineSurfaceRef.current;
+    if (!element) {
+      setInlineRenderedWidth(null);
+      return;
+    }
+
+    const updateWidth = () => {
+      const width = element.getBoundingClientRect().width;
+      setInlineRenderedWidth((currentWidth) =>
+        currentWidth !== null && Math.abs(currentWidth - width) < 0.5
+          ? currentWidth
+          : width,
+      );
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateWidth);
+      return () => window.removeEventListener("resize", updateWidth);
+    }
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   const handlePlaybackSpeedChange = React.useCallback((speed: number) => {
     if (isPlaybackSpeedOption(speed)) {
@@ -931,7 +963,8 @@ export function VideoPlayer({
   const inlineAspectRatio = aspectRatio ?? naturalAspectRatio ?? 16 / 9;
   const inlineSurfaceWidth = getInlineSurfaceWidth(inlineAspectRatio);
   const showInlineSpeedControl =
-    inlineSurfaceWidth >= INLINE_SPEED_CONTROL_MIN_WIDTH;
+    inlineRenderedWidth !== null &&
+    inlineRenderedWidth >= INLINE_SPEED_CONTROL_MIN_WIDTH;
   const inlineSurfaceStyle: React.CSSProperties = {
     aspectRatio: String(inlineAspectRatio),
     maxHeight: 256,
@@ -946,6 +979,7 @@ export function VideoPlayer({
         data-testid="video-player"
       >
         <div
+          ref={inlineSurfaceRef}
           className="group/video relative isolate max-w-full overflow-hidden rounded-2xl border border-border/70 bg-black"
           style={inlineSurfaceStyle}
         >

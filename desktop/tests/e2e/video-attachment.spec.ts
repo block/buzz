@@ -6,6 +6,8 @@ const VIDEO_SHA = "b".repeat(64);
 const VIDEO_URL = `http://localhost:3000/media/${VIDEO_SHA}.mp4`;
 const PORTRAIT_VIDEO_SHA = "c".repeat(64);
 const PORTRAIT_VIDEO_URL = `http://localhost:3000/media/${PORTRAIT_VIDEO_SHA}.mp4`;
+const CONSTRAINED_LANDSCAPE_VIDEO_SHA = "d".repeat(64);
+const CONSTRAINED_LANDSCAPE_VIDEO_URL = `http://localhost:3000/media/${CONSTRAINED_LANDSCAPE_VIDEO_SHA}.mp4`;
 const POSTER_DATA_URL =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgODAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iODAiIGZpbGw9IiMyNjQ2NTMiLz48Y2lyY2xlIGN4PSI1NCIgY3k9IjQwIiByPSIyMiIgZmlsbD0iI2YyYzE0ZSIvPjxwYXRoIGQ9Ik05MiAyNGg0NHYzMkg5MnoiIGZpbGw9IiNmNzgxNTQiLz48L3N2Zz4=";
 
@@ -706,4 +708,58 @@ test("narrow inline videos hide playback speed control", async ({ page }) => {
   const reviewDialog = page.getByTestId("video-review-dialog");
   await expect(reviewDialog).toBeVisible();
   await expect(reviewDialog.getByTestId("video-review-speed")).toHaveText("1x");
+});
+
+test("constrained landscape inline videos measure rendered width before showing speed", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(
+    page,
+    "general",
+    `![video](${CONSTRAINED_LANDSCAPE_VIDEO_URL})`,
+    {
+      extraTags: [
+        [
+          "imeta",
+          `url ${CONSTRAINED_LANDSCAPE_VIDEO_URL}`,
+          "m video/mp4",
+          `x ${CONSTRAINED_LANDSCAPE_VIDEO_SHA}`,
+          "size 987654",
+          "dim 160x80",
+          "duration 12.5",
+          `image ${POSTER_DATA_URL}`,
+          "filename constrained-landscape-demo.mp4",
+        ],
+      ],
+    },
+  );
+
+  const landscapePlayer = page.getByTestId("video-player").last();
+  await expect(landscapePlayer).toBeVisible();
+  const fullWidthBox = await landscapePlayer.boundingBox();
+  expect(fullWidthBox?.width).toBeGreaterThan(220);
+
+  await landscapePlayer.getByRole("button", { name: "Play video" }).click();
+  await expect(
+    landscapePlayer.getByTestId("video-inline-controls"),
+  ).toBeVisible();
+  await expect(landscapePlayer.getByTestId("video-inline-speed")).toBeVisible();
+
+  await landscapePlayer.evaluate((element) => {
+    (element as HTMLElement).style.width = "180px";
+  });
+  await expect
+    .poll(async () => {
+      const box = await landscapePlayer.boundingBox();
+      return box?.width ?? 0;
+    })
+    .toBeLessThan(220);
+  await expect(landscapePlayer.getByTestId("video-inline-speed")).toHaveCount(
+    0,
+  );
 });
