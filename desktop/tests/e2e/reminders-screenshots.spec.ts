@@ -246,3 +246,97 @@ test.describe("reminders screenshots", () => {
     });
   });
 });
+
+// Phase 2 — author + source at a glance, and click-to-navigate. Both cases
+// seed a reminder targeting Alice's seeded message in #general (event
+// `mock-general-alice`, channel `9a1657ac-…`), so the author resolves to
+// "alice" and the channel label to "general" from the live profile/channel
+// queries — no "Unknown channel" fallback.
+const PHASE2_SHOTS = "test-results/reminders-phase2";
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const ALICE_PUBKEY =
+  "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
+
+function aliceReminderContent() {
+  return JSON.stringify({
+    target: {
+      eventId: "mock-general-alice",
+      channelId: GENERAL_CHANNEL_ID,
+      preview: "Hey team — checking in.",
+      authorPubkey: ALICE_PUBKEY,
+    },
+    note: "Reply to Alice",
+    status: "pending",
+  });
+}
+
+test.describe("reminders phase 2 — author, source, navigation", () => {
+  test.beforeEach(async ({ page }) => {
+    await installMockBridge(page);
+  });
+
+  test("07 — reminder row shows author and source channel", async ({
+    page,
+  }) => {
+    await gotoInboxHome(page);
+
+    const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;
+    await seedReminders(page, [
+      mockReminderEvent({
+        id: "reminder-phase2-source-01",
+        dTag: "rem-phase2-source-01",
+        content: aliceReminderContent(),
+        notBefore: futureTimestamp,
+      }),
+    ]);
+
+    await openRemindersFilter(page);
+    // Author + source line resolves from the live profile/channel queries.
+    // Scope to the reminders panel to avoid matching the "general" entry in
+    // the sidebar channel list.
+    const remindersPanel = page.getByTestId("home-inbox-reminders");
+    await expect(
+      remindersPanel.getByText("alice", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      remindersPanel.getByText("general", { exact: true }),
+    ).toBeVisible();
+    await expect(remindersPanel.getByText("Reply to Alice")).toBeVisible();
+    await waitForAnimations(page);
+
+    await page.screenshot({
+      path: `${PHASE2_SHOTS}/01-reminder-row-author-channel.png`,
+      clip: { x: 0, y: 0, width: 900, height: 720 },
+    });
+  });
+
+  test("08 — clicking a reminder navigates to the message in context", async ({
+    page,
+  }) => {
+    await gotoInboxHome(page);
+
+    const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;
+    await seedReminders(page, [
+      mockReminderEvent({
+        id: "reminder-phase2-nav-01",
+        dTag: "rem-phase2-nav-01",
+        content: aliceReminderContent(),
+        notBefore: futureTimestamp,
+      }),
+    ]);
+
+    await openRemindersFilter(page);
+    // The reminder row body is a button whose preview text is the target
+    // message preview; clicking it navigates to the message in its channel.
+    await page.getByText("Reply to Alice").click();
+
+    // Lands in the #general chat view with the target message in context.
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(page.getByText("Hey team — checking in.")).toBeVisible();
+    await waitForAnimations(page);
+
+    await page.screenshot({
+      path: `${PHASE2_SHOTS}/02-click-navigates-to-message.png`,
+    });
+  });
+});
