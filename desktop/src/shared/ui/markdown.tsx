@@ -814,10 +814,23 @@ function ImageZoomOverlay({
   const isOpen = phase === "open";
   const isFading = phase === "fading";
   const displayBox = imageLightboxZoomBox(targetBox, zoom);
-  const transform =
-    prefersReducedMotion || isOpen
-      ? imageLightboxTransform(sourceBox, displayBox)
-      : "translate3d(0, 0, 0) scale(1)";
+  // Once fully settled at 1x, drop the transform to `none` so the wrapper
+  // leaves the GPU-composited path and the <img> repaints through WebKit's
+  // high-quality paint rasterizer — matching inline-image sharpness. An
+  // identity `translate3d` would keep it composited, so it must be `none`.
+  const atRest =
+    isOpen &&
+    hasEntered &&
+    zoom === IMAGE_LIGHTBOX_MIN_ZOOM &&
+    // Holds composited through the trackpad gesture-end idle window: after a
+    // pinch settles back to exactly 1x, `isAdjustingZoom` stays true for
+    // IMAGE_LIGHTBOX_TRACKPAD_ZOOM_IDLE_MS, avoiding a demote/re-promote thrash.
+    !isAdjustingZoom;
+  const transform = atRest
+    ? "none"
+    : prefersReducedMotion || isOpen
+      ? imageLightboxTransform(targetBox, displayBox)
+      : imageLightboxTransform(targetBox, sourceBox);
   const imageTransitionDuration = prefersReducedMotion
     ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
     : isClosing
@@ -919,15 +932,22 @@ function ImageZoomOverlay({
         }}
       />
       <div
-        className="absolute z-10 origin-top-left overflow-visible transition-[opacity,transform] will-change-transform"
+        className={cn(
+          "absolute z-10 origin-top-left overflow-visible transition-[opacity,transform]",
+          // Only promote to a composited layer while animating; demoting at
+          // rest is what restores high-quality rasterization.
+          !atRest && "will-change-transform",
+        )}
         style={{
-          ...imageLightboxStyle(sourceBox),
+          ...imageLightboxStyle(targetBox),
           opacity: prefersReducedMotion && isClosing ? 0 : 1,
           transform,
           transitionDuration: `${imageTransitionDuration}ms`,
-          transitionProperty: prefersReducedMotion
-            ? "opacity"
-            : "opacity, transform",
+          // At rest, exclude `transform` from the transition so the swap to
+          // `none` is instantaneous — a transitioned transform-to-`none` is
+          // browser-inconsistent and can flash at the settle.
+          transitionProperty:
+            prefersReducedMotion || atRest ? "opacity" : "opacity, transform",
           transitionTimingFunction: isClosing
             ? IMAGE_LIGHTBOX_EASE_IN_OUT
             : IMAGE_LIGHTBOX_EASE_OUT,

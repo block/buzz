@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.29
+
+- build: make mesh-llm opt-in for dev/staging to speed up iteration ([#1183](https://github.com/block/buzz/pull/1183)) ([`ce526106`](https://github.com/block/buzz/commit/ce5261067d2b970ecca7e0d6c24479fcd2ccad43))
+- feat(desktop): default temporary channels to 7-day expiry ([#1182](https://github.com/block/buzz/pull/1182)) ([`4b518fc4`](https://github.com/block/buzz/commit/4b518fc4b3ec6c55eeb4d4b203057d55d8ba0c56))
+- fix(desktop): render lightbox image sharply at full resolution ([#1181](https://github.com/block/buzz/pull/1181)) ([`ff727af9`](https://github.com/block/buzz/commit/ff727af926ce5a7a840b042d6cff4b5a40a81db5))
+- fix(desktop): keep thread guides behind the reply composer ([#1179](https://github.com/block/buzz/pull/1179)) ([`781d1acf`](https://github.com/block/buzz/commit/781d1acf8a412df882fbd49ae1dd2f31a1a3096f))
+- Sort direct messages alphabetically ([#1180](https://github.com/block/buzz/pull/1180)) ([`04df2c8d`](https://github.com/block/buzz/commit/04df2c8dc6ab055a5a9360f4a492715af6d28dc1))
+- Add composer selection formatting tray ([#1133](https://github.com/block/buzz/pull/1133)) ([`7dcf22d5`](https://github.com/block/buzz/commit/7dcf22d50eb4c7503248caa95398f889e6290839))
+- fix(desktop): honor per-agent relay override, default to workspace relay ([#1131](https://github.com/block/buzz/pull/1131)) ([`ea97e219`](https://github.com/block/buzz/commit/ea97e219895e396708cfc626d64b21f864a2674e))
+- [codex] Stabilize desktop E2E flakes ([#1174](https://github.com/block/buzz/pull/1174)) ([`141f7118`](https://github.com/block/buzz/commit/141f7118ae6aedd910966651c53d92f9c6f71702))
+- feat(desktop): show reminder author + source and click-to-navigate in inbox ([#1176](https://github.com/block/buzz/pull/1176)) ([`1186ea48`](https://github.com/block/buzz/commit/1186ea48b99cf2d2cd789137b3e907cee5d6e16c))
+- Improve inbox thread updates ([#1114](https://github.com/block/buzz/pull/1114)) ([`de3f21ab`](https://github.com/block/buzz/commit/de3f21abcd60985c47f43c34d963a68300018f0b))
+- docs(readme): mark git hosting as shipped in status table ([#1175](https://github.com/block/buzz/pull/1175)) ([`26fdfb67`](https://github.com/block/buzz/commit/26fdfb674c387fca20637ee4c2169f20fb98e50b))
+- feat(windows): bundle full Git-for-Windows toolchain for the shell tool ([#1145](https://github.com/block/buzz/pull/1145)) ([`592508ad`](https://github.com/block/buzz/commit/592508adddd889d1b2bbfd8b5384fc2b7107c35c))
+- fix(buzz-dev-mcp): resolve MSYS-absolute paths in the Windows file tools ([#1169](https://github.com/block/buzz/pull/1169)) ([`ec5cfa37`](https://github.com/block/buzz/commit/ec5cfa3796d88b6ea92c620817163e5c10fad8b3))
+
+
 ## v0.3.28
 
 - Improve thread branch display ([#1166](https://github.com/block/buzz/pull/1166)) ([`342a251a`](https://github.com/block/buzz/commit/342a251a9199b55ffc0e19cb50ee7e09a8ec051f))

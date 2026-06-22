@@ -212,12 +212,12 @@ fn initialize_mesh_native_runtime() -> anyhow::Result<()> {
         .any(|runtime| runtime.mesh_version == current)
     {
         anyhow::bail!(
-            "mesh native runtime for MeshLLM {current} is not installed; run `just staging` or `just mesh-e2e-hardware` to prepare it"
+            "mesh native runtime for MeshLLM {current} is not installed; run `just mesh=1 staging` or `just mesh-e2e-hardware` to prepare it"
         );
     }
     mesh_llm_host_runtime::initialize_host_runtime().map_err(|error| {
         anyhow::anyhow!(
-            "mesh native runtime failed to load; run `just staging` or `just mesh-e2e-hardware` to repair it: {error}"
+            "mesh native runtime failed to load; run `just mesh=1 staging` or `just mesh-e2e-hardware` to repair it: {error}"
         )
     })
 }

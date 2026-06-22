@@ -21,6 +21,7 @@ import {
   type ChannelSection,
 } from "@/features/sidebar/lib/useChannelSections";
 import { useDmSidebarMetadata } from "@/features/sidebar/useDmSidebarMetadata";
+import { sortDmChannelsByLabel } from "@/features/sidebar/lib/dmSidebarSort";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 import {
@@ -458,6 +459,10 @@ export function AppSidebar({
       fallbackDisplayName,
       profileDisplayName: profile?.displayName,
     });
+  const sortedDirectMessages = React.useMemo(
+    () => sortDmChannelsByLabel(directMessages, dmChannelLabels),
+    [directMessages, dmChannelLabels],
+  );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeWorkspaceId: activeWorkspace?.id,
     currentPubkey,
@@ -787,7 +792,7 @@ export function AppSidebar({
                 dmParticipantsByChannelId={dmParticipantsByChannelId}
                 isCollapsed={collapsedGroups.directMessages}
                 isActiveChannel={selectedView === "channel"}
-                items={directMessages}
+                items={sortedDirectMessages}
                 channelLabels={dmChannelLabels}
                 onHideDm={onHideDm}
                 onMarkChannelRead={onMarkChannelRead}

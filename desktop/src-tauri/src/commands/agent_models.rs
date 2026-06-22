@@ -188,13 +188,11 @@ pub async fn update_managed_agent(
         if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
             record.turn_timeout_seconds = turn_timeout_seconds;
         }
+        // Store the relay override exactly as supplied (trimmed). An explicit
+        // value pins the agent; empty falls back to the workspace relay at
+        // read-time. A name-only edit (relay_url == None) leaves the pin intact.
         if let Some(relay_url) = input.relay_url {
-            let trimmed = relay_url.trim();
-            record.relay_url = if trimmed.is_empty() {
-                relay_ws_url_with_override(&state)
-            } else {
-                trimmed.to_string()
-            };
+            record.relay_url = relay_url.trim().to_string();
         }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
@@ -248,7 +246,12 @@ pub async fn update_managed_agent(
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            let relay_url = record.relay_url.clone();
+            // Re-publish the renamed profile to the agent's effective relay:
+            // an explicit per-agent relay wins; empty falls back to workspace.
+            let relay_url = crate::relay::effective_agent_relay_url(
+                &record.relay_url,
+                &relay_ws_url_with_override(&state),
+            );
             let display_name = record.name.clone();
             let avatar_url = record
                 .avatar_url
