@@ -7,6 +7,8 @@ import {
   buildThreadPanelData,
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
+  buildThreadSummaryFromVisibleEntries,
+  hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
 
@@ -64,7 +66,7 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
   );
 });
 
-test("buildThreadPanelData keeps direct comments unindented", () => {
+test("buildThreadPanelData connects direct comments to the thread head", () => {
   const root = message({ id: "root", createdAt: 1 });
   const directComment = message({
     id: "direct-comment",
@@ -99,10 +101,196 @@ test("buildThreadPanelData keeps direct comments unindented", () => {
       depth: entry.message.depth,
     })),
     [
-      { id: "direct-comment", depth: 0 },
-      { id: "nested-reply", depth: 1 },
+      { id: "direct-comment", depth: 1 },
+      { id: "nested-reply", depth: 2 },
     ],
   );
+});
+
+test("buildThreadPanelData hides collapsed summaries for expanded replies", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const branch = message({
+    id: "branch",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+  });
+  const child = message({
+    id: "child",
+    createdAt: 3,
+    parentId: "branch",
+    rootId: "root",
+    depth: 2,
+    tags: [
+      ["e", "root", "", "root"],
+      ["e", "branch", "", "reply"],
+    ],
+  });
+
+  const collapsed = buildThreadPanelData(
+    [root, branch, child],
+    "root",
+    "root",
+    new Set(),
+  );
+  const expanded = buildThreadPanelData(
+    [root, branch, child],
+    "root",
+    "root",
+    new Set(["branch"]),
+  );
+
+  assert.equal(collapsed.visibleReplies[0].summary?.replyCount, 1);
+  assert.equal(expanded.visibleReplies[0].summary, null);
+});
+
+test("buildThreadSummaryFromVisibleEntries counts visible rows and hidden descendants", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const branch = message({
+    id: "branch",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "branch-author",
+    author: "Branch Author",
+  });
+  const child = message({
+    id: "child",
+    createdAt: 3,
+    parentId: "branch",
+    rootId: "root",
+    depth: 2,
+    pubkey: "child-author",
+    author: "Child Author",
+  });
+  const grandchild = message({
+    id: "grandchild",
+    createdAt: 4,
+    parentId: "child",
+    rootId: "root",
+    depth: 3,
+    pubkey: "grandchild-author",
+    author: "Grandchild Author",
+  });
+  const sibling = message({
+    id: "sibling",
+    createdAt: 5,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    pubkey: "sibling-author",
+    author: "Sibling Author",
+  });
+
+  const collapsed = buildThreadPanelData(
+    [root, branch, child, grandchild, sibling],
+    "root",
+    "root",
+    new Set(),
+  );
+  const expanded = buildThreadPanelData(
+    [root, branch, child, grandchild, sibling],
+    "root",
+    "root",
+    new Set(["branch"]),
+  );
+
+  for (const entries of [collapsed.visibleReplies, expanded.visibleReplies]) {
+    const summary = buildThreadSummaryFromVisibleEntries("root", entries);
+    assert.equal(summary?.threadHeadId, "root");
+    assert.equal(summary?.replyCount, 4);
+    assert.equal(summary?.lastReplyAt, 5);
+    assert.equal(summary?.participants.length, 3);
+    assert.ok(
+      summary?.participants.some(
+        (participant) => participant.id === "sibling-author",
+      ),
+    );
+  }
+});
+
+test("hasNestedThreadBranches returns false for flat direct replies", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const first = message({
+    id: "first",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+  const second = message({
+    id: "second",
+    createdAt: 3,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+
+  const panelData = buildThreadPanelData(
+    [root, first, second],
+    "root",
+    "root",
+    new Set(),
+  );
+
+  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), false);
+});
+
+test("hasNestedThreadBranches returns true for visible nested replies", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const branch = message({
+    id: "branch",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+  const child = message({
+    id: "child",
+    createdAt: 3,
+    parentId: "branch",
+    rootId: "root",
+    depth: 2,
+  });
+
+  const panelData = buildThreadPanelData(
+    [root, branch, child],
+    "root",
+    "root",
+    new Set(["branch"]),
+  );
+
+  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), true);
+});
+
+test("hasNestedThreadBranches returns true for collapsed nested replies", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const branch = message({
+    id: "branch",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+  });
+  const child = message({
+    id: "child",
+    createdAt: 3,
+    parentId: "branch",
+    rootId: "root",
+    depth: 2,
+  });
+
+  const panelData = buildThreadPanelData(
+    [root, branch, child],
+    "root",
+    "root",
+    new Set(),
+  );
+
+  assert.equal(hasNestedThreadBranches(panelData.visibleReplies), true);
 });
 
 test("shouldRenderUnreadDivider_firstUnreadIsFirstRendered_suppressesDivider", () => {

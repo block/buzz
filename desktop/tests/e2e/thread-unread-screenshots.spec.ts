@@ -133,6 +133,16 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(threadSummary).toBeVisible();
     await threadSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-panel")
+        .getByTestId("thread-collapse-rail"),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByTestId("message-thread-panel")
+        .getByTestId("thread-collapse-guide"),
+    ).toHaveCount(0);
     await page.getByTestId("message-thread-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
@@ -360,6 +370,46 @@ test.describe("thread unread indicator screenshots", () => {
     await page.screenshot({
       path: `${SHOTS}/04-thread-deep-nested-unread.png`,
     });
+
+    await page.getByTestId("message-thread-head").scrollIntoViewIfNeeded();
+    await page
+      .locator(
+        `[data-testid="thread-collapse-rail"][data-thread-head-id="mock-general-welcome"]`,
+      )
+      .click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expect(replies).toHaveCount(0);
+    const rootStack = page
+      .getByTestId("message-thread-replies")
+      .locator(
+        `[data-testid="message-thread-summary"][data-thread-head-id="mock-general-welcome"]`,
+      );
+    await expect(rootStack).toBeVisible();
+    await expect(rootStack).toContainText("6 replies");
+    await rootStack.click();
+    await expect(replies).toHaveCount(6);
+
+    await page
+      .locator(
+        `[data-testid="thread-collapse-guide"][data-thread-head-id="${r1.id}"]`,
+      )
+      .first()
+      .click();
+    await expect(replies).toHaveCount(1);
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .locator(
+          `[data-testid="message-thread-summary"][data-thread-head-id="${r1.id}"]`,
+        ),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .locator(
+          `[data-testid="thread-collapse-rail"][data-thread-head-id="${r1.id}"]`,
+        ),
+    ).toHaveCount(0);
   });
 
   test("05-thread-in-panel-subtree-badge", async ({ page }) => {

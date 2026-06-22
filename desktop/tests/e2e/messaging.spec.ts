@@ -968,7 +968,8 @@ test("ArrowUp in an empty composer edits your last message right after sending",
   // Edit mode is entered for the just-sent message.
   const editBanner = page.getByTestId("edit-target");
   await expect(editBanner).toBeVisible();
-  await expect(editBanner).toContainText(message);
+  await expect(editBanner).toContainText("Editing message");
+  await expect(editBanner).not.toContainText(message);
   await expect(input).toHaveText(message);
 });
 
@@ -1034,7 +1035,8 @@ test("ArrowUp edits your last thread reply right after sending it", async ({
 
   const editBanner = threadPanel.getByTestId("edit-target");
   await expect(editBanner).toBeVisible();
-  await expect(editBanner).toContainText(reply);
+  await expect(editBanner).toContainText("Editing message");
+  await expect(editBanner).not.toContainText(reply);
   await expect(threadInput).toHaveText(reply);
 });
 
