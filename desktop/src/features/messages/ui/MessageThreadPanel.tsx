@@ -387,12 +387,14 @@ export function MessageThreadPanel({
   const [hoveredCollapseBranchId, setHoveredCollapseBranchId] = React.useState<
     string | null
   >(null);
-  const [isThreadHeadRepliesCollapsed, setIsThreadHeadRepliesCollapsed] =
-    React.useState(false);
+  const [collapsedThreadHeadId, setCollapsedThreadHeadId] = React.useState<
+    string | null
+  >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
   const threadHeadId = threadHead?.id ?? null;
+  const isThreadHeadRepliesCollapsed = collapsedThreadHeadId === threadHeadId;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
   useComposerHeightPadding(
     threadBodyRef,
@@ -400,19 +402,17 @@ export function MessageThreadPanel({
     isSinglePanelView,
   );
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: threadHeadId is the reset trigger for local thread-tree collapse state
-  React.useEffect(() => {
-    setHoveredCollapseBranchId(null);
-    setIsThreadHeadRepliesCollapsed(false);
-  }, [threadHeadId]);
-
   const collapseThreadHeadReplies = React.useCallback(() => {
+    if (!threadHeadId) {
+      return;
+    }
+
     setHoveredCollapseBranchId(null);
-    setIsThreadHeadRepliesCollapsed(true);
-  }, []);
+    setCollapsedThreadHeadId(threadHeadId);
+  }, [threadHeadId]);
   const expandThreadHeadReplies = React.useCallback(() => {
     setHoveredCollapseBranchId(null);
-    setIsThreadHeadRepliesCollapsed(false);
+    setCollapsedThreadHeadId(null);
   }, []);
   const handleCollapseBranchHoverChange = React.useCallback(
     (message: TimelineMessage, hovered: boolean) => {

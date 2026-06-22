@@ -496,7 +496,7 @@ test("opens a single-level thread panel with inline expansion", async ({
     throw new Error("Expected root message row to have a data-message-id.");
   }
   const rootSummaryRow = timeline.locator(
-    `[data-thread-head-id="${rootMessageId}"]`,
+    `[data-testid="message-thread-summary"][data-thread-head-id="${rootMessageId}"]`,
   );
 
   await rootMessage.hover();
@@ -668,10 +668,13 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(nestedReplyFromBobRow).toBeVisible();
 
   const firstReplySummaryRow = threadReplies.locator(
-    `[data-thread-head-id="${firstReplyId}"]`,
+    `[data-testid="message-thread-summary"][data-thread-head-id="${firstReplyId}"]`,
   );
-  await expect(firstReplySummaryRow).toHaveCount(1);
-  await expect(firstReplySummaryRow).toContainText("2 replies");
+  await expect(firstReplySummaryRow).toHaveCount(0);
+  const firstReplyBranchRail = threadReplies.locator(
+    `[data-testid="thread-collapse-rail"][data-thread-head-id="${firstReplyId}"]`,
+  );
+  await expect(firstReplyBranchRail).toHaveCount(1);
 
   await expect(rootSummaryRow).toContainText("18 replies");
   await expect(
@@ -691,7 +694,9 @@ test("opens a single-level thread panel with inline expansion", async ({
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
-  await firstReplySummaryRow.click();
+  await firstReplyBranchRail.click();
+  await expect(firstReplySummaryRow).toHaveCount(1);
+  await expect(firstReplySummaryRow).toContainText("2 replies");
   await expect(
     threadReplies.getByTestId("message-row").filter({ hasText: nestedReply }),
   ).toHaveCount(0);

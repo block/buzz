@@ -147,10 +147,7 @@ export function MessageComposer({
   const previousDraftKeyRef = React.useRef<string | null>(null);
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
-  // Snapshot of composer state at the moment we enter edit mode (text body
-  // + draft attachments) so the user's pre-edit work isn't lost when the
-  // composer is hijacked for editing. Restored on edit-cancel/exit. `null`
-  // while not in edit mode.
+  // Snapshot composer state before edit mode so cancel can restore it.
   const preEditSnapshotRef = React.useRef<{
     content: string;
     pendingImeta: ImetaMedia[];
