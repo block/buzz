@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   CircleDot,
+  Copy,
   FileText,
   FolderGit2,
   Hash,
@@ -16,6 +17,7 @@ import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
+import { Button } from "@/shared/ui/button";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type ChatHeaderProps = {
@@ -100,14 +102,16 @@ export function ChatHeader({
   const clearCollapsedTopChromeControls =
     belowSystemChrome && sidebar?.state === "collapsed" && !sidebar.isMobile;
 
-  function handleTitleClick() {
+  async function handleCopyTitle() {
     const value = title.trim();
     if (!value) return;
 
-    void navigator.clipboard
-      .writeText(value)
-      .then(() => toast.success("Channel name copied"))
-      .catch(() => toast.error("Failed to copy channel name"));
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success("Channel name copied");
+    } catch {
+      toast.error("Failed to copy channel name");
+    }
   }
 
   const header = (
@@ -137,20 +141,23 @@ export function ChatHeader({
             )}
           </div>
           <h1
-            className="min-w-0 flex-1 translate-y-px truncate text-base font-semibold leading-6 tracking-tight"
+            className="min-w-0 translate-y-px truncate text-base font-semibold leading-6 tracking-tight"
             data-testid="chat-title"
             title={trimmedDescription || undefined}
           >
-            <button
-              aria-label="Copy channel name"
-              className="max-w-full cursor-copy truncate text-left"
-              onClick={handleTitleClick}
-              title="Click to copy channel name"
-              type="button"
-            >
-              {title}
-            </button>
+            {title}
           </h1>
+          <Button
+            aria-label={`Copy channel name: ${title}`}
+            className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+            onClick={() => void handleCopyTitle()}
+            size="icon-xs"
+            title="Copy channel name"
+            type="button"
+            variant="ghost"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </Button>
           {statusBadge ? (
             <div className="flex shrink-0 flex-wrap items-center gap-1">
               {statusBadge}
