@@ -57,7 +57,7 @@ export function CreateAgentDialog({
   const backendProvidersQuery = useBackendProvidersQuery();
   const { lastRuntimeId, setLastRuntime } = useLastRuntime();
   const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
-  const [agentCommand, setAgentCommand] = React.useState("goose");
+  const [agentCommand, setAgentCommand] = React.useState("buzz-agent");
   const [agentArgs, setAgentArgs] = React.useState("acp");
   const [mcpCommand, setMcpCommand] = React.useState("");
   const [mcpToolsets, setMcpToolsets] = React.useState("");
@@ -236,7 +236,7 @@ export function CreateAgentDialog({
     setSpawnAfterCreate(true);
     setStartOnAppLaunch(true);
     setAcpCommand("buzz-acp");
-    setAgentCommand("goose");
+    setAgentCommand("buzz-agent");
     setAgentArgs("acp");
     setMcpCommand("");
     setMcpToolsets("");

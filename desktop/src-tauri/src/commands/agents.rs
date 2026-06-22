@@ -145,6 +145,7 @@ async fn start_local_agent_with_preflight(
 /// empty map would surface as an opaque 401 from the provider.
 fn build_deploy_payload(
     app: &AppHandle,
+    state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
     // Merge persona env_vars + agent env_vars for provider deploy. Same
@@ -174,7 +175,15 @@ fn build_deploy_payload(
 
     Ok(serde_json::json!({
         "name": &record.name,
-        "relay_url": &record.relay_url,
+        // Resolve the per-agent pin against the active workspace relay here:
+        // this payload crosses the host boundary to a remote provider harness
+        // that has no notion of the desktop's workspace, so the blank→workspace
+        // fallback (otherwise applied at read-time in `effective_agent_relay_url`)
+        // must be materialized into a concrete URL before serializing.
+        "relay_url": crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &relay_ws_url_with_override(state),
+        ),
         "private_key_nsec": &record.private_key_nsec,
         "auth_tag": &record.auth_tag,
         "agent_command": &record.agent_command,
@@ -384,13 +393,15 @@ pub async fn create_managed_agent(
             .to_bech32()
             .map_err(|error| format!("failed to encode private key: {error}"))?;
 
+        // Store the relay override exactly as supplied (trimmed). An explicit
+        // value pins the agent; empty stays empty and resolves to the active
+        // workspace relay at read-time. Uniform for Local and Provider.
         let resolved_relay_url = input
             .relay_url
             .as_deref()
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| relay_ws_url_with_override(&state));
+            .unwrap_or("")
+            .to_string();
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
@@ -665,7 +676,7 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|r| r.pubkey == pubkey)
                     .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(&app, rec)
+                build_deploy_payload(&app, &state, rec)
             };
             // The agent was already persisted in Phase 3 — converting a
             // persona-resolution failure into `spawn_error` (rather than
@@ -803,7 +814,7 @@ pub async fn start_managed_agent(
             StartTarget::Provider {
                 backend: record.backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
-                agent_json: build_deploy_payload(&app, record)?,
+                agent_json: build_deploy_payload(&app, &state, record)?,
             }
         };
 
@@ -908,9 +919,11 @@ fn resolve_legacy_avatar(
 /// profile — and persists the updated record. After backfill, normal
 /// reconciliation proceeds.
 ///
-/// Query and publish both target the agent's stored `relay_url` so that, under
-/// an active workspace relay override, reconciliation reads and writes the same
-/// relay the agent's profile actually lives on.
+/// Query and publish target the relay returned by `effective_agent_relay_url`
+/// for every agent regardless of backend: an explicit per-agent `relay_url`
+/// wins, and a blank one falls back to the active workspace relay. This keeps
+/// reconciliation following the session's relay for never-pinned agents while
+/// honoring a deliberate pin wherever it points.
 pub(crate) async fn reconcile_agent_profile(
     state: &AppState,
     app: &AppHandle,
@@ -919,8 +932,15 @@ pub(crate) async fn reconcile_agent_profile(
 ) -> Result<(), String> {
     use crate::relay::{query_agent_profile, sync_managed_agent_profile};
 
+    // An explicit per-agent relay wins; an empty one falls back to the active
+    // workspace relay. Resolved once and used for both the read and write-back.
+    let relay_url = crate::relay::effective_agent_relay_url(
+        &data.relay_url,
+        &relay_ws_url_with_override(state),
+    );
+
     // Query the relay for the agent's existing kind:0 profile.
-    let existing = query_agent_profile(state, &data.relay_url, agent_pubkey).await?;
+    let existing = query_agent_profile(state, &relay_url, agent_pubkey).await?;
 
     // Resolve the expected avatar — backfilling for legacy records that have no
     // stored avatar_url yet.
@@ -974,7 +994,7 @@ pub(crate) async fn reconcile_agent_profile(
 
     sync_managed_agent_profile(
         state,
-        &data.relay_url,
+        &relay_url,
         &agent_keys,
         &data.name,
         Some(&expected_avatar),

@@ -145,6 +145,8 @@ export function CreateAgentRuntimeFields({
   return (
     <>
       <div className="grid gap-4 md:grid-cols-2">
+        {/* Relay URL pins the agent to a specific relay; blank falls back to
+            the active workspace relay. Shown for all agents. */}
         <div className="space-y-1.5">
           <label className="text-sm font-medium" htmlFor="agent-relay-url">
             Relay URL
@@ -154,7 +156,7 @@ export function CreateAgentRuntimeFields({
             autoComplete="off"
             id="agent-relay-url"
             onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Leave blank to use the desktop relay"
+            placeholder="Leave blank to use the workspace relay"
             value={relayUrl}
           />
           <p
@@ -162,7 +164,7 @@ export function CreateAgentRuntimeFields({
             id="help-agent-relay-url"
           >
             WebSocket URL of the relay this agent connects to. Leave blank to
-            use the built-in desktop relay.
+            use the active workspace relay.
           </p>
         </div>
 

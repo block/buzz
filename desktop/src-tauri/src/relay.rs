@@ -11,6 +11,11 @@ use crate::app_state::AppState;
 
 const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 
+// A reached-but-malformed 2xx body is NOT a connectivity failure, so this
+// message must never carry the "relay unreachable:" prefix the frontend
+// classifier keys on. Extracted to a const so a test can pin that contract.
+const MALFORMED_RESPONSE_MESSAGE: &str = "relay returned malformed response: not valid JSON";
+
 fn configured_env_var(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -46,6 +51,23 @@ pub fn relay_api_base_url_with_override(state: &AppState) -> String {
     match workspace_relay_override(state) {
         Some(url) => relay_http_base_url(&url),
         None => relay_api_base_url(),
+    }
+}
+
+/// Selects the relay a managed agent should use for a relay operation.
+///
+/// An explicit per-agent `relay_url` always wins (highest precedence), pinning
+/// the agent to that relay regardless of the active workspace. An empty or
+/// whitespace-only `relay_url` falls back to the active workspace relay, which
+/// resolves at read-time so a never-set record reconciles, spawns, and re-syncs
+/// on the session's relay instead of a stale stored value. Uniform for both
+/// Local and Provider backends.
+pub fn effective_agent_relay_url(record_relay: &str, workspace_relay: &str) -> String {
+    let pinned = record_relay.trim();
+    if pinned.is_empty() {
+        workspace_relay.to_string()
+    } else {
+        pinned.to_string()
     }
 }
 
@@ -211,11 +233,16 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
         return Err(msg);
     }
 
-    // Drop the reqwest error detail — it contains the raw URL.
+    // A successful HTTP response whose body fails to deserialize means the relay
+    // was reached but returned something unexpected (protocol mismatch, relay bug,
+    // corrupted body) — NOT a connectivity failure. Keep it off the
+    // "relay unreachable:" bucket so it surfaces loudly instead of being treated
+    // as a transient unreachable-relay condition. The reqwest error detail is
+    // dropped because it contains the raw URL.
     response
         .json::<T>()
         .await
-        .map_err(|_| "relay unreachable: response was not valid JSON".to_string())
+        .map_err(|_| MALFORMED_RESPONSE_MESSAGE.to_string())
 }
 
 pub async fn relay_error_message(response: reqwest::Response) -> String {
@@ -405,9 +432,11 @@ pub async fn sync_managed_agent_profile(
 
 /// Query the relay for an agent's kind:0 profile event.
 ///
-/// Queries the relay identified by `relay_url` (typically the agent's stored
-/// `relay_url`) so the query targets the same host the profile is published to,
-/// even when a workspace relay override is active.
+/// Queries the relay identified by `relay_url`. Callers uniformly pass the
+/// relay resolved by `effective_agent_relay_url` for every agent regardless of
+/// backend — an explicit per-agent pin, or the active workspace relay when the
+/// agent has none — so the query targets the host the profile is actually
+/// published to.
 ///
 /// Returns the parsed profile content (display_name, picture) if a kind:0 event
 /// exists for the given pubkey, or `None` if no profile is published.
@@ -554,10 +583,50 @@ pub async fn submit_event_with_keys(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_profile_event, classify_intercepted_response, parse_command_response,
-        relay_http_base_url,
+        build_profile_event, classify_intercepted_response, effective_agent_relay_url,
+        parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
+
+    // ── effective_agent_relay_url: per-agent override precedence ─────────────
+
+    #[test]
+    fn explicit_relay_wins_over_workspace() {
+        // An explicit per-agent relay pins the agent there regardless of the
+        // active workspace — this is the override taking highest precedence.
+        assert_eq!(
+            effective_agent_relay_url("wss://relay.other.com", "wss://staging.example.com"),
+            "wss://relay.other.com"
+        );
+    }
+
+    #[test]
+    fn explicit_relay_wins_even_when_equal_to_workspace() {
+        // No special-casing when the pin happens to match the active workspace.
+        assert_eq!(
+            effective_agent_relay_url("wss://staging.example.com", "wss://staging.example.com"),
+            "wss://staging.example.com"
+        );
+    }
+
+    #[test]
+    fn empty_relay_falls_back_to_workspace() {
+        // A never-set record resolves to the active workspace relay at read-time,
+        // so a stale stored default can never make it load-bearing.
+        assert_eq!(
+            effective_agent_relay_url("", "wss://staging.example.com"),
+            "wss://staging.example.com"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_relay_falls_back_to_workspace() {
+        // Whitespace-only is treated as unset, same as empty.
+        assert_eq!(
+            effective_agent_relay_url("   ", "wss://staging.example.com"),
+            "wss://staging.example.com"
+        );
+    }
 
     // ── relay_http_base_url loopback normalization ───────────────────────────
 
@@ -675,6 +744,19 @@ mod tests {
 
     // classify_request_error requires a real reqwest::Error (not publicly
     // constructable) — tested indirectly through integration; skipped here.
+
+    // ── parse_json_response malformed-body contract ──────────────────────────
+
+    #[test]
+    fn malformed_response_message_stays_off_unreachable_bucket() {
+        // A reached-but-malformed 2xx body is not a connectivity failure. If this
+        // message ever regains the "relay unreachable:" prefix, the frontend
+        // classifier would misroute it as unreachable — pin that it never does.
+        assert!(
+            !MALFORMED_RESPONSE_MESSAGE.starts_with("relay unreachable:"),
+            "malformed-response message must not match the unreachable prefix"
+        );
+    }
 
     // ── parse_command_response ───────────────────────────────────────────────
 

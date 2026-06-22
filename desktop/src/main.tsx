@@ -18,8 +18,7 @@ type E2eWindow = Window & {
 
 const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
 const E2E_WORKSPACE_ID = "e2e-default-workspace";
-const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
-  "sprout-onboarding-complete.v1:";
+const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 
 function configureDevE2eBridgeFromUrl() {
   if (!import.meta.env.DEV) {
@@ -40,8 +39,8 @@ function configureDevE2eBridgeFromUrl() {
     name: "E2E Test",
     relayUrl: "ws://localhost:3000",
   };
-  window.localStorage.setItem("sprout-workspaces", JSON.stringify([workspace]));
-  window.localStorage.setItem("sprout-active-workspace-id", E2E_WORKSPACE_ID);
+  window.localStorage.setItem("buzz-workspaces", JSON.stringify([workspace]));
+  window.localStorage.setItem("buzz-active-workspace-id", E2E_WORKSPACE_ID);
   window.localStorage.setItem(
     `${ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${E2E_DEFAULT_PUBKEY}`,
     "true",

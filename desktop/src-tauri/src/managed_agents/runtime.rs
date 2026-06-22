@@ -1519,6 +1519,18 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| record.agent_command.clone());
 
+    // The agent's effective relay drives both the child's relay connection
+    // (BUZZ_RELAY_URL) and git credential-helper URL: an explicit per-agent
+    // relay wins; an empty one falls back to the active workspace relay.
+    let effective_relay_url = {
+        use tauri::Manager;
+        let state = app.state::<crate::app_state::AppState>();
+        crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &crate::relay::relay_ws_url_with_override(&state),
+        )
+    };
+
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - bundled sidecars (buzz, buzz-acp, etc.) via exe parent (Contents/MacOS/)
@@ -1558,7 +1570,7 @@ pub fn spawn_agent_child(
     }
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
-    command.env("BUZZ_RELAY_URL", &record.relay_url);
+    command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -1681,7 +1693,7 @@ pub fn spawn_agent_child(
     //
     // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
-        let relay_http_url = crate::relay::relay_http_base_url(&record.relay_url);
+        let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
 
         command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
         command.env("GIT_TERMINAL_PROMPT", "0");
