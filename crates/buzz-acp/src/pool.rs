@@ -135,6 +135,17 @@ pub struct OwnedAgent {
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
+    /// Whether this agent is goose, gating the non-standard
+    /// `_goose/unstable/session/steer` delivery path for mid-turn mentions.
+    ///
+    /// Inferred from `agentInfo.name == "goose"` (or `serverInfo.name` per the
+    /// ACP-spec MCP heritage) in the `initialize` response. Other agents will
+    /// have this `false`; callers that observe `false` must use the universal
+    /// cancel+merge `Steer` path. Conservative-by-default: when a future agent
+    /// ships a compatible non-interrupting method under a different name, the
+    /// try-and-tolerate fallback in `pool.rs` keeps the gate from becoming a
+    /// hard exclusion list.
+    pub supports_goose_steer: bool,
 }
 
 /// Pool of agents with take-and-return ownership semantics.

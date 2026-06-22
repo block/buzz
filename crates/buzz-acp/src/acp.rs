@@ -144,6 +144,20 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
+    /// Goose-specific: most recently observed `_meta.goose.activeRunId` from
+    /// a `session/update` notification of kind `session_info_update`.
+    ///
+    /// Goose emits this whenever it starts or clears an active prompt run
+    /// (`crates/goose/src/acp/server.rs:2277` `send_active_run_update`).
+    /// Required as `expectedRunId` when calling the non-standard
+    /// `_goose/unstable/session/steer` method to inject a message into an
+    /// in-flight turn without cancelling it.
+    ///
+    /// `None` until the first `session_info_update` arrives, or after the
+    /// run clears (goose emits `activeRunId: null` at end of turn). Other
+    /// agents will simply never populate this — readers must treat `None`
+    /// as "no active run to steer into" and fall back to cancel+merge.
+    active_run_id: Option<String>,
 }
 
 impl AcpClient {
@@ -233,6 +247,7 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
+            active_run_id: None,
         })
     }
 
@@ -461,6 +476,37 @@ impl AcpClient {
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
+    }
+
+    /// Most recently observed goose `_meta.goose.activeRunId` from a
+    /// `session_info_update`, if any.
+    ///
+    /// Goose-only: other agents leave this `None` for the lifetime of the
+    /// client. Used by callers of [`send_custom_request`] when targeting
+    /// `_goose/unstable/session/steer`, which requires `expectedRunId`.
+    pub fn active_run_id(&self) -> Option<&str> {
+        self.active_run_id.as_deref()
+    }
+
+    /// Send an arbitrary JSON-RPC request and return the agent's result value.
+    ///
+    /// Wraps the internal `send_request` for callers outside this module that
+    /// need to dispatch agent-specific methods — e.g. goose's
+    /// `_goose/unstable/session/steer` for non-cancelling mid-turn message
+    /// injection. The caller is responsible for the method name and params
+    /// shape; errors propagate as [`AcpError::AgentError`] so the caller can
+    /// distinguish "method not found" (cleanly fall back) from transport
+    /// failure (escalate).
+    ///
+    /// Bounded by the same `REQUEST_TIMEOUT` as `initialize` / `session/new`.
+    /// Do NOT use this for `session/prompt` — that has its own bespoke
+    /// idle-timeout/cancel plumbing.
+    pub async fn send_custom_request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request(method, params).await
     }
 
     /// Cancel a turn cleanly, handling any pending permission request first.
@@ -918,7 +964,12 @@ impl AcpClient {
     /// Returns `true` if the update indicates a tool call started, signaling that
     /// the idle clock should be explicitly reset (the agent will be silent while
     /// the tool executes).
-    fn handle_session_update(&self, msg: &serde_json::Value) -> bool {
+    ///
+    /// Takes `&mut self` (not `&self`) because some updates carry agent state
+    /// the client must observe — notably goose's `session_info_update` with
+    /// `_meta.goose.activeRunId`, which seeds [`active_run_id`](Self::active_run_id)
+    /// so callers can target `_goose/unstable/session/steer` at the correct run.
+    fn handle_session_update(&mut self, msg: &serde_json::Value) -> bool {
         let update = &msg["params"]["update"];
         let update_type = update
             .get("sessionUpdate")
@@ -976,6 +1027,35 @@ impl AcpClient {
                     names.len(),
                     names.join(", ")
                 );
+                false
+            }
+            "session_info_update" => {
+                // Goose-only as of writing: `_meta.goose.activeRunId` carries
+                // the id of the currently-active prompt run, or `null` when
+                // the run has cleared. Other agents don't emit this field;
+                // for them `active_run_id` stays `None` and steer callers
+                // will fall back to cancel+merge.
+                let meta = update.get("_meta").and_then(|m| m.get("goose"));
+                if let Some(goose_meta) = meta {
+                    match goose_meta.get("activeRunId") {
+                        Some(serde_json::Value::String(run_id)) => {
+                            tracing::debug!(
+                                target: "acp::update",
+                                "session_info_update: activeRunId={run_id}"
+                            );
+                            self.active_run_id = Some(run_id.clone());
+                        }
+                        Some(serde_json::Value::Null) => {
+                            tracing::debug!(
+                                target: "acp::update",
+                                "session_info_update: activeRunId cleared"
+                            );
+                            self.active_run_id = None;
+                        }
+                        // Missing or non-string/null — leave state untouched.
+                        _ => {}
+                    }
+                }
                 false
             }
             "keepalive" => false,
@@ -2067,5 +2147,147 @@ mod tests {
             received["params"]["systemPrompt"].is_null(),
             "systemPrompt should NOT be in params when value is None"
         );
+    }
+
+    // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
+
+    /// Helper: spawn an inert `cat` subprocess so we have a real AcpClient
+    /// to drive `handle_session_update` against. `cat` never writes back,
+    /// which is fine — these tests don't read from the agent, they just
+    /// feed JSON into the parser.
+    async fn spawn_inert_client() -> AcpClient {
+        AcpClient::spawn("cat", &[], &[])
+            .await
+            .expect("spawn cat as inert client")
+    }
+
+    /// Build a `session/update` JSON-RPC notification carrying a
+    /// `session_info_update` with the given `_meta.goose.activeRunId` value.
+    /// Pass `None` to omit the `activeRunId` field entirely.
+    fn session_info_update_msg(active_run_id: Option<serde_json::Value>) -> serde_json::Value {
+        let mut goose = serde_json::Map::new();
+        if let Some(v) = active_run_id {
+            goose.insert("activeRunId".to_string(), v);
+        }
+        let mut meta = serde_json::Map::new();
+        meta.insert("goose".to_string(), serde_json::Value::Object(goose));
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "_meta": serde_json::Value::Object(meta),
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn active_run_id_sets_on_string() {
+        let mut client = spawn_inert_client().await;
+        assert!(client.active_run_id().is_none(), "starts as None");
+
+        let msg = session_info_update_msg(Some(serde_json::json!("run-abc-123")));
+        let _ = client.handle_session_update(&msg);
+
+        assert_eq!(client.active_run_id(), Some("run-abc-123"));
+    }
+
+    #[tokio::test]
+    async fn active_run_id_clears_on_null() {
+        let mut client = spawn_inert_client().await;
+        // Set it first
+        let set_msg = session_info_update_msg(Some(serde_json::json!("run-xyz")));
+        let _ = client.handle_session_update(&set_msg);
+        assert_eq!(client.active_run_id(), Some("run-xyz"));
+
+        // Then clear with explicit null
+        let clear_msg = session_info_update_msg(Some(serde_json::Value::Null));
+        let _ = client.handle_session_update(&clear_msg);
+        assert!(
+            client.active_run_id().is_none(),
+            "explicit null must clear active_run_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_run_id_untouched_when_missing() {
+        // Field absent entirely — must NOT clear existing state (only an
+        // explicit null clears; missing means "no new info this update").
+        let mut client = spawn_inert_client().await;
+        let set_msg = session_info_update_msg(Some(serde_json::json!("run-stable")));
+        let _ = client.handle_session_update(&set_msg);
+        assert_eq!(client.active_run_id(), Some("run-stable"));
+
+        // session_info_update with no activeRunId field — leave state alone.
+        let missing_msg = session_info_update_msg(None);
+        let _ = client.handle_session_update(&missing_msg);
+        assert_eq!(
+            client.active_run_id(),
+            Some("run-stable"),
+            "missing activeRunId must leave state untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_run_id_untouched_on_wrong_type() {
+        // A number or object in activeRunId is malformed — neither set nor clear.
+        let mut client = spawn_inert_client().await;
+        let set_msg = session_info_update_msg(Some(serde_json::json!("run-stable")));
+        let _ = client.handle_session_update(&set_msg);
+        assert_eq!(client.active_run_id(), Some("run-stable"));
+
+        let wrong_type_msg = session_info_update_msg(Some(serde_json::json!(42)));
+        let _ = client.handle_session_update(&wrong_type_msg);
+        assert_eq!(
+            client.active_run_id(),
+            Some("run-stable"),
+            "non-string/non-null activeRunId must leave state untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_custom_request_dispatches_method_and_params() {
+        // Echo the received request back as `_receivedRequest` so we can
+        // verify the wire-level method + params shape that `send_custom_request`
+        // emits. Same trick `session_new_full_*` tests use.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"steered":true,"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let params = serde_json::json!({
+            "sessionId": "ses_test",
+            "expectedRunId": "run-abc",
+            "prompt": [{"type": "text", "text": "hello"}],
+        });
+        let result = client
+            .send_custom_request("_goose/unstable/session/steer", params.clone())
+            .await
+            .expect("send_custom_request should succeed");
+
+        assert_eq!(result["steered"], serde_json::json!(true));
+        let received = &result["_receivedRequest"];
+        assert_eq!(
+            received["method"].as_str(),
+            Some("_goose/unstable/session/steer"),
+            "method must pass through verbatim"
+        );
+        assert_eq!(
+            received["params"], params,
+            "params must pass through verbatim"
+        );
+        // JSON-RPC envelope sanity
+        assert_eq!(received["jsonrpc"].as_str(), Some("2.0"));
+        assert!(received["id"].is_number(), "must have a numeric request id");
     }
 }

@@ -879,7 +879,10 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    result: Result<(AcpClient, u32)>,
+    /// Tuple: (initialized client, protocol version, supports_goose_steer).
+    /// The third element gates the `_goose/unstable/session/steer` delivery
+    /// path; see [`detect_goose_agent`].
+    result: Result<(AcpClient, u32, bool)>,
 }
 
 /// RAII guard that ensures a `RespawnResult` is sent even if the task panics.
@@ -903,7 +906,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, bool)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -1022,6 +1025,13 @@ async fn tokio_main() -> Result<()> {
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                        let supports_goose_steer = detect_goose_agent(&init_result);
+                        if supports_goose_steer {
+                            tracing::info!(
+                                agent = i,
+                                "agent advertises as goose — `_goose/unstable/session/steer` delivery enabled"
+                            );
+                        }
                         acp.observe(
                             "agent_initialized",
                             serde_json::json!({
@@ -1036,6 +1046,7 @@ async fn tokio_main() -> Result<()> {
                             model_capabilities: None,
                             desired_model: config.model.clone(),
                             protocol_version,
+                            supports_goose_steer,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -1448,7 +1459,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version)) => {
+                Ok((acp, protocol_version, supports_goose_steer)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1456,6 +1467,7 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         protocol_version,
+                        supports_goose_steer,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -2039,7 +2051,7 @@ async fn tokio_main() -> Result<()> {
     // Drain any respawn results that completed before the abort. Explicitly
     // shut down returned agents instead of relying on AcpClient::Drop.
     while let Ok(rr) = respawn_rx.try_recv() {
-        if let Ok((mut acp, _)) = rr.result {
+        if let Ok((mut acp, _, _)) = rr.result {
             acp.shutdown().await;
             tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
         }
@@ -2676,6 +2688,100 @@ fn spawn_respawn_task(
     true
 }
 
+// ── spawn_and_init ────────────────────────────────────────────────────────────
+
+/// Returns `true` if the agent's `initialize` response identifies it as goose.
+///
+/// Inspects `agentInfo.name` (or `serverInfo.name` per the ACP-spec MCP
+/// heritage — see [`run_models`] for the same dual-key lookup). A `true`
+/// result gates the non-standard `_goose/unstable/session/steer` delivery
+/// path for mid-turn mentions; `false` agents fall through to the universal
+/// cancel+merge `Steer` path.
+///
+/// Conservative-by-default: only `"goose"` matches. If a future agent ships
+/// a compatible mid-turn injection method under a different name, the
+/// try-and-tolerate fallback in the supervisor (sending the steer request
+/// and accepting method-not-found as "fall back") widens the gate without
+/// requiring a name list here.
+fn detect_goose_agent(init_result: &serde_json::Value) -> bool {
+    init_result
+        .get("agentInfo")
+        .or_else(|| init_result.get("serverInfo"))
+        .and_then(|info| info.get("name"))
+        .and_then(|v| v.as_str())
+        == Some("goose")
+}
+
+#[cfg(test)]
+mod detect_goose_agent_tests {
+    use super::*;
+
+    #[test]
+    fn matches_agent_info_name_goose() {
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "goose", "version": "1.0.0"},
+            "agentCapabilities": {},
+        });
+        assert!(detect_goose_agent(&init));
+    }
+
+    #[test]
+    fn matches_server_info_name_goose_as_fallback() {
+        // Some agents put it under serverInfo instead of agentInfo.
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "serverInfo": {"name": "goose", "version": "1.0.0"},
+            "agentCapabilities": {},
+        });
+        assert!(detect_goose_agent(&init));
+    }
+
+    #[test]
+    fn does_not_match_other_agent_names() {
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "claude-code", "version": "2.0"},
+            "agentCapabilities": {},
+        });
+        assert!(!detect_goose_agent(&init));
+    }
+
+    #[test]
+    fn does_not_match_when_name_missing() {
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {},
+        });
+        assert!(!detect_goose_agent(&init));
+    }
+
+    #[test]
+    fn does_not_match_when_name_is_non_string() {
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": 42},
+            "agentCapabilities": {},
+        });
+        assert!(!detect_goose_agent(&init));
+    }
+
+    #[test]
+    fn agent_info_takes_precedence_over_server_info() {
+        // If both are present, agentInfo wins (the .or_else fallback only
+        // fires when agentInfo is absent, not when its name doesn't match).
+        let init = serde_json::json!({
+            "protocolVersion": 1,
+            "agentInfo": {"name": "claude-code"},
+            "serverInfo": {"name": "goose"},
+        });
+        assert!(
+            !detect_goose_agent(&init),
+            "agentInfo.name=claude-code must win over serverInfo.name=goose"
+        );
+    }
+}
+
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
@@ -2686,7 +2792,7 @@ async fn spawn_and_init(
     extra_env: &[(String, String)],
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32)> {
+) -> Result<(AcpClient, u32, bool)> {
     let mut acp = AcpClient::spawn(command, args, extra_env)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -2696,6 +2802,7 @@ async fn spawn_and_init(
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+            let supports_goose_steer = detect_goose_agent(&init_result);
             acp.observe(
                 "agent_initialized",
                 serde_json::json!({
@@ -2703,7 +2810,7 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok((acp, protocol_version))
+            Ok((acp, protocol_version, supports_goose_steer))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -3535,6 +3642,7 @@ mod error_outcome_emission_tests {
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
+            supports_goose_steer: false,
         }
     }
 
