@@ -55,6 +55,9 @@ pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, 
 /// against a fake without touching the live OS keyring.
 trait KeyStore {
     fn probe(&self, name: &str) -> KeyringProbe;
+    /// Read a key. `Ok(None)` is "no such entry" (absent); `Err` is a backend
+    /// failure (keyring unreachable) — the caller MUST NOT collapse the two.
+    fn load(&self, name: &str) -> Result<Option<String>, String>;
     /// Write `value` and read it back to confirm before the caller strips the
     /// inline copy.
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String>;
@@ -63,6 +66,9 @@ trait KeyStore {
 impl KeyStore for SecretStore {
     fn probe(&self, name: &str) -> KeyringProbe {
         SecretStore::probe(self, name)
+    }
+    fn load(&self, name: &str) -> Result<Option<String>, String> {
+        SecretStore::load(self, name)
     }
     fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
         self.store(name, value)?;
@@ -82,6 +88,11 @@ enum KeyMigration {
     /// Could not persist (keyring unreachable, or write/verify failed). The key
     /// must stay inline (0o600 file fallback); do NOT drop it.
     KeptInline,
+    /// The record carried no inline key, so there was nothing to migrate. Kept
+    /// distinct from [`KeyMigration::Persisted`] so an empty key is never
+    /// mistaken for "verified present in the keyring" — an empty key after a
+    /// keyring outage means the secret is currently unavailable, not persisted.
+    Nothing,
 }
 
 /// Attempt to lift one record's inline key into the keyring with read-back
@@ -90,11 +101,12 @@ enum KeyMigration {
 ///
 /// The single source of truth for the migrate-vs-keep decision, shared by the
 /// load-time opportunistic re-migrate ([`hydrate_keys`]) and the save-time
-/// chokepoint ([`persist_agent_keys`]). An empty key is [`KeyMigration::Persisted`]
-/// (nothing to keep inline).
+/// chokepoint ([`persist_agent_keys`]). An empty key returns
+/// [`KeyMigration::Nothing`] — never [`KeyMigration::Persisted`], so a record
+/// left empty by a keyring outage is not mistaken for one verified present.
 fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> KeyMigration {
     if record.private_key_nsec.is_empty() {
-        return KeyMigration::Persisted;
+        return KeyMigration::Nothing;
     }
     let name = agent_keyring_name(&record.pubkey);
     match store.probe(&name) {
@@ -114,6 +126,22 @@ fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> Key
             }
         }
     }
+}
+
+/// Refuse to spawn an agent whose private key is unavailable. Returns
+/// `Some(error)` when `private_key_nsec` is empty — after [`hydrate_keys`] an
+/// empty key means a keyring outage or a genuinely absent secret, NOT a
+/// deliberately keyless agent. Spawning anyway would inject an empty
+/// `BUZZ_PRIVATE_KEY`/`NOSTR_PRIVATE_KEY`, launching with no identity. Callers
+/// (the spawn path) must fail closed (Wes storage.rs:158).
+pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
+    record.private_key_nsec.is_empty().then(|| {
+        format!(
+            "agent {} has no private key available — the OS keyring may be unreachable. \
+             Refusing to start without an identity; retry once the keyring is reachable.",
+            record.pubkey
+        )
+    })
 }
 
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
@@ -145,6 +173,18 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };
+    hydrate_keys_with(&store, records);
+}
+
+/// Testable core of [`hydrate_keys`], generic over the [`KeyStore`] seam.
+///
+/// A keyring LOAD error (`Err`) is an OUTAGE — distinct from `Ok(None)`
+/// (genuinely absent). On an outage the key is left empty and the record is
+/// surfaced as unavailable rather than silently swallowed: callers must refuse
+/// to spawn an agent whose key could not be read (see the empty-key bail in
+/// `spawn_agent_child`). Empty here never means "fine" — it means "no usable
+/// key this boot."
+fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) {
     for record in records.iter_mut() {
         if record.private_key_nsec.is_empty() {
             match store.load(&agent_keyring_name(&record.pubkey)) {
@@ -155,9 +195,13 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
                         record.pubkey
                     );
                 }
+                // Outage, NOT absence: the key may exist in the keyring but is
+                // unreadable this boot. Leave it empty so the spawn path
+                // refuses rather than launching with no identity.
                 Err(e) => {
                     eprintln!(
-                        "buzz-desktop: failed to read agent {} key from keyring: {e}",
+                        "buzz-desktop: agent {} key unavailable — keyring read failed ({e}); \
+                         agent will be refused until the keyring is reachable",
                         record.pubkey
                     );
                 }
@@ -168,7 +212,7 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
             // returned record must carry the key for readers. The next save
             // then strips it from JSON. Outcome is intentionally ignored:
             // on failure the key simply stays inline until a later boot.
-            let _ = migrate_inline_key(&store, record);
+            let _ = migrate_inline_key(store, record);
         }
     }
 }
@@ -220,6 +264,9 @@ fn persist_agent_keys(records: &mut [ManagedAgentRecord], any_inline_key: &mut b
             // Only ever returned for a non-empty key — JSON will carry it, so
             // the file must be locked down.
             KeyMigration::KeptInline => *any_inline_key = true,
+            // Empty key: nothing inline to carry and nothing to clear. Do not
+            // treat as persisted — there is no verified keyring entry to claim.
+            KeyMigration::Nothing => {}
         }
     }
 }
@@ -410,8 +457,8 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{
-        agent_keyring_name, migrate_inline_key, KeyMigration, KeyStore, KeyringProbe,
-        ManagedAgentRecord,
+        agent_keyring_name, hydrate_keys_with, migrate_inline_key, KeyMigration, KeyStore,
+        KeyringProbe, ManagedAgentRecord,
     };
 
     /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -445,6 +492,13 @@ mod tests {
                 stored: RefCell::new(HashMap::new()),
             }
         }
+        /// Seed a key as already present in the keyring.
+        fn with_key(self, name: &str, value: &str) -> Self {
+            self.stored
+                .borrow_mut()
+                .insert(name.to_string(), value.to_string());
+            self
+        }
     }
 
     impl KeyStore for FakeKeyStore {
@@ -454,6 +508,14 @@ mod tests {
             } else {
                 KeyringProbe::Unreachable
             }
+        }
+        fn load(&self, name: &str) -> Result<Option<String>, String> {
+            // An unreachable backend errors on read (outage), distinct from a
+            // reachable backend returning `Ok(None)` for an absent entry.
+            if !self.reachable {
+                return Err("keyring backend unreachable".to_string());
+            }
+            Ok(self.stored.borrow().get(name).cloned())
         }
         fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
             if self.fail_verify {
@@ -533,14 +595,64 @@ mod tests {
     }
 
     #[test]
-    fn migrate_is_noop_for_empty_key() {
+    fn migrate_reports_nothing_for_empty_key() {
         // A record whose key already lives in the keyring (empty inline) has
-        // nothing to migrate.
+        // nothing to migrate. It must NOT be reported as `Persisted` — an
+        // empty key after a keyring outage means the secret is unavailable,
+        // not verified present (Wes storage.rs:158).
         let store = FakeKeyStore::reachable();
         let record = record_with_key("");
 
-        assert_eq!(migrate_inline_key(&store, &record), KeyMigration::Persisted);
+        assert_eq!(migrate_inline_key(&store, &record), KeyMigration::Nothing);
         assert!(store.stored.borrow().is_empty());
+    }
+
+    #[test]
+    fn hydrate_fills_key_from_keyring_when_reachable() {
+        // The normal keyring-backed case: an empty inline key is filled from
+        // the keyring on load.
+        let store =
+            FakeKeyStore::reachable().with_key(&agent_keyring_name("agent-pubkey"), "nsec1stored");
+        let mut records = vec![record_with_key("")];
+
+        hydrate_keys_with(&store, &mut records);
+
+        assert_eq!(records[0].private_key_nsec, "nsec1stored");
+    }
+
+    #[test]
+    fn hydrate_leaves_key_empty_on_keyring_outage() {
+        // Outage edge (Wes storage.rs:158): when the keyring read ERRORS, the
+        // key must be left empty — never silently treated as resolved — so the
+        // spawn path refuses rather than launching the agent with no identity.
+        let store = FakeKeyStore::unreachable();
+        let mut records = vec![record_with_key("")];
+
+        hydrate_keys_with(&store, &mut records);
+
+        assert!(
+            records[0].private_key_nsec.is_empty(),
+            "an unreadable key must stay empty, not be fabricated"
+        );
+    }
+
+    #[test]
+    fn spawn_refused_when_private_key_empty() {
+        // The spawn path MUST refuse a record left empty by an outage/absence
+        // before injecting an empty BUZZ_PRIVATE_KEY / NOSTR_PRIVATE_KEY — never
+        // launch an agent with no identity (Wes storage.rs:158).
+        let record = record_with_key("");
+        assert!(
+            super::spawn_key_refusal(&record).is_some(),
+            "an agent with no private key must be refused"
+        );
+    }
+
+    #[test]
+    fn spawn_allowed_when_private_key_present() {
+        // A record carrying a key must not be blocked by the refusal guard.
+        let record = record_with_key("nsec1realkey");
+        assert!(super::spawn_key_refusal(&record).is_none());
     }
 
     fn write_log(content: &str) -> NamedTempFile {

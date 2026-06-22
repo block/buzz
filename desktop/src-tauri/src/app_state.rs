@@ -168,6 +168,13 @@ pub(crate) const KEYRING_SERVICE: &str = "buzz-desktop";
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";
 
+/// Filename of the marker written once a successful keyring migration deletes
+/// the legacy `identity.key`. Its presence is the only durable signal that a
+/// key once lived in the keyring — used to tell a genuine first-ever launch
+/// (no key anywhere, generating is correct) from a post-migration boot whose
+/// keyring is merely unreachable (the key IS in the keyring, must NOT generate).
+const MIGRATION_MARKER_NAME: &str = "identity.migrated";
+
 /// The keyring operations the identity resolution flow needs. Abstracted so the
 /// corrupt-keyring recovery decision ([`recover_from_keyring`]) can be
 /// unit-tested against a fake without touching the live OS keyring.
@@ -246,7 +253,12 @@ fn resolve_identity_with_store(
                     // fresh) — do NOT quarantine a valid leftover `identity.key`
                     // that holds the user's only good key.
                     Err(error) => {
-                        return recover_from_keyring(store, legacy_path, &error.to_string());
+                        return recover_from_keyring(
+                            store,
+                            legacy_path,
+                            data_dir,
+                            &error.to_string(),
+                        );
                     }
                 }
             }
@@ -256,13 +268,28 @@ fn resolve_identity_with_store(
             // One-time migration: import the legacy plaintext file, read-back
             // verify, THEN delete it.
             if legacy_path.exists() {
-                if let Some(keys) = migrate_identity_file(store, legacy_path)? {
+                if let Some(keys) = migrate_identity_file(store, legacy_path, data_dir)? {
                     return Ok(keys);
                 }
             }
         }
         KeyringProbe::Unreachable => {
-            // Keyring down this boot — read the file directly, do NOT migrate.
+            // Keyring down this boot. If a recoverable file is present, use it
+            // (and do NOT migrate — re-importing later could resurrect a
+            // rotated key). With NO file, the marker disambiguates two states
+            // that are otherwise byte-identical (Unreachable + no file):
+            //   - marker present → the key was migrated into the keyring and the
+            //     file deleted. The real key is unreachable, not gone. Fail
+            //     CLOSED — generating here would silently rotate the identity.
+            //   - no marker → genuine first-ever launch with nothing to protect.
+            //     Generate to the `0o600` file (legitimate first-run).
+            if !legacy_path.exists() && migration_marker_path(data_dir).exists() {
+                return Err(
+                    "identity key is in the OS keyring but the keyring is unavailable this boot; \
+                     retry once the keyring (Keychain / Credential Manager / Secret Service) is reachable"
+                        .to_string(),
+                );
+            }
             return load_file_or_generate(legacy_path, data_dir);
         }
     }
@@ -277,6 +304,7 @@ fn resolve_identity_with_store(
 fn recover_from_keyring(
     store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
     error: &str,
 ) -> Result<Keys, String> {
     eprintln!("buzz-desktop: corrupt nsec in keyring ({error}), clearing and recovering from file");
@@ -284,7 +312,7 @@ fn recover_from_keyring(
         eprintln!("buzz-desktop: failed to clear corrupt keyring value: {e}");
     }
     if legacy_path.exists() {
-        if let Some(keys) = migrate_identity_file(store, legacy_path)? {
+        if let Some(keys) = migrate_identity_file(store, legacy_path, data_dir)? {
             return Ok(keys);
         }
     }
@@ -324,6 +352,7 @@ fn load_file_or_generate(
 fn migrate_identity_file(
     store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
 ) -> Result<Option<Keys>, String> {
     let keys = match load_key_file(legacy_path) {
         Ok(keys) => keys,
@@ -341,6 +370,20 @@ fn migrate_identity_file(
     // Read-back verify before deleting the plaintext file.
     match store.load(IDENTITY_KEY_NAME)? {
         Some(stored) if stored == nsec => {
+            // Crash-safe ordering: record that the key now lives in the keyring
+            // (marker write + fsync) BEFORE deleting the file. A crash between
+            // the two must never leave "file gone, no marker" — that state is
+            // indistinguishable from a fresh install and would silently rotate
+            // the identity on the next keyring-unreachable boot. If the marker
+            // cannot be written, keep the file so the key is never stranded.
+            let marker_path = migration_marker_path(data_dir);
+            if let Err(e) = write_migration_marker(&marker_path) {
+                eprintln!(
+                    "buzz-desktop: keyring import ok but failed to write migration marker ({e}); \
+                     keeping identity.key so the key is not stranded"
+                );
+                return Ok(Some(keys));
+            }
             if let Err(e) = std::fs::remove_file(legacy_path) {
                 eprintln!("buzz-desktop: keyring import ok but failed to delete identity.key: {e}");
             } else {
@@ -350,6 +393,27 @@ fn migrate_identity_file(
         }
         _ => Err("keyring read-back verify failed for identity key".to_string()),
     }
+}
+
+/// Path of the migration-completed marker within `data_dir`.
+fn migration_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(MIGRATION_MARKER_NAME)
+}
+
+/// Atomically write (and fsync) the migration-completed marker. The content is
+/// irrelevant — only the file's durable existence is the signal — so a single
+/// byte keeps it minimal. Atomicity + fsync guarantee that once this returns
+/// `Ok`, the marker survives a crash, which is what makes deleting the legacy
+/// file afterward safe.
+fn write_migration_marker(marker_path: &std::path::Path) -> Result<(), String> {
+    use atomic_write_file::AtomicWriteFile;
+
+    let mut file = AtomicWriteFile::open(marker_path)
+        .map_err(|e| format!("open migration marker for atomic write: {e}"))?;
+    file.write_all(b"1")
+        .map_err(|e| format!("write migration marker: {e}"))?;
+    file.commit()
+        .map_err(|e| format!("commit migration marker: {e}"))
 }
 
 /// Generate a fresh identity, persist it through the store, return it.
@@ -644,6 +708,26 @@ mod tests {
                 deleted: RefCell::new(Vec::new()),
             }
         }
+
+        /// Backend down this boot: probe is `Unreachable` and the slot is empty
+        /// (the real key, if any, is in the keyring we cannot reach).
+        fn unreachable() -> Self {
+            Self {
+                probe: KeyringProbe::Unreachable,
+                slot: RefCell::new(HashMap::new()),
+                deleted: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// Backend reachable with no entry — drives the one-time migration path.
+        /// `store`/`load` go through the slot, so a read-back verify succeeds.
+        fn reachable_but_empty() -> Self {
+            Self {
+                probe: KeyringProbe::ReachableButEmpty,
+                slot: RefCell::new(HashMap::new()),
+                deleted: RefCell::new(Vec::new()),
+            }
+        }
     }
 
     impl IdentityKeyStore for FakeIdentityStore {
@@ -742,6 +826,68 @@ mod tests {
 
         assert_key_eq(&keyring_keys, &resolved);
         assert!(store.deleted.borrow().is_empty());
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn unreachable_post_migration_fails_closed_when_marker_present() {
+        // The silent-rotation hazard (Wes Comment 1). After a migration the
+        // file is gone and the marker exists; a later boot with the keyring
+        // unreachable must FAIL CLOSED — the real key is in the keyring, not
+        // gone, so generating a fresh one would silently rotate the identity.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        write_migration_marker(&migration_marker_path(dir.path())).unwrap();
+        assert!(!legacy_path.exists());
+
+        let store = FakeIdentityStore::unreachable();
+        let result = resolve_identity_with_store(&store, &legacy_path, dir.path());
+
+        assert!(
+            result.is_err(),
+            "must fail closed, not generate a fresh key"
+        );
+        // No identity file was written — nothing was generated or persisted.
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn unreachable_first_run_generates_to_file_when_no_marker() {
+        // Genuine first-EVER launch on a machine whose keyring is down: no file,
+        // no marker. There is no prior identity to protect, so generating to the
+        // `0o600` file is correct — fail-closed here would block a legitimate
+        // first launch.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        assert!(!legacy_path.exists());
+        assert!(!migration_marker_path(dir.path()).exists());
+
+        let store = FakeIdentityStore::unreachable();
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        // A fresh key was generated and persisted to the file (keyring is down).
+        let from_file = load_key_file(&legacy_path).unwrap();
+        assert_key_eq(&resolved, &from_file);
+    }
+
+    #[test]
+    fn migration_writes_marker_before_deleting_file() {
+        // Crash-safe ordering: a successful migration must leave the marker on
+        // disk AND remove the file. The marker existing while the file is gone
+        // is the durable post-migration signal the Unreachable arm relies on;
+        // "file gone, no marker" must never be the resting state.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        let file_keys = Keys::generate();
+        save_key_file(&legacy_path, &file_keys).unwrap();
+
+        // ReachableButEmpty drives the one-time migration path.
+        let store = FakeIdentityStore::reachable_but_empty();
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        assert_key_eq(&file_keys, &resolved);
+        // Marker written, file deleted — the safe resting state.
+        assert!(migration_marker_path(dir.path()).exists());
         assert!(!legacy_path.exists());
     }
 }

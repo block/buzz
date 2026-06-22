@@ -6,7 +6,7 @@ use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        ManagedAgentProcess, ManagedAgentRecord, ManagedAgentSummary,
+        spawn_key_refusal, ManagedAgentProcess, ManagedAgentRecord, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -1499,6 +1499,9 @@ pub fn spawn_agent_child(
     record: &ManagedAgentRecord,
     owner_hex: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
+    if let Some(error) = spawn_key_refusal(record) {
+        return Err(error);
+    }
     let log_path = managed_agent_log_path(app, &record.pubkey)?;
     append_log_marker(
         &log_path,
