@@ -56,20 +56,18 @@ pub fn relay_api_base_url_with_override(state: &AppState) -> String {
 
 /// Selects the relay a managed agent should use for a relay operation.
 ///
-/// Local agents always live on the workspace relay, so their frozen per-record
-/// `relay_url` is ignored — this is the invariant that lets a local record
-/// carrying a stale relay still reconcile, spawn, and re-sync on the session's
-/// relay. Remote (Provider) agents keep their per-record relay, where their
-/// profile genuinely lives.
-pub fn effective_agent_relay_url(
-    is_local: bool,
-    workspace_relay: &str,
-    record_relay: &str,
-) -> String {
-    if is_local {
+/// An explicit per-agent `relay_url` always wins (highest precedence), pinning
+/// the agent to that relay regardless of the active workspace. An empty or
+/// whitespace-only `relay_url` falls back to the active workspace relay, which
+/// resolves at read-time so a never-set record reconciles, spawns, and re-syncs
+/// on the session's relay instead of a stale stored value. Uniform for both
+/// Local and Provider backends.
+pub fn effective_agent_relay_url(record_relay: &str, workspace_relay: &str) -> String {
+    let pinned = record_relay.trim();
+    if pinned.is_empty() {
         workspace_relay.to_string()
     } else {
-        record_relay.to_string()
+        pinned.to_string()
     }
 }
 
@@ -589,49 +587,42 @@ mod tests {
     };
     use serde::Deserialize;
 
-    // ── effective_agent_relay_url: the local-agent relay invariant ───────────
+    // ── effective_agent_relay_url: per-agent override precedence ─────────────
 
     #[test]
-    fn local_agent_uses_workspace_relay_ignoring_stale_record() {
-        // The bug: a local record frozen at a dead relay must reconcile/spawn on
-        // the session's workspace relay, never the stale stored value.
+    fn explicit_relay_wins_over_workspace() {
+        // An explicit per-agent relay pins the agent there regardless of the
+        // active workspace — this is the override taking highest precedence.
         assert_eq!(
-            effective_agent_relay_url(true, "wss://staging.example.com", "ws://localhost:3000"),
-            "wss://staging.example.com"
-        );
-    }
-
-    #[test]
-    fn local_agent_uses_workspace_relay_even_when_record_already_matches() {
-        // No special-casing when the stored value happens to already be correct.
-        assert_eq!(
-            effective_agent_relay_url(
-                true,
-                "wss://staging.example.com",
-                "wss://staging.example.com"
-            ),
-            "wss://staging.example.com"
-        );
-    }
-
-    #[test]
-    fn remote_agent_keeps_its_per_record_relay() {
-        // Remote (Provider) profiles genuinely live on a per-record relay that
-        // differs from the workspace — that relay must be preserved.
-        assert_eq!(
-            effective_agent_relay_url(false, "wss://staging.example.com", "wss://relay.other.com"),
+            effective_agent_relay_url("wss://relay.other.com", "wss://staging.example.com"),
             "wss://relay.other.com"
         );
     }
 
     #[test]
-    fn remote_agent_relay_unchanged_even_when_equal_to_workspace() {
+    fn explicit_relay_wins_even_when_equal_to_workspace() {
+        // No special-casing when the pin happens to match the active workspace.
         assert_eq!(
-            effective_agent_relay_url(
-                false,
-                "wss://staging.example.com",
-                "wss://staging.example.com"
-            ),
+            effective_agent_relay_url("wss://staging.example.com", "wss://staging.example.com"),
+            "wss://staging.example.com"
+        );
+    }
+
+    #[test]
+    fn empty_relay_falls_back_to_workspace() {
+        // A never-set record resolves to the active workspace relay at read-time,
+        // so a stale stored default can never make it load-bearing.
+        assert_eq!(
+            effective_agent_relay_url("", "wss://staging.example.com"),
+            "wss://staging.example.com"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_relay_falls_back_to_workspace() {
+        // Whitespace-only is treated as unset, same as empty.
+        assert_eq!(
+            effective_agent_relay_url("   ", "wss://staging.example.com"),
             "wss://staging.example.com"
         );
     }

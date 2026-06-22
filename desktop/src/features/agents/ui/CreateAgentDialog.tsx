@@ -602,7 +602,6 @@ export function CreateAgentDialog({
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
                       agentCommand={agentCommand}
-                      isProviderMode={isProviderMode}
                       mcpCommand={mcpCommand}
                       mcpToolsets={mcpToolsets}
                       onParallelismChange={setParallelism}

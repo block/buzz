@@ -1519,17 +1519,15 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| record.agent_command.clone());
 
-    // Local agents always live on the workspace relay; resolve once so the
-    // child connects (BUZZ_RELAY_URL) and authenticates git (credential-helper
-    // URL) on the host reconciliation targets, never a stale per-record value.
-    // Remote agents keep their per-record relay.
+    // The agent's effective relay drives both the child's relay connection
+    // (BUZZ_RELAY_URL) and git credential-helper URL: an explicit per-agent
+    // relay wins; an empty one falls back to the active workspace relay.
     let effective_relay_url = {
         use tauri::Manager;
         let state = app.state::<crate::app_state::AppState>();
         crate::relay::effective_agent_relay_url(
-            record.backend == crate::managed_agents::BackendKind::Local,
-            &crate::relay::relay_ws_url_with_override(&state),
             &record.relay_url,
+            &crate::relay::relay_ws_url_with_override(&state),
         )
     };
 

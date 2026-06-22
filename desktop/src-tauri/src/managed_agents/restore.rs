@@ -209,7 +209,6 @@ pub async fn restore_managed_agents_on_launch(
                         private_key_nsec: record.private_key_nsec.clone(),
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
-                        backend_is_local: record.backend == BackendKind::Local,
                         avatar_url: record.avatar_url.clone(),
                         auth_tag: record.auth_tag.clone(),
                         pubkey: record.pubkey.clone(),

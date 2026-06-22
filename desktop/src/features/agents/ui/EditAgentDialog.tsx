@@ -37,11 +37,6 @@ export function EditAgentDialog({
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
 
-  // The per-agent relay URL is only honored for Provider agents; local agents
-  // always use the workspace relay. Gate off the record's backend, not any
-  // runtime toggle — an existing agent's backend is fixed.
-  const isProviderMode = agent.backend.type === "provider";
-
   const [name, setName] = React.useState(agent.name);
   const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
@@ -223,7 +218,6 @@ export function EditAgentDialog({
               acpCommand={acpCommand}
               agentArgs={agentArgs}
               agentCommand={agentCommand}
-              isProviderMode={isProviderMode}
               mcpCommand={mcpCommand}
               mcpToolsets={mcpToolsets}
               onAcpCommandChange={setAcpCommand}

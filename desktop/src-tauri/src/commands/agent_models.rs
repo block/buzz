@@ -188,19 +188,11 @@ pub async fn update_managed_agent(
         if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
             record.turn_timeout_seconds = turn_timeout_seconds;
         }
-        // Local agents always live on the workspace relay — ignore any
-        // user-supplied relay_url and force the workspace relay so the
-        // local-relay invariant holds at update too, not just at birth.
-        // Mirrors the create-time guard; Provider agents keep their own relay.
-        if record.backend == crate::managed_agents::BackendKind::Local {
-            record.relay_url = relay_ws_url_with_override(&state);
-        } else if let Some(relay_url) = input.relay_url {
-            let trimmed = relay_url.trim();
-            record.relay_url = if trimmed.is_empty() {
-                relay_ws_url_with_override(&state)
-            } else {
-                trimmed.to_string()
-            };
+        // Store the relay override exactly as supplied (trimmed). An explicit
+        // value pins the agent; empty falls back to the workspace relay at
+        // read-time. A name-only edit (relay_url == None) leaves the pin intact.
+        if let Some(relay_url) = input.relay_url {
+            record.relay_url = relay_url.trim().to_string();
         }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
@@ -254,13 +246,11 @@ pub async fn update_managed_agent(
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            // Local agents always live on the workspace relay; re-publish the
-            // renamed profile there rather than to a possibly-stale per-record
-            // relay. Mirrors reconcile and spawn for the same invariant.
+            // Re-publish the renamed profile to the agent's effective relay:
+            // an explicit per-agent relay wins; empty falls back to workspace.
             let relay_url = crate::relay::effective_agent_relay_url(
-                record.backend == crate::managed_agents::BackendKind::Local,
-                &relay_ws_url_with_override(&state),
                 &record.relay_url,
+                &relay_ws_url_with_override(&state),
             );
             let display_name = record.name.clone();
             let avatar_url = record
