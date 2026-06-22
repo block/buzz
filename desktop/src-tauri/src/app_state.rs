@@ -192,7 +192,13 @@ fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
     match store.probe(IDENTITY_KEY_NAME) {
         KeyringProbe::Present => {
             if let Some(nsec) = store.load(IDENTITY_KEY_NAME)? {
-                return parse_or_quarantine(&nsec, &legacy_path, data_dir);
+                let keys = parse_or_quarantine(&nsec, &legacy_path, data_dir)?;
+                // The key is authoritative in the keyring. A leftover
+                // `identity.key` means a prior migration's `remove_file` failed
+                // (transient AV lock, read-only mount, EPERM) and never retried
+                // — clean it up now so plaintext does not linger on disk.
+                cleanup_leftover_identity_file(&legacy_path);
+                return Ok(keys);
             }
             // Probe said Present but load found nothing — treat as empty.
         }
@@ -331,6 +337,19 @@ fn parse_or_quarantine(
             let store = crate::secret_store::SecretStore::keyring(KEYRING_SERVICE);
             generate_and_persist(&store, legacy_path)
         }
+    }
+}
+
+/// Best-effort removal of a leftover `identity.key` once the keyring is the
+/// authoritative store. Idempotent: a missing file is success. Logs but does
+/// not error on failure — a delete failure must never block startup.
+fn cleanup_leftover_identity_file(legacy_path: &std::path::Path) {
+    if !legacy_path.exists() {
+        return;
+    }
+    match std::fs::remove_file(legacy_path) {
+        Ok(()) => eprintln!("buzz-desktop: removed leftover identity.key (key is in keyring)"),
+        Err(e) => eprintln!("buzz-desktop: failed to remove leftover identity.key: {e}"),
     }
 }
 
@@ -482,6 +501,34 @@ mod tests {
         let path = dir.path().join("nonexistent.key");
 
         assert!(load_key_file(&path).is_err());
+    }
+
+    #[test]
+    fn cleanup_removes_leftover_identity_file() {
+        // Item 1: a leftover identity.key (from a migration whose remove_file
+        // failed) is deleted once the keyring is authoritative, so plaintext
+        // does not linger on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.key");
+        save_key_file(&path, &Keys::generate()).unwrap();
+        assert!(path.exists());
+
+        cleanup_leftover_identity_file(&path);
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_is_noop_when_no_leftover_file() {
+        // Idempotent: the cleanup runs on every keyring-Present boot, so a
+        // missing file must be a silent success, not an error or panic.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.key");
+        assert!(!path.exists());
+
+        cleanup_leftover_identity_file(&path);
+
+        assert!(!path.exists());
     }
 
     #[test]

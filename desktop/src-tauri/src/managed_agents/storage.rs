@@ -50,6 +50,72 @@ pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, 
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
 }
 
+/// The keyring operations the migration chokepoint needs. Abstracted so the
+/// migrate-and-strip decision logic ([`migrate_inline_key`]) can be unit-tested
+/// against a fake without touching the live OS keyring.
+trait KeyStore {
+    fn probe(&self, name: &str) -> KeyringProbe;
+    /// Write `value` and read it back to confirm before the caller strips the
+    /// inline copy.
+    fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String>;
+}
+
+impl KeyStore for SecretStore {
+    fn probe(&self, name: &str) -> KeyringProbe {
+        SecretStore::probe(self, name)
+    }
+    fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
+        self.store(name, value)?;
+        match self.load(name)? {
+            Some(stored) if stored == value => Ok(()),
+            _ => Err("keyring read-back verify failed".to_string()),
+        }
+    }
+}
+
+/// Outcome of attempting to lift a record's inline key into the keyring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyMigration {
+    /// Written to the keyring and read-back verified. Safe to drop the inline
+    /// copy when serializing.
+    Persisted,
+    /// Could not persist (keyring unreachable, or write/verify failed). The key
+    /// must stay inline (0o600 file fallback); do NOT drop it.
+    KeptInline,
+}
+
+/// Attempt to lift one record's inline key into the keyring with read-back
+/// verify. Pure decision logic — does NOT mutate the record, so the caller
+/// chooses whether to strip the inline copy based on the returned outcome.
+///
+/// The single source of truth for the migrate-vs-keep decision, shared by the
+/// load-time opportunistic re-migrate ([`hydrate_keys`]) and the save-time
+/// chokepoint ([`persist_agent_keys`]). An empty key is [`KeyMigration::Persisted`]
+/// (nothing to keep inline).
+fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> KeyMigration {
+    if record.private_key_nsec.is_empty() {
+        return KeyMigration::Persisted;
+    }
+    let name = agent_keyring_name(&record.pubkey);
+    match store.probe(&name) {
+        // Keyring down this boot: keep the key inline (file fallback), do NOT
+        // migrate — re-importing later could resurrect a rotated key.
+        KeyringProbe::Unreachable => KeyMigration::KeptInline,
+        KeyringProbe::Present | KeyringProbe::ReachableButEmpty => {
+            match store.write_and_verify(&name, &record.private_key_nsec) {
+                Ok(()) => KeyMigration::Persisted,
+                Err(e) => {
+                    eprintln!(
+                        "buzz-desktop: keyring write for agent {} failed ({e}), keeping inline",
+                        record.pubkey
+                    );
+                    KeyMigration::KeptInline
+                }
+            }
+        }
+    }
+}
+
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let path = managed_agents_store_path(app)?;
     if !path.exists() {
@@ -65,32 +131,44 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
     Ok(records)
 }
 
-/// Fill in each record's in-memory `private_key_nsec` from the keyring when it
-/// was not serialized inline. A record loaded with a non-empty key came from
-/// the JSON file-fallback (keyring was unreachable when it was written) — leave
-/// it as-is. A record with an empty key has its secret in the keyring.
+/// Fill in each record's in-memory `private_key_nsec` from the keyring, and
+/// opportunistically re-migrate any key that is still inline.
+///
+/// - Empty key → fetch it from the keyring (the normal keyring-backed case).
+/// - Non-empty key → the JSON carried it inline because the keyring was
+///   unreachable at its last save. Re-migrate it now ([`migrate_inline_key`]):
+///   if the keyring is reachable this boot, write-verify-strip so the next save
+///   writes clean JSON and plaintext stops lingering on disk; if still
+///   unreachable, leave it inline. This makes the strip deterministic on the
+///   next reachable boot rather than waiting for a non-deterministic save.
 fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };
     for record in records.iter_mut() {
-        if !record.private_key_nsec.is_empty() {
-            continue;
-        }
-        match store.load(&agent_keyring_name(&record.pubkey)) {
-            Ok(Some(nsec)) => record.private_key_nsec = nsec,
-            Ok(None) => {
-                eprintln!(
-                    "buzz-desktop: agent {} has no key in JSON or keyring",
-                    record.pubkey
-                );
+        if record.private_key_nsec.is_empty() {
+            match store.load(&agent_keyring_name(&record.pubkey)) {
+                Ok(Some(nsec)) => record.private_key_nsec = nsec,
+                Ok(None) => {
+                    eprintln!(
+                        "buzz-desktop: agent {} has no key in JSON or keyring",
+                        record.pubkey
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "buzz-desktop: failed to read agent {} key from keyring: {e}",
+                        record.pubkey
+                    );
+                }
             }
-            Err(e) => {
-                eprintln!(
-                    "buzz-desktop: failed to read agent {} key from keyring: {e}",
-                    record.pubkey
-                );
-            }
+        } else {
+            // Inline residue from a prior keyring-unreachable save. Lift it
+            // into the keyring now (side effect) but KEEP it in memory — the
+            // returned record must carry the key for readers. The next save
+            // then strips it from JSON. Outcome is intentionally ignored:
+            // on failure the key simply stays inline until a later boot.
+            let _ = migrate_inline_key(&store, record);
         }
     }
 }
@@ -135,38 +213,14 @@ fn persist_agent_keys(records: &mut [ManagedAgentRecord], any_inline_key: &mut b
         return;
     };
     for record in records.iter_mut() {
-        if record.private_key_nsec.is_empty() {
-            continue;
+        match migrate_inline_key(&store, record) {
+            // Verified in the keyring — drop the inline copy so it stays out of
+            // JSON. Safe: this is a save-local clone, callers keep their keys.
+            KeyMigration::Persisted => record.private_key_nsec.clear(),
+            // Only ever returned for a non-empty key — JSON will carry it, so
+            // the file must be locked down.
+            KeyMigration::KeptInline => *any_inline_key = true,
         }
-        let name = agent_keyring_name(&record.pubkey);
-        match store.probe(&name) {
-            KeyringProbe::Unreachable => {
-                // Keep the key inline (file fallback); do not migrate.
-                *any_inline_key = true;
-            }
-            KeyringProbe::Present | KeyringProbe::ReachableButEmpty => {
-                match write_and_verify(&store, &name, &record.private_key_nsec) {
-                    Ok(()) => record.private_key_nsec.clear(),
-                    Err(e) => {
-                        eprintln!(
-                            "buzz-desktop: keyring write for agent {} failed ({e}), keeping inline",
-                            record.pubkey
-                        );
-                        *any_inline_key = true;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Write `value` to the keyring and read it back to confirm before the caller
-/// strips the inline copy.
-fn write_and_verify(store: &SecretStore, name: &str, value: &str) -> Result<(), String> {
-    store.store(name, value)?;
-    match store.load(name)? {
-        Some(stored) if stored == value => Ok(()),
-        _ => Err("keyring read-back verify failed".to_string()),
     }
 }
 
@@ -349,9 +403,145 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::io::Write as _;
 
     use tempfile::NamedTempFile;
+
+    use super::{
+        agent_keyring_name, migrate_inline_key, KeyMigration, KeyStore, KeyringProbe,
+        ManagedAgentRecord,
+    };
+
+    /// In-memory [`KeyStore`] for testing the migrate decision without the OS
+    /// keyring. `reachable=false` simulates a backend outage; `fail_verify`
+    /// simulates a write whose read-back does not confirm.
+    struct FakeKeyStore {
+        reachable: bool,
+        fail_verify: bool,
+        stored: RefCell<HashMap<String, String>>,
+    }
+
+    impl FakeKeyStore {
+        fn reachable() -> Self {
+            Self {
+                reachable: true,
+                fail_verify: false,
+                stored: RefCell::new(HashMap::new()),
+            }
+        }
+        fn unreachable() -> Self {
+            Self {
+                reachable: false,
+                fail_verify: false,
+                stored: RefCell::new(HashMap::new()),
+            }
+        }
+        fn verify_fails() -> Self {
+            Self {
+                reachable: true,
+                fail_verify: true,
+                stored: RefCell::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl KeyStore for FakeKeyStore {
+        fn probe(&self, _name: &str) -> KeyringProbe {
+            if self.reachable {
+                KeyringProbe::ReachableButEmpty
+            } else {
+                KeyringProbe::Unreachable
+            }
+        }
+        fn write_and_verify(&self, name: &str, value: &str) -> Result<(), String> {
+            if self.fail_verify {
+                return Err("read-back verify failed".to_string());
+            }
+            self.stored
+                .borrow_mut()
+                .insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+    }
+
+    fn record_with_key(nsec: &str) -> ManagedAgentRecord {
+        serde_json::from_str(&format!(
+            r#"{{
+                "pubkey": "agent-pubkey",
+                "name": "test-agent",
+                "private_key_nsec": "{nsec}",
+                "relay_url": "wss://localhost:3000",
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }}"#
+        ))
+        .expect("sample record")
+    }
+
+    #[test]
+    fn migrate_persists_and_signals_stripping_when_keyring_reachable() {
+        // Item 2: an inline key (residue from a prior keyring-unreachable save)
+        // is written to the keyring and verified when the backend is reachable,
+        // so the next save can drop it from JSON.
+        let store = FakeKeyStore::reachable();
+        let record = record_with_key("nsec1realkey");
+
+        let outcome = migrate_inline_key(&store, &record);
+
+        assert_eq!(outcome, KeyMigration::Persisted);
+        assert_eq!(
+            store
+                .stored
+                .borrow()
+                .get(&agent_keyring_name("agent-pubkey"))
+                .map(String::as_str),
+            Some("nsec1realkey")
+        );
+    }
+
+    #[test]
+    fn migrate_keeps_inline_when_keyring_unreachable() {
+        // No-resurrection guard: a transient outage must NOT migrate; the key
+        // stays inline (file fallback) so it is not lost.
+        let store = FakeKeyStore::unreachable();
+        let record = record_with_key("nsec1realkey");
+
+        let outcome = migrate_inline_key(&store, &record);
+
+        assert_eq!(outcome, KeyMigration::KeptInline);
+        assert!(store.stored.borrow().is_empty());
+    }
+
+    #[test]
+    fn migrate_keeps_inline_when_verify_fails() {
+        // A write whose read-back does not confirm must keep the key inline —
+        // never drop plaintext on an unverified write.
+        let store = FakeKeyStore::verify_fails();
+        let record = record_with_key("nsec1realkey");
+
+        assert_eq!(
+            migrate_inline_key(&store, &record),
+            KeyMigration::KeptInline
+        );
+    }
+
+    #[test]
+    fn migrate_is_noop_for_empty_key() {
+        // A record whose key already lives in the keyring (empty inline) has
+        // nothing to migrate.
+        let store = FakeKeyStore::reachable();
+        let record = record_with_key("");
+
+        assert_eq!(migrate_inline_key(&store, &record), KeyMigration::Persisted);
+        assert!(store.stored.borrow().is_empty());
+    }
 
     fn write_log(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().expect("temp log");
