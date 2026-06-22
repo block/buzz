@@ -221,6 +221,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
+- **[deploy/nixos](deploy/nixos/README.md)** · **[deploy/compose](deploy/compose/README.md)** · **[deploy/charts/buzz](deploy/charts/buzz/README.md)** — relay deployment guides
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
 
 <details>
