@@ -582,7 +582,7 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await expect(page.getByTestId("chat-ephemeral-badge")).toBeVisible();
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveAttribute(
     "aria-label",
-    /Ephemeral channel\. Cleans up (tomorrow|in \d+ hours?)\./,
+    /Ephemeral channel\. Cleans up in 7 days\./,
   );
 
   await page
@@ -599,7 +599,7 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
   const firstChannelName = "ephemeral-alpha";
   const secondChannelName = "ephemeral-beta";
   const initialTime = new Date("2026-04-09T00:00:00.000Z");
-  const shiftedTime = new Date("2026-04-09T02:00:00.000Z");
+  const shiftedTime = new Date("2026-04-15T02:00:00.000Z");
 
   await page.clock.setFixedTime(initialTime);
   await page.goto("/");
