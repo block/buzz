@@ -230,11 +230,16 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
         return Err(msg);
     }
 
-    // Drop the reqwest error detail — it contains the raw URL.
+    // A successful HTTP response whose body fails to deserialize means the relay
+    // was reached but returned something unexpected (protocol mismatch, relay bug,
+    // corrupted body) — NOT a connectivity failure. Keep it off the
+    // "relay unreachable:" bucket so it surfaces loudly instead of being treated
+    // as a transient unreachable-relay condition. The reqwest error detail is
+    // dropped because it contains the raw URL.
     response
         .json::<T>()
         .await
-        .map_err(|_| "relay unreachable: response was not valid JSON".to_string())
+        .map_err(|_| "relay returned malformed response: not valid JSON".to_string())
 }
 
 pub async fn relay_error_message(response: reqwest::Response) -> String {

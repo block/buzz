@@ -105,6 +105,7 @@ export function CreateAgentRuntimeFields({
   acpCommand,
   agentArgs,
   agentCommand,
+  isProviderMode,
   mcpCommand,
   mcpToolsets,
   parallelism,
@@ -125,6 +126,7 @@ export function CreateAgentRuntimeFields({
   acpCommand: string;
   agentArgs: string;
   agentCommand: string;
+  isProviderMode: boolean;
   mcpCommand: string;
   mcpToolsets: string;
   parallelism: string;
@@ -145,26 +147,30 @@ export function CreateAgentRuntimeFields({
   return (
     <>
       <div className="grid gap-4 md:grid-cols-2">
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium" htmlFor="agent-relay-url">
-            Relay URL
-          </label>
-          <Input
-            aria-describedby="help-agent-relay-url"
-            autoComplete="off"
-            id="agent-relay-url"
-            onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Leave blank to use the desktop relay"
-            value={relayUrl}
-          />
-          <p
-            className="text-xs text-muted-foreground"
-            id="help-agent-relay-url"
-          >
-            WebSocket URL of the relay this agent connects to. Leave blank to
-            use the built-in desktop relay.
-          </p>
-        </div>
+        {/* Relay URL is a per-record value that only Provider agents honor;
+            local agents always use the workspace relay, so hide it for them. */}
+        {isProviderMode ? (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="agent-relay-url">
+              Relay URL
+            </label>
+            <Input
+              aria-describedby="help-agent-relay-url"
+              autoComplete="off"
+              id="agent-relay-url"
+              onChange={(event) => onRelayUrlChange(event.target.value)}
+              placeholder="Leave blank to use the desktop relay"
+              value={relayUrl}
+            />
+            <p
+              className="text-xs text-muted-foreground"
+              id="help-agent-relay-url"
+            >
+              WebSocket URL of the relay this agent connects to. Leave blank to
+              use the built-in desktop relay.
+            </p>
+          </div>
+        ) : null}
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium" htmlFor="agent-acp-command">
