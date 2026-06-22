@@ -35,17 +35,24 @@ export function nextThreadBadgeFrontier(
 // seeded once at open then advanced toward the live marker on subsequent reads
 // (see nextThreadBadgeFrontier). Called during render so snapshots reflect
 // "what was unread on open," matching the openFrontierRef pattern.
+//
+// Reply-presence is keyed on `repliesByRootId`, not the direct-parent map: a
+// root whose only reply is a deep orphan (intermediate ancestor absent from the
+// loaded window) has no direct child but still owns that reply by rootId. Gating
+// on direct children alone skipped such a root entirely, so its frontier never
+// existed and its badge could never clear — the seed-side face of the orphan
+// defect that the count rollup fixes on the tally side.
 export function seedThreadBadgeFrontiers(
   channelFrontiers: Map<string, number | null>,
   messages: TimelineMessage[],
-  directRepliesByParentId: ReadonlyMap<string, TimelineMessage[]>,
+  repliesByRootId: ReadonlyMap<string, TimelineMessage[]>,
   isNotified: (rootId: string) => boolean,
   getReadAt: (rootId: string) => number | null,
 ): void {
   for (const message of messages) {
     if (message.parentId) continue;
     if (!isNotified(message.id)) continue;
-    if (!directRepliesByParentId.has(message.id)) continue;
+    if (!repliesByRootId.has(message.id)) continue;
     channelFrontiers.set(
       message.id,
       nextThreadBadgeFrontier(

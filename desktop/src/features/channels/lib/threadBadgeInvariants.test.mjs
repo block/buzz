@@ -6,7 +6,7 @@ import {
   nextThreadBadgeFrontier,
   seedThreadBadgeFrontiers,
 } from "./threadBadgeFrontier.ts";
-import { buildDirectRepliesByParentId } from "./subtreeCreatedAt.ts";
+import { buildRepliesByRootId } from "./subtreeCreatedAt.ts";
 
 // LP4 characterization invariants for thread-unread badges.
 //
@@ -35,7 +35,7 @@ const notifiedAll = () => true;
 const counts = (messages, frontiers, isNotified = notifiedAll, currentPubkey) =>
   computeThreadBadgeCounts(
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     frontiers,
     isNotified,
     currentPubkey,
@@ -46,7 +46,7 @@ const seed = (frontiers, messages, getReadAt, isNotified = seedAll) =>
   seedThreadBadgeFrontiers(
     frontiers,
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     isNotified,
     getReadAt,
   );

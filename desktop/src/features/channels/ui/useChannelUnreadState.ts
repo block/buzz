@@ -2,8 +2,8 @@ import * as React from "react";
 
 import {
   buildCreatedAtByMessageId,
-  buildDirectRepliesByParentId,
   buildDirectReplyIdsByParentId,
+  buildRepliesByRootId,
   collectReplyDescendantIds,
   subtreeMaxCreatedAt,
 } from "@/features/channels/lib/subtreeCreatedAt";
@@ -118,8 +118,8 @@ export function useChannelUnreadState({
     () => buildDirectReplyIdsByParentId(timelineMessages),
     [timelineMessages],
   );
-  const directRepliesByParentId = React.useMemo(
-    () => buildDirectRepliesByParentId(timelineMessages),
+  const repliesByRootId = React.useMemo(
+    () => buildRepliesByRootId(timelineMessages),
     [timelineMessages],
   );
   const getFirstReplyIdForMessage = React.useCallback(
@@ -147,6 +147,24 @@ export function useChannelUnreadState({
         createdAtByMessageId,
       ),
     [createdAtByMessageId, directReplyIdsByParentId],
+  );
+  // Root-scoped variant of the ceiling, used only by the thread-open mark-read
+  // effect below. Folds in replies that resolve to the root by rootId, so a
+  // severed orphan (intermediate ancestor outside the loaded window) still
+  // raises the ceiling and the channel-root badge can clear on open. The
+  // branch-scoped getSubtreeMaxCreatedAt above stays as-is for the expand
+  // caller, which must advance only its own branch — a branch node owns no
+  // rootId bucket, so passing repliesByRootId there would be a no-op anyway,
+  // but keeping the two callbacks distinct makes the scope intent explicit.
+  const getRootSubtreeMaxCreatedAt = React.useCallback(
+    (rootId: string) =>
+      subtreeMaxCreatedAt(
+        rootId,
+        directReplyIdsByParentId,
+        createdAtByMessageId,
+        repliesByRootId,
+      ),
+    [createdAtByMessageId, directReplyIdsByParentId, repliesByRootId],
   );
   const threadPanelIndex = React.useMemo(
     () => buildThreadPanelIndex(timelineMessages),
@@ -232,10 +250,15 @@ export function useChannelUnreadState({
   React.useEffect(() => {
     if (!openThreadHeadId) return;
     if (isThreadMuted(openThreadHeadId)) return;
-    const openReadCeiling = getSubtreeMaxCreatedAt(openThreadHeadId);
+    const openReadCeiling = getRootSubtreeMaxCreatedAt(openThreadHeadId);
     if (openReadCeiling === null) return;
     markThreadRead(openThreadHeadId, openReadCeiling);
-  }, [openThreadHeadId, getSubtreeMaxCreatedAt, markThreadRead, isThreadMuted]);
+  }, [
+    openThreadHeadId,
+    getRootSubtreeMaxCreatedAt,
+    markThreadRead,
+    isThreadMuted,
+  ]);
   // Compute the in-thread "New" divider position from the open-time frontier.
   const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(() => {
     if (!openThreadHeadId || threadMessages.length === 0) {
@@ -307,7 +330,7 @@ export function useChannelUnreadState({
     seedThreadBadgeFrontiers(
       channelFrontiers,
       timelineMessages,
-      directRepliesByParentId,
+      repliesByRootId,
       (rootId) => !isThreadMuted(rootId),
       (rootId) => getThreadReadAt(rootId, activeChannelId),
     );
@@ -330,7 +353,7 @@ export function useChannelUnreadState({
     () =>
       computeThreadBadgeCounts(
         timelineMessages,
-        directRepliesByParentId,
+        repliesByRootId,
         activeChannelId
           ? threadBadgeFrontiersRef.current.get(activeChannelId)
           : undefined,
@@ -341,7 +364,7 @@ export function useChannelUnreadState({
       activeChannelId,
       currentPubkey,
       timelineMessages,
-      directRepliesByParentId,
+      repliesByRootId,
       isThreadMuted,
       readStateVersion,
     ],

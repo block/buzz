@@ -5,14 +5,16 @@ import {
   subtreeMaxCreatedAt,
   buildDirectReplyIdsByParentId,
   buildCreatedAtByMessageId,
+  buildRepliesByRootId,
 } from "./subtreeCreatedAt.ts";
 
 // The thread-open read ceiling: opening a thread advances its read frontier to
 // subtreeMaxCreatedAt(headId), the newest createdAt anywhere in the head's
 // subtree. The thread-open caller starts the walk at the ROOT (consume the
-// whole thread); the expand caller starts at a BRANCH node (consume only that
-// branch). These tests pin both — Case 1's orphan-misses-ceiling defect and the
-// call-site split that must NOT let expand cross into a sibling branch.
+// whole thread) and folds in rootId-matched orphans; the expand caller starts
+// at a BRANCH node (consume only that branch) with no rootId folding. These
+// tests pin both — Case 1's orphan-misses-ceiling defect and the call-site
+// split that must NOT let expand cross into a sibling branch.
 
 const msg = (id, parentId, createdAt, rootId) => ({
   id,
@@ -21,6 +23,7 @@ const msg = (id, parentId, createdAt, rootId) => ({
   createdAt,
 });
 
+// Branch-scoped ceiling — the expand caller. Parent-chain walk only.
 const ceiling = (headId, messages) =>
   subtreeMaxCreatedAt(
     headId,
@@ -28,28 +31,29 @@ const ceiling = (headId, messages) =>
     buildCreatedAtByMessageId(messages),
   );
 
+// Root-scoped ceiling — the thread-open caller. Folds in replies that resolve
+// to the head by rootId, so a severed orphan still raises the ceiling.
+const rootCeiling = (headId, messages) =>
+  subtreeMaxCreatedAt(
+    headId,
+    buildDirectReplyIdsByParentId(messages),
+    buildCreatedAtByMessageId(messages),
+    buildRepliesByRootId(messages),
+  );
+
 // (3) Case 1 — orphan misses the thread-open ceiling. The deep reply `c` is the
 // newest content (300), but its middle ancestor `b` is unloaded, so `c` keys
-// under absent "b" and the root-started walk never reaches it. The ceiling
-// stops at the newest REACHABLE node (`a` at 200), leaving `c` permanently
-// above the frontier — the channel-root badge can never clear via thread-open.
-//
-// EXPECTED-RED on current code: the parentId-only walk yields 200, not 300.
-// `c.rootId === "root"` is set explicitly — the redesign keys the ceiling walk
-// on rootId-reachability so the orphan is included and the assertion flips to
-// 300. Asserting the DESIRED value (300) makes this a failing characterization
-// of the live defect, not a pin of the bug.
-test("openThreadCeiling_deepOrphanMissingAncestor_includedInCeiling_DEFECT", {
-  todo: "Case 1: parentId walk can't reach the orphan; P2 rootId re-key fixes it",
-}, () => {
+// under absent "b" and the parentId-only walk never reaches it. The root-scoped
+// ceiling folds in `c` by its rootId ("root", which travels with the event via
+// getThreadReference), so it reaches 300 and the channel-root badge can clear.
+test("openThreadCeiling_deepOrphanMissingAncestor_includedInCeiling", () => {
   const loaded = [
     msg("root", null, 50, "root"),
     msg("a", "root", 200, "root"),
     // msg("b", "a", ...) — intentionally absent: unloaded middle ancestor.
     msg("c", "b", 300, "root"),
   ];
-  // DESIRED: ceiling reaches the orphan's 300. Current code returns 200 (RED).
-  assert.equal(ceiling("root", loaded), 300);
+  assert.equal(rootCeiling("root", loaded), 300);
 });
 
 // (3) control — with the middle ancestor present the chain is intact and the

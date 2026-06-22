@@ -2,34 +2,6 @@ import { computeThreadUnreadMarker } from "@/features/messages/lib/unreadMarker"
 import type { TimelineMessage } from "@/features/messages/types";
 
 /**
- * All reply messages in a root's subtree — direct children plus every deeper
- * descendant, walked through the direct-replies adjacency map. A reply-to-a-
- * reply must count toward the root's badge, so the badge tally needs the whole
- * subtree rather than the root's direct children alone.
- *
- * Terminates without a visited-set: buildDirectRepliesByParentId places each
- * message under exactly one parent key, and the only caller seeds the walk from
- * true roots (parentId === null), so a node in a malformed parent cycle — whose
- * members all key off each other, never off a root — is unreachable from any
- * root's bucket. Seeding from a non-root id, or a builder that filed one node
- * under two keys, would break that invariant.
- */
-function collectSubtreeReplies(
-  rootId: string,
-  directRepliesByParentId: ReadonlyMap<string, TimelineMessage[]>,
-): TimelineMessage[] {
-  const replies: TimelineMessage[] = [];
-  const pending = [...(directRepliesByParentId.get(rootId) ?? [])];
-  while (pending.length > 0) {
-    const reply = pending.pop();
-    if (!reply) continue;
-    replies.push(reply);
-    pending.push(...(directRepliesByParentId.get(reply.id) ?? []));
-  }
-  return replies;
-}
-
-/**
  * Per-thread unread reply counts for the summary rows in the main timeline.
  *
  * Counts are computed only for threads the user has notification interest in
@@ -39,9 +11,16 @@ function collectSubtreeReplies(
  * count spans the root's WHOLE subtree, so a reply nested under another reply
  * still tallies toward the root's badge.
  *
+ * Subtree membership is keyed on each reply's `rootId` rather than walked
+ * through the parent chain: a reply whose intermediate ancestor is absent from
+ * the loaded window still carries its true rootId (getThreadReference), so it
+ * rolls up to the root the parent-chain walk could never reach. For an intact
+ * chain every descendant carries the root's rootId, so the tally is identical
+ * to the old adjacency walk. Each reply has exactly one rootId, so it is
+ * counted once and a malformed parent cycle keys off no root.
+ *
  * @param messages Top-level timeline entries in chronological order.
- * @param directRepliesByParentId Direct replies keyed by parent id, walked to
- *   collect each root's full descendant subtree.
+ * @param repliesByRootId Replies grouped by their resolved thread root id.
  * @param frontiers Per-root read frontier in unix seconds, or null/undefined
  *   when the thread was never read (every reply counts unread).
  * @param isNotified Whether a thread root is one the user is notified for.
@@ -49,7 +28,7 @@ function collectSubtreeReplies(
  */
 export function computeThreadBadgeCounts(
   messages: TimelineMessage[],
-  directRepliesByParentId: ReadonlyMap<string, TimelineMessage[]>,
+  repliesByRootId: ReadonlyMap<string, TimelineMessage[]>,
   frontiers: ReadonlyMap<string, number | null> | undefined,
   isNotified: (rootId: string) => boolean,
   currentPubkey?: string,
@@ -58,11 +37,8 @@ export function computeThreadBadgeCounts(
   for (const message of messages) {
     if (message.parentId) continue;
     if (!isNotified(message.id)) continue;
-    const subtreeReplies = collectSubtreeReplies(
-      message.id,
-      directRepliesByParentId,
-    );
-    if (subtreeReplies.length === 0) continue;
+    const subtreeReplies = repliesByRootId.get(message.id);
+    if (!subtreeReplies || subtreeReplies.length === 0) continue;
     const { unreadCount } = computeThreadUnreadMarker(
       subtreeReplies,
       frontiers?.get(message.id) ?? null,

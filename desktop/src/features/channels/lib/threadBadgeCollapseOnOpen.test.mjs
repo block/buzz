@@ -5,8 +5,8 @@ import { computeThreadBadgeCounts } from "./threadBadgeCounts.ts";
 import { nextThreadBadgeFrontier } from "./threadBadgeFrontier.ts";
 import {
   buildCreatedAtByMessageId,
-  buildDirectRepliesByParentId,
   buildDirectReplyIdsByParentId,
+  buildRepliesByRootId,
   subtreeMaxCreatedAt,
 } from "./subtreeCreatedAt.ts";
 
@@ -21,9 +21,13 @@ import {
 // (subtreeMaxCreatedAt); these tests pin that the badge collapses to 0 on open
 // whether or not the OWN marker actually advances.
 
+// rootId is "root" on every reply: these threads are all rooted at "root", and
+// the badge roll-up groups by rootId (getThreadReference's `root` e-tag), so the
+// nested b under a still tallies at root. Top-level "root" carries its own id.
 const msg = (id, parentId, createdAt, pubkey = "author") => ({
   id,
   parentId,
+  rootId: parentId === null ? id : "root",
   createdAt,
   pubkey,
 });
@@ -53,7 +57,7 @@ const badgeAfterOpen = (rootId, messages, priorOwnMarker, currentPubkey) => {
   const frontier = nextThreadBadgeFrontier(undefined, liveMarker);
   return computeThreadBadgeCounts(
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     new Map([[rootId, frontier]]),
     () => true,
     currentPubkey,
@@ -102,7 +106,7 @@ test("openThreadWithUnreadNestedReply_oldDirectCeilingLeftBadgeLit", () => {
   const frontier = nextThreadBadgeFrontier(undefined, oldDirectCeiling);
   const count = computeThreadBadgeCounts(
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     new Map([["root", frontier]]),
     () => true,
   ).get("root");
@@ -135,7 +139,7 @@ test("openThreadWhereOnlyUnreadIsOwnReply_neverShowsBadge", () => {
   // Frontier below every reply (never read) — only "other"'s reply a counts.
   const beforeOpen = computeThreadBadgeCounts(
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     new Map([["root", null]]),
     () => true,
     "me",
@@ -154,7 +158,7 @@ test("openThreadWhereEveryUnreadIsOwnReply_inertNoBadgeEver", () => {
   ];
   const before = computeThreadBadgeCounts(
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     new Map([["root", null]]),
     () => true,
     "me",

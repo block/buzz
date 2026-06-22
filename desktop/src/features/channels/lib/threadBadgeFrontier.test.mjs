@@ -3,16 +3,16 @@ import test from "node:test";
 
 import { nextThreadBadgeFrontier } from "./threadBadgeFrontier.ts";
 import { seedThreadBadgeFrontiers } from "./threadBadgeFrontier.ts";
-import { buildDirectRepliesByParentId } from "./subtreeCreatedAt.ts";
+import { buildRepliesByRootId } from "./subtreeCreatedAt.ts";
 import { computeThreadBadgeCounts } from "./threadBadgeCounts.ts";
 
-const msg = (id, parentId) => ({ id, parentId });
+const msg = (id, parentId) => ({ id, parentId, rootId: parentId ?? id });
 const seedAll = () => true;
 const seed = (frontiers, messages, isNotified, getReadAt) =>
   seedThreadBadgeFrontiers(
     frontiers,
     messages,
-    buildDirectRepliesByParentId(messages),
+    buildRepliesByRootId(messages),
     isNotified,
     getReadAt,
   );
@@ -131,14 +131,14 @@ test("seedThreadBadgeFrontiers_channelMarkerFoldedIntoSeed_badgeVanishes_DEFECT"
   // already advanced the channel marker to 250, so the EFFECTIVE marker
   // getReadAt returns is max(100, 250) = 250.
   const messages = [reply("root", null, 50), reply("r1", "root", 200)];
-  const directReplies = buildDirectRepliesByParentId(messages);
+  const repliesByRootId = buildRepliesByRootId(messages);
   const foldedEffectiveMarker = Math.max(100, 250); // thread_own vs channel
 
   const frontiers = new Map();
   seedThreadBadgeFrontiers(
     frontiers,
     messages,
-    directReplies,
+    repliesByRootId,
     seedAll,
     () => foldedEffectiveMarker,
   );
@@ -147,7 +147,7 @@ test("seedThreadBadgeFrontiers_channelMarkerFoldedIntoSeed_badgeVanishes_DEFECT"
 
   const result = computeThreadBadgeCounts(
     messages,
-    directReplies,
+    repliesByRootId,
     frontiers,
     seedAll,
   );
@@ -159,14 +159,14 @@ test("seedThreadBadgeFrontiers_preMarkReadMarkerSeeded_badgeSurvives_DESIRED", (
   // Identical thread, but the seed reads the PRE-mark-read marker: the thread's
   // own marker (100), captured before the channel-open fold advanced it to 250.
   const messages = [reply("root", null, 50), reply("r1", "root", 200)];
-  const directReplies = buildDirectRepliesByParentId(messages);
+  const repliesByRootId = buildRepliesByRootId(messages);
   const preMarkReadMarker = 100; // thread_own only, channel fold not applied
 
   const frontiers = new Map();
   seedThreadBadgeFrontiers(
     frontiers,
     messages,
-    directReplies,
+    repliesByRootId,
     seedAll,
     () => preMarkReadMarker,
   );
@@ -175,7 +175,7 @@ test("seedThreadBadgeFrontiers_preMarkReadMarkerSeeded_badgeSurvives_DESIRED", (
 
   const result = computeThreadBadgeCounts(
     messages,
-    directReplies,
+    repliesByRootId,
     frontiers,
     seedAll,
   );
@@ -183,31 +183,23 @@ test("seedThreadBadgeFrontiers_preMarkReadMarkerSeeded_badgeSurvives_DESIRED", (
   assert.equal(result.get("root"), 1);
 });
 
-// --- LP4 Case 3, second face: orphan-only root is never seeded at all ---
+// --- LP4 Case 3, second face: orphan-only root IS seed-eligible ---
 //
-// seedThreadBadgeFrontiers gates seed-eligibility on a DIRECT reply existing:
-// `if (!directRepliesByParentId.has(message.id)) continue;` (threadBadgeFrontier
-// .ts). A root whose ONLY reply is a deep orphan — the middle ancestor unloaded,
-// so the orphan keys under its absent parent, not the root — has NO direct-reply
-// entry. So the root is skipped: its frontier is never created. This is a
-// distinct failure from a wrong COUNT (the count tests above) — here the
-// frontier snapshot itself never exists, so even a corrected count path has
-// nothing to measure against.
-//
-// The orphan carries rootId === "root" (getThreadReference resolves it from the
-// event's own `root` e-tag regardless of ancestor load state), which is exactly
-// the key the redesign will use to make the root seed-eligible. This test is
-// expected-RED on current code (root is skipped, so it asserts the DESIRED
-// seeded state and fails today) and flips green once seeding keys eligibility
-// on rootId-reachability rather than a direct-reply entry.
+// seedThreadBadgeFrontiers gates seed-eligibility on a reply existing under the
+// root by rootId: `if (!repliesByRootId.has(message.id)) continue;`. A root
+// whose ONLY reply is a deep orphan — the middle ancestor unloaded, so the
+// orphan keys under its absent parent in the direct-reply map — still owns that
+// reply by rootId (getThreadReference resolves rootId from the event's own
+// `root` e-tag regardless of ancestor load state). The old direct-reply gate
+// skipped such a root entirely, so its frontier never existed and its badge
+// could never clear; keying on rootId makes it seed-eligible. This is a face of
+// Case 3 distinct from a wrong COUNT — here the frontier snapshot itself was
+// missing, so even a corrected count path had nothing to measure against.
 
-test("seedThreadBadgeFrontiers_orphanOnlyRoot_seedEligible_DEFECT", {
-  todo: "Case 3 second face: direct-reply seed gate skips orphan-only roots; P2 rootId re-key fixes it",
-}, () => {
+test("seedThreadBadgeFrontiers_orphanOnlyRoot_seedEligible", () => {
   // root's only reply is `c`, whose middle ancestor `b` is unloaded. `c` keys
-  // under "b" (absent), so directRepliesByParentId has NO entry for "root" and
-  // today's seed skips it. DESIRED: the root IS seed-eligible (orphan is part of
-  // its thread by rootId) and seeds to the read marker 100.
+  // under "b" (absent) in the direct-reply map but carries rootId === "root",
+  // so repliesByRootId has an entry for "root" and the root seeds to marker 100.
   const messages = [
     reply("root", null, 50),
     // reply("b", "root", ...) — intentionally absent: unloaded ancestor.
@@ -215,14 +207,12 @@ test("seedThreadBadgeFrontiers_orphanOnlyRoot_seedEligible_DEFECT", {
   ];
   const frontiers = new Map();
   seed(frontiers, messages, seedAll, () => 100);
-  // EXPECTED-RED on current code: root is skipped (frontier absent). Post-fix
-  // the root is seeded to 100 and this passes.
   assert.equal(frontiers.get("root"), 100);
 });
 
 test("seedThreadBadgeFrontiers_directReplyRoot_seedEligible_DESIRED", () => {
-  // Control: the SAME root with a DIRECT reply present. directRepliesByParentId
-  // has an entry for "root", so it is seed-eligible today and after the fix.
+  // Control: the SAME root with a DIRECT reply present. repliesByRootId has an
+  // entry for "root", so it is seed-eligible — the intact-chain baseline.
   const messages = [reply("root", null, 50), reply("r1", "root", 200)];
   const frontiers = new Map();
   seed(frontiers, messages, seedAll, () => 100);
