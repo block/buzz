@@ -168,6 +168,31 @@ pub(crate) const KEYRING_SERVICE: &str = "buzz-desktop";
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";
 
+/// The keyring operations the identity resolution flow needs. Abstracted so the
+/// corrupt-keyring recovery decision ([`recover_from_keyring`]) can be
+/// unit-tested against a fake without touching the live OS keyring.
+trait IdentityKeyStore {
+    fn probe(&self, name: &str) -> crate::secret_store::KeyringProbe;
+    fn load(&self, name: &str) -> Result<Option<String>, String>;
+    fn store(&self, name: &str, value: &str) -> Result<(), String>;
+    fn delete(&self, name: &str) -> Result<(), String>;
+}
+
+impl IdentityKeyStore for crate::secret_store::SecretStore {
+    fn probe(&self, name: &str) -> crate::secret_store::KeyringProbe {
+        crate::secret_store::SecretStore::probe(self, name)
+    }
+    fn load(&self, name: &str) -> Result<Option<String>, String> {
+        crate::secret_store::SecretStore::load(self, name)
+    }
+    fn store(&self, name: &str, value: &str) -> Result<(), String> {
+        crate::secret_store::SecretStore::store(self, name, value)
+    }
+    fn delete(&self, name: &str) -> Result<(), String> {
+        crate::secret_store::SecretStore::delete(self, name)
+    }
+}
+
 /// Resolve the human identity key: migrate a legacy `identity.key` into the
 /// keyring when safe, otherwise load from whichever backend holds it, else
 /// generate-and-save.
@@ -178,8 +203,6 @@ const IDENTITY_KEY_NAME: &str = "identity";
 /// later import from a leftover (possibly rotated) file could resurrect an old
 /// key.
 fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
-    use crate::secret_store::KeyringProbe;
-
     let legacy_path = data_dir.join("identity.key");
 
     // No keyring available in this build: the `0o600` file is the only store.
@@ -188,17 +211,44 @@ fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
     }
 
     let store = crate::secret_store::SecretStore::keyring(KEYRING_SERVICE);
+    resolve_identity_with_store(&store, &legacy_path, data_dir)
+}
+
+/// Identity resolution over an [`IdentityKeyStore`] seam. Split from
+/// [`load_or_create_identity`] so the probe/recover branches are testable
+/// without the live OS keyring.
+fn resolve_identity_with_store(
+    store: &impl IdentityKeyStore,
+    legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<Keys, String> {
+    use crate::secret_store::KeyringProbe;
 
     match store.probe(IDENTITY_KEY_NAME) {
         KeyringProbe::Present => {
             if let Some(nsec) = store.load(IDENTITY_KEY_NAME)? {
-                let keys = parse_or_quarantine(&nsec, &legacy_path, data_dir)?;
-                // The key is authoritative in the keyring. A leftover
-                // `identity.key` means a prior migration's `remove_file` failed
-                // (transient AV lock, read-only mount, EPERM) and never retried
-                // — clean it up now so plaintext does not linger on disk.
-                cleanup_leftover_identity_file(&legacy_path);
-                return Ok(keys);
+                match Keys::parse(nsec.trim()) {
+                    Ok(keys) => {
+                        eprintln!(
+                            "buzz-desktop: persisted identity pubkey {}",
+                            keys.public_key().to_hex()
+                        );
+                        // The key is authoritative in the keyring. A leftover
+                        // `identity.key` means a prior migration's `remove_file`
+                        // failed (transient AV lock, read-only mount, EPERM) and
+                        // never retried — clean it up now so plaintext does not
+                        // linger on disk.
+                        cleanup_leftover_identity_file(legacy_path);
+                        return Ok(keys);
+                    }
+                    // The corruption is in the KEYRING, not the file. Clear the
+                    // bad keyring value and recover from the file (or generate
+                    // fresh) — do NOT quarantine a valid leftover `identity.key`
+                    // that holds the user's only good key.
+                    Err(error) => {
+                        return recover_from_keyring(store, legacy_path, &error.to_string());
+                    }
+                }
             }
             // Probe said Present but load found nothing — treat as empty.
         }
@@ -206,18 +256,39 @@ fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
             // One-time migration: import the legacy plaintext file, read-back
             // verify, THEN delete it.
             if legacy_path.exists() {
-                if let Some(keys) = migrate_identity_file(&store, &legacy_path)? {
+                if let Some(keys) = migrate_identity_file(store, legacy_path)? {
                     return Ok(keys);
                 }
             }
         }
         KeyringProbe::Unreachable => {
             // Keyring down this boot — read the file directly, do NOT migrate.
-            return load_file_or_generate(&legacy_path, data_dir);
+            return load_file_or_generate(legacy_path, data_dir);
         }
     }
 
-    generate_and_persist(&store, &legacy_path)
+    generate_and_persist(store, legacy_path)
+}
+
+/// Recover from a corrupt nsec in the keyring (parse failed). Clear the bad
+/// keyring value, then migrate a valid leftover `identity.key` if one exists,
+/// generating fresh only as a last resort. The keyring delete is best-effort:
+/// a delete failure logs and continues — it must never block startup.
+fn recover_from_keyring(
+    store: &impl IdentityKeyStore,
+    legacy_path: &std::path::Path,
+    error: &str,
+) -> Result<Keys, String> {
+    eprintln!("buzz-desktop: corrupt nsec in keyring ({error}), clearing and recovering from file");
+    if let Err(e) = store.delete(IDENTITY_KEY_NAME) {
+        eprintln!("buzz-desktop: failed to clear corrupt keyring value: {e}");
+    }
+    if legacy_path.exists() {
+        if let Some(keys) = migrate_identity_file(store, legacy_path)? {
+            return Ok(keys);
+        }
+    }
+    generate_and_persist(store, legacy_path)
 }
 
 /// Load the `0o600` identity file, quarantining corruption, else generate and
@@ -251,7 +322,7 @@ fn load_file_or_generate(
 /// then delete the file. Returns `Ok(None)` if the file was corrupt (caller
 /// continues to generate-and-save).
 fn migrate_identity_file(
-    store: &crate::secret_store::SecretStore,
+    store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
 ) -> Result<Option<Keys>, String> {
     let keys = match load_key_file(legacy_path) {
@@ -283,7 +354,7 @@ fn migrate_identity_file(
 
 /// Generate a fresh identity, persist it through the store, return it.
 fn generate_and_persist(
-    store: &crate::secret_store::SecretStore,
+    store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
 ) -> Result<Keys, String> {
     let keys = Keys::generate();
@@ -298,7 +369,7 @@ fn generate_and_persist(
 /// Persist `keys` through the store, falling back to the `0o600` file when the
 /// keyring write fails on an availability error.
 fn persist_identity(
-    store: &crate::secret_store::SecretStore,
+    store: &impl IdentityKeyStore,
     keys: &Keys,
     legacy_path: &std::path::Path,
 ) -> Result<(), String> {
@@ -311,31 +382,6 @@ fn persist_identity(
         Err(keyring_err) => {
             eprintln!("buzz-desktop: keyring write failed ({keyring_err}), using file fallback");
             save_key_file(legacy_path, keys)
-        }
-    }
-}
-
-fn parse_or_quarantine(
-    nsec: &str,
-    legacy_path: &std::path::Path,
-    data_dir: &std::path::Path,
-) -> Result<Keys, String> {
-    match Keys::parse(nsec.trim()) {
-        Ok(keys) => {
-            eprintln!(
-                "buzz-desktop: persisted identity pubkey {}",
-                keys.public_key().to_hex()
-            );
-            Ok(keys)
-        }
-        Err(error) => {
-            quarantine_corrupt_key(
-                legacy_path,
-                data_dir,
-                &format!("parse keyring nsec: {error}"),
-            );
-            let store = crate::secret_store::SecretStore::keyring(KEYRING_SERVICE);
-            generate_and_persist(&store, legacy_path)
         }
     }
 }
@@ -571,5 +617,131 @@ mod tests {
 
         let loaded = load_key_file(&path).unwrap();
         assert_key_eq(&keys2, &loaded);
+    }
+
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use crate::secret_store::KeyringProbe;
+
+    /// In-memory [`IdentityKeyStore`] for testing identity recovery without the
+    /// OS keyring. Seeded with an initial value and a probe outcome; records
+    /// every `delete`/`store` so tests can assert the keyring was cleared and
+    /// rewritten. `write_and_verify` succeeds (store then load reflects it).
+    struct FakeIdentityStore {
+        probe: KeyringProbe,
+        slot: RefCell<HashMap<String, String>>,
+        deleted: RefCell<Vec<String>>,
+    }
+
+    impl FakeIdentityStore {
+        fn present_with(value: &str) -> Self {
+            let mut slot = HashMap::new();
+            slot.insert(IDENTITY_KEY_NAME.to_string(), value.to_string());
+            Self {
+                probe: KeyringProbe::Present,
+                slot: RefCell::new(slot),
+                deleted: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl IdentityKeyStore for FakeIdentityStore {
+        fn probe(&self, _name: &str) -> KeyringProbe {
+            self.probe
+        }
+        fn load(&self, name: &str) -> Result<Option<String>, String> {
+            Ok(self.slot.borrow().get(name).cloned())
+        }
+        fn store(&self, name: &str, value: &str) -> Result<(), String> {
+            self.slot
+                .borrow_mut()
+                .insert(name.to_string(), value.to_string());
+            Ok(())
+        }
+        fn delete(&self, name: &str) -> Result<(), String> {
+            self.deleted.borrow_mut().push(name.to_string());
+            self.slot.borrow_mut().remove(name);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn corrupt_keyring_recovers_valid_file_without_rotating() {
+        // The load-bearing regression guard. When the keyring holds a corrupt
+        // nsec (Present) AND a valid `identity.key` is on disk (leftover from a
+        // failed prior migration), recovery must RECOVER THE FILE'S identity —
+        // not quarantine the file and rotate to a fresh key (the original
+        // hazard). The corrupt keyring value must be cleared and replaced by the
+        // file's key (migrated in).
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        let file_keys = Keys::generate();
+        save_key_file(&legacy_path, &file_keys).unwrap();
+
+        let store = FakeIdentityStore::present_with("not-a-valid-nsec");
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        // The FILE's identity is recovered — NOT a freshly generated one.
+        assert_key_eq(&file_keys, &resolved);
+        // The corrupt keyring value was cleared.
+        assert_eq!(store.deleted.borrow().as_slice(), [IDENTITY_KEY_NAME]);
+        // The keyring now holds the file's key (migrated in, read-back verified).
+        let file_nsec = file_keys.secret_key().to_bech32().unwrap();
+        assert_eq!(
+            store
+                .slot
+                .borrow()
+                .get(IDENTITY_KEY_NAME)
+                .map(String::as_str),
+            Some(file_nsec.as_str())
+        );
+        // The valid file was migrated (deleted), not quarantined to .bad.*.
+        assert!(!legacy_path.exists());
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".bad.")));
+    }
+
+    #[test]
+    fn corrupt_keyring_generates_fresh_only_when_no_file() {
+        // With a corrupt keyring value and NO file on disk, generate-fresh is
+        // the correct last resort — and the corrupt keyring value is cleared
+        // first.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        assert!(!legacy_path.exists());
+
+        let store = FakeIdentityStore::present_with("not-a-valid-nsec");
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        assert_eq!(store.deleted.borrow().as_slice(), [IDENTITY_KEY_NAME]);
+        // A fresh, valid key was persisted to the keyring (replacing the cleared
+        // corrupt value).
+        let stored = store.slot.borrow().get(IDENTITY_KEY_NAME).cloned();
+        assert_eq!(
+            stored.as_deref(),
+            Some(resolved.secret_key().to_bech32().unwrap().as_str())
+        );
+    }
+
+    #[test]
+    fn valid_keyring_is_used_and_leftover_file_cleaned_up() {
+        // The happy path is unchanged: a valid keyring value is used as-is, and
+        // a leftover plaintext file is cleaned up (keyring is authoritative).
+        let keyring_keys = Keys::generate();
+        let nsec = keyring_keys.secret_key().to_bech32().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        save_key_file(&legacy_path, &Keys::generate()).unwrap();
+
+        let store = FakeIdentityStore::present_with(&nsec);
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        assert_key_eq(&keyring_keys, &resolved);
+        assert!(store.deleted.borrow().is_empty());
+        assert!(!legacy_path.exists());
     }
 }
