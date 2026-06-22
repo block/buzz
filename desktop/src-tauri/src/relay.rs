@@ -11,6 +11,11 @@ use crate::app_state::AppState;
 
 const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 
+// A reached-but-malformed 2xx body is NOT a connectivity failure, so this
+// message must never carry the "relay unreachable:" prefix the frontend
+// classifier keys on. Extracted to a const so a test can pin that contract.
+const MALFORMED_RESPONSE_MESSAGE: &str = "relay returned malformed response: not valid JSON";
+
 fn configured_env_var(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -239,7 +244,7 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     response
         .json::<T>()
         .await
-        .map_err(|_| "relay returned malformed response: not valid JSON".to_string())
+        .map_err(|_| MALFORMED_RESPONSE_MESSAGE.to_string())
 }
 
 pub async fn relay_error_message(response: reqwest::Response) -> String {
@@ -580,7 +585,7 @@ pub async fn submit_event_with_keys(
 mod tests {
     use super::{
         build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-        parse_command_response, relay_http_base_url,
+        parse_command_response, relay_http_base_url, MALFORMED_RESPONSE_MESSAGE,
     };
     use serde::Deserialize;
 
@@ -747,6 +752,19 @@ mod tests {
 
     // classify_request_error requires a real reqwest::Error (not publicly
     // constructable) — tested indirectly through integration; skipped here.
+
+    // ── parse_json_response malformed-body contract ──────────────────────────
+
+    #[test]
+    fn malformed_response_message_stays_off_unreachable_bucket() {
+        // A reached-but-malformed 2xx body is not a connectivity failure. If this
+        // message ever regains the "relay unreachable:" prefix, the frontend
+        // classifier would misroute it as unreachable — pin that it never does.
+        assert!(
+            !MALFORMED_RESPONSE_MESSAGE.starts_with("relay unreachable:"),
+            "malformed-response message must not match the unreachable prefix"
+        );
+    }
 
     // ── parse_command_response ───────────────────────────────────────────────
 

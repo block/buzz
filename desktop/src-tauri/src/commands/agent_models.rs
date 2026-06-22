@@ -188,7 +188,13 @@ pub async fn update_managed_agent(
         if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
             record.turn_timeout_seconds = turn_timeout_seconds;
         }
-        if let Some(relay_url) = input.relay_url {
+        // Local agents always live on the workspace relay — ignore any
+        // user-supplied relay_url and force the workspace relay so the
+        // local-relay invariant holds at update too, not just at birth.
+        // Mirrors the create-time guard; Provider agents keep their own relay.
+        if record.backend == crate::managed_agents::BackendKind::Local {
+            record.relay_url = relay_ws_url_with_override(&state);
+        } else if let Some(relay_url) = input.relay_url {
             let trimmed = relay_url.trim();
             record.relay_url = if trimmed.is_empty() {
                 relay_ws_url_with_override(&state)
