@@ -432,10 +432,11 @@ pub async fn sync_managed_agent_profile(
 
 /// Query the relay for an agent's kind:0 profile event.
 ///
-/// Queries the relay identified by `relay_url`. Callers pass the workspace relay
-/// for `Local` agents (which always live on the workspace relay) and the agent's
-/// stored per-record `relay_url` for remote agents, so the query targets the
-/// host the profile is actually published to.
+/// Queries the relay identified by `relay_url`. Callers uniformly pass the
+/// relay resolved by `effective_agent_relay_url` for every agent regardless of
+/// backend — an explicit per-agent pin, or the active workspace relay when the
+/// agent has none — so the query targets the host the profile is actually
+/// published to.
 ///
 /// Returns the parsed profile content (display_name, picture) if a kind:0 event
 /// exists for the given pubkey, or `None` if no profile is published.

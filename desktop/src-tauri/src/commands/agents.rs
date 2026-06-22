@@ -145,6 +145,7 @@ async fn start_local_agent_with_preflight(
 /// empty map would surface as an opaque 401 from the provider.
 fn build_deploy_payload(
     app: &AppHandle,
+    state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
     // Merge persona env_vars + agent env_vars for provider deploy. Same
@@ -174,7 +175,15 @@ fn build_deploy_payload(
 
     Ok(serde_json::json!({
         "name": &record.name,
-        "relay_url": &record.relay_url,
+        // Resolve the per-agent pin against the active workspace relay here:
+        // this payload crosses the host boundary to a remote provider harness
+        // that has no notion of the desktop's workspace, so the blank→workspace
+        // fallback (otherwise applied at read-time in `effective_agent_relay_url`)
+        // must be materialized into a concrete URL before serializing.
+        "relay_url": crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &relay_ws_url_with_override(state),
+        ),
         "private_key_nsec": &record.private_key_nsec,
         "auth_tag": &record.auth_tag,
         "agent_command": &record.agent_command,
@@ -667,7 +676,7 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|r| r.pubkey == pubkey)
                     .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(&app, rec)
+                build_deploy_payload(&app, &state, rec)
             };
             // The agent was already persisted in Phase 3 — converting a
             // persona-resolution failure into `spawn_error` (rather than
@@ -805,7 +814,7 @@ pub async fn start_managed_agent(
             StartTarget::Provider {
                 backend: record.backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
-                agent_json: build_deploy_payload(&app, record)?,
+                agent_json: build_deploy_payload(&app, &state, record)?,
             }
         };
 
@@ -910,11 +919,11 @@ fn resolve_legacy_avatar(
 /// profile — and persists the updated record. After backfill, normal
 /// reconciliation proceeds.
 ///
-/// Query and publish target the workspace relay for `Local` agents (which always
-/// live on the workspace relay) and the agent's stored `relay_url` for remote
-/// agents (whose profile lives on a per-record relay). For local agents this
-/// makes reconciliation follow the session's relay rather than a frozen
-/// per-record value that may have drifted from where the agent actually runs.
+/// Query and publish target the relay returned by `effective_agent_relay_url`
+/// for every agent regardless of backend: an explicit per-agent `relay_url`
+/// wins, and a blank one falls back to the active workspace relay. This keeps
+/// reconciliation following the session's relay for never-pinned agents while
+/// honoring a deliberate pin wherever it points.
 pub(crate) async fn reconcile_agent_profile(
     state: &AppState,
     app: &AppHandle,
