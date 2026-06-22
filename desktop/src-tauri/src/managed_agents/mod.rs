@@ -14,6 +14,7 @@ mod restore;
 pub mod retention;
 mod runtime;
 mod storage;
+pub(crate) mod team_events;
 mod team_repair;
 mod teams;
 mod types;
