@@ -14,10 +14,8 @@ import {
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
 import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
-import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -54,6 +52,11 @@ const FILTER_OPTIONS: Array<{ label: string; value: InboxFilter }> = [
   { value: "reminders", label: "Reminders" },
 ];
 
+const INBOX_HEADER_ICON_BUTTON_CLASS =
+  "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:bg-muted/70 data-[state=open]:text-foreground disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0";
+const INBOX_PANE_RIGHT_DIVIDER_CLASS =
+  "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:z-40 after:w-px after:bg-border/35 after:content-['']";
+
 function ActivityLabel({
   isDone,
   isActionRequired,
@@ -67,7 +70,7 @@ function ActivityLabel({
     <div
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
-        "mt-0 flex min-w-0 items-center gap-1.5 text-2xs leading-3",
+        "mt-0 flex min-w-0 items-center gap-1.5 text-2xs leading-3 group-hover/inbox-item:pr-[6.75rem] group-focus-within/inbox-item:pr-[6.75rem]",
         isActionRequired && !isDone
           ? "font-medium text-amber-600/80 dark:text-amber-300/80"
           : isDone
@@ -150,18 +153,26 @@ export function InboxListPane({
     const hasActiveReminder = activeReminderEventIds?.has(item.id) ?? false;
     const hasChannelTarget = Boolean(item.item.channelId);
     const typeLabel = getInboxTypeLabel(item);
+    const rowHighlightColor = isSelected
+      ? "color-mix(in srgb, hsl(var(--background)) 70%, hsl(var(--muted)) 30%)"
+      : "color-mix(in srgb, hsl(var(--background)) 75%, hsl(var(--muted)) 25%)";
 
     const row = (
       <div
         className="group/inbox-item relative"
         data-testid={`home-inbox-item-${item.id}`}
+        style={
+          {
+            "--inbox-row-highlight-bg": rowHighlightColor,
+          } as React.CSSProperties
+        }
       >
         <button
           className={cn(
-            "relative block w-full border-l px-5 py-2.5 text-left transition-colors after:pointer-events-none after:absolute after:bottom-0 after:left-[3.875rem] after:right-0 after:h-px after:bg-border/45 after:content-['']",
+            "relative block w-full border-l px-3 py-4 text-left transition-colors after:pointer-events-none after:absolute after:bottom-0 after:left-[3.375rem] after:right-0 after:h-px after:bg-border/45 after:content-['']",
             isSelected
-              ? "border-l-transparent bg-muted/30"
-              : "border-l-transparent hover:bg-muted/25 active:bg-muted/40",
+              ? "border-l-transparent bg-[var(--inbox-row-highlight-bg)]"
+              : "border-l-transparent group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] active:bg-muted/40",
             index === items.length - 1 && "after:hidden",
           )}
           onClick={() => onSelect(item.id)}
@@ -202,67 +213,63 @@ export function InboxListPane({
                 isDone={isDone}
                 label={typeLabel}
               />
-            </div>
-          </div>
 
-          <div
-            className={cn(
-              "mt-1.5 text-sm leading-5 [&_a]:font-medium [&_a]:text-current",
-              isDone
-                ? "font-normal text-muted-foreground"
-                : "font-semibold text-foreground",
-            )}
-          >
-            <Markdown
-              className="inbox-preview-markdown text-inherit leading-5"
-              content={item.preview}
-              interactive={false}
-              mentionNames={item.mentionNames}
-            />
+              <div
+                className={cn(
+                  "mt-1.5 text-sm leading-5 [&_a]:font-medium [&_a]:text-current",
+                  isDone
+                    ? "font-normal text-muted-foreground"
+                    : "font-semibold text-foreground",
+                )}
+              >
+                <Markdown
+                  className="inbox-preview-markdown text-inherit leading-5"
+                  content={item.preview}
+                  interactive={false}
+                  mentionNames={item.mentionNames}
+                />
+              </div>
+            </div>
           </div>
         </button>
 
-        <div className="pointer-events-none absolute right-4 top-2 z-10 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
-          <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
-            <div className="flex items-center gap-0.5 p-1">
-              {isDone ? (
-                <InboxRowActionButton
-                  label="Mark unread"
-                  onClick={() => onMarkUnread(item.id)}
-                >
-                  <MailOpen className="!h-4 !w-4" />
-                </InboxRowActionButton>
-              ) : (
-                <InboxRowActionButton
-                  label="Mark as read"
-                  onClick={() => onMarkRead(item.id)}
-                >
-                  <MailOpen className="!h-4 !w-4" />
-                </InboxRowActionButton>
-              )}
-              <InboxRowActionButton
-                disabled={!hasChannelTarget}
-                label={hasChannelTarget ? "Open in channel" : "No channel link"}
-                onClick={() => onOpenDirect(item)}
-              >
-                <ExternalLink className="!h-4 !w-4" />
-              </InboxRowActionButton>
-              <InboxRowActionButton
-                active={hasActiveReminder}
-                disabled={!hasChannelTarget}
-                label={
-                  hasChannelTarget
-                    ? hasActiveReminder
-                      ? "Reminder set"
-                      : "Remind me later"
-                    : "Cannot remind without a channel"
-                }
-                onClick={() => onRemindLater(item)}
-              >
-                <Clock className="!h-4 !w-4" />
-              </InboxRowActionButton>
-            </div>
-          </div>
+        <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-[var(--inbox-row-highlight-bg)] p-1 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
+          {isDone ? (
+            <InboxRowActionButton
+              label="Mark unread"
+              onClick={() => onMarkUnread(item.id)}
+            >
+              <MailOpen className="!h-4 !w-4" />
+            </InboxRowActionButton>
+          ) : (
+            <InboxRowActionButton
+              label="Mark as read"
+              onClick={() => onMarkRead(item.id)}
+            >
+              <MailOpen className="!h-4 !w-4" />
+            </InboxRowActionButton>
+          )}
+          <InboxRowActionButton
+            disabled={!hasChannelTarget}
+            label={hasChannelTarget ? "Open in channel" : "No channel link"}
+            onClick={() => onOpenDirect(item)}
+          >
+            <ExternalLink className="!h-4 !w-4" />
+          </InboxRowActionButton>
+          <InboxRowActionButton
+            active={hasActiveReminder}
+            disabled={!hasChannelTarget}
+            label={
+              hasChannelTarget
+                ? hasActiveReminder
+                  ? "Reminder set"
+                  : "Remind me later"
+                : "Cannot remind without a channel"
+            }
+            onClick={() => onRemindLater(item)}
+          >
+            <Clock className="!h-4 !w-4" />
+          </InboxRowActionButton>
         </div>
       </div>
     );
@@ -314,24 +321,22 @@ export function InboxListPane({
     <section
       className={cn(
         "relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60",
-        showRightDivider && topChromeInset.verticalDivider,
+        showRightDivider && INBOX_PANE_RIGHT_DIVIDER_CLASS,
       )}
     >
       <TopChromeInsetHeader flush>
-        <div className="px-5 py-1">
+        <div className="px-3 py-1">
           <div className="flex w-full min-w-0 items-center justify-between gap-3">
             <Popover>
               <PopoverTrigger asChild>
-                <Button
+                <button
                   aria-label="Inbox options"
-                  className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                  className={INBOX_HEADER_ICON_BUTTON_CLASS}
                   data-testid="inbox-options-trigger"
-                  size="icon"
                   type="button"
-                  variant="outline"
                 >
                   <Ellipsis className="h-4 w-4" />
-                </Button>
+                </button>
               </PopoverTrigger>
               <PopoverContent align="start" className="w-60 p-2">
                 <div
@@ -374,13 +379,11 @@ export function InboxListPane({
             <div className="ml-auto flex shrink-0 items-center justify-end">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button
+                  <button
                     aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}`}
-                    className="relative h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                    className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "relative")}
                     data-testid="inbox-filter-trigger"
-                    size="icon"
                     type="button"
-                    variant="outline"
                   >
                     <ListFilter className="h-4 w-4" />
                     {dueReminderCount > 0 ? (
@@ -391,7 +394,7 @@ export function InboxListPane({
                         {dueReminderCount}
                       </span>
                     ) : null}
-                  </Button>
+                  </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-48">
                   <DropdownMenuRadioGroup
