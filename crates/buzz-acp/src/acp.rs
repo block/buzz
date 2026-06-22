@@ -158,6 +158,14 @@ pub struct AcpClient {
     /// agents will simply never populate this — readers must treat `None`
     /// as "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
+    /// Per-turn channel for receiving goose-native non-cancelling steer
+    /// requests from the main loop. Installed by
+    /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
+    /// consumed (via `take()`) by `session_prompt_with_idle_timeout` so it
+    /// is dropped at scope exit alongside the turn it served. `None`
+    /// outside of a goose-native turn — the read loop's steer arm is
+    /// disabled in that case.
+    steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
 }
 
 impl AcpClient {
@@ -248,6 +256,7 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
+            steer_rx: None,
         })
     }
 
@@ -436,7 +445,7 @@ impl AcpClient {
         }
 
         let result = self
-            .read_until_response_with_idle_timeout(id, idle_timeout, hard_deadline)
+            .read_until_response_with_idle_timeout(session_id, id, idle_timeout, hard_deadline)
             .await;
 
         // On timeout errors, leave current_hard_deadline set so cancel_with_cleanup
@@ -482,31 +491,36 @@ impl AcpClient {
     /// `session_info_update`, if any.
     ///
     /// Goose-only: other agents leave this `None` for the lifetime of the
-    /// client. Used by callers of [`send_custom_request`] when targeting
-    /// `_goose/unstable/session/steer`, which requires `expectedRunId`.
+    /// client. Read directly by `read_until_response_with_idle_timeout`'s
+    /// steer arm at write time (see [`crate::pool::SteerRequest`] for
+    /// why the read loop owns this); production callers do not need this
+    /// accessor. Kept as `pub` so tests can introspect the field.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
     }
 
-    /// Send an arbitrary JSON-RPC request and return the agent's result value.
+    /// Install a per-turn steer request channel for goose-native
+    /// non-cancelling mid-turn delivery.
     ///
-    /// Wraps the internal `send_request` for callers outside this module that
-    /// need to dispatch agent-specific methods — e.g. goose's
-    /// `_goose/unstable/session/steer` for non-cancelling mid-turn message
-    /// injection. The caller is responsible for the method name and params
-    /// shape; errors propagate as [`AcpError::AgentError`] so the caller can
-    /// distinguish "method not found" (cleanly fall back) from transport
-    /// failure (escalate).
+    /// Called by the dispatch path immediately before
+    /// [`session_prompt_with_idle_timeout`] for goose-capable agents
+    /// (`OwnedAgent.supports_goose_steer == true`). The matching `Sender`
+    /// is stored in `TaskMeta.steer_tx` for the main loop's mode-gate
+    /// fork to drive.
     ///
-    /// Bounded by the same `REQUEST_TIMEOUT` as `initialize` / `session/new`.
-    /// Do NOT use this for `session/prompt` — that has its own bespoke
-    /// idle-timeout/cancel plumbing.
-    pub async fn send_custom_request(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, AcpError> {
-        self.send_request(method, params).await
+    /// Panics if a receiver is already installed — there is exactly one
+    /// turn per `AcpClient` at a time, and stacking receivers would
+    /// silently misroute steer requests across turns. The previous
+    /// turn's receiver must have been consumed by the read loop and
+    /// dropped at scope exit before the next turn dispatches.
+    pub fn install_steer_rx(&mut self, rx: tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>) {
+        assert!(
+            self.steer_rx.is_none(),
+            "install_steer_rx: previous turn's receiver was not consumed — \
+             stacking receivers would misroute steer requests across turns"
+        );
+        self.steer_rx = Some(rx);
     }
 
     /// Cancel a turn cleanly, handling any pending permission request first.
@@ -603,7 +617,12 @@ impl AcpClient {
         // but ignore cancellation.
         let cleanup_idle = std::time::Duration::from_secs(30);
         let result = self
-            .read_until_response_with_idle_timeout(prompt_id, cleanup_idle, hard_deadline)
+            .read_until_response_with_idle_timeout(
+                session_id,
+                prompt_id,
+                cleanup_idle,
+                hard_deadline,
+            )
             .await?;
         self.parse_stop_reason(&result)
     }
@@ -832,13 +851,53 @@ impl AcpClient {
     /// `hard_deadline` is an absolute `Instant` (pre-computed by the caller) so
     /// that `cancel_with_cleanup` can inherit the remaining budget from the
     /// original turn rather than starting a fresh timer.
+    /// Read agent messages until the response with `expected_id` arrives, or
+    /// either of two timeouts fires. Returns `Result<value, IdleTimeout |
+    /// HardTimeout | other>`.
+    ///
+    /// - `idle_timeout`: silent-agent guard, **reset on every line of valid
+    ///   JSON** (and explicitly on `session/update` notifications).
+    /// - `hard_deadline`: absolute wall-clock cap on the whole call, passed
+    ///   in so that `cancel_with_cleanup` can inherit the remaining budget
+    ///   from the original turn rather than starting a fresh timer.
+    ///
+    /// While reading, the loop interleaves goose-native non-cancelling steer
+    /// requests via `tokio::select!`. The select uses `biased` for
+    /// reader-first throughput, with a pre-select deadline check at the top
+    /// of every loop iteration so a continuously-ready reader arm cannot
+    /// starve the hard deadline (Max's review gate). The steer arm is
+    /// guarded by `pending_steer.is_none()` so at most one steer is in
+    /// flight at a time; a successful steer response is routed to the
+    /// caller's oneshot ack instead of being returned as the prompt result.
+    ///
+    /// `session_id` is threaded in lexically by callers so the goose-native
+    /// steer arm can complete `sessionId` in the steer JSON-RPC params at
+    /// write time without needing access to outer state. See
+    /// [`crate::pool::SteerRequest`] for why params are built here and not
+    /// in the main loop.
     async fn read_until_response_with_idle_timeout(
         &mut self,
+        session_id: &str,
         expected_id: u64,
         idle_timeout: std::time::Duration,
         hard_deadline: tokio::time::Instant,
     ) -> Result<serde_json::Value, AcpError> {
         use tokio::time::Instant;
+
+        // Take the per-turn steer receiver into a local so it can be
+        // borrowed independently of `self.reader` inside `select!`.
+        // Dropped at scope exit (return paths drain `pending_steer` first
+        // so the ack_tx oneshot is never leaked silently).
+        let mut steer_rx = self.steer_rx.take();
+
+        // Tracks the in-flight steer write: `(request_id, ack_tx)`. While
+        // `Some`, the steer arm is gated off so we don't stack writes,
+        // and a response matching `id` is routed to the ack_tx instead
+        // of being treated as the prompt result. Drained on every return
+        // path with `PromptCompletedNeutral` so callers are never left
+        // hanging.
+        let mut pending_steer: Option<(u64, tokio::sync::oneshot::Sender<crate::pool::SteerAck>)> =
+            None;
 
         let mut idle_deadline = Instant::now() + idle_timeout;
 
@@ -851,23 +910,157 @@ impl AcpClient {
             } else {
                 hard_deadline
             };
-            let remaining = next_deadline.saturating_duration_since(Instant::now());
+
+            // Pre-select deadline check — required by Max's review. Under
+            // `biased`, a continuously-ready reader arm wins every poll and
+            // `sleep_until(next_deadline)` is never reached, silently
+            // defeating the hard-deadline guarantee for agents that keep
+            // producing output (see `acp.rs:608` for why the hard deadline
+            // exists). Check the classified deadline here so a steady-
+            // stream agent is still bounded.
+            if Instant::now() >= next_deadline {
+                if let Some((_, ack_tx)) = pending_steer.take() {
+                    // Prompt is timing out — release the withheld event via
+                    // PromptCompletedNeutral (no fallback signal: there is
+                    // no in-flight turn to signal once we return, and
+                    // normal dispatch handles redelivery).
+                    let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                }
+                if idle_fires_first {
+                    tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
+                    return Err(AcpError::IdleTimeout(idle_timeout));
+                } else {
+                    tracing::warn!("hard turn timeout exceeded");
+                    return Err(AcpError::HardTimeout);
+                }
+            }
 
             // LinesCodec::new_with_max_length enforces MAX_LINE_SIZE at the
             // read level — the buffer never grows beyond the limit.
-            let read_result = tokio::time::timeout(remaining, self.reader.next()).await;
+            let read_result = tokio::select! {
+                biased;
+                read_result = self.reader.next() => Some(read_result),
+                // Steer arm: gated off whenever a steer write is already in
+                // flight so we don't stack two writes against the same
+                // process. The `async { steer_rx.as_mut()?.recv().await }`
+                // wrapper produces `None` when no receiver is installed,
+                // which mismatches the `Some(req)` pattern and disables the
+                // branch for that iteration (no busy loop). Cancel-safe:
+                // `mpsc::Receiver::recv` does not lose messages on drop.
+                Some(req) = async {
+                    match steer_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => None,
+                    }
+                }, if pending_steer.is_none() => {
+                    // Selected: build steer params at write time using the
+                    // lexical `session_id` and the freshest `active_run_id`.
+                    //
+                    // `active_run_id` is updated by `session/update`
+                    // notifications inside this very loop; reading it here
+                    // (rather than snapshotting at dispatch) guarantees the
+                    // value matches what goose's run-id check will compare
+                    // against. If it's `None`, no `session/update` has
+                    // arrived yet so we cannot form a valid `expectedRunId`
+                    // — ack `ExpectedRunIdMissing` and drop the request
+                    // without writing anything. The main loop maps this to
+                    // the universal cancel+merge `Steer` fallback.
+                    match self.active_run_id.clone() {
+                        None => {
+                            tracing::warn!(
+                                "goose-native steer: no active_run_id at write time \
+                                 (no session/update seen yet) — falling back to cancel+merge"
+                            );
+                            let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
+                                crate::pool::SteerError::ExpectedRunIdMissing,
+                            ));
+                        }
+                        Some(run_id) => {
+                            let id = self.next_id;
+                            self.next_id += 1;
+                            let prompt_block_refs: Vec<&str> =
+                                req.prompt_blocks.iter().map(String::as_str).collect();
+                            let params =
+                                build_steer_params(session_id, &run_id, &prompt_block_refs);
+                            let msg = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "method": "_goose/unstable/session/steer",
+                                "params": params,
+                            });
+                            tracing::debug!(
+                                target: "acp::wire",
+                                "→ {}",
+                                serde_json::to_string(&msg).unwrap_or_default()
+                            );
+                            match self.write_ndjson(&msg).await {
+                                Ok(()) => {
+                                    pending_steer = Some((id, req.ack_tx));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "goose-native steer write failed: {e} — releasing withheld event"
+                                    );
+                                    let _ = req.ack_tx.send(crate::pool::SteerAck::Err(
+                                        crate::pool::SteerError::Transport(e.to_string()),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    // Loop back to the next iteration without consuming a
+                    // reader line; we'll wait for either the prompt
+                    // response or the steer response next.
+                    None
+                }
+                _ = tokio::time::sleep_until(next_deadline) => {
+                    // The pre-select check at the top of the next iteration
+                    // would catch this anyway, but firing the deadline arm
+                    // here makes the wakeup immediate (no extra reader poll
+                    // round-trip when stdout is idle).
+                    if let Some((_, ack_tx)) = pending_steer.take() {
+                        let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                    }
+                    if idle_fires_first {
+                        tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
+                        return Err(AcpError::IdleTimeout(idle_timeout));
+                    } else {
+                        tracing::warn!("hard turn timeout exceeded");
+                        return Err(AcpError::HardTimeout);
+                    }
+                }
+            };
+
+            // Steer arm fired (or the select selected nothing read-side this
+            // iteration): no reader frame to process, loop to re-evaluate
+            // deadlines and arm the next select.
+            let read_result = match read_result {
+                Some(r) => r,
+                None => continue,
+            };
 
             match read_result {
-                Ok(None) => return Err(AcpError::AgentExited),
-                Ok(Some(Err(LinesCodecError::MaxLineLengthExceeded))) => {
+                None => {
+                    if let Some((_, ack_tx)) = pending_steer.take() {
+                        let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                    }
+                    return Err(AcpError::AgentExited);
+                }
+                Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
+                    if let Some((_, ack_tx)) = pending_steer.take() {
+                        let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                    }
                     return Err(AcpError::Protocol(
                         "agent stdout line exceeded 10MB limit".into(),
                     ));
                 }
-                Ok(Some(Err(e))) => {
+                Some(Err(e)) => {
+                    if let Some((_, ack_tx)) = pending_steer.take() {
+                        let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                    }
                     return Err(AcpError::Io(std::io::Error::other(e)));
                 }
-                Ok(Some(Ok(line))) => {
+                Some(Ok(line)) => {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
@@ -898,14 +1091,45 @@ impl AcpClient {
                     // Malformed lines (skipped above) don't count as real agent activity.
                     idle_deadline = Instant::now() + idle_timeout;
 
-                    // Check for matching response (has matching id AND no `method`
-                    // field — a `method` field means agent-initiated request, not response).
+                    // Steer response routing must come BEFORE the prompt
+                    // response check: a steer response is a regular
+                    // JSON-RPC response (id + result/error, no method),
+                    // so the matcher must disambiguate by id. Both checks
+                    // share the `no method` guard.
                     if let Some(id) = msg.get("id") {
-                        if *id == serde_json::json!(expected_id) && msg.get("method").is_none() {
-                            if let Some(error) = msg.get("error") {
-                                return Err(AcpError::AgentError(error.to_string()));
+                        if msg.get("method").is_none() {
+                            if let Some((steer_id, _)) = pending_steer.as_ref() {
+                                if *id == serde_json::json!(*steer_id) {
+                                    // Take the ack_tx out and route the
+                                    // response. We do not return — keep
+                                    // reading until the prompt response
+                                    // arrives.
+                                    let (_, ack_tx) = pending_steer.take().expect("just checked");
+                                    let ack = if let Some(error) = msg.get("error") {
+                                        crate::pool::SteerAck::Err(
+                                            crate::pool::SteerError::AgentError(error.to_string()),
+                                        )
+                                    } else {
+                                        crate::pool::SteerAck::Success
+                                    };
+                                    let _ = ack_tx.send(ack);
+                                    continue;
+                                }
                             }
-                            return Ok(msg["result"].clone());
+                            if *id == serde_json::json!(expected_id) {
+                                if let Some(error) = msg.get("error") {
+                                    if let Some((_, ack_tx)) = pending_steer.take() {
+                                        let _ = ack_tx
+                                            .send(crate::pool::SteerAck::PromptCompletedNeutral);
+                                    }
+                                    return Err(AcpError::AgentError(error.to_string()));
+                                }
+                                if let Some((_, ack_tx)) = pending_steer.take() {
+                                    let _ =
+                                        ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
+                                }
+                                return Ok(msg["result"].clone());
+                            }
                         }
                     }
 
@@ -941,17 +1165,6 @@ impl AcpClient {
                                 tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
                             }
                         }
-                    }
-                }
-                Err(_elapsed) => {
-                    // Classification was determined before sleeping — not
-                    // affected by scheduler jitter between deadline and wakeup.
-                    if idle_fires_first {
-                        tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
-                        return Err(AcpError::IdleTimeout(idle_timeout));
-                    } else {
-                        tracing::warn!("hard turn timeout exceeded");
-                        return Err(AcpError::HardTimeout);
                     }
                 }
             }
@@ -1170,6 +1383,34 @@ fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::
         .collect();
     serde_json::json!({
         "sessionId": session_id,
+        "prompt": blocks,
+    })
+}
+
+/// Build `_goose/unstable/session/steer` params from one or more text
+/// content blocks plus the freshest `expectedRunId`.
+///
+/// Wire shape:
+/// ```json
+/// { "sessionId": "...", "expectedRunId": "...", "prompt": [{"type":"text","text":"..."}, ...] }
+/// ```
+///
+/// Called from the read-loop steer arm at write time so `expectedRunId`
+/// matches goose's *current* run (it advances on each `session/update`).
+/// See [`crate::pool::SteerRequest`] for why this is the read loop's job
+/// and not the main loop's.
+fn build_steer_params(
+    session_id: &str,
+    expected_run_id: &str,
+    prompt_blocks: &[&str],
+) -> serde_json::Value {
+    let blocks: Vec<serde_json::Value> = prompt_blocks
+        .iter()
+        .map(|text| serde_json::json!({ "type": "text", "text": text }))
+        .collect();
+    serde_json::json!({
+        "sessionId": session_id,
+        "expectedRunId": expected_run_id,
         "prompt": blocks,
     })
 }
@@ -1867,6 +2108,7 @@ mod tests {
         let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 999,
                 std::time::Duration::from_millis(100),
                 hard_deadline,
@@ -1885,6 +2127,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 999,
                 std::time::Duration::from_secs(60),
                 hard_deadline,
@@ -1908,6 +2151,7 @@ mod tests {
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 999,
                 std::time::Duration::from_millis(200),
                 hard_deadline,
@@ -1928,6 +2172,7 @@ mod tests {
         let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 42,
                 std::time::Duration::from_secs(2),
                 hard_deadline,
@@ -1944,6 +2189,7 @@ mod tests {
         let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 999,
                 std::time::Duration::from_secs(2),
                 hard_deadline,
@@ -1971,6 +2217,7 @@ mod tests {
         let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 0,
                 std::time::Duration::from_secs(3),
                 hard_deadline,
@@ -1986,11 +2233,66 @@ mod tests {
         let idle = std::time::Duration::from_millis(100);
         let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         let result = client
-            .read_until_response_with_idle_timeout(999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline)
             .await;
         assert!(
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "idle should fire before hard when idle << hard, got {result:?}"
+        );
+    }
+
+    /// Hard-deadline starvation regression (Max's review gate, Eva's required test).
+    ///
+    /// When the read-loop became a `tokio::select!` with `biased; reader →
+    /// steer → sleep_until`, a continuously-ready reader arm could win every
+    /// poll and starve the timer arm — silently defeating the hard-deadline
+    /// guarantee. The fix is a pre-select deadline check at the top of every
+    /// loop iteration; this test pins that behavior.
+    ///
+    /// Setup: agent emits a **gapless** stream of valid JSON `session/update`
+    /// notifications (no `sleep` between lines) so the reader arm is
+    /// continuously ready. Each line is valid JSON, so it resets the idle
+    /// clock — and we set idle ≫ hard so idle cannot fire first. With
+    /// `biased; reader → steer → sleep_until`, the reader arm would win
+    /// every poll and `sleep_until` would never be reached. Only the
+    /// pre-select deadline check at the top of the loop can stop us.
+    ///
+    /// Without the pre-select check, this test hangs against the infinite
+    /// bash subprocess until the test harness's own outer timeout, and the
+    /// returned error would never be `HardTimeout`.
+    #[tokio::test]
+    async fn hard_deadline_fires_under_continuous_valid_json_stream() {
+        // Truly infinite, gapless stream of valid JSON. No `sleep` between
+        // echoes — the reader arm is continuously ready, which is the
+        // exact starvation scenario the pre-select check guards against.
+        // `while :; do echo ...; done` (not a fixed-count `for`) so the
+        // subprocess never naturally exits before the hard deadline,
+        // regardless of how fast the host drains bash output. Without
+        // this, fast hardware drains a bounded loop in < hard_deadline
+        // and the reader hits EOF (`AgentExited`) before the timer fires,
+        // masking whether the pre-select check actually works.
+        let mut client = spawn_script(
+            r#"while :; do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"text":"x"}}}}'; done"#,
+        )
+        .await;
+        let hard = std::time::Duration::from_millis(300);
+        let hard_deadline = tokio::time::Instant::now() + hard;
+        let idle = std::time::Duration::from_secs(60); // idle ≫ hard
+        let start = std::time::Instant::now();
+        let result = client
+            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline)
+            .await;
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, Err(AcpError::HardTimeout)),
+            "expected HardTimeout under gapless valid-JSON stream, got {result:?} (elapsed {elapsed:?})"
+        );
+        // Must fire close to the hard deadline, not late. Without the
+        // pre-select check the reader arm starves sleep_until and elapsed
+        // tracks the bash subprocess lifetime instead.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "HardTimeout fired late ({elapsed:?}); reader arm may be starving sleep_until"
         );
     }
 
@@ -2037,6 +2339,7 @@ mod tests {
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 999,
                 std::time::Duration::from_millis(100),
                 hard_deadline,
@@ -2070,6 +2373,7 @@ mod tests {
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
+                "test",
                 999,
                 std::time::Duration::from_millis(200),
                 hard_deadline,
@@ -2247,47 +2551,150 @@ mod tests {
         );
     }
 
+    // ── Goose-native steer arm tests ──────────────────────────────────────
+    //
+    // These exercise the seam between `install_steer_rx` and the read
+    // loop's steer arm, isolated from `AgentPool` / `EventQueue` /
+    // dispatch. They prove the locked Option-X contract at the read-loop
+    // boundary:
+    //   1. With `active_run_id == None`, the steer arm acks
+    //      `Err(ExpectedRunIdMissing)` and writes nothing — the main
+    //      loop's "Err-before-pending" fallback path is reachable.
+    //   2. With `active_run_id` set, the steer arm writes the JSON-RPC
+    //      request with the matching `expectedRunId` and routes the
+    //      response to the ack oneshot as `Success`.
+    //
+    // We don't test the full mode-gate fork here — that lives in lib.rs
+    // and is covered by goose e2e (Eva's lane).
+
+    /// Steer with no `active_run_id` set acks `ExpectedRunIdMissing`
+    /// without writing anything. The read loop continues normally and
+    /// eventually hits the idle timeout (which is fine — we just need to
+    /// observe the ack).
     #[tokio::test]
-    async fn send_custom_request_dispatches_method_and_params() {
-        // Echo the received request back as `_receivedRequest` so we can
-        // verify the wire-level method + params shape that `send_custom_request`
-        // emits. Same trick `session_new_full_*` tests use.
-        let script = r#"
-            read -t 2 _init
-            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
-            read -t 2 REQ
-            echo '{"jsonrpc":"2.0","id":1,"result":{"steered":true,"_receivedRequest":'"$REQ"'}}'
-            sleep 1
-        "#;
-        let mut client = spawn_script(script).await;
-        client
-            .initialize()
-            .await
-            .expect("initialize should succeed");
+    async fn native_steer_with_no_active_run_id_acks_expected_run_id_missing() {
+        // Quiet process: never emits anything, so the read loop has only
+        // the steer arm and the idle timeout to consider.
+        let mut client = spawn_script("sleep 10").await;
+        assert!(
+            client.active_run_id().is_none(),
+            "precondition: active_run_id starts as None"
+        );
 
-        let params = serde_json::json!({
-            "sessionId": "ses_test",
-            "expectedRunId": "run-abc",
-            "prompt": [{"type": "text", "text": "hello"}],
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
+        client.install_steer_rx(steer_rx);
+
+        // Fire-and-forget: send a SteerRequest from a separate task so
+        // the read loop picks it up via the select! arm.
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
+        let send_task = tokio::spawn(async move {
+            steer_tx
+                .send(crate::pool::SteerRequest {
+                    prompt_blocks: vec!["test steer body".into()],
+                    ack_tx,
+                })
+                .await
+                .expect("steer_tx send should succeed");
         });
-        let result = client
-            .send_custom_request("_goose/unstable/session/steer", params.clone())
-            .await
-            .expect("send_custom_request should succeed");
 
-        assert_eq!(result["steered"], serde_json::json!(true));
-        let received = &result["_receivedRequest"];
-        assert_eq!(
-            received["method"].as_str(),
-            Some("_goose/unstable/session/steer"),
-            "method must pass through verbatim"
+        // Drive the read loop with short idle timeout so the test
+        // doesn't hang. The expected_id is intentionally never going to
+        // be matched (the script writes nothing); the read loop will
+        // exit via IdleTimeout shortly after the steer arm fires.
+        let idle = std::time::Duration::from_millis(500);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let read_result = client
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline)
+            .await;
+        send_task.await.expect("send_task should complete");
+
+        // Read loop exit shape: IdleTimeout (no agent activity).
+        assert!(
+            matches!(read_result, Err(AcpError::IdleTimeout(_))),
+            "expected IdleTimeout once steer was acked + script stayed silent, got {read_result:?}"
         );
-        assert_eq!(
-            received["params"], params,
-            "params must pass through verbatim"
+
+        // Ack must be ExpectedRunIdMissing — the steer arm bailed out
+        // without writing because active_run_id was None at write time.
+        let ack = ack_rx
+            .await
+            .expect("ack oneshot must have received a SteerAck");
+        match ack {
+            crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
+            other => panic!("expected SteerAck::Err(ExpectedRunIdMissing), got {other:?}"),
+        }
+    }
+
+    /// Steer with `active_run_id` set writes the JSON-RPC request and
+    /// routes the matching response to the ack oneshot as `Success`.
+    /// Verifies the wire shape (`sessionId` + `expectedRunId` + `prompt`)
+    /// indirectly: the bash script emits a response keyed by the steer
+    /// id (0), and `Success` only fires if the read loop matched that
+    /// id to its `pending_steer` entry.
+    #[tokio::test]
+    async fn native_steer_with_active_run_id_routes_response_to_ack() {
+        // Script: pause briefly so the test task can install the steer
+        // and we can be sure the response doesn't race ahead of the
+        // write — then emit the steer response (id=0 because next_id
+        // starts at 0 and the steer is the first request the read loop
+        // writes), then idle. This is a JSON-RPC success response with
+        // a `stopReason` payload (matching the shape goose uses for
+        // steer responses in fake_llm.rs).
+        let script = "sleep 0.5; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
+                      sleep 10";
+        let mut client = spawn_script(script).await;
+
+        // Set active_run_id via a synthesized session_info_update so the
+        // steer arm has a non-None value to read at write time.
+        let update = session_info_update_msg(Some(serde_json::json!("run-42")));
+        let _ = client.handle_session_update(&update);
+        assert_eq!(client.active_run_id(), Some("run-42"));
+
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
+        client.install_steer_rx(steer_rx);
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
+        let send_task = tokio::spawn(async move {
+            steer_tx
+                .send(crate::pool::SteerRequest {
+                    prompt_blocks: vec!["test steer body".into()],
+                    ack_tx,
+                })
+                .await
+                .expect("steer_tx send should succeed");
+        });
+
+        // Drive the read loop. Expected_id 999 will never be emitted by
+        // the script so the read loop exits via idle timeout after the
+        // steer response is routed to ack.
+        let idle = std::time::Duration::from_secs(2);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let read_result = client
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline)
+            .await;
+        send_task.await.expect("send_task should complete");
+
+        // Read loop exit: IdleTimeout (no further activity after the
+        // routed steer response). AgentExited would also be a valid
+        // exit if the bash script terminated early; either is fine —
+        // what matters is the ack.
+        assert!(
+            matches!(
+                read_result,
+                Err(AcpError::IdleTimeout(_)) | Err(AcpError::AgentExited)
+            ),
+            "expected IdleTimeout or AgentExited after steer ack, got {read_result:?}"
         );
-        // JSON-RPC envelope sanity
-        assert_eq!(received["jsonrpc"].as_str(), Some("2.0"));
-        assert!(received["id"].is_number(), "must have a numeric request id");
+
+        // Ack must be Success: the steer response (id=0) was routed to
+        // pending_steer.ack_tx.
+        let ack = ack_rx
+            .await
+            .expect("ack oneshot must have received a SteerAck");
+        match ack {
+            crate::pool::SteerAck::Success => {}
+            other => panic!("expected SteerAck::Success, got {other:?}"),
+        }
     }
 }

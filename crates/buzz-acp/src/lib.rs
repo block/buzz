@@ -885,6 +885,26 @@ struct RespawnResult {
     result: Result<(AcpClient, u32, bool)>,
 }
 
+/// Outcome of a goose-native steer attempt, forwarded from a per-attempt
+/// watcher task (which awaits the `SteerRequest.ack_tx` oneshot) back to
+/// the main loop's `select!`. The main loop drives queue side-effects from
+/// this — it cannot await the oneshot itself without blocking the relay
+/// stream.
+///
+/// Carries enough identity to operate on the right withheld event in
+/// `EventQueue::withheld_native_steer`: `channel_id` is the routing key,
+/// `event_id` is the hex id of the single event the steer carried.
+struct SteerAckEvent {
+    channel_id: Uuid,
+    event_id: String,
+    /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
+    /// `Err` if the oneshot was dropped without a send — should not happen
+    /// under the current read-loop drains, but if it ever does the main
+    /// loop treats it as `PromptCompletedNeutral` (release withheld, no
+    /// fallback signal) to avoid leaking the withheld event.
+    ack: std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
+}
+
 /// RAII guard that ensures a `RespawnResult` is sent even if the task panics.
 /// Without this, a panicked respawn task would leave `respawn_in_flight = true`
 /// permanently, silently losing the slot forever.
@@ -1342,6 +1362,19 @@ async fn tokio_main() -> Result<()> {
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+    // Channel for goose-native steer ack watchers to forward outcomes back
+    // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
+    // short-lived task that awaits the `SteerRequest.ack_tx` oneshot and
+    // forwards a `SteerAckEvent`. Unbounded because:
+    //   1. The producer count is bounded by in-flight goose turns
+    //      (`agents` slots, capacity-1 `steer_tx` each), so the channel
+    //      cannot legitimately back up under steady state.
+    //   2. We must never drop a steer outcome — losing an ack would leak a
+    //      withheld event in `EventQueue::withheld_native_steer` until
+    //      `IN_FLIGHT_DEADLINE_SECS` expires.
+    let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+
+    // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
     let tx = shutdown_tx.clone();
@@ -1413,6 +1446,7 @@ async fn tokio_main() -> Result<()> {
     enum PoolEvent {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
+        SteerAck(SteerAckEvent),
     }
 
     loop {
@@ -1507,6 +1541,14 @@ async fn tokio_main() -> Result<()> {
                 // are in-flight tasks.
                 Some(Err(e)) = join_set.join_next(), if !join_set.is_empty() => {
                     Some(PoolEvent::Panic(e))
+                }
+                // Goose-native steer ack from a watcher task. Outcomes drive
+                // queue side-effects (drop / release withheld event) and
+                // optionally the cancel+merge fallback signal. See the
+                // `Some(PoolEvent::SteerAck(...))` match arm below for the
+                // locked semantics (Eva + Max + Perci).
+                Some(ack_event) = steer_ack_rx.recv() => {
+                    Some(PoolEvent::SteerAck(ack_event))
                 }
                 control_event = async {
                     match relay_observer_control_rx.as_mut() {
@@ -1796,6 +1838,18 @@ async fn tokio_main() -> Result<()> {
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
                             let event_id_hex = buzz_event.event.id.to_hex();
+                            // Clone for the goose-native steer fork, which
+                            // needs the event to render the steer body. The
+                            // clone is unconditional because we don't know
+                            // yet whether the mode gate will demand a steer
+                            // — checking `multiple_event_handling` here
+                            // would couple the queueing path to the mode
+                            // and break the existing invariant that every
+                            // accepted event goes through `queue.push`
+                            // first. `nostr::Event::clone` is cheap (Arc-
+                            // backed payload) so the cost is negligible.
+                            let event_for_steer = buzz_event.event.clone();
+                            let prompt_tag_for_steer = prompt_tag.clone();
                             let accepted = queue.push(QueuedEvent {
                                 channel_id: buzz_event.channel_id,
                                 event: buzz_event.event,
@@ -1809,12 +1863,15 @@ async fn tokio_main() -> Result<()> {
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             if accepted {
                                 let rc = ctx.rest_client.clone();
+                                let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
-                                    pool::reaction_add(&rc, &event_id_hex, "👀").await;
+                                    pool::reaction_add(&rc, &eid, "👀").await;
                                 });
                             }
                             // Event is already queued. If mode requires it AND
-                            // the channel has an in-flight task, fire cancel.
+                            // the channel has an in-flight task, fire cancel —
+                            // OR take the goose-native non-cancelling steer
+                            // fork for `Steer` signals against goose agents.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
@@ -1826,11 +1883,35 @@ async fn tokio_main() -> Result<()> {
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    signal_in_flight_task(
-                                        &mut pool,
-                                        buzz_event.channel_id,
-                                        signal,
-                                    );
+                                    // Goose-native fork: when the mode wants a
+                                    // Steer and the in-flight agent is goose,
+                                    // try the non-cancelling path first. On
+                                    // accept, withhold the queued event and
+                                    // spawn an ack watcher; the main loop's
+                                    // `PoolEvent::SteerAck` arm decides
+                                    // success/release/fallback. On reject,
+                                    // fall through to the universal
+                                    // cancel+merge `Steer` signal so the
+                                    // event still reaches the agent.
+                                    let native_attempted = matches!(signal, ControlSignal::Steer)
+                                        && pool.task_supports_goose_steer(
+                                            buzz_event.channel_id,
+                                        )
+                                        && try_native_steer(
+                                            &mut pool,
+                                            &mut queue,
+                                            buzz_event.channel_id,
+                                            event_for_steer,
+                                            prompt_tag_for_steer,
+                                            &steer_ack_tx,
+                                        );
+                                    if !native_attempted {
+                                        signal_in_flight_task(
+                                            &mut pool,
+                                            buzz_event.channel_id,
+                                            signal,
+                                        );
+                                    }
                                 }
                             }
                             for (channel_id, thread_tags) in
@@ -1980,6 +2061,94 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
+                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                    typing_channels.insert(channel_id, thread_tags);
+                }
+            }
+            Some(PoolEvent::SteerAck(SteerAckEvent {
+                channel_id,
+                event_id,
+                ack,
+            })) => {
+                // Goose-native steer attempt resolved. Locked semantics
+                // (Eva + Max + Perci, unanimous on Option X):
+                //
+                //   Success
+                //     The agent received the steer via the non-cancelling
+                //     path. Drop the withheld event so normal dispatch
+                //     never redelivers it.
+                //
+                //   Err(_) where the read loop had NOT yet established
+                //   pending_steer (write never landed — Transport /
+                //   ExpectedRunIdMissing / AgentError before pending):
+                //     Delivery state of the underlying message is "never
+                //     attempted on the wire". Release withheld back to the
+                //     queue front AND issue the cancel+merge fallback so
+                //     the message still reaches the agent.
+                //
+                //   PromptCompletedNeutral
+                //     The read loop wrote the steer (or was preparing to)
+                //     but the prompt completed before the response landed.
+                //     Delivery state is unknown — but the prompt completing
+                //     means there is no in-flight turn to signal anymore.
+                //     Release withheld for normal dispatch; do NOT fire
+                //     the fallback signal (it would target a turn that
+                //     just ended; normal dispatch already handles
+                //     redelivery via the released queue entry).
+                //
+                //   Err(PromptCompleted)
+                //     Defensive case: the read loop does not currently
+                //     send this variant — `pool::send_steer` returns it
+                //     synchronously (handled by `try_native_steer`'s Err
+                //     branch falling through to cancel+merge). If a
+                //     future read-loop change ever routes this through
+                //     the ack, treat it like PromptCompletedNeutral:
+                //     release, no fallback.
+                //
+                //   Watcher Err (oneshot dropped)
+                //     Should not happen — the read loop drains
+                //     pending_steer on every return path. If it does,
+                //     treat as PromptCompletedNeutral to avoid leaking
+                //     the withheld event in `withheld_native_steer`.
+                let (release_withheld, drop_withheld, signal_fallback) = match &ack {
+                    Ok(pool::SteerAck::Success) => (false, true, false),
+                    Ok(pool::SteerAck::Err(pool::SteerError::PromptCompleted)) => {
+                        (true, false, false)
+                    }
+                    Ok(pool::SteerAck::Err(_)) => (true, false, true),
+                    Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
+                    Err(_recv_err) => (true, false, false),
+                };
+                tracing::info!(
+                    channel = %channel_id,
+                    event_id = %event_id,
+                    ?ack,
+                    release_withheld,
+                    drop_withheld,
+                    signal_fallback,
+                    "goose-native steer ack received"
+                );
+                if drop_withheld {
+                    queue.remove_event(channel_id, &event_id);
+                }
+                if release_withheld {
+                    queue.release_native_steer(channel_id, &event_id);
+                }
+                if signal_fallback {
+                    // Universal cancel+merge fallback. Note: the
+                    // queued event has already been released to the
+                    // front of `queues[channel_id]`, so the cancel
+                    // will pick it up as part of the merged batch and
+                    // re-prompt the agent.
+                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                }
+                // After releasing a withheld event, give dispatch a chance
+                // to re-flush. If the prompt is still in flight, the
+                // channel stays `in_flight_channels` and `flush_next`
+                // skips it — but a Steer fallback signal sent above will
+                // tear down the in-flight task; on its completion the
+                // queue drains. We still try here in case the in-flight
+                // task has already returned.
                 for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -2162,6 +2331,118 @@ fn signal_in_flight_task(
     false
 }
 
+/// Attempt the goose-native non-cancelling steer for a freshly-queued event.
+///
+/// Caller invariants:
+/// - `event` has already been pushed into `EventQueue::queues[channel_id]`
+///   via [`EventQueue::push`] — its `event.id` must still be locatable
+///   there so [`EventQueue::mark_native_steer_pending`] can move it to the
+///   side table.
+/// - The in-flight task for `channel_id` is goose
+///   (`pool::TaskMeta::supports_goose_steer == true`); the caller's
+///   responsibility to check via [`AgentPool::task_supports_goose_steer`].
+/// - `multiple_event_handling` resolved to `ControlSignal::Steer`; this
+///   function is the goose-native fork of that signal.
+///
+/// Returns `true` if the native attempt was accepted by the read loop
+/// (capacity-1 mpsc `try_send` succeeded, event withheld synchronously,
+/// ack watcher spawned). On `true` the caller MUST NOT issue the
+/// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
+/// will issue it from the ack arm if the native attempt fails.
+///
+/// Returns `false` if `pool.send_steer` failed (no in-flight task,
+/// `steer_tx` already full from a prior in-flight steer, or read loop
+/// torn down). The caller MUST fall through to
+/// `signal_in_flight_task(channel_id, ControlSignal::Steer)` so the
+/// event still reaches the agent via the universal path.
+///
+/// The withheld event is NOT released here on `false` because no withhold
+/// was established: `mark_native_steer_pending` only runs on `Ok(())`.
+fn try_native_steer(
+    pool: &mut AgentPool,
+    queue: &mut EventQueue,
+    channel_id: uuid::Uuid,
+    event: nostr::Event,
+    prompt_tag: String,
+    steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
+) -> bool {
+    // Build the steer body: framing strings come from
+    // `queue::native_steer_framing()` (Eva's drift-proof requirement —
+    // native and cancel+merge fallback share these so the agent gets the
+    // same orientation regardless of transport). The single event block
+    // is rendered by `queue::format_event_block`, the same function
+    // `queue::format_prompt` uses internally for `[Buzz event: …]`
+    // sections, so the rendering also cannot drift.
+    //
+    // Passing `None` for `channel_info` / `profile_lookup` is intentional:
+    // native steer is a *delta* into a live turn — the agent already saw
+    // channel context and the actor's profile in the original prompt,
+    // duplicating it here would defeat the point of non-cancelling
+    // steering (which is to inject only what's new).
+    let (header, closing) = queue::native_steer_framing();
+    let event_id_hex = event.id.to_hex();
+    let be = queue::BatchEvent {
+        event,
+        prompt_tag: prompt_tag.clone(),
+        received_at: std::time::Instant::now(),
+    };
+    let event_block = queue::format_event_block(channel_id, None, &be, None);
+    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
+    let request = pool::SteerRequest {
+        prompt_blocks: vec![body],
+        ack_tx,
+    };
+
+    match pool.send_steer(channel_id, request) {
+        Ok(()) => {
+            // Withhold the queued event synchronously BEFORE spawning
+            // the watcher: this closes the race where `mark_complete`
+            // clears `in_flight_channels` and a stray `flush_next` could
+            // re-deliver the event via normal dispatch. See
+            // `EventQueue::mark_native_steer_pending` docs at queue.rs:606.
+            let withheld = queue.mark_native_steer_pending(channel_id, &event_id_hex);
+            if !withheld {
+                // Race: the event was already drained out of the queue
+                // before we got here (e.g. a concurrent flush picked it
+                // up). The steer is on the wire; if it succeeds the
+                // agent gets it via the native path AND normal
+                // dispatch — duplicate delivery is benign (agent gets
+                // the same message twice). Log so this is visible if it
+                // ever happens in production.
+                tracing::warn!(
+                    channel = %channel_id,
+                    event_id = %event_id_hex,
+                    "native steer accepted by read loop but event was not in queue to withhold \
+                     — possible duplicate delivery if steer succeeds"
+                );
+            }
+            let ack_tx_clone = steer_ack_tx.clone();
+            let event_id_for_watcher = event_id_hex.clone();
+            tokio::spawn(async move {
+                let ack = ack_rx.await;
+                let _ = ack_tx_clone.send(SteerAckEvent {
+                    channel_id,
+                    event_id: event_id_for_watcher,
+                    ack,
+                });
+            });
+            true
+        }
+        Err(e) => {
+            tracing::info!(
+                channel = %channel_id,
+                error = ?e,
+                "goose-native steer not accepted — falling back to cancel+merge"
+            );
+            false
+        }
+    }
+}
+
+// ── dispatch_pending ──────────────────────────────────────────────────────────
+
 /// Flush queued work to available agents.
 fn dispatch_pending(
     pool: &mut AgentPool,
@@ -2181,7 +2462,7 @@ fn dispatch_pending(
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
         let affinity_hit = pool.has_session_for(channel_id);
-        let agent = match pool.try_claim(Some(channel_id)) {
+        let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
@@ -2201,6 +2482,27 @@ fn dispatch_pending(
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
+
+        // Goose-native non-cancelling steer seam: snapshot capability before
+        // the agent moves into `run_prompt_task`, and install the per-turn
+        // steer receiver on the read loop so the main loop's mode-gate fork
+        // (see the `if accepted && queue.is_channel_in_flight(...)` block
+        // in the relay event branch of the main `select!` loop) can drive
+        // it via the matching sender stored in `TaskMeta.steer_tx`.
+        // Capacity 1: the main loop must observe an `ack` before issuing
+        // the next steer, so the channel never legitimately backs up;
+        // `Full` from a `try_send` signals a logic bug and is mapped to a
+        // Transport error by `pool::AgentPool::send_steer`. Non-goose
+        // agents leave both fields unset, preserving the universal
+        // cancel+merge `Steer` path.
+        let supports_goose_steer = agent.supports_goose_steer;
+        let steer_tx = if supports_goose_steer {
+            let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
+            agent.acp.install_steer_rx(rx);
+            Some(tx)
+        } else {
+            None
+        };
 
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
@@ -2225,6 +2527,8 @@ fn dispatch_pending(
                 channel_id: Some(channel_id),
                 recoverable_batch,
                 control_tx: Some(control_tx),
+                steer_tx,
+                supports_goose_steer,
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -2606,6 +2910,8 @@ fn dispatch_heartbeat(
             channel_id: None,
             recoverable_batch: None,
             control_tx: None,
+            steer_tx: None,
+            supports_goose_steer: false,
         },
     );
     *heartbeat_in_flight = true;
@@ -3142,6 +3448,8 @@ mod owner_control_command_tests {
                 channel_id: Some(channel_id),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
+                steer_tx: None,
+                supports_goose_steer: false,
             },
         );
 
@@ -3664,6 +3972,8 @@ mod error_outcome_emission_tests {
                 channel_id: None,
                 recoverable_batch: None,
                 control_tx: None,
+                steer_tx: None,
+                supports_goose_steer: false,
             },
         );
 
