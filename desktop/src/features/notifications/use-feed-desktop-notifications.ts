@@ -79,10 +79,12 @@ export function useFeedDesktopNotifications(
   const seenItemIdsRef = React.useRef<Set<string>>(
     new Set(readStoredSeenFeedIds(normalizedPubkey)),
   );
+  const hasInitializedFeedRef = React.useRef(false);
   const hasAutoRequestedRef = React.useRef(false);
 
   React.useEffect(() => {
     seenItemIdsRef.current = new Set(readStoredSeenFeedIds(normalizedPubkey));
+    hasInitializedFeedRef.current = false;
     hasAutoRequestedRef.current = false;
   }, [normalizedPubkey]);
 
@@ -133,21 +135,23 @@ export function useFeedDesktopNotifications(
       return;
     }
 
+    const currentFeedItems = collectHomeAlertItems(feed);
+
     // Wait for sender profiles to load so notification titles include names.
-    // The first-load seed below marks all current items as seen, so we must
-    // defer it until profiles are available — otherwise items get marked seen
-    // before we can dispatch notifications with sender names.
-    if (profiles === undefined) {
+    // Empty feeds do not need profiles; marking them initialized here keeps the
+    // first later live alert from being mistaken for initial-load backlog.
+    if (profiles === undefined && currentFeedItems.length > 0) {
       return;
     }
 
-    const currentFeedItems = collectHomeAlertItems(feed);
-
-    // Guard: empty seen set + populated feed means first load or cleared
-    // storage. Seed the seen set without notifying to prevent a flood.
-    if (seenItemIdsRef.current.size === 0 && currentFeedItems.length > 0) {
-      seenItemIdsRef.current = new Set(currentFeedItems.map((item) => item.id));
-      writeStoredSeenFeedIds(normalizedPubkey, [...seenItemIdsRef.current]);
+    if (!hasInitializedFeedRef.current) {
+      hasInitializedFeedRef.current = true;
+      if (currentFeedItems.length > 0) {
+        seenItemIdsRef.current = new Set(
+          currentFeedItems.map((item) => item.id),
+        );
+        writeStoredSeenFeedIds(normalizedPubkey, [...seenItemIdsRef.current]);
+      }
       return;
     }
 

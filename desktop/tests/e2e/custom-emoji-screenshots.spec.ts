@@ -97,20 +97,35 @@ test("message list renders inline and emoji-only messages with Slack-style emoji
   const emojiOnlyRow = rows
     .filter({
       has: page.locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`),
+      hasText: "😀 ❤️",
     })
-    .last();
+    .first();
 
   await expect(inlineRow).toBeVisible();
   await expect(emojiOnlyRow).toBeVisible();
 
-  const inlineBox = await inlineRow
-    .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`)
-    .boundingBox();
-  const emojiOnlyBox = await emojiOnlyRow
-    .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`)
-    .boundingBox();
-  expect(inlineBox?.height).toBeGreaterThan(10);
-  expect(emojiOnlyBox?.height).toBeGreaterThan((inlineBox?.height ?? 0) * 1.8);
+  const inlineEmoji = inlineRow.locator(
+    `img[data-custom-emoji][alt=":${SHORTCODE}:"]`,
+  );
+  const emojiOnlyEmoji = emojiOnlyRow.locator(
+    `img[data-custom-emoji][alt=":${SHORTCODE}:"]`,
+  );
+
+  await expect
+    .poll(async () => (await inlineEmoji.boundingBox())?.height ?? 0)
+    .toBeGreaterThan(10);
+  await expect
+    .poll(async () => {
+      const inlineBox = await inlineEmoji.boundingBox();
+      const emojiOnlyBox = await emojiOnlyEmoji.boundingBox();
+
+      if (!inlineBox || !emojiOnlyBox || inlineBox.height === 0) {
+        return 0;
+      }
+
+      return emojiOnlyBox.height / inlineBox.height;
+    })
+    .toBeGreaterThan(1.8);
 
   await page.screenshot({
     path: `${SHOTS}/03-message-list-emoji-sizing.png`,
