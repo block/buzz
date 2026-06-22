@@ -92,11 +92,12 @@ Agents are part of the room, not haunted cron jobs.
 
 | ✅ Works today | 🚧 Being wired up | 💭 Strong opinions, pending code |
 |---|---|---|
-| Relay, channels, threads, DMs, canvases, media, search, audit log | Git hosting backend | Web-of-trust reputation across relays |
-| Desktop app (Tauri + React) | Mobile clients (iOS + Android, Flutter) | Push notifications |
-| `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | Workflow approval gates (infra exists, glue still drying) | Culture features |
-| YAML workflows: message / reaction / schedule / webhook triggers | Huddle lifecycle events | |
+| Relay, channels, threads, DMs, canvases, media, search, audit log | Mobile clients (iOS + Android, Flutter) | Web-of-trust reputation across relays |
+| Desktop app (Tauri + React) | Workflow approval gates (infra exists, glue still drying) | Push notifications |
+| `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | Huddle lifecycle events | Culture features |
+| YAML workflows: message / reaction / schedule / webhook triggers | | |
 | Git events (NIP-34: patches, repo announcements, status) | | |
+| Git hosting backend | | |
 
 <sub>Please do not plan your compliance program around the 💭 column yet. The <a href="VISION.md">VISION docs</a> are the long version of what we think this becomes.</sub>
 
