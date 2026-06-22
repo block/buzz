@@ -446,8 +446,6 @@ export function MessageThreadPanel({
         }
       : null;
 
-  // Keep heavy markdown rows deferred, and drive scroll from the same list so
-  // deep-link targets only resolve after the matching DOM row has committed.
   const deferredThreadReplies = React.useDeferredValue(
     threadReplies,
     EMPTY_THREAD_REPLIES,
@@ -488,6 +486,9 @@ export function MessageThreadPanel({
       deferredThreadReplies,
     );
   }, [deferredThreadReplies, threadHeadId]);
+  const visibleThreadHeadSummary = isThreadHeadRepliesCollapsed
+    ? threadHeadSummary
+    : null;
 
   const threadMessages = React.useMemo(
     () => deferredThreadReplies.map((entry) => entry.message),
@@ -666,7 +667,7 @@ export function MessageThreadPanel({
           data-testid="message-thread-replies"
         >
           {repliesRenderState === "list" ? (
-            isThreadHeadRepliesCollapsed && threadHeadSummary ? (
+            visibleThreadHeadSummary ? (
               <div
                 className="space-y-0"
                 data-render-pending={isRepliesPending ? "true" : undefined}
@@ -675,7 +676,7 @@ export function MessageThreadPanel({
                   depth={threadHead.depth}
                   message={threadHead}
                   onOpenThread={expandThreadHeadReplies}
-                  summary={threadHeadSummary}
+                  summary={visibleThreadHeadSummary}
                   summaryIndentOffsetPx={THREAD_PANEL_SUMMARY_INDENT_OFFSET_PX}
                 />
               </div>
