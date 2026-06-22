@@ -232,6 +232,33 @@ test("video upload previews use poster frames and inline videos open review mode
     restoredInlinePlayer.getByRole("button", { name: "Pause video" }),
   ).toBeVisible();
 
+  const inlineSpeedButton =
+    restoredInlinePlayer.getByTestId("video-inline-speed");
+  await expect(inlineSpeedButton).toHaveText("1x");
+  await inlineSpeedButton.click();
+  const inlineSpeedMenu = page.getByTestId("video-inline-speed-menu");
+  await expect(inlineSpeedMenu.getByRole("button")).toHaveText([
+    "2x",
+    "1.75x",
+    "1.5x",
+    "1.25x",
+    "1x",
+    "0.75x",
+    "0.5x",
+    "0.25x",
+  ]);
+  await inlineSpeedMenu
+    .getByRole("button", { name: "1.5x", exact: true })
+    .click();
+  await expect(inlineSpeedButton).toHaveText("1.5x");
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(1.5);
+
   // Inline volume controls.
   await inlinePlayer.getByRole("button", { name: "Mute" }).click();
   await expect
@@ -272,6 +299,24 @@ test("video upload previews use poster frames and inline videos open review mode
 
   const reviewVideo = reviewDialog.locator("video");
   await expect(reviewVideo).not.toHaveAttribute("controls", "");
+  const reviewSpeedButton = reviewDialog.getByTestId("video-review-speed");
+  await expect(reviewSpeedButton).toHaveText("1.5x");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(1.5);
+  await reviewSpeedButton.click();
+  await page
+    .getByTestId("video-review-speed-menu")
+    .getByRole("button", { name: "0.25x", exact: true })
+    .click();
+  await expect(reviewSpeedButton).toHaveText("0.25x");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(0.25);
   await reviewDialog.getByRole("button", { name: "Play review video" }).click();
   await expect(
     reviewDialog.getByRole("button", { name: "Pause review video" }),
@@ -569,6 +614,16 @@ test("video upload previews use poster frames and inline videos open review mode
     .getByRole("button", { name: "Close video review" })
     .click();
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
+  await expect(
+    restoredInlinePlayer.getByTestId("video-inline-speed"),
+  ).toHaveText("0.25x");
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(0.25);
 
   await reviewButton.evaluate((button) =>
     (button as HTMLButtonElement).click(),
