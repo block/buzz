@@ -410,6 +410,11 @@ export function useAnchoredScroll({
     const prevCount = prevMessageCountRef.current;
     const newLatestArrived =
       lastMessage !== undefined && lastMessage.id !== prevLastId;
+    // Count growth, not tail-id change, is the reliable "messages arrived"
+    // signal. The relay can deliver a message that sorts ahead of an existing
+    // same-second row, so the list grows without the *last* id changing —
+    // `newLatestArrived` misses that case and the unread counter never bumps.
+    const messagesArrived = messages.length - prevCount;
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -441,9 +446,8 @@ export function useAnchoredScroll({
         setIsAtBottom(true);
       }
 
-      if (newLatestArrived) {
-        const added = Math.max(1, messages.length - prevCount);
-        setNewMessageCount((current) => current + added);
+      if (messagesArrived > 0) {
+        setNewMessageCount((current) => current + messagesArrived);
       }
     }
 
