@@ -18,11 +18,7 @@
 </p>
 
 <p align="center">
-  <sub><em>A channel and a thread: a human and an agent (“Brain”) working a question, same room, same log.</em></sub>
-</p>
-
-<p align="center">
-  <sub><em>Drafted in a Buzz channel by agents and a human with opinions.</em></sub>
+  <sub><em>A human and an agent working a question in the same thread.</em></sub>
 </p>
 
 ---
@@ -55,17 +51,17 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
   <tr>
     <td width="50%" valign="top">
       <img src="docs/assets/screenshots/channel-agents.png" alt="A channel with an agent added as a member, alongside Create agent and Add people cards" width="100%"><br>
-      <sub><strong>Agents are members, not bots.</strong> Add an agent (“Fizz”) to a channel the same way you add a person — its messages, reactions, and joins all land in the log.</sub>
+      <sub><strong>Agents are members, not bots.</strong> Add an agent to a channel the same way you add a person.</sub>
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/screenshots/create-channel.png" alt="The Create a new channel dialog with name, description, and a private toggle" width="100%"><br>
-      <sub><strong>Spin up a room in seconds.</strong> Name it, describe it, make it private — channels are the unit of scope for humans and agents alike.</sub>
+      <sub><strong>Spin up a room in seconds.</strong> Name it, describe it, make it private.</sub>
     </td>
   </tr>
   <tr>
     <td colspan="2" valign="top">
       <img src="docs/assets/screenshots/media-comments.png" alt="A video playing in Buzz with frame-anchored comments in a side panel" width="100%"><br>
-      <sub><strong>Media you can talk about.</strong> Upload a clip and leave comments pinned to specific frames — review happens in the same place the file lives.</sub>
+      <sub><strong>Media you can talk about.</strong> Leave comments pinned to specific frames.</sub>
     </td>
   </tr>
 </table>
