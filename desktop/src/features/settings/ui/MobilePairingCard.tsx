@@ -27,6 +27,7 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 type PairingStep =
   | "generating"
@@ -321,14 +322,16 @@ export function MobilePairingCard({
 
   return (
     <section className="min-w-0" data-testid="settings-mobile">
-      <div className="mb-12 space-y-1">
-        <h2 className="text-2xl font-semibold tracking-tight">Mobile</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Connect the Buzz mobile app to this relay by scanning a QR code. The
-          connection is secured with end-to-end encryption and a verification
-          code.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Mobile"
+        description={
+          <>
+            Connect the Buzz mobile app to this relay by scanning a QR code. The
+            connection is secured with end-to-end encryption and a verification
+            code.
+          </>
+        }
+      />
 
       <SettingsOptionGroup>
         <SettingsOptionRow className="gap-3">

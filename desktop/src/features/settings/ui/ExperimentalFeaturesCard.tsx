@@ -1,6 +1,7 @@
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 function FeatureRow({ feature }: { feature: FeatureDefinition }) {
   const [enabled, toggle] = useFeatureToggle(feature.id);
@@ -31,13 +32,15 @@ export function ExperimentalFeaturesCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-experimental">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Experiments</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          These features are functional but still being refined. Enable them to
-          try new capabilities early.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Experiments"
+        description={
+          <>
+            These features are functional but still being refined. Enable them
+            to try new capabilities early.
+          </>
+        }
+      />
 
       <div className="flex flex-col gap-2">
         {previewFeatures.map((f) => (
