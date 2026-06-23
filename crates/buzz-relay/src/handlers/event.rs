@@ -1071,6 +1071,7 @@ mod tests {
                 CancellationToken::new(),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
+                3,
             );
             if let Some(pk) = pubkey {
                 state.conn_manager.set_authenticated_pubkey(conn_id, pk);
