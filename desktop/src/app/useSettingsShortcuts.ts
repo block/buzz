@@ -26,6 +26,7 @@ export function useSettingsShortcuts({
       }
 
       event.preventDefault();
+      event.stopImmediatePropagation();
       if (open) {
         onClose();
         return;
@@ -34,9 +35,9 @@ export function useSettingsShortcuts({
       onOpenSettings();
     }
 
-    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keydown", handleKeyDown, true);
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [onClose, onOpenSettings, open]);
 }
