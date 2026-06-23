@@ -44,7 +44,7 @@ test("createPersonaDialogState returns a fresh empty draft", () => {
   const first = createPersonaDialogState();
   const second = createPersonaDialogState();
 
-  assert.equal(first.title, "Create persona");
+  assert.equal(first.title, "Create agent");
   assert.deepEqual(first.initialValues, {
     displayName: "",
     avatarUrl: "",
@@ -123,7 +123,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     updatedAt: "2025-01-02T00:00:00Z",
   });
 
-  assert.equal(state.title, "Edit persona");
+  assert.equal(state.title, "Edit agent");
   assert.equal(state.description, "");
   assert.equal(state.submitLabel, "Save changes");
   assert.deepEqual(state.initialValues, {
@@ -165,6 +165,7 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
   const state = importPersonaDialogState({
     displayName: "Imported",
     avatarDataUrl: null,
+    avatarRef: null,
     systemPrompt: "Imported prompt",
     runtime: null,
     model: "model-b",
@@ -182,6 +183,22 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
     model: "model-b",
     provider: undefined,
   });
+});
+
+test("importPersonaDialogState preserves Goose app-avatar refs from persona markdown", () => {
+  const state = importPersonaDialogState({
+    displayName: "Goosey",
+    avatarDataUrl: null,
+    avatarRef: "app-avatar:gloopies-19",
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: [],
+    sourceFile: "goosey.persona.md",
+  });
+
+  assert.equal(state.initialValues.avatarUrl, "app-avatar:gloopies-19");
 });
 
 test("editPersonaDialogState preserves provider=databricks", () => {
@@ -248,6 +265,7 @@ test("importPersonaDialogState preserves provider=anthropic", () => {
   const state = importPersonaDialogState({
     displayName: "Imported With Provider",
     avatarDataUrl: null,
+    avatarRef: null,
     systemPrompt: "Anthropic agent.",
     runtime: "goose",
     model: "claude-sonnet",
