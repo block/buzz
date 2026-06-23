@@ -97,16 +97,24 @@ const EMPTY_THREAD_MARKER: ThreadUnreadMarker = {
 
 /**
  * @param replies Thread replies in chronological order.
- * @param frontierSeconds Read frontier in unix seconds captured at thread
- *   open. `null` means the thread was never read, so every reply counts as
- *   unread.
+ * @param getReadAt Per-message read resolver (LP4 v3). A reply is unread when
+ *   its `createdAt` is strictly newer than `getReadAt(reply.id)`; a `null`
+ *   marker means the reply was never read, so it counts as unread. Folding the
+ *   channel term into each marker happens upstream in the resolver, never
+ *   reply→reply, so reading one reply never clears another.
  * @param currentPubkey When provided, replies authored by this pubkey are
  *   never counted as unread (the user knows about their own posts).
+ * @param isForcedUnread Session-local OR-overlay (LP4 v3). When it returns
+ *   true for a reply, the reply counts as unread regardless of its marker —
+ *   the per-message analog of channel mark-unread. Markers are monotonic and
+ *   cannot move backward, so a deliberate mark-unread lives in this transient
+ *   overlay, never in the read-line. Defaults to never-forced.
  */
 export function computeThreadUnreadMarker(
   replies: Pick<TimelineMessage, "id" | "createdAt" | "pubkey">[],
-  frontierSeconds: number | null,
+  getReadAt: (messageId: string) => number | null,
   currentPubkey?: string,
+  isForcedUnread: (messageId: string) => boolean = () => false,
 ): ThreadUnreadMarker {
   // Normalize once: see computeChannelUnreadMarker for the case-mismatch guard.
   const normalizedPubkey = currentPubkey?.toLowerCase();
@@ -118,8 +126,9 @@ export function computeThreadUnreadMarker(
     if (normalizedPubkey && reply.pubkey?.toLowerCase() === normalizedPubkey) {
       continue;
     }
+    const readAt = getReadAt(reply.id);
     const isUnread =
-      frontierSeconds === null || reply.createdAt > frontierSeconds;
+      isForcedUnread(reply.id) || readAt === null || reply.createdAt > readAt;
     if (!isUnread) {
       continue;
     }

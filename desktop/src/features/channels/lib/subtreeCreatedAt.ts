@@ -1,36 +1,17 @@
 /**
- * Newest `createdAt` across a thread branch: the message itself plus every
- * descendant, walked through the direct-children adjacency map. Drilling into a
- * branch advances the thread read frontier to this value, so it determines how
- * far "expanding consumes unread" reaches. Returns null when the message is
- * absent from the timeline so the caller can skip the read-state write.
+ * Reply-graph builders for the per-message thread badge model (LP4 v3). Each
+ * maps the loaded timeline into an index a badge consumer reads in O(1): direct
+ * children by parent, replies by their resolved thread root, createdAt by id,
+ * and the descendant id walk. The old `subtreeMaxCreatedAt` frontier-advance
+ * helper is gone — read state is now per-message (`effective(msg:<id>)`), so no
+ * subtree ceiling is computed.
  */
-export function subtreeMaxCreatedAt(
-  messageId: string,
-  directReplyIdsByParentId: ReadonlyMap<string, string[]>,
-  createdAtByMessageId: ReadonlyMap<string, number>,
-): number | null {
-  const ownCreatedAt = createdAtByMessageId.get(messageId);
-  if (ownCreatedAt === undefined) return null;
-
-  let maxCreatedAt = ownCreatedAt;
-  const pendingIds = [...(directReplyIdsByParentId.get(messageId) ?? [])];
-  while (pendingIds.length > 0) {
-    const currentId = pendingIds.pop();
-    if (!currentId) continue;
-    const createdAt = createdAtByMessageId.get(currentId);
-    if (createdAt !== undefined && createdAt > maxCreatedAt) {
-      maxCreatedAt = createdAt;
-    }
-    pendingIds.push(...(directReplyIdsByParentId.get(currentId) ?? []));
-  }
-  return maxCreatedAt;
-}
 
 /** Minimal timeline shape the adjacency/createdAt builders read. */
 interface ReplyGraphMessage {
   id: string;
   parentId?: string | null;
+  rootId?: string | null;
   createdAt: number;
 }
 
@@ -49,19 +30,24 @@ export function buildDirectReplyIdsByParentId(
 }
 
 /**
- * Maps each parent message id to its direct-reply objects in timeline order.
- * Built once so per-thread badge consumers resolve direct replies in O(1)
- * instead of re-scanning the whole timeline per top-level message.
+ * Maps each thread root id to every reply that resolves to it by `rootId`,
+ * in timeline order. Unlike the parent-keyed maps above, this groups by the
+ * reply's own `rootId` (getThreadReference: the `root` e-tag that travels with
+ * the event), so a deep reply lands under its true root even when an
+ * intermediate ancestor is absent from the loaded window. Root-keyed badge
+ * consumers use this to roll up severed orphans the parent-chain walk misses.
+ * Top-level messages (no rootId) and self-referential roots are excluded.
  */
-export function buildDirectRepliesByParentId<T extends ReplyGraphMessage>(
+export function buildRepliesByRootId<T extends ReplyGraphMessage>(
   messages: readonly T[],
 ): Map<string, T[]> {
   const map = new Map<string, T[]>();
   for (const message of messages) {
-    if (!message.parentId) continue;
-    const currentReplies = map.get(message.parentId) ?? [];
+    const rootId = message.rootId;
+    if (!rootId || rootId === message.id) continue;
+    const currentReplies = map.get(rootId) ?? [];
     currentReplies.push(message);
-    map.set(message.parentId, currentReplies);
+    map.set(rootId, currentReplies);
   }
   return map;
 }

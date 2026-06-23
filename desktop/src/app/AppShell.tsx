@@ -1,13 +1,8 @@
 import * as React from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 
-import {
-  deriveShellRoute,
-  isWindowDragHandleEvent,
-  toSearchHit,
-} from "@/app/AppShell.helpers";
+import { deriveShellRoute, toSearchHit } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
   AppShellOverlays,
@@ -20,6 +15,7 @@ import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
+import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import {
   channelsQueryKey,
@@ -29,6 +25,7 @@ import {
   useOpenDmMutation,
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
+import { msgContextKey } from "@/features/channels/readState/readStateFormat";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { getThreadReference } from "@/features/messages/lib/threading";
@@ -97,6 +94,7 @@ const LazySettingsScreen = React.lazy(async () => {
 
 export function AppShell() {
   useWebviewZoomShortcuts();
+  useTauriWindowDrag();
 
   const workspacesHook = useWorkspaces();
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
@@ -374,6 +372,21 @@ export function AppShell() {
     },
     [markChannelRead],
   );
+
+  // Per-message read frontier (LP4 v3): effective(msg:<id>) folds through the
+  // channel, so a channel-read clears messages older than the top-level frontier.
+  const getMessageReadAt = React.useCallback(
+    (messageId: string) => getChannelReadAt(msgContextKey(messageId)),
+    [getChannelReadAt],
+  );
+  const markMessageRead = React.useCallback(
+    (messageId: string, timestamp: number) =>
+      markChannelRead(
+        msgContextKey(messageId),
+        new Date(timestamp * 1_000).toISOString(),
+      ),
+    [markChannelRead],
+  );
   const threadActivityFeedItems = useThreadActivityFeedItems(
     threadActivityItems,
     mutedRootIds,
@@ -482,9 +495,10 @@ export function AppShell() {
     [goSettings],
   );
 
-  const handleCloseSettings = React.useCallback(() => {
-    closeSettings();
-  }, [closeSettings]);
+  const handleCloseSettings = React.useCallback(
+    () => closeSettings(),
+    [closeSettings],
+  );
 
   // Section switches rewrite the settings entry rather than stacking one
   // history entry per section, so back always exits settings in one step.
@@ -608,13 +622,12 @@ export function AppShell() {
     };
   }, []);
 
-  const handleOpenNewDm = React.useCallback(() => {
-    setIsNewDmOpen(true);
-  }, []);
+  const handleOpenNewDm = React.useCallback(() => setIsNewDmOpen(true), []);
 
-  const handleOpenCreateChannel = React.useCallback(() => {
-    setIsCreateChannelOpen(true);
-  }, []);
+  const handleOpenCreateChannel = React.useCallback(
+    () => setIsCreateChannelOpen(true),
+    [],
+  );
 
   React.useLayoutEffect(() => {
     if (settingsOpen) {
@@ -685,36 +698,6 @@ export function AppShell() {
     selectedView,
   });
 
-  React.useEffect(() => {
-    function handlePointerDown(event: PointerEvent) {
-      if (event.button !== 0 || event.detail > 1) {
-        return;
-      }
-
-      if (!isWindowDragHandleEvent(event)) {
-        return;
-      }
-
-      void getCurrentWindow().startDragging();
-    }
-
-    function handleDoubleClick(event: MouseEvent) {
-      if (event.button !== 0 || !isWindowDragHandleEvent(event)) {
-        return;
-      }
-
-      event.preventDefault();
-      void getCurrentWindow().toggleMaximize();
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown, true);
-    window.addEventListener("dblclick", handleDoubleClick, true);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown, true);
-      window.removeEventListener("dblclick", handleDoubleClick, true);
-    };
-  }, []);
-
   return (
     <PreventSleepProvider>
       <ChannelNavigationProvider channels={channels}>
@@ -733,6 +716,8 @@ export function AppShell() {
             getChannelReadAt,
             getThreadReadAt,
             markThreadRead,
+            getMessageReadAt,
+            markMessageRead,
             readStateVersion,
             setContextParentResolver,
             followThread: handleFollowThread,

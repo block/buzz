@@ -25,6 +25,12 @@ type AppShellContextValue = {
   getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
   // Advance the thread read frontier to the given unix-seconds timestamp.
   markThreadRead: (rootId: string, timestamp: number) => void;
+  // Per-message read frontier as unix-seconds timestamp, or null when never
+  // read. Uses `msg:<id>` context keys folded through the active channel by the
+  // parent resolver (LP4 v3 per-message badge model).
+  getMessageReadAt: (messageId: string) => number | null;
+  // Advance a single message's read marker to the given unix-seconds timestamp.
+  markMessageRead: (messageId: string, timestamp: number) => void;
   // Bump-counter that invalidates whenever the read marker changes. Include
   // in memo deps that consume getChannelReadAt.
   readStateVersion: number;
@@ -50,6 +56,8 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   getChannelReadAt: () => null,
   getThreadReadAt: () => null,
   markThreadRead: () => {},
+  getMessageReadAt: () => null,
+  markMessageRead: () => {},
   readStateVersion: 0,
   setContextParentResolver: () => {},
   followThread: () => {},

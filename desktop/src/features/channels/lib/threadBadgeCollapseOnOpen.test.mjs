@@ -2,147 +2,124 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { computeThreadBadgeCounts } from "./threadBadgeCounts.ts";
-import { nextThreadBadgeFrontier } from "./threadBadgeFrontier.ts";
-import {
-  buildCreatedAtByMessageId,
-  buildDirectRepliesByParentId,
-  buildDirectReplyIdsByParentId,
-  subtreeMaxCreatedAt,
-} from "./subtreeCreatedAt.ts";
+import { buildRepliesByRootId } from "./subtreeCreatedAt.ts";
 
-// End-to-end model of the mark-read-on-thread-open pipeline in
-// useChannelUnreadState. The open effect computes a read ceiling for the thread
-// head, markThreadRead advances the thread-OWN marker toward it (monotonic, per
-// advanceContext), the badge frontier snapshot then advances toward that live
-// marker (seedThreadBadgeFrontiers -> nextThreadBadgeFrontier), and the
-// summary badge counts the whole subtree against that snapshot
-// (computeThreadBadgeCounts). The fix changed the open ceiling from the
-// direct-replies max (head + direct children) to the full-subtree max
-// (subtreeMaxCreatedAt); these tests pin that the badge collapses to 0 on open
-// whether or not the OWN marker actually advances.
+// Open-at-level contract (LP4 v3). Opening a thread no longer collapses the
+// whole subtree badge (#1118's behavior, deliberately reversed). The on-open
+// effect marks read ONLY the replies revealed on open — each gets its own
+// msg:<id> marker advanced to its createdAt — so a reply in a still-collapsed
+// branch keeps its badge until it too is revealed. The root summary badge
+// (computeThreadBadgeCounts) reads effective(msg:<id>) live: a reply counts
+// iff createdAt > readAt, so reading one reply never clears another.
 
-const msg = (id, parentId, createdAt, pubkey = "author") => ({
+// rootId travels with every reply (getThreadReference's `root` e-tag), so a
+// nested reply rolls up to the thread root even when an ancestor is collapsed.
+const msg = (id, parentId, createdAt = 100, pubkey = "author", rootId) => ({
   id,
   parentId,
+  rootId: rootId ?? parentId ?? id,
   createdAt,
   pubkey,
 });
 
-// The ceiling the open effect now writes: full-subtree max over the head.
-const openCeiling = (rootId, messages) =>
-  subtreeMaxCreatedAt(
-    rootId,
-    buildDirectReplyIdsByParentId(messages),
-    buildCreatedAtByMessageId(messages),
-  );
+const countAll = () => true;
 
-// Drive one thread-open through the pipeline. `priorOwnMarker` is the thread's
-// OWN read marker before this open (null = never read). Returns the resulting
-// badge count for the root after open.
-const badgeAfterOpen = (rootId, messages, priorOwnMarker, currentPubkey) => {
-  const ceiling = openCeiling(rootId, messages);
-  // markThreadRead -> advanceContext: monotonic max of prior own marker and the
-  // new ceiling. A null ceiling means no replies; the effect early-returns.
-  const liveMarker =
-    ceiling === null
-      ? priorOwnMarker
-      : priorOwnMarker === null
-        ? ceiling
-        : Math.max(priorOwnMarker, ceiling);
-  // seedThreadBadgeFrontiers advances the snapshot toward the live marker.
-  const frontier = nextThreadBadgeFrontier(undefined, liveMarker);
-  return computeThreadBadgeCounts(
+// Model the on-open mark-read effect: each revealed reply's msg:<id> marker is
+// advanced to its own createdAt (useChannelUnreadState's open effect maps
+// markMessageRead(id, createdAt) over the visible set). A reply absent from the
+// revealed set was never read, so its resolver returns null and it stays
+// unread. Returns the live per-message getReadAt resolver after the open.
+function openMarksRevealed(messages, revealedIds) {
+  const revealed = new Set(revealedIds);
+  const createdAtById = new Map(messages.map((m) => [m.id, m.createdAt]));
+  return (id) => (revealed.has(id) ? (createdAtById.get(id) ?? null) : null);
+}
+
+const rootBadge = (messages, getReadAt, currentPubkey) =>
+  computeThreadBadgeCounts(
     messages,
-    buildDirectRepliesByParentId(messages),
-    new Map([[rootId, frontier]]),
-    () => true,
+    buildRepliesByRootId(messages),
+    getReadAt,
+    countAll,
     currentPubkey,
-  ).get(rootId);
-};
-
-test("openThreadWithUnreadNestedReply_advancesFrontierToSubtreeMax", () => {
-  // root -> a(100) -> b(200): the unread lives in nested reply b.
-  // The OLD direct-replies ceiling stopped at a(100) (b is a grandchild, not a
-  // direct reply of root); only subtree-max reaches the nested b(200).
-  const messages = [
-    msg("root", null, 50),
-    msg("a", "root", 100),
-    msg("b", "a", 200),
-  ];
-  const ids = buildDirectReplyIdsByParentId(messages);
-  const createdAt = buildCreatedAtByMessageId(messages);
-  assert.equal(subtreeMaxCreatedAt("root", ids, createdAt), 200);
-});
-
-test("openThreadWithUnreadNestedReply_collapsesBadgeToZero", () => {
-  // The reported bug: before the fix the frontier sat at the direct-replies
-  // ceiling (100) and the nested reply b(200) kept the badge lit. The fix
-  // advances to subtree-max (200), so the badge recomputes to 0 on open.
-  const messages = [
-    msg("root", null, 50),
-    msg("a", "root", 100),
-    msg("b", "a", 200),
-  ];
-  assert.equal(badgeAfterOpen("root", messages, null), undefined);
-});
-
-test("openThreadWithUnreadNestedReply_oldDirectCeilingLeftBadgeLit", () => {
-  // Regression guard: the OLD behavior advanced the frontier only to the
-  // direct-replies ceiling — max over root(50) and its DIRECT reply a(100),
-  // i.e. 100. The nested grandchild b(200) was excluded, so the badge stayed
-  // lit (count=1). This pins the exact gap the fix closes: had the fix been
-  // reverted to that ceiling, the badge would NOT clear. The subtree-max
-  // ceiling (200) is asserted to clear the badge in the test above.
-  const messages = [
-    msg("root", null, 50),
-    msg("a", "root", 100),
-    msg("b", "a", 200),
-  ];
-  const oldDirectCeiling = 100;
-  const frontier = nextThreadBadgeFrontier(undefined, oldDirectCeiling);
-  const count = computeThreadBadgeCounts(
-    messages,
-    buildDirectRepliesByParentId(messages),
-    new Map([["root", frontier]]),
-    () => true,
   ).get("root");
-  assert.equal(count, 1);
-});
 
-test("ownMarkerAlreadyAtSubtreeMax_stillCollapsesBadgeToZero", () => {
-  // Prior-session expand synced the OWN marker to subtree-max BEFORE this
-  // session's first open. markThreadRead's advance is then a no-op
-  // (advanceContext early-returns, no notify), but the badge still reads 0
-  // because the frontier snapshot is seeded from the live marker on render,
-  // independent of whether the advance notified. Pins the no-op-return path.
+test("openRevealingOnlyDirectChild_keepsCollapsedGrandchildBadge", () => {
+  // root -> a -> b: opening reveals direct child a but b is nested under a
+  // still-collapsed branch. The OLD whole-subtree-on-open would have cleared
+  // the badge entirely; v3 marks only a read, so b keeps the root badge lit.
   const messages = [
     msg("root", null, 50),
     msg("a", "root", 100),
-    msg("b", "a", 200),
+    msg("b", "a", 200, "author", "root"),
   ];
-  assert.equal(badgeAfterOpen("root", messages, 200), undefined);
+  assert.equal(rootBadge(messages, openMarksRevealed(messages, ["a"])), 1);
+});
+
+test("openRevealingWholeSubtree_clearsRootBadge", () => {
+  // When every reply is revealed on open, each is marked read and the badge
+  // clears — the only case the old subtree-collapse and the new open-at-level
+  // agree on.
+  const messages = [
+    msg("root", null, 50),
+    msg("a", "root", 100),
+    msg("b", "a", 200, "author", "root"),
+  ];
+  assert.equal(
+    rootBadge(messages, openMarksRevealed(messages, ["a", "b"])),
+    undefined,
+  );
+});
+
+test("openRevealingOneBranch_keepsOtherCollapsedBranchBadge", () => {
+  // root -> {a -> a1, c -> c1}: opening reveals branch a (a, a1) but leaves
+  // branch c collapsed. The two unread replies under c keep the root badge.
+  const messages = [
+    msg("root", null, 50),
+    msg("a", "root", 100),
+    msg("a1", "a", 110, "author", "root"),
+    msg("c", "root", 120),
+    msg("c1", "c", 130, "author", "root"),
+  ];
+  assert.equal(
+    rootBadge(messages, openMarksRevealed(messages, ["a", "a1"])),
+    2,
+  );
+});
+
+test("newerReplyAfterOpen_relightsRootBadge", () => {
+  // Open marks a(100) read at its createdAt. A newer reply b(200) arrives in
+  // the same revealed branch; the predicate is strictly createdAt > readAt, so
+  // b is unread against a's marker and the badge relights. Models a reply
+  // landing after the open snapshot without re-marking.
+  const messages = [
+    msg("root", null, 50),
+    msg("a", "root", 100),
+    msg("b", "root", 200),
+  ];
+  // Only a was present/revealed at open; b is unread (never marked).
+  assert.equal(rootBadge(messages, openMarksRevealed(messages, ["a"])), 1);
 });
 
 test("openThreadWhereOnlyUnreadIsOwnReply_neverShowsBadge", () => {
-  // Will "commented back": a nested reply authored by the current user. Self
-  // authored replies are excluded from the count, so no badge ever shows and
-  // the fix is inert — the badge is already absent before and after open.
+  // A nested reply authored by the current user. Self-authored replies are
+  // excluded from the count, so no badge shows regardless of read state — the
+  // open-at-level change is inert here.
   const messages = [
     msg("root", null, 50),
     msg("a", "root", 100, "other"),
-    msg("b", "a", 200, "ME"),
+    msg("b", "a", 200, "ME", "root"),
   ];
-  // Frontier below every reply (never read) — only "other"'s reply a counts.
-  const beforeOpen = computeThreadBadgeCounts(
-    messages,
-    buildDirectRepliesByParentId(messages),
-    new Map([["root", null]]),
-    () => true,
-    "me",
-  ).get("root");
-  assert.equal(beforeOpen, 1);
-  // After open the frontier reaches subtree-max (200), clearing a as well.
-  assert.equal(badgeAfterOpen("root", messages, null, "me"), undefined);
+  // Nothing revealed (never read), only "other"'s reply a could count.
+  assert.equal(
+    rootBadge(messages, () => null, "me"),
+    1,
+  );
+  // After revealing a, only the self-authored b remains — no badge.
+  assert.equal(
+    rootBadge(messages, openMarksRevealed(messages, ["a"]), "me"),
+    undefined,
+  );
 });
 
 test("openThreadWhereEveryUnreadIsOwnReply_inertNoBadgeEver", () => {
@@ -150,15 +127,14 @@ test("openThreadWhereEveryUnreadIsOwnReply_inertNoBadgeEver", () => {
   const messages = [
     msg("root", null, 50),
     msg("a", "root", 100, "ME"),
-    msg("b", "a", 200, "ME"),
+    msg("b", "a", 200, "ME", "root"),
   ];
-  const before = computeThreadBadgeCounts(
-    messages,
-    buildDirectRepliesByParentId(messages),
-    new Map([["root", null]]),
-    () => true,
-    "me",
-  ).get("root");
-  assert.equal(before, undefined);
-  assert.equal(badgeAfterOpen("root", messages, null, "me"), undefined);
+  assert.equal(
+    rootBadge(messages, () => null, "me"),
+    undefined,
+  );
+  assert.equal(
+    rootBadge(messages, openMarksRevealed(messages, ["a", "b"]), "me"),
+    undefined,
+  );
 });

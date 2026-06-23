@@ -1165,6 +1165,39 @@ async fn handle_edit_metadata(event: &Event, state: &Arc<AppState>) -> anyhow::R
                                 }),
                             )
                             .await?;
+
+                            // Resubscribe connected agents after restore: archiving evicts their
+                            // live subscriptions (CLOSED "channel access revoked") and unarchive
+                            // otherwise emits no signal that makes a connected agent resubscribe.
+                            // We reuse the member_added notification (44100) purely as a resubscribe
+                            // trigger — no membership actually changed here — because it flows on the
+                            // agent's always-live global membership subscription, the same path
+                            // remove/re-add uses to recover. Humans self-heal via the re-emitted
+                            // kind:39000 discovery, so this is intentionally agent-scoped.
+                            //
+                            // Known limitation: emit_membership_notification builds a created_at=now
+                            // event with no nonce, and insert_event skips fan-out on a duplicate id.
+                            // Four sub-second toggles (archive->unarchive->archive->unarchive) on the
+                            // same channel by the same actor could collide ids and skip a fan-out.
+                            // Not reachable in practice — unarchive has a single human-driven caller;
+                            // the reaper only auto-archives — so we don't engineer around it.
+                            for member in state.db.get_members(channel_id).await? {
+                                if let Err(e) = emit_membership_notification(
+                                    state,
+                                    channel_id,
+                                    &member.pubkey,
+                                    &actor_bytes,
+                                    KIND_MEMBER_ADDED_NOTIFICATION,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        channel = %channel_id,
+                                        error = %e,
+                                        "post-unarchive resubscribe notification failed"
+                                    );
+                                }
+                            }
                         }
                         _ => {} // ignore invalid values
                     }

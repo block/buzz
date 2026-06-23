@@ -23,15 +23,21 @@ function fixture() {
 
 const ROOT_SUBTREE = ["a", "b", "a1", "b1", "b2"];
 
+// LP4 v3: the panel badge reads a per-message resolver, not an open-time
+// frontier snapshot, and there is no separate expanded-subtree gate — the
+// per-message marker already distinguishes a read parent from its still-unread
+// descendant. A uniform read-line at `seconds` (or null = never read)
+// reproduces the legacy boundary cases.
+const uniformReadAt = (seconds) => () => seconds;
+
 test("computeThreadReplyUnreadCounts_collapsedBranch_countsUnreadDescendants", () => {
-  // Frontier 350: a1(400), b1(500), b2(600) are unread.
+  // Read-line 350: a1(400), b1(500), b2(600) are unread.
   const counts = computeThreadReplyUnreadCounts({
     timelineMessages: fixture(),
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-    frontierSeconds: 350,
+    getReadAt: uniformReadAt(350),
   });
   assert.equal(counts.get("a"), 1); // a1
   assert.equal(counts.get("b"), 2); // b1, b2
@@ -43,66 +49,66 @@ test("computeThreadReplyUnreadCounts_expandedBranch_omitsBadge", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(["b"]),
-    expandedSubtreeReplyIds: new Set(["b1", "b2"]),
-    frontierSeconds: 350,
+    getReadAt: uniformReadAt(350),
   });
   assert.equal(counts.get("a"), 1);
+  // b renders its children inline, so it carries no summary badge.
   assert.equal(counts.has("b"), false);
 });
 
-test("computeThreadReplyUnreadCounts_expandedBranch_revealedChildNoStaleBadge", () => {
-  // Expand b: mark-read-on-expand reads b's whole subtree, and the panel now
-  // reveals collapsed child b1 (descendant b2 still unread vs the open-time
-  // frontier). b1 must carry NO badge — the expanded subtree is excluded.
+test("computeThreadReplyUnreadCounts_revealedCollapsedChild_keepsOwnSubtreeBadge", () => {
+  // v3 open-at-level: expanding b reveals direct child b1 but marks only the
+  // revealed set read — it does NOT clear b1's still-collapsed descendant b2.
+  // The per-message marker leaves b2 unread, so the now-visible (collapsed) b1
+  // carries a badge of 1. This is the deliberate reversal of the #1118
+  // whole-subtree-on-open behavior.
   const counts = computeThreadReplyUnreadCounts({
     timelineMessages: fixture(),
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b", "b1"],
     expandedReplyIds: new Set(["b"]),
-    expandedSubtreeReplyIds: new Set(["b1", "b2"]),
-    frontierSeconds: 350,
+    // b and its revealed direct child b1 are read; b2 (collapsed under b1)
+    // is still unread.
+    getReadAt: (id) => (id === "b1" || id === "b" ? 1000 : 350),
   });
   assert.equal(counts.get("a"), 1);
-  assert.equal(counts.has("b"), false);
-  assert.equal(counts.has("b1"), false);
+  assert.equal(counts.has("b"), false); // expanded -> no summary badge
+  assert.equal(counts.get("b1"), 1); // collapsed b1 keeps its b2 badge
 });
 
 test("computeThreadReplyUnreadCounts_descendantsButNoneUnread_noBadge", () => {
-  // Frontier 1000: nothing is newer, so no unread descendants anywhere.
+  // Read-line 1000: nothing is newer, so no unread descendants anywhere.
   const counts = computeThreadReplyUnreadCounts({
     timelineMessages: fixture(),
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-    frontierSeconds: 1000,
+    getReadAt: uniformReadAt(1000),
   });
   assert.equal(counts.size, 0);
 });
 
-test("computeThreadReplyUnreadCounts_nullFrontier_allDescendantsUnread", () => {
+test("computeThreadReplyUnreadCounts_neverRead_allDescendantsUnread", () => {
   const counts = computeThreadReplyUnreadCounts({
     timelineMessages: fixture(),
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-    frontierSeconds: null,
+    getReadAt: uniformReadAt(null),
   });
   assert.equal(counts.get("a"), 1); // a1
   assert.equal(counts.get("b"), 2); // b1, b2
 });
 
 test("computeThreadReplyUnreadCounts_otherThreadReply_notCounted", () => {
-  // other1(800) is unread by frontier but outside root's subtree — its
-  // ancestor "other" is not a visible row here and must never be keyed.
+  // other1(800) is unread but outside root's subtree — its ancestor "other"
+  // is not in subtreeReplyIds and must never be keyed.
   const counts = computeThreadReplyUnreadCounts({
     timelineMessages: fixture(),
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b", "other"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-    frontierSeconds: 350,
+    getReadAt: uniformReadAt(350),
   });
   assert.equal(counts.has("other"), false);
 });
@@ -114,8 +120,7 @@ test("computeThreadReplyUnreadCounts_onlyVisibleRowsKeyed", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-    frontierSeconds: 350,
+    getReadAt: uniformReadAt(350),
   });
   assert.equal(counts.get("a"), 1);
   assert.equal(counts.has("b"), false);
@@ -137,39 +142,38 @@ test("computeThreadReplyUnreadCounts_selfAuthored_skipsOwnReplies", () => {
     subtreeReplyIds: ["a", "b", "a1", "b1", "b2"],
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-    frontierSeconds: 350,
+    getReadAt: uniformReadAt(350),
     currentPubkey: "me",
   });
   assert.equal(counts.has("a"), false); // a1 is self-authored, so 0 unread
   assert.equal(counts.get("b"), 2); // b1, b2 are by "other"
 });
 
-test("computeThreadReplyUnreadCounts_openTimeSnapshot_survivesChannelMarkRead", () => {
-  // Regression (Fix 1): the in-panel badge must reflect "what was unread when
-  // the thread opened", NOT the live root marker. On channel-open
-  // markChannelRead advances the channel marker to the newest TOP-LEVEL
-  // message; effective(thread) = max(thread_own, channel_marker), so the live
-  // value can jump PAST the nested replies and zero every badge. Passing the
-  // open-time snapshot (frontier 350, captured before the advance) keeps the
-  // badges; passing the post-advance live value (650, past b2(600)) loses them.
-  const args = {
+test("computeThreadReplyUnreadCounts_perMessageMarkers_readOneDescendantKeepsRest", () => {
+  // The defining per-message case: marking b1 read leaves sibling-line b2
+  // unread independently. b's badge counts only the still-unread b2.
+  const counts = computeThreadReplyUnreadCounts({
     timelineMessages: fixture(),
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
-    expandedSubtreeReplyIds: new Set(),
-  };
-  const snapshotCounts = computeThreadReplyUnreadCounts({
-    ...args,
-    frontierSeconds: 350,
+    getReadAt: (id) => (id === "b1" || id === "a1" ? 1000 : 350),
   });
-  assert.equal(snapshotCounts.get("a"), 1);
-  assert.equal(snapshotCounts.get("b"), 2);
+  assert.equal(counts.has("a"), false); // a1 read
+  assert.equal(counts.get("b"), 1); // b1 read, only b2 remains
+});
 
-  const liveAdvancedCounts = computeThreadReplyUnreadCounts({
-    ...args,
-    frontierSeconds: 650,
+test("computeThreadReplyUnreadCounts_forcedUnread_relightsReadDescendant", () => {
+  // Session-local mark-unread forces a1 (read by its marker) back to unread,
+  // so collapsed parent a regains its badge.
+  const counts = computeThreadReplyUnreadCounts({
+    timelineMessages: fixture(),
+    subtreeReplyIds: ROOT_SUBTREE,
+    visibleReplyIds: ["a", "b"],
+    expandedReplyIds: new Set(),
+    getReadAt: uniformReadAt(1000), // everything read by marker
+    isForcedUnread: (id) => id === "a1",
   });
-  assert.equal(liveAdvancedCounts.size, 0);
+  assert.equal(counts.get("a"), 1); // a1 forced unread
+  assert.equal(counts.has("b"), false); // b subtree still read
 });

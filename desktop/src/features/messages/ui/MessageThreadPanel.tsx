@@ -63,6 +63,7 @@ type MessageThreadPanelProps = {
   onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
+  onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onScrollTargetResolved: () => void;
   onSelectReplyTarget: (message: TimelineMessage) => void;
@@ -88,6 +89,7 @@ type MessageThreadPanelProps = {
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
   isFollowingThread?: boolean;
+  isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
   onUnfollowThread?: () => void;
 };
@@ -347,6 +349,7 @@ export function MessageThreadPanel({
   isSending,
   isSinglePanelView = false,
   isFollowingThread,
+  isMessageUnreadById,
   onCancelEdit,
   onCancelReply,
   onClose,
@@ -356,6 +359,7 @@ export function MessageThreadPanel({
   onEditSave,
   onFollowThread,
   onMarkUnread,
+  onMarkRead,
   onExpandReplies,
   onScrollTargetResolved,
   onSelectReplyTarget,
@@ -642,6 +646,7 @@ export function MessageThreadPanel({
                 highlightedBranch?.id === threadHead.id
               }
               isFollowingThread={isFollowingThread}
+              isUnread={isMessageUnreadById?.(threadHead.id)}
               layoutVariant="thread-reply"
               message={threadHead}
               onCollapseDescendants={
@@ -664,6 +669,7 @@ export function MessageThreadPanel({
                 onFollowThread ? (_msg) => onFollowThread() : undefined
               }
               onMarkUnread={onMarkUnread}
+              onMarkRead={onMarkRead}
               onToggleReaction={onToggleReaction}
               onUnfollowThread={
                 onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
@@ -761,6 +767,7 @@ export function MessageThreadPanel({
                         }
                         highlightThreadLineDepths={highlightedLineDepths}
                         hoverBackground={!entry.summary}
+                        isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}
                         onCollapseDepthGuide={handleCollapseDepthGuide}
@@ -790,6 +797,7 @@ export function MessageThreadPanel({
                             : undefined
                         }
                         onMarkUnread={onMarkUnread}
+                        onMarkRead={onMarkRead}
                         onReply={onSelectReplyTarget}
                         onToggleReaction={onToggleReaction}
                         profiles={profiles}

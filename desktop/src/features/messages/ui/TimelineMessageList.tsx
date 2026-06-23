@@ -36,11 +36,13 @@ type TimelineMessageListProps = {
   followThreadById?: (rootId: string) => void;
   highlightedMessageId?: string | null;
   isFollowingThreadById?: (rootId: string) => boolean;
+  isMessageUnreadById?: (messageId: string) => boolean;
   messageFooters?: Record<string, React.ReactNode>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
+  onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
@@ -187,11 +189,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   followThreadById,
   highlightedMessageId = null,
   isFollowingThreadById,
+  isMessageUnreadById,
   messageFooters,
   messages,
   onDelete,
   onEdit,
   onMarkUnread,
+  onMarkRead,
   onReply,
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
@@ -234,12 +238,14 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               followThreadById={followThreadById}
               highlightedMessageId={highlightedMessageId}
               isFollowingThreadById={isFollowingThreadById}
+              isMessageUnreadById={isMessageUnreadById}
               isSendingVideoReviewComment={isSendingVideoReviewComment}
               key={row.key}
               messageFooters={messageFooters}
               onDelete={onDelete}
               onEdit={onEdit}
               onMarkUnread={onMarkUnread}
+              onMarkRead={onMarkRead}
               onReply={onReply}
               onSendVideoReviewComment={onSendVideoReviewComment}
               onToggleReaction={onToggleReaction}
@@ -276,11 +282,13 @@ const TimelineRenderRowView = React.memo(function TimelineRenderRowView({
   followThreadById,
   highlightedMessageId = null,
   isFollowingThreadById,
+  isMessageUnreadById,
   isSendingVideoReviewComment = false,
   messageFooters,
   onDelete,
   onEdit,
   onMarkUnread,
+  onMarkRead,
   onReply,
   onSendVideoReviewComment,
   onToggleReaction,
@@ -370,6 +378,7 @@ const TimelineRenderRowView = React.memo(function TimelineRenderRowView({
               ? isFollowingThreadById(message.id)
               : undefined
           }
+          isUnread={isMessageUnreadById?.(message.id)}
           message={message}
           onDelete={
             onDelete && currentPubkey && message.pubkey === currentPubkey
@@ -385,6 +394,7 @@ const TimelineRenderRowView = React.memo(function TimelineRenderRowView({
             followThreadById ? () => followThreadById(message.id) : undefined
           }
           onMarkUnread={onMarkUnread}
+          onMarkRead={onMarkRead}
           onToggleReaction={onToggleReaction}
           onReply={onReply}
           onUnfollowThread={
@@ -419,6 +429,7 @@ const TimelineRenderRowView = React.memo(function TimelineRenderRowView({
         agentPubkeys={agentPubkeys}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
+        isUnread={isMessageUnreadById?.(message.id)}
         message={message}
         onDelete={
           onDelete && currentPubkey && message.pubkey === currentPubkey
@@ -431,6 +442,7 @@ const TimelineRenderRowView = React.memo(function TimelineRenderRowView({
             : undefined
         }
         onMarkUnread={onMarkUnread}
+        onMarkRead={onMarkRead}
         onToggleReaction={onToggleReaction}
         onReply={onReply}
         profiles={profiles}

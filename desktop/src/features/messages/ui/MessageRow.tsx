@@ -56,6 +56,7 @@ export const MessageRow = React.memo(
     actionBarPlacement = "floating",
     collapseDescendantsLabel,
     isFollowingThread,
+    isUnread,
     layoutVariant = "default",
     message,
     onCollapseDepthGuide,
@@ -66,6 +67,7 @@ export const MessageRow = React.memo(
     onEdit,
     onFollowThread,
     onMarkUnread,
+    onMarkRead,
     onToggleReaction,
     onReply,
     onUnfollowThread,
@@ -88,6 +90,7 @@ export const MessageRow = React.memo(
     actionBarPlacement?: "floating" | "inside";
     collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
+    isUnread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
     onCollapseDepthGuide?: (message: TimelineMessage) => void;
@@ -104,6 +107,7 @@ export const MessageRow = React.memo(
     onEdit?: (message: TimelineMessage) => void;
     onFollowThread?: (message: TimelineMessage) => void;
     onMarkUnread?: (message: TimelineMessage) => void;
+    onMarkRead?: (message: TimelineMessage) => void;
     onToggleReaction?: (
       message: TimelineMessage,
       emoji: string,
@@ -344,11 +348,13 @@ export const MessageRow = React.memo(
         <MessageActionBar
           channelId={channelId}
           isFollowingThread={isFollowingThread}
+          isUnread={isUnread}
           message={message}
           onDelete={onDelete}
           onEdit={onEdit}
           onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}
+          onMarkRead={onMarkRead}
           onReactionBadgeBurstRequest={
             reactionPending ? undefined : setBadgeBurstEmoji
           }
@@ -736,6 +742,7 @@ export const MessageRow = React.memo(
     prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
     prev.hoverBackground === next.hoverBackground &&
     prev.isFollowingThread === next.isFollowingThread &&
+    prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&
     prev.onCollapseDepthGuide === next.onCollapseDepthGuide &&
     prev.onCollapseDepthGuideHoverChange ===

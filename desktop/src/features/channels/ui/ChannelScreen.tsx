@@ -7,6 +7,10 @@ import {
   useChannelMembersQuery,
   useJoinChannelMutation,
 } from "@/features/channels/hooks";
+import {
+  MSG_PREFIX,
+  THREAD_PREFIX,
+} from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
 import {
@@ -43,6 +47,7 @@ import {
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
+import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import type { RespondToMode } from "@/shared/api/types";
@@ -88,8 +93,8 @@ export function ChannelScreen({
     markChannelRead,
     markChannelUnread,
     getChannelReadAt,
-    getThreadReadAt,
-    markThreadRead,
+    getMessageReadAt,
+    markMessageRead,
     setContextParentResolver,
     openCreateChannel,
     openChannelManagement: openGlobalChannelManagement,
@@ -198,15 +203,25 @@ export function ChannelScreen({
     // thread itself is read.
     markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
-  // Install the NIP-RS parent resolver for active-channel thread contexts and
-  // clear it on leave so a stale channel id never parents another channel.
+  // Install the NIP-RS parent resolver: every `thread:<root>` or `msg:<id>`
+  // context evaluated while this channel is active belongs to it (both are only
+  // ever read for the active channel's timeline messages), so the parent is
+  // always the active channel. Folding `msg:` to the channel — never to another
+  // message — means reading an ancestor never covers a descendant (LP4 Issue 2
+  // by construction); a channel-read still clears any message older than the
+  // top-level channel frontier. Non-thread/non-message keys (channels) have no
+  // parent → null, which degrades effective() to the own term. Cleared on
+  // channel leave / unmount so a stale channel id never becomes the parent of
+  // another channel's contexts.
   React.useEffect(() => {
     if (!activeChannelId) {
       setContextParentResolver(null);
       return;
     }
     setContextParentResolver((contextId) =>
-      contextId.startsWith("thread:") ? activeChannelId : null,
+      contextId.startsWith(THREAD_PREFIX) || contextId.startsWith(MSG_PREFIX)
+        ? activeChannelId
+        : null,
     );
     return () => setContextParentResolver(null);
   }, [activeChannelId, setContextParentResolver]);
@@ -371,8 +386,10 @@ export function ChannelScreen({
     firstUnreadMessageId,
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
-    getSubtreeMaxCreatedAt,
-    handleMarkUnread,
+    handleMarkMessageRead,
+    handleMarkMessageUnread,
+    isMessageUnread,
+    markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
     threadMessages,
@@ -388,9 +405,9 @@ export function ChannelScreen({
     threadReplyTargetId,
     expandedThreadReplyIds,
     getChannelReadAt,
-    getThreadReadAt,
+    getMessageReadAt,
     markChannelUnread,
-    markThreadRead,
+    markMessageRead,
     isThreadMuted,
     readStateVersion,
   });
@@ -419,8 +436,7 @@ export function ChannelScreen({
     expandedThreadReplyIds,
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
-    getSubtreeMaxCreatedAt,
-    markThreadRead,
+    markRevealedRepliesRead,
     openThreadHeadId: effectiveOpenThreadHeadId,
     onOptimisticOpenThreadHeadIdChange: setOptimisticOpenThreadHeadId,
     sendMessageMutation,
@@ -438,6 +454,17 @@ export function ChannelScreen({
         ? handleToggleReaction
         : undefined,
     [activeChannel, handleToggleReaction],
+  );
+  // The menu actions are typed (message) => void; the per-message read-state
+  // handlers key off the message id (message + subtree). Adapt at the seam so
+  // the handlers stay id-based and the menu stays message-based.
+  const handleMessageMarkUnread = React.useCallback(
+    (message: TimelineMessage) => handleMarkMessageUnread(message.id),
+    [handleMarkMessageUnread],
+  );
+  const handleMessageMarkRead = React.useCallback(
+    (message: TimelineMessage) => handleMarkMessageRead(message.id),
+    [handleMarkMessageRead],
   );
   const handleSendVideoReviewComment = React.useCallback(
     async (
@@ -726,6 +753,7 @@ export function ChannelScreen({
                   followThreadById={followThread}
                   unfollowThreadById={unfollowThread}
                   isFollowingThreadById={isFollowingThread}
+                  isMessageUnreadById={isMessageUnread}
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
                   isSinglePanelView={isSinglePanelView}
@@ -761,7 +789,8 @@ export function ChannelScreen({
                   onEditSave={
                     activeChannel?.archivedAt ? undefined : handleEditSave
                   }
-                  onMarkUnread={handleMarkUnread}
+                  onMarkUnread={handleMessageMarkUnread}
+                  onMarkRead={handleMessageMarkRead}
                   onExpandThreadReplies={handleExpandThreadReplies}
                   onOpenAgentSession={handleOpenAgentSession}
                   onOpenDm={handleOpenDm}

@@ -514,14 +514,23 @@ test.describe("thread unread indicator screenshots", () => {
       path: `${SHOTS}/05-thread-in-panel-subtree-badge.png`,
     });
 
-    // Expanding p marks its whole subtree read; the descendant-inclusive gate
-    // (Phase 2.5) drops the badge from p and every revealed row beneath it.
+    // v3 contract: expanding a branch marks only its REVEALED direct children
+    // read, never the whole subtree. The unread replies sit two levels under p
+    // (p -> c -> c2 -> c2-child), so a single expand of p only reveals c — the
+    // deeper unread stays collapsed and the badge survives. The badge clears
+    // only as each level is individually revealed: expand p (reveals c, badge
+    // still counts c2 + c2-child), expand c (reveals c2, read), expand c2
+    // (reveals c2-child, read) -> badge clears to 0.
     await expandReply(page, p.id);
-    await expect(inPanelBadge).toHaveCount(0);
+    await expect(inPanelBadge).toBeVisible();
 
     await page.screenshot({
       path: `${SHOTS}/06-thread-expand-clears-subtree-badge.png`,
     });
+
+    await expandReply(page, c.id);
+    await expandReply(page, c2.id);
+    await expect(inPanelBadge).toHaveCount(0);
   });
 
   test("06-in-panel-badge-bumps-on-live-reply", async ({ page }) => {
@@ -635,11 +644,13 @@ test.describe("thread unread indicator screenshots", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
-    // Each branch gains its own unread reply. Badges are computed against the
-    // open-time frozen frontier snapshot, and expand-clear is driven by the
-    // per-branch `expandedSubtreeReplyIds` gate — NOT a cross-branch live
-    // marker sweep. So expanding one branch clears only its OWN badge; the
-    // sibling's badge survives until that branch is expanded too.
+    // Each branch gains its own unread reply, nested one level under the
+    // branch's child (branchNew -> newChild -> unread; branchOld -> oldChild ->
+    // unread). Under the v3 per-message contract, expanding a branch marks only
+    // its REVEALED direct children read — so revealing newChild does NOT reach
+    // the unread reply beneath it. Clearing a branch's badge requires expanding
+    // down to the level the unread actually sits at; the sibling branch is
+    // never touched, so its badge survives independently.
     const base = unreadTimestamp();
     await emitMockMessage(page, "general", "Unread in older branch", {
       parentEventId: oldChild.id,
@@ -667,19 +678,23 @@ test.describe("thread unread indicator screenshots", () => {
       path: `${SHOTS}/08-two-sibling-badges-before-expand.png`,
     });
 
-    // Expand the LATER branch. Only its OWN badge clears, via the
-    // `expandedSubtreeReplyIds` gate against the frozen open-time frontier.
-    // The older sibling's badge SURVIVES — the design does not sweep across
-    // branches off a live marker.
+    // Expand the LATER branch down to where its unread sits: revealing
+    // branchNew shows newChild (still collapsed over the unread reply, so the
+    // badge survives), then revealing newChild marks the unread reply read and
+    // clears branchNew's badge. The older sibling is never expanded, so its
+    // badge survives — per-message markers isolate each branch.
     await expandReply(page, branchNew.id);
+    await expect(inPanelBadges).toHaveCount(2);
+    await expandReply(page, newChild.id);
     await expect(inPanelBadges).toHaveCount(1);
 
     await page.screenshot({
       path: `${SHOTS}/09-expand-clears-own-branch-sibling-survives.png`,
     });
 
-    // Expanding the older branch clears the last remaining badge.
+    // Expanding the older branch to its unread depth clears the last badge.
     await expandReply(page, branchOld.id);
+    await expandReply(page, oldChild.id);
     await expect(inPanelBadges).toHaveCount(0);
 
     await page.screenshot({
@@ -966,11 +981,17 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(badge).toBeVisible();
     await expect(badge).toContainText("2");
 
-    // Opening a notified thread advances the frontier to the full subtree max,
-    // so it consumes the direct reply A AND the nested mention B at once — the
-    // badge clears to 0 in place without drilling into A's collapsed branch.
+    // v3 contract: opening a thread marks only its REVEALED direct children
+    // read, never the whole subtree. Opening Alice's thread reveals direct
+    // child A (read), but nested mention B stays collapsed under A — so the
+    // root badge drops to 1, not 0. Expanding A reveals B, marks it read, and
+    // clears the badge. The badge predicate reads the live per-message marker,
+    // not a subtree-max open ceiling.
     await aliceSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expect(badge).toContainText("1");
+
+    await expandReply(page, replyA?.id ?? "");
     await expect(badge).toHaveCount(0);
 
     await page.getByTestId("message-thread-close").click();
@@ -978,5 +999,69 @@ test.describe("thread unread indicator screenshots", () => {
 
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await expect(badge).toHaveCount(0);
+  });
+
+  // The mark-read/unread menu is a SINGLE item whose label toggles by the
+  // clicked message's own read state — driven by the same predicate the unread
+  // badge uses (computeThreadUnreadMarker over the message + its forced-unread
+  // overlay), so the label and badge can never disagree. Pre-fix the menu
+  // rendered TWO simultaneous items ("Mark unread" AND "Mark read") gated only
+  // on prop presence. This pins the single-toggle contract in both states and
+  // through a full round trip.
+  //
+  // A top-level message in the OPEN channel is read-on-open by construction:
+  // ChannelScreen advances the channel frontier to the newest top-level message
+  // and the channel→message fold clears it (this is the badge's own behaviour —
+  // a message in the channel you are looking at is never unread). So the only
+  // route to an unread top-level message here is the mark-unread action itself,
+  // which is exactly what the toggle's forced-unread overlay exists to drive.
+  test("15-mark-read-unread-menu-single-toggle", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Emit an Alice-authored (non-self) top-level message, read-on-open.
+    const message = await emitMockMessage(page, "general", "Toggle me", {
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) - 10,
+    });
+    const messageId = message?.id ?? "";
+
+    const toggle = page.getByTestId(`mark-read-toggle-${messageId}`);
+    const moreActions = page.getByTestId(`more-actions-${messageId}`);
+
+    // Selecting a DropdownMenuItem closes the Radix menu and returns focus to
+    // the trigger. Re-clicking the trigger before that close settles is eaten
+    // by Radix's closing transition (the menu never reopens). Gate each reopen
+    // on the previous menu being fully unmounted — the toggle testid only
+    // exists while the dropdown content is mounted, so count 0 is a reliable
+    // "closed" signal — then re-hover from a clean state before re-clicking.
+    const openMenu = async () => {
+      await expect(toggle).toHaveCount(0);
+      await page.mouse.move(0, 0);
+      await page.getByText("Toggle me").hover();
+      await moreActions.click();
+      await expect(toggle).toHaveCount(1);
+    };
+
+    // Read → the single item reads "Mark unread", and there is exactly one
+    // (never both items at once). Clicking it forces the message unread.
+    await openMenu();
+    await expect(toggle).toHaveText("Mark unread");
+    await toggle.click();
+
+    // Now unread → the same single item shows the inverse label. Clicking it
+    // marks the message read again.
+    await openMenu();
+    await expect(toggle).toHaveText("Mark read");
+    await toggle.click();
+
+    // Back to read → the label has toggled back, still a single item. The
+    // round trip proves the label tracks the live predicate, not prop presence.
+    await openMenu();
+    await expect(toggle).toHaveText("Mark unread");
   });
 });

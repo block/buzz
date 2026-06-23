@@ -24,8 +24,7 @@ export function useChannelPaneHandlers({
   expandedThreadReplyIds,
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
-  getSubtreeMaxCreatedAt,
-  markThreadRead,
+  markRevealedRepliesRead,
   onOptimisticOpenThreadHeadIdChange,
   openThreadHeadId,
   sendMessageMutation,
@@ -43,8 +42,7 @@ export function useChannelPaneHandlers({
   expandedThreadReplyIds: ReadonlySet<string>;
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
-  getSubtreeMaxCreatedAt: (messageId: string) => number | null;
-  markThreadRead: (rootId: string, timestamp: number) => void;
+  markRevealedRepliesRead: (messageId: string) => void;
   onOptimisticOpenThreadHeadIdChange: React.Dispatch<
     React.SetStateAction<string | null | undefined>
   >;
@@ -201,16 +199,12 @@ export function useChannelPaneHandlers({
         return next;
       });
 
-      // Drilling into a branch consumes its unread, persistently: advance the
-      // thread frontier to the branch's newest reply. Monotonic Math.max means
-      // this marks read everything chronologically up to it (channel-open
-      // parity). The open-time snapshot pins the session divider, so it never
-      // moves mid-session.
-      const rootId = openThreadHeadIdRef.current;
-      const subtreeMaxCreatedAt = getSubtreeMaxCreatedAt(message.id);
-      if (rootId && subtreeMaxCreatedAt !== null) {
-        markThreadRead(rootId, subtreeMaxCreatedAt);
-      }
+      // Drilling into a branch reveals only its direct replies (LP4 v3
+      // open-at-level): mark exactly those read, never the whole subtree. A
+      // reply still nested in a collapsed grandchild branch keeps its badge
+      // until it too is revealed — the deliberate reversal of #1118's
+      // whole-subtree-on-open collapse.
+      markRevealedRepliesRead(message.id);
 
       if (firstReplyId) {
         setThreadScrollTargetId(firstReplyId);
@@ -219,8 +213,7 @@ export function useChannelPaneHandlers({
     [
       getFirstReplyIdForMessage,
       getReplyDescendantIdsForMessage,
-      getSubtreeMaxCreatedAt,
-      markThreadRead,
+      markRevealedRepliesRead,
       setExpandedThreadReplyIds,
       setThreadScrollTargetId,
     ],

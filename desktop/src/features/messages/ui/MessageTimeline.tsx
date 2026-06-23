@@ -54,9 +54,11 @@ type MessageTimelineProps = {
   profiles?: UserProfileLookup;
   followThreadById?: (rootId: string) => void;
   isFollowingThreadById?: (rootId: string) => boolean;
+  isMessageUnreadById?: (messageId: string) => boolean;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
+  onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
@@ -145,12 +147,14 @@ const MessageTimelineBase = React.forwardRef<
     isFetchingOlder = false,
     followThreadById,
     isFollowingThreadById,
+    isMessageUnreadById,
     messageFooters,
     personaLookup,
     profiles,
     onDelete,
     onEdit,
     onMarkUnread,
+    onMarkRead,
     onReply,
     channelName,
     channelType,
@@ -533,11 +537,13 @@ const MessageTimelineBase = React.forwardRef<
                     followThreadById={followThreadById}
                     highlightedMessageId={highlightedMessageId}
                     isFollowingThreadById={isFollowingThreadById}
+                    isMessageUnreadById={isMessageUnreadById}
                     messageFooters={messageFooters}
                     messages={deferredMessages}
                     onDelete={onDelete}
                     onEdit={onEdit}
                     onMarkUnread={onMarkUnread}
+                    onMarkRead={onMarkRead}
                     onReply={onReply}
                     isSendingVideoReviewComment={isSendingVideoReviewComment}
                     onSendVideoReviewComment={onSendVideoReviewComment}

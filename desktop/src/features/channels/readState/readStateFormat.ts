@@ -8,7 +8,28 @@ export const READ_STATE_D_TAG_PREFIX = "read-state:";
 export const READ_STATE_FETCH_LIMIT = 500;
 export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
-const MAX_CONTEXTS = 10_000;
+export const MAX_CONTEXTS = 10_000;
+
+// Context-key prefix for a per-MESSAGE read marker (LP4 v3). One grow-only
+// marker per reply id; the badge predicate reads effective("msg:<id>") live so
+// reading an ancestor never covers a descendant (Issue 2 by construction).
+// Distinct from THREAD_PREFIX so the parent resolver and eviction can tell the
+// two key families apart.
+export const MSG_PREFIX = "msg:";
+export const THREAD_PREFIX = "thread:";
+
+export function msgContextKey(messageId: string): string {
+  return `${MSG_PREFIX}${messageId}`;
+}
+
+// A well-formed per-message context key: the msg: prefix with a non-empty id
+// that does NOT itself start with thread: (guards against a thread key being
+// mistaken for, or double-prefixed into, a message key).
+export function isMsgContextKey(value: string): value is `msg:${string}` {
+  if (!value.startsWith(MSG_PREFIX)) return false;
+  const id = value.slice(MSG_PREFIX.length);
+  return id.length > 0 && !id.startsWith(THREAD_PREFIX);
+}
 
 export function localReadStateKey(pubkey: string): string {
   return `buzz.channel-read-state.v2:${pubkey}`;

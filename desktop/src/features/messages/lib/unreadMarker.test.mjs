@@ -14,6 +14,13 @@ function reply(id, createdAt, parentId) {
   return { id, createdAt, author: "a", time: "", body: "", depth: 1, parentId };
 }
 
+// LP4 v3: the thread marker now reads a per-message resolver instead of a
+// single frontier. A uniform read-line at `seconds` (or null = never read)
+// reproduces the old frontier semantics for the shared-boundary cases.
+function uniformReadAt(seconds) {
+  return () => seconds;
+}
+
 test("computeChannelUnreadMarker_emptyTimeline_returnsNoUnread", () => {
   const marker = computeChannelUnreadMarker([], 100);
   assert.equal(marker.firstUnreadMessageId, null);
@@ -98,60 +105,74 @@ test("computeChannelUnreadMarker_suppressedNeverReadChannel_returnsNoMarker", ()
 // --- computeThreadUnreadMarker tests ---
 
 test("computeThreadUnreadMarker_emptyReplies_returnsNoUnread", () => {
-  const marker = computeThreadUnreadMarker([], 100);
+  const marker = computeThreadUnreadMarker([], uniformReadAt(100));
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
 });
 
-test("computeThreadUnreadMarker_nullFrontier_marksAllRepliesUnread", () => {
+test("computeThreadUnreadMarker_neverRead_marksAllRepliesUnread", () => {
   const replies = [
     { id: "r1", createdAt: 10 },
     { id: "r2", createdAt: 20 },
     { id: "r3", createdAt: 30 },
   ];
-  const marker = computeThreadUnreadMarker(replies, null);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(null));
   assert.equal(marker.firstUnreadReplyId, "r1");
   assert.equal(marker.unreadCount, 3);
 });
 
-test("computeThreadUnreadMarker_frontierBetweenReplies_countsAfterFrontier", () => {
+test("computeThreadUnreadMarker_readLineBetweenReplies_countsAfterLine", () => {
   const replies = [
     { id: "r1", createdAt: 10 },
     { id: "r2", createdAt: 20 },
     { id: "r3", createdAt: 30 },
   ];
-  const marker = computeThreadUnreadMarker(replies, 15);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(15));
   assert.equal(marker.firstUnreadReplyId, "r2");
   assert.equal(marker.unreadCount, 2);
 });
 
-test("computeThreadUnreadMarker_frontierAtReplyTimestamp_isRead", () => {
-  // A reply whose createdAt equals the frontier is considered read (strictly >).
+test("computeThreadUnreadMarker_readAtEqualsReplyTimestamp_isRead", () => {
+  // A reply whose createdAt equals its read marker is read (strictly >).
   const replies = [
     { id: "r1", createdAt: 10 },
     { id: "r2", createdAt: 20 },
   ];
-  const marker = computeThreadUnreadMarker(replies, 20);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(20));
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
 });
 
-test("computeThreadUnreadMarker_frontierAboveAll_returnsNoUnread", () => {
+test("computeThreadUnreadMarker_readLineAboveAll_returnsNoUnread", () => {
   const replies = [
     { id: "r1", createdAt: 10 },
     { id: "r2", createdAt: 20 },
   ];
-  const marker = computeThreadUnreadMarker(replies, 100);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(100));
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
 });
 
-test("computeThreadUnreadMarker_frontierBelowAll_allUnread", () => {
+test("computeThreadUnreadMarker_readLineBelowAll_allUnread", () => {
   const replies = [
     { id: "r1", createdAt: 10 },
     { id: "r2", createdAt: 20 },
   ];
-  const marker = computeThreadUnreadMarker(replies, 5);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(5));
+  assert.equal(marker.firstUnreadReplyId, "r1");
+  assert.equal(marker.unreadCount, 2);
+});
+
+test("computeThreadUnreadMarker_perMessageMarkers_countOnlyUnreadReply", () => {
+  // The point of the per-message resolver: reading r2 leaves r1 and r3
+  // unread independently — no single frontier could express this.
+  const replies = [
+    { id: "r1", createdAt: 10 },
+    { id: "r2", createdAt: 20 },
+    { id: "r3", createdAt: 30 },
+  ];
+  const readAt = (id) => (id === "r2" ? 20 : null);
+  const marker = computeThreadUnreadMarker(replies, readAt);
   assert.equal(marker.firstUnreadReplyId, "r1");
   assert.equal(marker.unreadCount, 2);
 });
@@ -162,15 +183,32 @@ test("computeThreadUnreadMarker_singleReplyUnread_countsOne", () => {
     { id: "r2", createdAt: 20 },
     { id: "r3", createdAt: 30 },
   ];
-  const marker = computeThreadUnreadMarker(replies, 25);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(25));
   assert.equal(marker.firstUnreadReplyId, "r3");
   assert.equal(marker.unreadCount, 1);
 });
 
-test("computeThreadUnreadMarker_emptyRepliesNullFrontier_returnsNoUnread", () => {
-  const marker = computeThreadUnreadMarker([], null);
+test("computeThreadUnreadMarker_emptyRepliesNeverRead_returnsNoUnread", () => {
+  const marker = computeThreadUnreadMarker([], uniformReadAt(null));
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
+});
+
+test("computeThreadUnreadMarker_forcedUnread_overridesReadMarker", () => {
+  // Session-local mark-unread: r1 is read by its marker but forced unread,
+  // so it counts; the OR-overlay never clears an otherwise-unread reply.
+  const replies = [
+    { id: "r1", createdAt: 10 },
+    { id: "r2", createdAt: 20 },
+  ];
+  const marker = computeThreadUnreadMarker(
+    replies,
+    uniformReadAt(100),
+    undefined,
+    (id) => id === "r1",
+  );
+  assert.equal(marker.firstUnreadReplyId, "r1");
+  assert.equal(marker.unreadCount, 1);
 });
 
 // --- Self-authored skip tests ---
@@ -213,7 +251,7 @@ test("computeThreadUnreadMarker_selfAuthored_skipsOwnReplies", () => {
     { id: "r2", createdAt: 20, pubkey: "other" },
     { id: "r3", createdAt: 30, pubkey: "me" },
   ];
-  const marker = computeThreadUnreadMarker(replies, 5, "me");
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(5), "me");
   assert.equal(marker.firstUnreadReplyId, "r2");
   assert.equal(marker.unreadCount, 1);
 });
@@ -223,7 +261,7 @@ test("computeThreadUnreadMarker_allSelfAuthored_returnsNoUnread", () => {
     { id: "r1", createdAt: 10, pubkey: "me" },
     { id: "r2", createdAt: 20, pubkey: "me" },
   ];
-  const marker = computeThreadUnreadMarker(replies, 5, "me");
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(5), "me");
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
 });
@@ -233,7 +271,7 @@ test("computeThreadUnreadMarker_noPubkey_countsNormally", () => {
     { id: "r1", createdAt: 10, pubkey: "me" },
     { id: "r2", createdAt: 20, pubkey: "other" },
   ];
-  const marker = computeThreadUnreadMarker(replies, 5);
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(5));
   assert.equal(marker.firstUnreadReplyId, "r1");
   assert.equal(marker.unreadCount, 2);
 });
@@ -254,7 +292,7 @@ test("computeThreadUnreadMarker_selfAuthoredMixedCase_skipsOwnReplies", () => {
     { id: "r1", createdAt: 10, pubkey: "ABCDEF" },
     { id: "r2", createdAt: 20, pubkey: "other" },
   ];
-  const marker = computeThreadUnreadMarker(replies, 5, "abcdef");
+  const marker = computeThreadUnreadMarker(replies, uniformReadAt(5), "abcdef");
   assert.equal(marker.firstUnreadReplyId, "r2");
   assert.equal(marker.unreadCount, 1);
 });
