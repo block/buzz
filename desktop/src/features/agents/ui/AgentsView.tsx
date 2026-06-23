@@ -19,8 +19,10 @@ import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
+import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 
 export function AgentsView() {
+  const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamActions = useTeamActions(
@@ -75,11 +77,6 @@ export function AgentsView() {
               personaLabelsById={personas.personaLabelsById}
               presenceLoaded={agents.managedPresenceQuery.isSuccess}
               presenceLookup={agents.managedPresenceQuery.data ?? {}}
-              onAddToChannel={(agent) => {
-                agents.setActionNoticeMessage(null);
-                agents.setActionErrorMessage(null);
-                agents.setAgentToAddToChannel(agent);
-              }}
               onBulkRemoveStopped={() => {
                 void agents.handleBulkRemoveStopped();
               }}
@@ -89,22 +86,13 @@ export function AgentsView() {
               onCreateAgent={() => {
                 agents.setIsCreateOpen(true);
               }}
-              onDeleteAgent={(pubkey) => {
-                void agents.handleDelete(pubkey);
+              onOpenAgentProfile={(pubkey) => {
+                openProfilePanel?.(pubkey);
+              }}
+              onOpenPersonaProfile={(persona) => {
+                openPersonaProfilePanel?.(persona);
               }}
               onSelectLogAgent={agents.setLogAgentPubkey}
-              onStartAgent={(pubkey) => {
-                void agents.handleStart(pubkey);
-              }}
-              onStopAgent={(pubkey) => {
-                void agents.handleStop(pubkey);
-              }}
-              onToggleStartOnAppLaunch={(pubkey, startOnAppLaunch) => {
-                void agents.handleToggleStartOnAppLaunch(
-                  pubkey,
-                  startOnAppLaunch,
-                );
-              }}
               selectedLogAgentPubkey={agents.logAgentPubkey}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
@@ -128,13 +116,6 @@ export function AgentsView() {
               isPersonasPending={personas.isPending}
               onCreatePersona={personas.openCreate}
               onChooseCatalog={personas.openCatalog}
-              onDuplicatePersona={personas.openDuplicate}
-              onEditPersona={personas.openEdit}
-              onExportPersona={personas.handleExport}
-              onDeactivatePersona={(persona) => {
-                void personas.handleSetActive(persona, false, "library");
-              }}
-              onDeletePersona={personas.openDelete}
               onImportPersonaFile={(fileBytes, fileName) => {
                 void personas.handleImportFile(fileBytes, fileName);
               }}

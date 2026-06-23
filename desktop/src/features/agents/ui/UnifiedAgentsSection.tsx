@@ -28,7 +28,6 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { AgentGroupRows } from "./AgentGroupRows";
-import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { PersonaIdentity } from "./PersonaIdentity";
 import { PersonaLibraryEntryPoints } from "./PersonaLibraryEntryPoints";
 
@@ -47,15 +46,12 @@ type UnifiedAgentsSectionProps = {
   personaLabelsById: Record<string, string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
-  onAddToChannel: (agent: ManagedAgent) => void;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
   onCreateAgent: () => void;
-  onDeleteAgent: (pubkey: string) => void;
+  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenPersonaProfile: (persona: AgentPersona) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
-  onStartAgent: (pubkey: string) => void;
-  onStopAgent: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
   selectedLogAgentPubkey: string | null;
   canChooseCatalog: boolean;
   personas: AgentPersona[];
@@ -66,11 +62,6 @@ type UnifiedAgentsSectionProps = {
   isPersonasPending: boolean;
   onCreatePersona: () => void;
   onChooseCatalog: () => void;
-  onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
-  onExportPersona: (persona: AgentPersona) => void;
-  onDeactivatePersona: (persona: AgentPersona) => void;
-  onDeletePersona: (persona: AgentPersona) => void;
   onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
 };
 
@@ -120,15 +111,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     personaLabelsById,
     presenceLoaded,
     presenceLookup,
-    onAddToChannel,
     onBulkRemoveStopped,
     onBulkStopRunning,
     onCreateAgent,
-    onDeleteAgent,
+    onOpenAgentProfile,
+    onOpenPersonaProfile,
     onSelectLogAgent,
-    onStartAgent,
-    onStopAgent,
-    onToggleStartOnAppLaunch,
     selectedLogAgentPubkey,
     canChooseCatalog,
     personas,
@@ -139,11 +127,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isPersonasPending,
     onCreatePersona,
     onChooseCatalog,
-    onDuplicatePersona,
-    onEditPersona,
-    onExportPersona,
-    onDeactivatePersona,
-    onDeletePersona,
     onImportPersonaFile,
   } = props;
 
@@ -188,12 +171,8 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     presenceLoaded,
     presenceLookup,
     selectedLogAgentPubkey,
-    onAddToChannel,
-    onDelete: onDeleteAgent,
+    onOpenProfile: onOpenAgentProfile,
     onSelectLogAgent,
-    onStart: onStartAgent,
-    onStop: onStopAgent,
-    onToggleStartOnAppLaunch,
   } as const;
 
   return (
@@ -277,16 +256,15 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                     ) : !hasAgents ? (
                       <Badge variant="outline">Inactive</Badge>
                     ) : null}
-                    <PersonaActionsMenu
-                      isActionPending={isActionPending}
-                      isPending={isPersonasPending}
-                      persona={g.persona}
-                      onDuplicate={onDuplicatePersona}
-                      onEdit={onEditPersona}
-                      onExport={onExportPersona}
-                      onDeactivate={onDeactivatePersona}
-                      onDelete={onDeletePersona}
-                    />
+                    <Button
+                      disabled={isPersonasPending}
+                      onClick={() => onOpenPersonaProfile(g.persona)}
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                    >
+                      Manage
+                    </Button>
                   </div>
                 </div>
                 {!isCollapsed && hasAgents ? (
