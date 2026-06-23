@@ -34,6 +34,27 @@ export function useRemindersQuery(pubkey: string | undefined) {
 }
 
 /**
+ * The due-reminder contribution to the in-app Inbox nav badge. Reminders are a
+ * separate stream from the feed badge machinery, so the count is summed in at
+ * the AppShell wiring point rather than threaded through homeBadge.ts. Reads
+ * the shared query above, so the useReminderNotifications poll's invalidate
+ * keeps it live and countDue re-evaluates as reminders cross due. The caller
+ * adds this raw (no isHomeActive suppression), mirroring the inbox filter
+ * badge, which persists while the Inbox is open.
+ *
+ * `enabled` mirrors the homeBadgeEnabled contract: when the home badge toggle is
+ * off, the feed contribution returns 0, so the reminder add must too — otherwise
+ * a disabled badge would still show a reminder `(1)`.
+ */
+export function useDueReminderBadgeCount(
+  pubkey: string | undefined,
+  enabled: boolean,
+): number {
+  const remindersQuery = useRemindersQuery(pubkey);
+  return enabled ? countDueReminders(remindersQuery.data ?? []) : 0;
+}
+
+/**
  * Wraps every reminder write so the shared query is invalidated on success —
  * the consistency spine the panel/badge/overlay all depend on. A mutation that
  * skipped invalidation would leave those surfaces stale until the next refetch.

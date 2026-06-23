@@ -44,6 +44,10 @@ const overrides = new Map([
   // overage from load-bearing per-message plumbing, not generic debt growth.
   // Approved override; still queued to split with the rest of this list.
   ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
+  // useDueReminderBadgeCount hook call + sum to wire due-reminder count into
+  // the Inbox nav badge — a small overage from load-bearing badge plumbing,
+  // not generic debt growth. Approved override; still queued to split.
+  ["src/app/AppShell.tsx", 1007],
 ]);
 
 await runFileSizeCheck({

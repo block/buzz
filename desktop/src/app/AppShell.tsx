@@ -69,6 +69,7 @@ import {
   isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
+import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
@@ -411,6 +412,12 @@ export function AppShell() {
       getThreadReadAt,
     );
 
+  // Raw add to the in-app nav badge, mirroring the inbox filter badge; gated by
+  // homeBadgeEnabled to match every other badge contribution.
+  const dueReminderBadge = useDueReminderBadgeCount(
+    identityQuery.data?.pubkey,
+    notificationSettings.settings.homeBadgeEnabled,
+  );
   const isNotifiedForThread = React.useCallback(
     (rootId: string) =>
       !mutedRootIds.has(rootId) &&
@@ -822,7 +829,7 @@ export function AppShell() {
                           currentPubkey={identityQuery.data?.pubkey}
                           errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
-                          homeBadgeCount={homeBadgeCount}
+                          homeBadgeCount={homeBadgeCount + dueReminderBadge}
                           isAddWorkspaceOpen={isAddWorkspaceOpen}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
