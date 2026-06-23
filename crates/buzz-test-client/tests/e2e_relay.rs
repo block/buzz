@@ -846,6 +846,79 @@ async fn test_nip29_put_user_default_policy_allows() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// Restoring an archived channel must re-signal connected members so their
+/// agents resubscribe. Archive evicts live channel subscriptions; unarchive
+/// emits a kind:44100 member_added notification per member on the always-live
+/// global membership feed, which is the resubscribe trigger remove/re-add uses.
+#[tokio::test]
+#[ignore]
+async fn test_unarchive_emits_member_added_notification() {
+    let url = relay_url();
+
+    let owner_keys = Keys::generate();
+    let owner_pubkey_hex = owner_keys.public_key().to_hex();
+
+    // Creating the channel makes the owner its sole member.
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+
+    // Subscribe to the global membership feed (kind:44100 addressed to the owner).
+    // This is a global, non-channel-scoped subscription, so archive's
+    // channel-scoped eviction leaves it intact across the archive→unarchive cycle.
+    let sid = sub_id("membership-feed");
+    let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::P),
+        [owner_pubkey_hex.as_str()],
+    );
+    ws.subscribe(&sid, vec![membership_filter])
+        .await
+        .expect("subscribe to membership feed");
+    ws.collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("membership feed EOSE");
+
+    // Archive, then unarchive, the channel via kind:9002 edit-metadata.
+    for archived in ["true", "false"] {
+        let event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).unwrap(),
+                Tag::parse(["archived", archived]).unwrap(),
+            ])
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+        let ok = ws.send_event(event).await.expect("send kind 9002");
+        assert!(ok.accepted, "edit-metadata rejected: {}", ok.message);
+    }
+
+    // The unarchive must fan out a 44100 to the owner. Loop past any other
+    // events delivered on the connection until we see it (or time out).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .expect("timed out waiting for member_added notification");
+        if let RelayMessage::Event { event, .. } = ws
+            .recv_event(remaining)
+            .await
+            .expect("recv membership notification")
+        {
+            if event.kind == Kind::Custom(44100) {
+                let content: serde_json::Value =
+                    serde_json::from_str(&event.content).expect("parse notification content");
+                assert_eq!(content["type"], "member_added");
+                assert_eq!(content["channel_id"], channel_id);
+                break;
+            }
+        }
+    }
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): "nobody" policy blocks a third party from adding the agent.
 #[tokio::test]
 #[ignore]
