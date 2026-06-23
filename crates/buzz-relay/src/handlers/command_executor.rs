@@ -120,18 +120,22 @@ async fn enforce_latched_body(
 /// latched-body rule on the approval note. Approvals reference no `h` tag of
 /// their own — the channel is the workflow's (`get_workflow().channel_id`).
 /// A workflow with no channel (global) cannot be latched, so it passes through.
+///
+/// The `get_workflow` lookup honors the same fail-VISIBLE posture as
+/// [`enforce_latched_body`]: a missing workflow (`NotFound`) cannot be latched
+/// and passes, but a genuine DB error rejects rather than silently skipping the
+/// check — otherwise a transient pool blip would let a plaintext note slip into
+/// a latched channel.
 async fn enforce_latched_approval_note(
     state: &Arc<AppState>,
     content: &str,
     workflow_id: Uuid,
 ) -> Result<(), IngestError> {
-    let channel_id = state
-        .db
-        .get_workflow(workflow_id)
-        .await
-        .ok()
-        .and_then(|w| w.channel_id);
-    enforce_latched_body(state, content, channel_id).await
+    match state.db.get_workflow(workflow_id).await {
+        Ok(w) => enforce_latched_body(state, content, w.channel_id).await,
+        Err(buzz_db::DbError::NotFound(_)) => Ok(()),
+        Err(e) => Err(IngestError::Rejected(format!("error: database error: {e}"))),
+    }
 }
 
 /// Persist a command event inside a transaction. Returns the OPEN transaction
