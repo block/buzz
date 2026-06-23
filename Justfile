@@ -463,15 +463,10 @@ get-current-mobile-version:
 get-next-mobile-patch-version:
     @python3 -c "v='$(just get-current-mobile-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
 
-# Update version in all package manifests and regenerate lockfiles
-bump-version version:
+# Update version in desktop package manifests and regenerate lockfiles
+bump-desktop-version version:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Validate semver format
-    if ! echo "{{ version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-        echo "Error: '{{ version }}' is not valid semver (expected X.Y.Z)"
-        exit 1
-    fi
     # desktop/package.json
     cd desktop && npm pkg set "version={{ version }}" && cd ..
     # desktop/src-tauri/tauri.conf.json
@@ -501,10 +496,6 @@ bump-version version:
 bump-relay-version version:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! echo "{{ version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-        echo "Error: '{{ version }}' is not valid semver (expected X.Y.Z)"
-        exit 1
-    fi
     # buzz-relay carries its own `version =` (not version.workspace), so the
     # replace targets the package version line only.
     sed -i '' -E "s/^version = \".*\"/version = \"{{ version }}\"/" crates/buzz-relay/Cargo.toml
@@ -515,10 +506,6 @@ bump-relay-version version:
 bump-mobile-version version:
     #!/usr/bin/env bash
     set -euo pipefail
-    if ! echo "{{ version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-        echo "Error: '{{ version }}' is not valid semver (expected X.Y.Z)"
-        exit 1
-    fi
     # pubspec carries a `version: X.Y.Z+build`; preserve the `+build` convention
     # (a literal `+1`, matching the desktop lane's prior behavior).
     sed -i '' "s/^version: .*/version: {{ version }}+1/" mobile/pubspec.yaml
@@ -569,10 +556,15 @@ _release-pr lane version:
     #!/usr/bin/env bash
     set -euo pipefail
     VERSION="{{ version }}"
+    if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+        echo "Error: '$VERSION' is not valid semver (expected X.Y.Z)"
+        exit 1
+    fi
     # Lane-specific identifiers. The bump command runs after the branch switch.
     case "{{ lane }}" in
         desktop)
             BRANCH_PREFIX="version-bump"
+            TAG_FETCH='v*'
             TAG_MATCH='v[0-9]*'
             TAG_PREFIX="v"
             CHANGELOG="CHANGELOG.md"
@@ -580,6 +572,7 @@ _release-pr lane version:
             ARTIFACT="Buzz Desktop" ;;
         relay)
             BRANCH_PREFIX="relay-release"
+            TAG_FETCH='relay-v*'
             TAG_MATCH='relay-v[0-9]*'
             TAG_PREFIX="relay-v"
             CHANGELOG="crates/buzz-relay/CHANGELOG.md"
@@ -587,6 +580,7 @@ _release-pr lane version:
             ARTIFACT="Buzz Relay" ;;
         mobile)
             BRANCH_PREFIX="mobile-release"
+            TAG_FETCH='mobile-v*'
             TAG_MATCH='mobile-v[0-9]*'
             TAG_PREFIX="mobile-v"
             CHANGELOG="mobile/CHANGELOG.md"
@@ -606,7 +600,7 @@ _release-pr lane version:
     git fetch origin refs/heads/main:refs/remotes/origin/main --no-tags
     # Release tags are remote-owned state; sync only this lane's tags so stale
     # local tags from older histories do not make release preflight fail.
-    git fetch origin "+refs/tags/${TAG_MATCH}:refs/tags/${TAG_MATCH}"
+    git fetch origin "+refs/tags/${TAG_FETCH}:refs/tags/${TAG_FETCH}"
     if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
         echo "Error: local main is not up-to-date with origin/main. Run 'git pull' first."
         exit 1
@@ -630,7 +624,7 @@ _release-pr lane version:
     fi
     # Lane-specific bump (the one diverging step).
     case "{{ lane }}" in
-        desktop) just bump-version "$VERSION" ;;
+        desktop) just bump-desktop-version "$VERSION" ;;
         relay)   just bump-relay-version "$VERSION" ;;
         mobile)  just bump-mobile-version "$VERSION" ;;
     esac

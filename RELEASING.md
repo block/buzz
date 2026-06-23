@@ -89,6 +89,10 @@ they bump, which branch prefix they use, and what the merge triggers.
    tags pushed by the workflow's own `GITHUB_TOKEN`; the desktop lane dispatches
    `release.yml` for the same reason.)
 
+Every push to `main` continues to build and publish `:main` + `:sha-<7>` tags
+(the rolling development image). The `:latest` tag tracks the latest **stable**
+relay release only — it does not move on main pushes or prereleases.
+
 ### Mobile
 
 1. **`just release-mobile`** runs locally on `main` — computes the next mobile
@@ -123,7 +127,7 @@ The argument forms below apply to `release-desktop`, `release-relay`, and
 
 ## Version Files
 
-`just bump-version <version>` (desktop lane) updates these files:
+`just bump-desktop-version <version>` (desktop lane) updates these files:
 
 | File | Field |
 |------|-------|
