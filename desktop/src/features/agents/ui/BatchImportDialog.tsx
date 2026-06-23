@@ -18,6 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { buildBatchImportPersonaInput } from "./batchImportPersonaInput";
 
 type BatchImportDialogProps = {
   fileName: string;
@@ -91,13 +92,7 @@ export function BatchImportDialog({
       });
 
       try {
-        await createPersona({
-          displayName: persona.displayName,
-          avatarUrl: persona.avatarDataUrl ?? undefined,
-          systemPrompt: persona.systemPrompt,
-          runtime: persona.runtime ?? undefined,
-          model: persona.model ?? undefined,
-        });
+        await createPersona(buildBatchImportPersonaInput(persona));
         completed += 1;
         setImportedCount(completed);
         setItemStatuses((prev) => {

@@ -7,8 +7,9 @@ import {
   updatePersona as updatePersonaApi,
   type ParsedPersonaPreview,
 } from "@/shared/api/tauriPersonas";
-import type { AgentPersona, UpdatePersonaInput } from "@/shared/api/types";
+import type { AgentPersona } from "@/shared/api/types";
 import { buildPersonaImportPlan } from "./personaImportPlan";
+import { buildPersonaImportUpdateInput } from "./personaImportUpdateInput";
 import {
   editPersonaDialogState,
   type PersonaDialogState,
@@ -105,41 +106,20 @@ export function usePersonaImportActions(
       preview: personaImportTargetPreview.preview,
     });
 
-    const selectedFieldSet = new Set(selectedFields);
     const preview = personaImportTargetPreview.preview;
     const existing = personaImportTarget;
 
     try {
-      const updateInput: UpdatePersonaInput = {
-        id: existing.id,
-        displayName: selectedFieldSet.has("displayName")
-          ? preview.displayName
-          : existing.displayName,
-        systemPrompt: selectedFieldSet.has("systemPrompt")
-          ? preview.systemPrompt
-          : existing.systemPrompt,
-        avatarUrl: selectedFieldSet.has("avatarUrl")
-          ? (preview.avatarDataUrl ?? undefined)
-          : (existing.avatarUrl ?? undefined),
-        runtime: selectedFieldSet.has("runtime")
-          ? (preview.runtime ?? undefined)
-          : (existing.runtime ?? undefined),
-        model: selectedFieldSet.has("model")
-          ? (preview.model ?? undefined)
-          : (existing.model ?? undefined),
-        namePool: selectedFieldSet.has("namePool")
-          ? preview.namePool.length > 0
-            ? preview.namePool
-            : undefined
-          : existing.namePool.length > 0
-            ? [...existing.namePool]
-            : undefined,
-      };
+      const updateInput = buildPersonaImportUpdateInput({
+        existing,
+        preview,
+        selectedFields,
+      });
 
       await updatePersonaApi(updateInput);
 
       const updatedFieldCount = plan.fields.filter((field) =>
-        selectedFieldSet.has(field.field),
+        selectedFields.includes(field.field),
       ).length;
 
       feedback.setPersonaNoticeMessage(

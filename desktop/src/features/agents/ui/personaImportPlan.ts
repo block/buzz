@@ -174,6 +174,18 @@ export function buildPersonaImportPlan({
     });
   }
 
+  const existingProvider = normalizeOptionalText(persona.provider);
+  const importedProvider = normalizeOptionalText(preview.provider);
+  if (existingProvider !== importedProvider) {
+    fields.push({
+      field: "provider",
+      label: "LLM provider",
+      existingValue: existingProvider,
+      importedValue: importedProvider,
+      ...singleLineChanges(existingProvider, importedProvider),
+    });
+  }
+
   const existingNamePool = namePoolToString(persona.namePool);
   const importedNamePool = namePoolToString(preview.namePool);
   if (existingNamePool !== importedNamePool) {
