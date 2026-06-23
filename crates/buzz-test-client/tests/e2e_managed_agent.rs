@@ -1,14 +1,16 @@
 //! End-to-end tests for kind:30177 managed-agent events (NIP-AP).
 //!
 //! These tests verify the relay accepts and addresses managed-agent events the
-//! same way it does personas, and — the security-critical case — that the
-//! content round-tripped through the relay carries only the opt-IN allowlisted
-//! identity/config fields and never a secret.
+//! same way it does personas, and that content published as a projection-shaped
+//! body round-trips through the relay unchanged.
 //!
 //! - Accepts a valid managed-agent event and queries it back by NIP-33
 //!   coordinate (the `d`-tag is the agent's 64-hex pubkey).
-//! - The published content carries NO `private_key_nsec`, `auth_tag`,
-//!   `env_vars`, provider backend blob, or runtime fields.
+//! - Round-trips the published content through the relay, confirming it returns
+//!   exactly the projected fields and nothing more. The body is a hand-built
+//!   secret-free literal; the secret-exclusion regression guard lives in the
+//!   `agent_events.rs` unit test, not here (the e2e crate can't reach the
+//!   desktop projection function).
 //! - Enforces NIP-33 replacement semantics (same d-tag, newer timestamp wins).
 //! - Honors a NIP-09 a-tag tombstone, removing the agent coordinate.
 //!
@@ -134,15 +136,19 @@ async fn test_managed_agent_publish_and_query() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── Secret exclusion (the security-critical case) ────────────────────────────
+// ── Round-trip fidelity (relay returns only what was published) ──────────────
 
-/// The content round-tripped through the relay must carry only the opt-IN
-/// allowlisted identity/config fields — never a secret, the provider backend
-/// blob, env vars, or runtime fields. This proves the full publish→relay→query
-/// pipe, not just the projection function (which is unit-tested separately).
+/// The relay round-trips published content byte-for-byte: a projection-shaped
+/// body goes out, and the relay returns exactly those fields and nothing more.
+/// The body here is a hand-built secret-free literal (`agent_projection_content`),
+/// so this test does NOT exercise the desktop projection function — the e2e crate
+/// can't reach it. The secret-exclusion regression guard lives in the
+/// `agent_events.rs` unit test (`content_excludes_secrets_and_runtime_fields`),
+/// which feeds a fully-populated secret-bearing record through the real
+/// projection. This test confirms the relay neither adds nor drops fields.
 #[tokio::test]
 #[ignore]
-async fn test_managed_agent_published_content_excludes_secrets() {
+async fn test_managed_agent_round_trips_only_projected_fields() {
     let url = relay_url();
     let keys = Keys::generate();
     let d_tag = agent_d_tag();
@@ -177,7 +183,10 @@ async fn test_managed_agent_published_content_excludes_secrets() {
     assert_eq!(events.len(), 1, "expected exactly one managed-agent event");
     let published = &events[0].content;
 
-    // Secret-bearing fields — must never appear in relay-stored content.
+    // The relay must not inject fields. These assertions confirm round-trip
+    // fidelity for a projection-shaped body — they are NOT the secret guard
+    // (the input literal is secret-free by construction; the real guard is the
+    // `agent_events.rs` unit test over the projection function).
     for forbidden in [
         "private_key_nsec",
         "private_key",

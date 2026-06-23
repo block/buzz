@@ -36,6 +36,10 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 /// owner-authored, so the caller skips them — this helper assumes the team is
 /// publishable. Best-effort: a failure here is logged and swallowed so a
 /// retention hiccup never blocks the disk-authoritative write.
+///
+/// Unlike `retain_managed_agent_pending`, this has no projection-equality
+/// short-circuit: teams have no start/stop runtime churn, so a republish only
+/// happens on an actual user edit. The guard is intentionally omitted.
 fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
     use crate::managed_agents::{
         managed_agents_base_dir,
