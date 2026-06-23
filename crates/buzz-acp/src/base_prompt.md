@@ -72,6 +72,8 @@ Your persistent workspace is in your working directory:
 
 Knowledge files use `ALL_CAPS_WITH_UNDERSCORES.md` naming. `AGENTS.md` lists active agents and roles. See `AGENTS.md` in your working directory for full workspace conventions.
 
+These paths are relative to your working directory — keep exploration there. Never run `find` or recursive searches over `$HOME` or `/` hunting for workspace files: they live under your working directory, not elsewhere on disk.
+
 ## Agent Memory
 
 Your `core` memory is auto-injected into your context every turn — it holds identity, durable rules, and goals across sessions.

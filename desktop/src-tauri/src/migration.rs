@@ -133,6 +133,100 @@ pub fn migrate_legacy_app_data_dir(app: &tauri::AppHandle) {
     }
 }
 
+/// Knowledge directories and files carried from the legacy nest into the live
+/// nest. Deliberately excludes `REPOS/`: cloned repositories are re-clonable by
+/// definition (Will's stranded `REPOS/` measured 62 GB of checkouts plus build
+/// artifacts), so copying them would block desktop startup for minutes on every
+/// cold launch while recovering nothing the agent "remembers". Agents re-clone
+/// what they need into the live nest. The agent's accumulated knowledge — notes,
+/// plans, logs — is what must survive the rename, and it totals a few hundred KB.
+///
+/// All entries are plain files or directories of plain files on the observed
+/// disk, so `copy_dir_all`'s symlink branch is not exercised. This is a
+/// content-dependent property, not a structural guarantee: `copy_dir_all`
+/// recurses with `symlink_metadata`, so a symlink later dropped into one of
+/// these dirs (e.g. by a skill writing into `.scratch/`) would hit that branch's
+/// clobber/abort hazard. The per-entry log-and-continue below bounds the blast
+/// radius of such a failure to the single offending entry.
+const LEGACY_NEST_KNOWLEDGE: &[&str] = &[
+    "AGENTS.md",
+    "RESEARCH",
+    "PLANS",
+    "GUIDES",
+    "WORK_LOGS",
+    "OUTBOX",
+    ".scratch",
+];
+
+/// Migrate the legacy agent nest (`~/.sprout`) into the current nest (`~/.buzz`).
+///
+/// PR #960 renamed the nest directory but shipped no migration, stranding the
+/// agent's accumulated knowledge in `~/.sprout` while `~/.buzz` booted empty —
+/// so agents searched `$HOME` for files they "remembered", triggering macOS TCC
+/// prompts. This copies only the knowledge directories (see
+/// [`LEGACY_NEST_KNOWLEDGE`]), never `REPOS/`.
+///
+/// Non-fatal and idempotent, mirroring [`migrate_legacy_app_data_dir`]: a copy
+/// error is logged and never aborts startup. There is no completion sentinel —
+/// the migration re-runs on every launch while `~/.sprout` exists, which is
+/// cheap because the copy is tiny and `copy_dir_all` skips files that already
+/// exist in the destination. This relies on `REPOS/` being out of scope; if it
+/// is ever added back, a sentinel or off-thread copy becomes mandatory.
+pub fn migrate_legacy_nest() {
+    let Some(home) = dirs::home_dir() else {
+        eprintln!("buzz-desktop: nest-migration: cannot resolve home directory");
+        return;
+    };
+    migrate_legacy_nest_at(&home.join(".sprout"), &home.join(".buzz"));
+}
+
+/// Copy the [`LEGACY_NEST_KNOWLEDGE`] entries from `legacy` to `current`.
+///
+/// Each entry is copied independently with its own log-and-continue, so a
+/// failure on one entry never skips the rest. No-ops cleanly when `legacy` is
+/// absent or an entry does not exist.
+fn migrate_legacy_nest_at(legacy: &Path, current: &Path) {
+    if !legacy.exists() {
+        return;
+    }
+    for name in LEGACY_NEST_KNOWLEDGE {
+        let src = legacy.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = current.join(name);
+        let result = if src.is_dir() {
+            copy_dir_all(&src, &dst)
+        } else {
+            copy_file_if_absent(&src, &dst)
+        };
+        match result {
+            Ok(()) => eprintln!(
+                "buzz-desktop: nest-migration: migrated {} to {}",
+                src.display(),
+                dst.display()
+            ),
+            Err(error) => eprintln!(
+                "buzz-desktop: nest-migration: failed to migrate {} to {}: {error}",
+                src.display(),
+                dst.display()
+            ),
+        }
+    }
+}
+
+/// Copy a single file only if the destination does not already exist, matching
+/// `copy_dir_all`'s non-destructive guard for top-level files (e.g. `AGENTS.md`).
+fn copy_file_if_absent(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if dst.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst).map(|_| ())
+}
+
 /// Read a JSON array of objects from `path`, apply `f` to each object,
 /// and write back if any mutation returned `true`.
 fn patch_json_records(
