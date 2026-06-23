@@ -762,10 +762,9 @@ test.describe("thread unread indicator screenshots", () => {
     });
   });
 
-  // Thread-only replies now route through Inbox instead of lighting the
-  // channel's sidebar dot. Viewing the channel should still leave the channel
-  // dot clear when the only new item is an unopened thread reply.
-  test("11-thread-reply-does-not-light-sidebar-dot-after-channel-view", async ({
+  // Thread-only replies now also light the channel sidebar badge. Viewing the
+  // channel should leave unopened thread replies unread until the thread is read.
+  test("11-thread-reply-lights-sidebar-badge-after-channel-view", async ({
     page,
   }) => {
     await installMockBridge(page);
@@ -799,27 +798,25 @@ test.describe("thread unread indicator screenshots", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-    // The crux: leave general. Its sidebar dot must stay clear because
-    // thread-only reply activity belongs in Inbox, not the channel nav.
+    // The crux: leave general. The unopened thread reply should still keep a
+    // numeric channel sidebar badge until the thread itself is read.
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
-    await expect(page.getByTestId("channel-unread-general")).toHaveCount(0);
+    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
 
     await page.screenshot({
-      path: `${SHOTS}/11-thread-reply-no-sidebar-dot.png`,
+      path: `${SHOTS}/11-thread-reply-sidebar-badge.png`,
     });
   });
 
   // Regression guard for the all-replies window: when the loaded window holds
   // ONLY thread replies (the top-level root has scrolled past the history
-  // limit), thread-only activity should still stay out of channel unread dots.
+  // limit), thread-only activity should still light the channel sidebar badge.
   //
   // The `all-replies` fixture carries a far-future `lastMessageAt` (standing in
   // for the backend's reply-inclusive MAX) with no top-level message in its
   // window.
-  test("12-thread-reply-does-not-light-all-replies-sidebar-dot", async ({
-    page,
-  }) => {
+  test("12-thread-reply-lights-all-replies-sidebar-badge", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
 
@@ -843,14 +840,14 @@ test.describe("thread unread indicator screenshots", () => {
     await page.getByTestId("channel-all-replies").click();
     await expect(page.getByTestId("chat-title")).toHaveText("all-replies");
 
-    // The crux: leave the channel. Its sidebar dot should remain clear because
-    // thread-only reply activity belongs in Inbox.
+    // The crux: leave the channel. Its unopened thread reply should still keep
+    // a numeric channel sidebar badge until the thread itself is read.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
-    await expect(page.getByTestId("channel-unread-all-replies")).toHaveCount(0);
+    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
 
     await page.screenshot({
-      path: `${SHOTS}/12-thread-reply-no-all-replies-sidebar-dot.png`,
+      path: `${SHOTS}/12-thread-reply-all-replies-sidebar-badge.png`,
     });
   });
 

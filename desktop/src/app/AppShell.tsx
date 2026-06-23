@@ -6,6 +6,7 @@ import { Outlet, useLocation } from "@tanstack/react-router";
 import {
   deriveShellRoute,
   isWindowDragHandleEvent,
+  shouldBounceForChannelNotification,
   toSearchHit,
 } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
@@ -179,7 +180,8 @@ export function AppShell() {
     refetchHomeFeedFromLiveSignal,
   );
   const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, _event: RelayEvent) => {
+    (_channelId: string, event: RelayEvent) => {
+      if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.settings.desktopEnabled) return;
       void requestDockBounce();
     },
@@ -390,11 +392,6 @@ export function AppShell() {
     channels,
   );
 
-  // Badge count is computed here (rather than inside useHomeFeedNotifications)
-  // so it can consume the NIP-RS read-state lifted from the single
-  // ReadStateManager mounted via useUnreadChannels above. Channel-backed
-  // feed items contribute to the badge iff strictly newer than that
-  // channel's read marker; non-channel items keep their seen-set fallback.
   const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
@@ -412,8 +409,6 @@ export function AppShell() {
       getThreadReadAt,
     );
 
-  // Raw add to the in-app nav badge, mirroring the inbox filter badge; gated by
-  // homeBadgeEnabled to match every other badge contribution.
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,
@@ -592,14 +587,18 @@ export function AppShell() {
   }, []);
 
   React.useEffect(() => {
-    const numericCount =
+    const count =
       unreadChannelNotificationCount + homeBadgeCountExcludingHighPriority;
-    if (numericCount > 0) {
-      void setDesktopAppBadge({ kind: "count", count: numericCount });
-    } else {
-      void setDesktopAppBadge({ kind: "none" });
-    }
-  }, [homeBadgeCountExcludingHighPriority, unreadChannelNotificationCount]);
+    void setDesktopAppBadge(
+      count
+        ? { kind: "count", count }
+        : { kind: unreadChannelIds.size ? "dot" : "none" },
+    );
+  }, [
+    homeBadgeCountExcludingHighPriority,
+    unreadChannelIds,
+    unreadChannelNotificationCount,
+  ]);
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();

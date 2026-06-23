@@ -5,6 +5,8 @@ import {
   HOME_MENTION_EVENT_KINDS,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
+  KIND_REACTION,
+  KIND_STREAM_MESSAGE_EDIT,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 
@@ -42,9 +44,10 @@ export function buildChannelFilter(
  * History filter for cold-load and scrollback: message kinds *only*, so the
  * `limit` budget buys visible message depth. Auxiliary events (reactions,
  * edits, deletions) are backfilled separately by `#e` reference via
- * {@link buildChannelAuxFilter}, and arrive for future messages through the
- * live subscription ({@link buildChannelFilter}, which keeps the broad
- * {@link CHANNEL_EVENT_KINDS} set).
+ * {@link buildChannelStructuralAuxFilter} and
+ * {@link buildChannelReactionAuxFilter}, and arrive for future messages
+ * through the live subscription ({@link buildChannelFilter}, which keeps the
+ * broad {@link CHANNEL_EVENT_KINDS} set).
  */
 export function buildChannelHistoryFilter(
   channelId: string,
@@ -65,16 +68,44 @@ export function buildChannelHistoryFilter(
 }
 
 /**
- * Aux-backfill filter for one chunk of loaded message ids: pulls reactions/
- * edits/deletions ({@link CHANNEL_AUX_EVENT_KINDS}) that reference those ids
- * by `#e`. Keyed by reference, not time, so a late edit/deletion for an old
- * visible message still applies — see {@link buildChannelHistoryFilter}.
+ * Aux-backfill filter for one chunk of loaded message ids: pulls auxiliary
+ * events ({@link CHANNEL_AUX_EVENT_KINDS}) that reference those ids by `#e`.
+ * Keyed by reference, not time, so a late edit/deletion for an old visible
+ * message still applies — see {@link buildChannelHistoryFilter}.
  */
 export function buildChannelAuxFilter(
   _channelId: string,
   messageIds: string[],
 ): RelaySubscriptionFilter {
   return buildChannelAuxKindFilter(messageIds, [...CHANNEL_AUX_EVENT_KINDS]);
+}
+
+/**
+ * Structural aux filter for history backfill: edits/deletions only. Reactions
+ * are hydrated from the rows the GUI actually renders, so the slow kind:5 scan
+ * never shares a request with first-paint reaction pills.
+ */
+export function buildChannelStructuralAuxFilter(
+  _channelId: string,
+  messageIds: string[],
+): RelaySubscriptionFilter {
+  return buildChannelAuxKindFilter(messageIds, [
+    KIND_DELETION,
+    KIND_NIP29_DELETE_EVENT,
+    KIND_STREAM_MESSAGE_EDIT,
+  ]);
+}
+
+/**
+ * Reactions-only filter for the message rows the GUI is currently rendering.
+ * Keep this separate from structural aux backfill so the slow kind:5 deletion
+ * scan cannot delay reaction pills that affect visible pixels right now.
+ */
+export function buildChannelReactionAuxFilter(
+  _channelId: string,
+  messageIds: string[],
+): RelaySubscriptionFilter {
+  return buildChannelAuxKindFilter(messageIds, [KIND_REACTION]);
 }
 
 export function buildChannelAuxDeletionFilter(

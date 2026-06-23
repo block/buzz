@@ -5,6 +5,7 @@ import {
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
 import { relayClient } from "@/shared/api/relayClient";
+import { buildChannelStructuralAuxFilter } from "@/shared/api/relayChannelFilters";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -65,16 +66,16 @@ export async function mergeAuxEventsWithDeletionBackfill(input: {
 }
 
 /**
- * After a content-kinds-only history fetch, pull the auxiliary events
- * (reactions, edits, deletions) that reference the loaded messages — keyed by
- * `#e` over their ids, not by a time window — and merge them into the same
- * channel cache.
+ * After a content-kinds-only history fetch, pull structural auxiliary events
+ * (edits/deletions) that reference the loaded messages — keyed by `#e` over
+ * their ids, not by a time window — and merge them into the same channel cache.
+ * Reactions are hydrated separately for the rows the GUI renders.
  *
  * History fetches request content kinds only so the `limit` budget buys
- * visible message depth (a reaction-heavy 200-event window was only ~136
- * messages). The cost is that an edit/deletion for a visible message can fall
- * outside any fetched time window — so aux must be pulled by reference, or a
- * visible message renders stale (un-edited / not-deleted).
+ * visible message depth. The cost is that an edit/deletion for a visible
+ * message can fall outside any fetched time window — so structural aux must be
+ * pulled by reference, or a visible message renders stale (un-edited /
+ * not-deleted).
  *
  * Best-effort: failures are logged but never reject, so a flaky overlay fetch
  * can't blank the freshly-loaded messages.
@@ -92,9 +93,10 @@ export async function backfillAuxForMessages(
   try {
     const cacheKey = channelMessagesKey(channelId);
     const cachedEvents = queryClient.getQueryData<RelayEvent[]>(cacheKey) ?? [];
-    const auxEvents = await relayClient.fetchAuxEventsForMessages(
+    const auxEvents = await relayClient.fetchAuxEventsByReference(
       channelId,
       messageIds,
+      buildChannelStructuralAuxFilter,
     );
     const mergedAuxEvents = await mergeAuxEventsWithDeletionBackfill({
       channelId,
