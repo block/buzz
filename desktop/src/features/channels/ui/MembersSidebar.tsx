@@ -573,6 +573,13 @@ export function MembersSidebar({
   }
 
   function renderMemberCard(member: ChannelMember, memberIsBot: boolean) {
+    const memberProfile =
+      memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()];
+    const viewerIsOwner = Boolean(
+      memberProfile?.ownerPubkey &&
+        currentPubkey &&
+        memberProfile.ownerPubkey.toLowerCase() === currentPubkey.toLowerCase(),
+    );
     return (
       <div className="content-visibility-auto" key={member.pubkey}>
         <MembersSidebarMemberCard
@@ -609,10 +616,8 @@ export function MembersSidebar({
           presenceStatus={
             memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
           }
-          profileAvatarUrl={
-            memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()]
-              ?.avatarUrl ?? null
-          }
+          profileAvatarUrl={memberProfile?.avatarUrl ?? null}
+          viewerIsOwner={viewerIsOwner}
         />
       </div>
     );
