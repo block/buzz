@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.30
+
+- fix(desktop): collapse mark-read/unread menu into one toggling item ([#1188](https://github.com/block/buzz/pull/1188)) ([`ce994df74`](https://github.com/block/buzz/commit/ce994df74e60cf43b2fb0b97ea9989aacd47650e))
+- fix(channels): replace thread-unread badge frontier with per-message read markers ([#1178](https://github.com/block/buzz/pull/1178)) ([`28db41dfd`](https://github.com/block/buzz/commit/28db41dfd383f3f7acd57011bd98661a08e7bfe4))
+- fix(relay): resubscribe agents when an archived channel is restored ([#1187](https://github.com/block/buzz/pull/1187)) ([`6780ea21e`](https://github.com/block/buzz/commit/6780ea21e44a525aa73455c4ae79702564f783f2))
+
+
 ## v0.3.29
 
 - build: make mesh-llm opt-in for dev/staging to speed up iteration ([#1183](https://github.com/block/buzz/pull/1183)) ([`ce526106`](https://github.com/block/buzz/commit/ce5261067d2b970ecca7e0d6c24479fcd2ccad43))
