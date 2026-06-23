@@ -909,7 +909,7 @@ export function MemoryFocusedView({
 
   return (
     <div className="pt-4">
-      <MemorySection agentPubkey={agentPubkey} />
+      <MemorySection agentPubkey={agentPubkey} viewerIsOwner={isOwner} />
     </div>
   );
 }

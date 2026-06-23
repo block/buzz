@@ -9,9 +9,12 @@
 //! Why this shape:
 //! - Owner secret key never leaves Rust. The desktop signs in as the owner
 //!   and decrypts via `agent ↔ owner` NIP-44 conversation key.
-//! - Owner gating is enforced here: the requested agent pubkey MUST exist
-//!   in the local `managed_agents` store. If not, the command refuses.
-//!   The UI hides the section anyway, but defense in depth.
+//! - Owner gating is enforced here: the request is accepted if the agent is
+//!   in the local `managed_agents` store OR the agent's live `kind:0`
+//!   cryptographically declares the viewer as its NIP-OA owner. Either way
+//!   the engrams are NIP-44 encrypted to the viewer's own pubkey, so the
+//!   encryption is the real boundary; this gate just decides whether to try.
+//!   The UI hides the section for non-owners anyway, but defense in depth.
 //! - One call returns everything because the orphans view requires the
 //!   full set anyway. Lazy/per-node decrypt is deferred to IXI-60.
 
@@ -25,6 +28,7 @@ use tauri::{AppHandle, State};
 use buzz_core_pkg::engram::{self, extract_refs, select_head, validate_and_decrypt, Body};
 use buzz_core_pkg::kind::KIND_AGENT_ENGRAM;
 
+use crate::commands::identity_archive::{extract_oa_owner, fetch_kind0};
 use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::query_relay};
 
 /// Hard cap on engrams returned per (agent, owner) pair. Matches the CLI
@@ -85,29 +89,57 @@ pub async fn get_agent_memory(
     state: State<'_, AppState>,
 ) -> Result<AgentMemoryListing, String> {
     // ── Owner gating ────────────────────────────────────────────────────
-    // The viewer (this desktop's identity) is the prospective owner. We
-    // accept the request only if the agent appears in our managed_agents
-    // store — that's the local source of truth for "agents I own". The UI
-    // must already have hidden the section for non-owners; this is just
-    // defense in depth.
+    // The viewer (this desktop's identity) is the prospective owner. The
+    // relay query below is `#p`-tagged for the viewer's OWN pubkey and every
+    // engram is NIP-44 encrypted to that pubkey, so the viewer decrypts with
+    // their own key — the agent's seckey is never needed. Encryption + the
+    // relay's server-side `#p` scoping are the real boundary; this gate only
+    // decides whether we bother attempting (and avoids a needless roundtrip
+    // for agents the viewer plainly doesn't own).
     //
-    // Why `managed_agents` rather than a NIP-OA `kind:0` lookup (the gate
-    // the archive command uses): the question this surface needs to answer
-    // is "do I have the seckey to decrypt this agent's engrams?", not
-    // "does this agent's `kind:0` declare me as its OA owner?". The former
-    // is what `managed_agents` records — it can't lie, you either have the
-    // key locally or you don't. The latter is forgeable (a malicious agent
-    // can put any pubkey in their `auth` tag) and would also require a
-    // relay roundtrip on every panel open. Keep this gate; don't swap it
-    // back to `resolve_oa_owner` "for consistency" — they're answering
-    // different questions.
+    // We accept the request on either of two owner signals, mirroring the UI's
+    // `viewerIsOwner = isCurrentUserOwner || isOwner`:
+    //   1. The agent is in this desktop's `managed_agents` store — local
+    //      fast-path, no roundtrip. Covers locally-run agents (and older
+    //      agents that never advertised an owner).
+    //   2. The agent's live `kind:0` cryptographically declares the viewer as
+    //      its NIP-OA owner (verified via `extract_oa_owner`). This is the
+    //      remote-owner case: the owner runs the agent on another desktop, so
+    //      holds no local seckey, but legitimately owns it.
+    //
+    // (Historical note: this gate used to refuse anything not in
+    // `managed_agents`, on the theory that key-custody was the only safe
+    // proxy for ownership. That conflated "do I hold the seckey?" with "am I
+    // the owner?" — the two diverge exactly for a remote-owned agent, which
+    // wrongly locked legitimate owners out of their own memory. The declared-
+    // owner path is cleared (PR #917 author signed off); decryption still
+    // does the real guarding.)
     let agent = PublicKey::from_hex(&agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
+    let viewer_pubkey = {
+        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        keys.public_key().to_hex()
+    };
+
     let managed = load_managed_agents(&app)?;
-    if !managed.iter().any(|m| m.pubkey == agent_pubkey) {
+    let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey);
+    let is_declared_owner = if is_managed {
+        false // already authorized; skip the relay roundtrip
+    } else {
+        // Verify the agent's live `kind:0` declares the viewer as owner.
+        match fetch_kind0(&state, &agent_pubkey).await? {
+            Some(kind0) => extract_oa_owner(&kind0)
+                .map(|(owner_hex, _tag)| owner_hex.eq_ignore_ascii_case(&viewer_pubkey))
+                .unwrap_or(false),
+            None => false,
+        }
+    };
+
+    if !is_managed && !is_declared_owner {
         return Err(format!(
-            "not the owner of agent {agent_pubkey} (no managed-agent record)"
+            "not the owner of agent {agent_pubkey} (no managed-agent record \
+             and no verified NIP-OA owner declaration)"
         ));
     }
 

@@ -29,7 +29,7 @@ use crate::{
 /// preimage subject is the *target* pubkey, not the request signer). The
 /// `buzz-sdk` lives on nostr 0.36; the desktop is on 0.37, so we bridge
 /// via hex round-trip exactly like `relay::build_profile_event` does.
-fn extract_oa_owner(target_kind0: &nostr::Event) -> Option<(String, [String; 4])> {
+pub(crate) fn extract_oa_owner(target_kind0: &nostr::Event) -> Option<(String, [String; 4])> {
     let target_hex = target_kind0.pubkey.to_hex();
     let target_compat = nostr::PublicKey::from_hex(&target_hex).ok()?;
 
@@ -55,7 +55,10 @@ fn extract_oa_owner(target_kind0: &nostr::Event) -> Option<(String, [String; 4])
     None
 }
 
-async fn fetch_kind0(state: &AppState, pubkey: &str) -> Result<Option<nostr::Event>, String> {
+pub(crate) async fn fetch_kind0(
+    state: &AppState,
+    pubkey: &str,
+) -> Result<Option<nostr::Event>, String> {
     let events = query_relay(
         state,
         &[serde_json::json!({
