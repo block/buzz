@@ -81,7 +81,9 @@ export type ProfileSummaryViewProps = {
   memoryCount: number | undefined;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
+  ownerPubkey: string | null;
   onOpenChannels: () => void;
+  onOpenOwner?: () => void;
   onOpenMemories: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
   presenceLoaded: boolean;
@@ -113,7 +115,9 @@ export function ProfileSummaryView({
   memoryCount,
   ownerDisplayName,
   ownerHandle,
+  ownerPubkey,
   onOpenChannels,
+  onOpenOwner,
   onOpenMemories,
   onOpenDm,
   presenceLoaded,
@@ -134,11 +138,14 @@ export function ProfileSummaryView({
       relayAgent,
       isBot,
     }),
-    ...(isOwner === true
+    ...(ownerDisplayName || isOwner === true
       ? buildOwnerFields({
+          includeOperationalFields: isOwner === true,
           managedAgent,
           ownerDisplayName,
           ownerHandle,
+          ownerPubkey,
+          onOpenOwner,
           presenceLoaded,
           presenceStatus,
           relayAgent,
@@ -594,16 +601,22 @@ function buildPublicFields({
 }
 
 function buildOwnerFields({
+  includeOperationalFields,
   managedAgent,
   ownerDisplayName,
   ownerHandle,
+  ownerPubkey,
+  onOpenOwner,
   presenceLoaded,
   presenceStatus,
   relayAgent,
 }: {
+  includeOperationalFields: boolean;
   managedAgent: ManagedAgent | undefined;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
+  ownerPubkey: string | null;
+  onOpenOwner?: () => void;
   presenceLoaded: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   relayAgent: RelayAgent | undefined;
@@ -612,12 +625,31 @@ function buildOwnerFields({
 
   if (ownerDisplayName) {
     fields.push({
-      copyValue: ownerHandle ?? undefined,
+      copyValue: onOpenOwner
+        ? undefined
+        : (ownerPubkey ?? ownerHandle ?? undefined),
       displayValue: ownerDisplayName,
+      displayNode: onOpenOwner ? (
+        <button
+          className="max-w-full truncate text-left text-sm text-muted-foreground transition-colors hover:text-foreground hover:underline"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenOwner();
+          }}
+          title={ownerDisplayName}
+          type="button"
+        >
+          {ownerDisplayName}
+        </button>
+      ) : undefined,
       icon: UserRound,
       label: "Owned by",
       testId: "user-profile-owned-by",
     });
+  }
+
+  if (!includeOperationalFields) {
+    return fields;
   }
 
   if (managedAgent?.agentCommand) {

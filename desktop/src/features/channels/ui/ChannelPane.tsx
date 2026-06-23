@@ -948,6 +948,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                       onClose={onCloseProfilePanel}
                       onOpenDm={onOpenDm}
+                      onOpenProfile={onOpenProfilePanel}
                       onViewChange={onProfilePanelViewChange}
                       pubkey={profilePanelPubkey}
                       splitPaneClamp
