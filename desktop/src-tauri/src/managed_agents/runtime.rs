@@ -11,6 +11,9 @@ use crate::{
     util::now_iso,
 };
 
+mod path;
+use path::build_augmented_path;
+
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
 /// Binary name fragments for all known agent/harness processes that Buzz
@@ -1535,28 +1538,13 @@ pub fn spawn_agent_child(
     //   - bundled CLI via ~/.local/bin symlink
     //   - bundled sidecars (buzz, buzz-acp, etc.) via exe parent (Contents/MacOS/)
     //   - runtimes (node, python, etc.) via login shell PATH
-    let augmented_path = {
-        let mut parts: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(home) = dirs::home_dir() {
-            parts.push(home.join(".local").join("bin"));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                parts.push(parent.to_path_buf());
-            }
-        }
-        if let Some(shell_path) = login_shell_path() {
-            parts.push(std::path::PathBuf::from(shell_path));
-        }
-        if parts.is_empty() {
-            None
-        } else {
-            // join_paths uses the platform separator (':' on Unix, ';' on Windows).
-            std::env::join_paths(parts)
-                .ok()
-                .map(|s| s.to_string_lossy().into_owned())
-        }
-    };
+    let augmented_path = build_augmented_path(
+        dirs::home_dir(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
+        login_shell_path(),
+    );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
     if let Some(home) = super::default_agent_workdir() {
