@@ -15,8 +15,9 @@ const SEARCH_PROMPT_ENTER_DURATION_SECONDS = 0.54;
 const SEARCH_PROMPT_EXIT_DURATION_SECONDS = 0.32;
 const SEARCH_PROMPT_ENTER_STAGGER_SECONDS = 0.014;
 const SEARCH_PROMPT_EXIT_STAGGER_SECONDS = 0.008;
-const SEARCH_PROMPT_Y_OFFSET_PX = 8;
-const SEARCH_PROMPT_BLUR_PX = 5;
+const SEARCH_PROMPT_Y_OFFSET = "0.5rem";
+const SEARCH_PROMPT_NEGATIVE_Y_OFFSET = "-0.5rem";
+const SEARCH_PROMPT_BLUR = "0.25rem";
 
 const searchPromptPhraseVariants = {
   animate: {
@@ -34,7 +35,7 @@ const searchPromptPhraseVariants = {
 
 const searchPromptCharacterVariants = {
   animate: {
-    filter: "blur(0px)",
+    filter: "blur(0)",
     opacity: 1,
     transition: {
       duration: SEARCH_PROMPT_ENTER_DURATION_SECONDS,
@@ -43,18 +44,18 @@ const searchPromptCharacterVariants = {
     y: 0,
   },
   exit: {
-    filter: `blur(${SEARCH_PROMPT_BLUR_PX}px)`,
+    filter: `blur(${SEARCH_PROMPT_BLUR})`,
     opacity: 0,
     transition: {
       duration: SEARCH_PROMPT_EXIT_DURATION_SECONDS,
       ease: SEARCH_PROMPT_EXIT_EASE,
     },
-    y: -SEARCH_PROMPT_Y_OFFSET_PX,
+    y: SEARCH_PROMPT_NEGATIVE_Y_OFFSET,
   },
   initial: {
-    filter: `blur(${SEARCH_PROMPT_BLUR_PX}px)`,
+    filter: `blur(${SEARCH_PROMPT_BLUR})`,
     opacity: 0,
-    y: SEARCH_PROMPT_Y_OFFSET_PX,
+    y: SEARCH_PROMPT_Y_OFFSET,
   },
 };
 
