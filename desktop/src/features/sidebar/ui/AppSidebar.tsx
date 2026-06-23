@@ -48,6 +48,7 @@ import {
   SECTION_ACTION_VISIBILITY_CLASS,
   SECTION_ICON_BUTTON_CLASS,
 } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
@@ -140,6 +141,7 @@ type AppSidebarProps = {
     updates: Partial<Pick<Workspace, "name" | "relayUrl" | "token">>,
   ) => void;
   onRemoveWorkspace: (id: string) => void;
+  onCreateAgent: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -209,6 +211,7 @@ export function AppSidebar({
   onOpenDm,
   onUpdateWorkspace,
   onRemoveWorkspace,
+  onCreateAgent,
   onSelectAgents,
   onSelectProjects,
   onSelectPulse,
@@ -310,6 +313,14 @@ export function AppSidebar({
 
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
+  const { openNextFrame: openModalNextFrame } = useDeferredModalOpen();
+  const openCreateDialog = React.useCallback(
+    (kind: CreateChannelKind) => {
+      setCreateDialogKind(null);
+      openModalNextFrame(() => setCreateDialogKind(kind));
+    },
+    [openModalNextFrame],
+  );
 
   React.useEffect(() => {
     if (!canShowSidebarUpdateCard) {
@@ -324,9 +335,9 @@ export function AppSidebar({
   // dialog's `onOpenChange` below.
   React.useEffect(() => {
     if (isCreateChannelOpenProp) {
-      setCreateDialogKind("stream");
+      openCreateDialog("stream");
     }
-  }, [isCreateChannelOpenProp]);
+  }, [isCreateChannelOpenProp, openCreateDialog]);
   const [collapsedGroups, setCollapsedGroups] = React.useState<
     Record<CollapsibleSidebarGroup, boolean>
   >({
@@ -506,6 +517,15 @@ export function AppSidebar({
     [createDialogKind, onCreateChannel, onCreateForum],
   );
 
+  const handleOpenCreateChannel = React.useCallback(() => {
+    if (onCreateChannelOpenChange) {
+      onCreateChannelOpenChange(true);
+      return;
+    }
+
+    openCreateDialog("stream");
+  }, [onCreateChannelOpenChange, openCreateDialog]);
+
   return (
     <Sidebar
       className="!border-r-0"
@@ -530,11 +550,16 @@ export function AppSidebar({
           data-testid="sidebar-pinned-header"
         >
           <TopbarSearch
+            channelLabels={dmChannelLabels}
             channels={searchChannels}
             currentPubkey={currentPubkey}
             focusRequest={searchFocusRequest}
             onOpenChannel={onSelectChannel}
             onOpenResult={onOpenSearchResult}
+            onOpenUser={(user) => onOpenDm({ pubkeys: [user.pubkey] })}
+            onCreateAgent={onCreateAgent}
+            onCreateChannel={handleOpenCreateChannel}
+            suggestionChannels={channels}
           />
           <SidebarHeader
             className="cursor-default select-none px-0 pb-0 pt-2"
@@ -725,7 +750,7 @@ export function AppSidebar({
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
                   onBrowseClick={onBrowseChannels}
-                  onCreateClick={() => setCreateDialogKind("stream")}
+                  onCreateClick={() => openCreateDialog("stream")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
                   onMarkChannelUnread={onMarkChannelUnread}
@@ -756,7 +781,7 @@ export function AppSidebar({
                   isActiveChannel={selectedView === "channel"}
                   items={forumChannels}
                   listTestId="forum-list"
-                  onCreateClick={() => setCreateDialogKind("forum")}
+                  onCreateClick={() => openCreateDialog("forum")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
                   onMarkChannelUnread={onMarkChannelUnread}

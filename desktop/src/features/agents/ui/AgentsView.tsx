@@ -1,5 +1,10 @@
+import * as React from "react";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import {
+  consumePendingOpenCreateAgent,
+  subscribeOpenCreateAgent,
+} from "@/features/agents/openCreateAgentEvent";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
@@ -41,6 +46,16 @@ export function AgentsView() {
     teamActions.createTeamMutation.isPending ||
     teamActions.updateTeamMutation.isPending ||
     teamActions.deleteTeamMutation.isPending;
+
+  React.useEffect(() => {
+    if (consumePendingOpenCreateAgent()) {
+      agents.setIsCreateOpen(true);
+    }
+
+    return subscribeOpenCreateAgent(() => {
+      agents.setIsCreateOpen(true);
+    });
+  }, [agents.setIsCreateOpen]);
 
   return (
     <>
