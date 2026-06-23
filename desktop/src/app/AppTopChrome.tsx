@@ -6,7 +6,10 @@ import {
 } from "lucide-react";
 import * as React from "react";
 
+import { isMacPlatform } from "@/shared/lib/platform";
+import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
+import { cn } from "@/shared/lib/cn";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type AppTopChromeProps = {
@@ -48,6 +51,14 @@ export function AppTopChrome({
   onGoBack,
   onGoForward,
 }: AppTopChromeProps) {
+  const isFullscreen = useIsFullscreen();
+  // On macOS the traffic-light buttons overlay the chrome at x≈12 (see
+  // `trafficLightPosition` in `tauri.conf.json`), so the nav row sits at
+  // `left-[80px]` to clear them. In fullscreen those buttons hide, so shift
+  // the row back to the standard left inset.
+  const navRowLeftClass =
+    isMacPlatform() && isFullscreen ? "left-[12px]" : "left-[80px]";
+
   React.useEffect(() => {
     const handleWheel = (event: WheelEvent) => {
       if (event.clientY <= TOP_CHROME_WHEEL_GUARD_HEIGHT) {
@@ -71,7 +82,12 @@ export function AppTopChrome({
         className="fixed inset-x-0 top-0 z-20 h-10 cursor-default select-none"
         data-tauri-drag-region
       />
-      <div className="fixed left-[80px] top-[6px] z-45 flex items-center gap-0.5">
+      <div
+        className={cn(
+          "fixed top-[6px] z-45 flex items-center gap-0.5",
+          navRowLeftClass,
+        )}
+      >
         <TopChromeSidebarTrigger />
         <Button
           aria-label="Go back"
