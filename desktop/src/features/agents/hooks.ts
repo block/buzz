@@ -125,16 +125,17 @@ function invalidateManagedAgentQueriesInBackground(
   );
 }
 
-export function useAcpRuntimesQuery() {
+export function useAcpRuntimesQuery(options?: { enabled?: boolean }) {
   return useQuery({
+    enabled: options?.enabled ?? true,
     queryKey: acpRuntimesQueryKey,
     queryFn: discoverAcpRuntimes,
     staleTime: 60_000,
   });
 }
 
-export function useAvailableAcpRuntimes() {
-  const query = useAcpRuntimesQuery();
+export function useAvailableAcpRuntimes(options?: { enabled?: boolean }) {
+  const query = useAcpRuntimesQuery(options);
   const available = React.useMemo(
     () =>
       (query.data ?? []).filter(
@@ -155,8 +156,9 @@ export function useInstallAcpRuntimeMutation() {
   });
 }
 
-export function useBackendProvidersQuery() {
+export function useBackendProvidersQuery(options?: { enabled?: boolean }) {
   return useQuery({
+    enabled: options?.enabled ?? true,
     queryKey: backendProvidersQueryKey,
     queryFn: discoverBackendProviders,
     staleTime: 30_000,
@@ -175,11 +177,13 @@ export function usePersonasQuery() {
 export function useManagedAgentPrereqsQuery(
   acpCommand: string,
   mcpCommand: string,
+  options?: { enabled?: boolean },
 ) {
   const normalizedAcpCommand = acpCommand.trim();
   const normalizedMcpCommand = mcpCommand.trim();
 
   return useQuery({
+    enabled: options?.enabled ?? true,
     queryKey: [
       ...managedAgentPrereqsQueryKey,
       normalizedAcpCommand,

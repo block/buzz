@@ -535,11 +535,13 @@ function AgentActionsMenu({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <EditAgentDialog
-        agent={agent}
-        onOpenChange={setEditOpen}
-        open={editOpen}
-      />
+      {editOpen ? (
+        <EditAgentDialog
+          agent={agent}
+          onOpenChange={setEditOpen}
+          open={editOpen}
+        />
+      ) : null}
     </>
   );
 }
