@@ -92,7 +92,6 @@ export function ChannelScreenHeader({
     <ChatHeader
       belowSystemChrome
       chromeWrapperRef={chromeWrapperRef}
-      density="compact"
       actions={actions}
       channelType={activeChannel?.channelType}
       description={getChannelDescription(activeChannel)}
