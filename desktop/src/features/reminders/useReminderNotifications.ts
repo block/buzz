@@ -1,6 +1,10 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
-import { useRemindersQuery } from "@/features/reminders/hooks";
+import {
+  remindersQueryKey,
+  useRemindersQuery,
+} from "@/features/reminders/hooks";
 import { dueSince } from "@/features/reminders/lib/reminderFilters";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
 import {
@@ -51,6 +55,7 @@ export function useReminderNotifications(
   settings: NotificationSettings,
 ): void {
   const reminders = useRemindersQuery(pubkey).data;
+  const queryClient = useQueryClient();
   const remindersRef = React.useRef<Reminder[]>([]);
   remindersRef.current = reminders ?? [];
   const settingsRef = React.useRef(settings);
@@ -109,10 +114,18 @@ export function useReminderNotifications(
       // not backlog-replay reminders that came due while muted — same no-replay
       // rationale as seed-to-now. Suppressed reminders still show in panel/badge.
       window.localStorage.setItem(watermarkStorageKey(pubkey), String(now));
+      // Liveness tick: re-render every countDue consumer (inbox nav badge,
+      // HomeView filter, panel) so a reminder that crossed notBefore while the
+      // app sat idle surfaces within the poll interval. Safe to run after the
+      // watermark advance — the toast check() fires on this hook's own
+      // setInterval, not on query-data change, so the refetch cannot re-fire it.
+      void queryClient.invalidateQueries({
+        queryKey: remindersQueryKey(pubkey),
+      });
     };
 
     check();
     const interval = window.setInterval(check, POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [pubkey]);
+  }, [pubkey, queryClient]);
 }

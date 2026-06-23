@@ -22,7 +22,6 @@ import {
 import {
   AUX_BACKFILL_CHUNK_SIZE,
   buildChannelAuxDeletionFilter,
-  buildChannelAuxFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
   buildChannelMentionFilter,
@@ -168,14 +167,18 @@ export class RelayClient {
     );
   }
 
-  async fetchAuxEventsForMessages(
+  async fetchAuxEventsByReference(
     channelId: string,
-    messageIds: string[],
-  ): Promise<RelayEvent[]> {
+    referencedEventIds: string[],
+    buildFilter: (
+      channelId: string,
+      eventIds: string[],
+    ) => RelaySubscriptionFilter,
+  ) {
     return this.fetchChunkedAuxEvents(
       channelId,
-      messageIds,
-      buildChannelAuxFilter,
+      referencedEventIds,
+      buildFilter,
     );
   }
 

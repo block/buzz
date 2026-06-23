@@ -36,6 +36,8 @@ export function mergeCurrentProfileIntoLookup(
       avatarUrl: currentProfile.avatarUrl,
       nip05Handle: currentProfile.nip05Handle,
       isAgent: profiles?.[normalizePubkey(currentProfile.pubkey)]?.isAgent,
+      ownerPubkey:
+        profiles?.[normalizePubkey(currentProfile.pubkey)]?.ownerPubkey ?? null,
     },
   };
 }

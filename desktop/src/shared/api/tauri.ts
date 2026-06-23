@@ -56,12 +56,10 @@ type RawProfile = {
   avatar_url: string | null;
   about: string | null;
   nip05_handle: string | null;
+  owner_pubkey: string | null;
 };
 
-type RawUserProfileSummary = {
-  display_name: string | null;
-  avatar_url: string | null;
-  nip05_handle: string | null;
+type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
   is_agent?: boolean;
 };
 
@@ -70,13 +68,7 @@ type RawUsersBatchResponse = {
   missing: string[];
 };
 
-type RawUserSearchResult = {
-  pubkey: string;
-  display_name: string | null;
-  avatar_url: string | null;
-  nip05_handle: string | null;
-  is_agent?: boolean;
-};
+type RawUserSearchResult = RawUserProfileSummary & { pubkey: string };
 
 type RawSearchUsersResponse = {
   users: RawUserSearchResult[];
@@ -426,6 +418,7 @@ function fromRawProfile(profile: RawProfile): Profile {
     avatarUrl: profile.avatar_url,
     about: profile.about,
     nip05Handle: profile.nip05_handle,
+    ownerPubkey: profile.owner_pubkey,
   };
 }
 
@@ -436,6 +429,7 @@ function fromRawUserProfileSummary(
     displayName: profile.display_name,
     avatarUrl: profile.avatar_url,
     nip05Handle: profile.nip05_handle,
+    ownerPubkey: profile.owner_pubkey,
     isAgent: profile.is_agent ?? false,
   };
 }
@@ -446,6 +440,7 @@ function fromRawUserSearchResult(user: RawUserSearchResult): UserSearchResult {
     displayName: user.display_name,
     avatarUrl: user.avatar_url,
     nip05Handle: user.nip05_handle,
+    ownerPubkey: user.owner_pubkey,
     isAgent: user.is_agent ?? false,
   };
 }

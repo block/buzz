@@ -13,6 +13,7 @@ function makeUser(overrides = {}) {
     displayName: null,
     isAgent: false,
     nip05Handle: null,
+    ownerPubkey: null,
     pubkey: "abcdef1234567890",
     ...overrides,
   };

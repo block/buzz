@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   buildChannelAuxDeletionFilter,
   buildChannelAuxFilter,
+  buildChannelReactionAuxFilter,
+  buildChannelStructuralAuxFilter,
 } from "./relayChannelFilters.ts";
 
 const CHANNEL = "36411e44-0e2d-4cfe-bd6e-567eb169db9f";
@@ -24,6 +26,20 @@ test("buildChannelAuxFilter keys on #e only, no #h", () => {
 
 test("buildChannelAuxDeletionFilter keys on #e only, no #h", () => {
   const filter = buildChannelAuxDeletionFilter(CHANNEL, IDS);
+  assert.deepEqual(filter["#e"], IDS);
+  assert.equal("#h" in filter, false);
+});
+
+test("buildChannelReactionAuxFilter fetches only kind:7 by #e", () => {
+  const filter = buildChannelReactionAuxFilter(CHANNEL, IDS);
+  assert.deepEqual(filter.kinds, [7]);
+  assert.deepEqual(filter["#e"], IDS);
+  assert.equal("#h" in filter, false);
+});
+
+test("buildChannelStructuralAuxFilter excludes reactions", () => {
+  const filter = buildChannelStructuralAuxFilter(CHANNEL, IDS);
+  assert.deepEqual(filter.kinds, [5, 9005, 40003]);
   assert.deepEqual(filter["#e"], IDS);
   assert.equal("#h" in filter, false);
 });

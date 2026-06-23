@@ -270,6 +270,50 @@ function aliceReminderContent() {
   });
 }
 
+// Nav badge — the surface unit tests can't prove: a due reminder driving the
+// Inbox nav item's `(1)` count. The count is gated behind `homeBadgeEnabled`,
+// so seed that setting on before installMockBridge (addInitScript runs at
+// document start, ahead of the app reading localStorage).
+const NAVBADGE_SHOTS = "test-results/reminders-navbadge";
+const NOTIFICATION_SETTINGS_KEY = `buzz-notification-settings.v2:${MOCK_PUBKEY}`;
+
+test.describe("reminders nav badge", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(
+      ({ key }) => {
+        localStorage.setItem(key, JSON.stringify({ homeBadgeEnabled: true }));
+      },
+      { key: NOTIFICATION_SETTINGS_KEY },
+    );
+    await installMockBridge(page);
+  });
+
+  test("09 — Inbox nav badge counts a due reminder", async ({ page }) => {
+    await gotoInboxHome(page);
+
+    // One overdue pending reminder (notBefore in the past) is the sole badge
+    // contributor; the feed baseline is 0, so an exact "1" proves the reminder
+    // — not feed noise — drives the nav count.
+    const pastTimestamp = Math.floor(Date.now() / 1000) - 7200;
+    await seedReminders(page, [
+      mockReminderEvent({
+        id: "reminder-navbadge-01",
+        dTag: "rem-navbadge-01",
+        content: aliceReminderContent(),
+        notBefore: pastTimestamp,
+      }),
+    ]);
+
+    await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
+    await waitForAnimations(page);
+
+    await page.screenshot({
+      path: `${NAVBADGE_SHOTS}/01-inbox-nav-badge-due-reminder.png`,
+      clip: { x: 0, y: 0, width: 900, height: 720 },
+    });
+  });
+});
+
 test.describe("reminders phase 2 — author, source, navigation", () => {
   test.beforeEach(async ({ page }) => {
     await installMockBridge(page);

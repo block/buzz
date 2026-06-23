@@ -9,6 +9,7 @@ import {
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
+import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
@@ -29,6 +30,7 @@ function resetWorkspaceState(): void {
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetVideoPlayerState();
+  resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearAllDrafts();
 }

@@ -52,6 +52,7 @@ type MockSearchProfileSeed = {
   avatarUrl?: string | null;
   nip05Handle?: string | null;
   about?: string | null;
+  ownerPubkey?: string | null;
   isAgent?: boolean;
 };
 
@@ -136,6 +137,7 @@ type RawProfile = {
   avatar_url: string | null;
   about: string | null;
   nip05_handle: string | null;
+  owner_pubkey: string | null;
   is_agent?: boolean;
 };
 
@@ -143,6 +145,7 @@ type RawUserProfileSummary = {
   display_name: string | null;
   avatar_url: string | null;
   nip05_handle: string | null;
+  owner_pubkey: string | null;
   is_agent?: boolean;
 };
 
@@ -156,6 +159,7 @@ type RawUserSearchResult = {
   display_name: string | null;
   avatar_url: string | null;
   nip05_handle: string | null;
+  owner_pubkey: string | null;
   is_agent?: boolean;
 };
 
@@ -1118,6 +1122,7 @@ function seedMockSearchProfiles(config?: E2eConfig) {
       avatar_url: seed.avatarUrl ?? null,
       about: seed.about ?? null,
       nip05_handle: seed.nip05Handle ?? null,
+      owner_pubkey: seed.ownerPubkey ?? null,
       is_agent: seed.isAgent ?? false,
     };
     mockProfiles.set(pubkey, profile);
@@ -1145,6 +1150,7 @@ function getMockProfileByPubkey(pubkey: string): RawProfile | null {
     avatar_url: null,
     about: null,
     nip05_handle: null,
+    owner_pubkey: null,
     is_agent: mockAgentPubkeys.has(normalizedPubkey),
   };
 }
@@ -1811,6 +1817,7 @@ const mockProfiles = new Map<string, RawProfile>([
       avatar_url: null,
       about: null,
       nip05_handle: null,
+      owner_pubkey: null,
       is_agent: false,
     },
   ],
@@ -1822,6 +1829,7 @@ const mockProfiles = new Map<string, RawProfile>([
       avatar_url: null,
       about: null,
       nip05_handle: null,
+      owner_pubkey: MOCK_IDENTITY_PUBKEY,
       is_agent: true,
     },
   ],
@@ -1947,6 +1955,7 @@ function importMockIdentity(nsec: string) {
       avatar_url: null,
       about: null,
       nip05_handle: null,
+      owner_pubkey: null,
     });
   }
 
@@ -1993,6 +2002,7 @@ function ensureMockProfile(config: E2eConfig | undefined): RawProfile {
     avatar_url: null,
     about: null,
     nip05_handle: null,
+    owner_pubkey: null,
   };
   mockProfiles.set(pubkey, profile);
   return profile;
@@ -3078,7 +3088,8 @@ async function handleGetProfile(config: E2eConfig | undefined) {
       display_name: null,
       about: null,
       avatar_url: null,
-      nip05: null,
+      nip05_handle: null,
+      owner_pubkey: null,
     };
   }
   const content = JSON.parse(events[0].content ?? "{}");
@@ -3087,7 +3098,8 @@ async function handleGetProfile(config: E2eConfig | undefined) {
     display_name: content.display_name ?? content.name ?? null,
     about: content.about ?? null,
     avatar_url: content.picture ?? null,
-    nip05: content.nip05 ?? null,
+    nip05_handle: content.nip05 ?? null,
+    owner_pubkey: null,
   };
 }
 
@@ -3170,7 +3182,8 @@ async function handleUpdateProfile(
     display_name: updated.display_name ?? null,
     about: updated.about ?? null,
     avatar_url: updated.picture ?? null,
-    nip05: updated.nip05 ?? null,
+    nip05_handle: updated.nip05 ?? null,
+    owner_pubkey: null,
   };
 }
 
@@ -3201,7 +3214,8 @@ async function handleGetUserProfile(
       display_name: null,
       about: null,
       avatar_url: null,
-      nip05: null,
+      nip05_handle: null,
+      owner_pubkey: null,
     };
   }
   const content = JSON.parse(events[0].content ?? "{}");
@@ -3210,7 +3224,8 @@ async function handleGetUserProfile(
     display_name: content.display_name ?? content.name ?? null,
     about: content.about ?? null,
     avatar_url: content.picture ?? null,
-    nip05: content.nip05 ?? null,
+    nip05_handle: content.nip05 ?? null,
+    owner_pubkey: null,
   };
 }
 
@@ -3238,6 +3253,7 @@ async function handleGetUsersBatch(
         display_name: profile.display_name,
         avatar_url: profile.avatar_url,
         nip05_handle: profile.nip05_handle,
+        owner_pubkey: profile.owner_pubkey,
         is_agent: profile.is_agent ?? false,
       };
     }
@@ -3261,6 +3277,10 @@ async function handleGetUsersBatch(
       display_name: content.display_name ?? content.name ?? null,
       avatar_url: content.picture ?? null,
       nip05_handle: content.nip05 ?? null,
+      owner_pubkey:
+        ((ev.tags ?? []) as string[][]).find(
+          (tag) => Array.isArray(tag) && tag[0] === "auth" && tag.length === 4,
+        )?.[1] ?? null,
       is_agent: Array.isArray(ev.tags)
         ? ev.tags.some(
             (tag) =>
@@ -3285,6 +3305,7 @@ async function handleGetUsersBatch(
       display_name: profile.display_name,
       avatar_url: profile.avatar_url,
       nip05_handle: profile.nip05_handle,
+      owner_pubkey: profile.owner_pubkey,
       is_agent: profile.is_agent ?? false,
     };
   }
@@ -3337,6 +3358,7 @@ async function handleSearchUsers(
         display_name: profile.display_name,
         avatar_url: profile.avatar_url,
         nip05_handle: profile.nip05_handle,
+        owner_pubkey: profile.owner_pubkey,
         is_agent: profile.is_agent ?? false,
       }));
 
@@ -3360,6 +3382,10 @@ async function handleSearchUsers(
       display_name: content.display_name ?? content.name ?? null,
       avatar_url: content.picture ?? null,
       nip05_handle: content.nip05 ?? null,
+      owner_pubkey:
+        ((ev.tags ?? []) as string[][]).find(
+          (tag) => Array.isArray(tag) && tag[0] === "auth" && tag.length === 4,
+        )?.[1] ?? null,
       is_agent: Array.isArray(ev.tags)
         ? ev.tags.some(
             (tag) =>
@@ -5053,6 +5079,7 @@ async function handleCreateManagedAgent(
     avatar_url: avatarUrl,
     about: args.input.systemPrompt?.trim() || null,
     nip05_handle: null,
+    owner_pubkey: MOCK_IDENTITY_PUBKEY,
     is_agent: true,
   });
   syncMockRelayAgentsFromManagedAgents();

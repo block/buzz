@@ -56,6 +56,7 @@ type UserProfilePanelProps = {
   layout?: "standalone" | "split";
   onClose: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
+  onOpenProfile?: (pubkey: string) => void;
   onResetWidth?: () => void;
   onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onViewChange: (
@@ -136,6 +137,7 @@ export function UserProfilePanel({
   layout = "standalone",
   onClose,
   onOpenDm,
+  onOpenProfile,
   onResetWidth,
   onResizeStart,
   onViewChange,
@@ -172,6 +174,8 @@ export function UserProfilePanel({
   const { goChannel } = useAppNavigation();
 
   const profile = profileQuery.data;
+  const ownerPubkey = profile?.ownerPubkey ?? null;
+  const ownerProfileQuery = useUserProfileQuery(ownerPubkey ?? undefined);
   const pubkeyLower = pubkey.toLowerCase();
   const presenceStatus = presenceQuery.data?.[pubkeyLower];
   const userStatus = userStatusQuery.data?.[pubkeyLower];
@@ -252,7 +256,16 @@ export function UserProfilePanel({
 
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   const ownerHandle = React.useMemo(() => {
-    if (currentPubkey === undefined) {
+    if (ownerPubkey) {
+      const ownerProfile = ownerProfileQuery.data;
+      return (
+        ownerProfile?.nip05Handle?.trim() ||
+        ownerProfile?.displayName?.trim() ||
+        truncatePubkey(ownerPubkey)
+      );
+    }
+
+    if (currentPubkey === undefined || isOwner !== true) {
       return null;
     }
 
@@ -262,8 +275,22 @@ export function UserProfilePanel({
       currentProfile?.displayName?.trim() ||
       truncatePubkey(currentPubkey)
     );
-  }, [currentProfileQuery.data, currentPubkey]);
-  const ownerDisplayName = ownerHandle ? `${ownerHandle} (you)` : null;
+  }, [
+    currentProfileQuery.data,
+    currentPubkey,
+    isOwner,
+    ownerProfileQuery.data,
+    ownerPubkey,
+  ]);
+  const isCurrentUserOwner =
+    currentPubkey !== undefined &&
+    ownerPubkey !== null &&
+    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  const ownerDisplayName = ownerHandle
+    ? isCurrentUserOwner || (!ownerPubkey && isOwner === true)
+      ? `${ownerHandle} (you)`
+      : ownerHandle
+    : null;
   const panelTitle = VIEW_TITLES[view];
   const memoryCount = memoryQuery.data
     ? (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length
@@ -334,8 +361,15 @@ export function UserProfilePanel({
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}
           ownerDisplayName={ownerDisplayName}
+          ownerAvatarUrl={ownerProfileQuery.data?.avatarUrl ?? null}
           ownerHandle={ownerHandle}
+          ownerPubkey={ownerPubkey}
           onOpenChannels={() => onViewChange("channels")}
+          onOpenOwner={
+            ownerPubkey && onOpenProfile
+              ? () => onOpenProfile(ownerPubkey)
+              : undefined
+          }
           onOpenMemories={() => onViewChange("memories")}
           onOpenDm={onOpenDm}
           presenceLoaded={presenceQuery.isSuccess}

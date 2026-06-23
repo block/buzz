@@ -316,6 +316,7 @@ export function NewDirectMessageDialog({
               ? currentName
               : (currentName ?? candidateName),
         nip05Handle: current.nip05Handle ?? candidate.nip05Handle ?? null,
+        ownerPubkey: current.ownerPubkey ?? candidate.ownerPubkey ?? null,
         isAgent: current.isAgent || candidate.isAgent,
       });
     };
@@ -334,6 +335,7 @@ export function NewDirectMessageDialog({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
+        ownerPubkey: null,
         isAgent: true,
       });
     }
@@ -344,6 +346,7 @@ export function NewDirectMessageDialog({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
+        ownerPubkey: null,
         isAgent: true,
       });
     }
