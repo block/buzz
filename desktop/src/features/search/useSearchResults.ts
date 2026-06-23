@@ -187,6 +187,7 @@ export function useSearchResults({
             ? candidate.displayName
             : (existing.displayName ?? candidate.displayName),
         nip05Handle: existing.nip05Handle ?? candidate.nip05Handle ?? null,
+        ownerPubkey: existing.ownerPubkey ?? candidate.ownerPubkey ?? null,
         isAgent: existing.isAgent || isKnownAgent,
       });
     };
@@ -205,6 +206,7 @@ export function useSearchResults({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
+        ownerPubkey: null,
         isAgent: true,
       };
 
@@ -219,6 +221,7 @@ export function useSearchResults({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
+        ownerPubkey: null,
         isAgent: true,
       };
 
