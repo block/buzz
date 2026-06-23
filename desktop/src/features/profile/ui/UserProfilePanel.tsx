@@ -361,6 +361,7 @@ export function UserProfilePanel({
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}
           ownerDisplayName={ownerDisplayName}
+          ownerAvatarUrl={ownerProfileQuery.data?.avatarUrl ?? null}
           ownerHandle={ownerHandle}
           ownerPubkey={ownerPubkey}
           onOpenChannels={() => onViewChange("channels")}
