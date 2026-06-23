@@ -1,10 +1,11 @@
 import {
-  CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
+  KIND_REACTION,
+  KIND_STREAM_MESSAGE_EDIT,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 
@@ -42,7 +43,8 @@ export function buildChannelFilter(
  * History filter for cold-load and scrollback: message kinds *only*, so the
  * `limit` budget buys visible message depth. Auxiliary events (reactions,
  * edits, deletions) are backfilled separately by `#e` reference via
- * {@link buildChannelAuxFilter}, and arrive for future messages through the
+ * {@link buildChannelReactionAuxFilter} and
+ * {@link buildChannelStructuralAuxFilter}, and arrive for future messages through the
  * live subscription ({@link buildChannelFilter}, which keeps the broad
  * {@link CHANNEL_EVENT_KINDS} set).
  */
@@ -65,16 +67,37 @@ export function buildChannelHistoryFilter(
 }
 
 /**
- * Aux-backfill filter for one chunk of loaded message ids: pulls reactions/
- * edits/deletions ({@link CHANNEL_AUX_EVENT_KINDS}) that reference those ids
- * by `#e`. Keyed by reference, not time, so a late edit/deletion for an old
+ * Reactions-only aux filter (kind:7 by `#e`). Reactions load on their own fast
+ * REQ, isolated from the slow kind:5 deletion scan they were previously bundled
+ * with. On a busy workspace the bundled query queued past the history-load
+ * timeout and the all-or-nothing catch dropped every reaction on cold-load;
+ * kind:7 alone is ~5x faster (measured against staging), so it reliably beats
+ * the timeout. Keyed by `#e` reference, not time, so an old reaction on a
  * visible message still applies — see {@link buildChannelHistoryFilter}.
  */
-export function buildChannelAuxFilter(
+export function buildChannelReactionAuxFilter(
   _channelId: string,
   messageIds: string[],
 ): RelaySubscriptionFilter {
-  return buildChannelAuxKindFilter(messageIds, [...CHANNEL_AUX_EVENT_KINDS]);
+  return buildChannelAuxKindFilter(messageIds, [KIND_REACTION]);
+}
+
+/**
+ * Structural aux overlay filter: edits + deletions ({@link KIND_STREAM_MESSAGE_EDIT},
+ * {@link KIND_DELETION}, {@link KIND_NIP29_DELETE_EVENT}) by `#e`. The slow
+ * half of the old bundle — fetched separately so a stale/slow deletion scan
+ * can't strand reactions. A missed edit/deletion only renders a message
+ * un-edited until the next backfill; a missed reaction looks like data loss.
+ */
+export function buildChannelStructuralAuxFilter(
+  _channelId: string,
+  messageIds: string[],
+): RelaySubscriptionFilter {
+  return buildChannelAuxKindFilter(messageIds, [
+    KIND_STREAM_MESSAGE_EDIT,
+    KIND_DELETION,
+    KIND_NIP29_DELETE_EVENT,
+  ]);
 }
 
 export function buildChannelAuxDeletionFilter(

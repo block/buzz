@@ -599,6 +599,7 @@ export function HomeView({
                       emoji,
                       eventId: message.id,
                       remove,
+                      channelId: selectedChannel?.id,
                     });
                     await channelMessagesQuery.refetch();
                     onRefresh();

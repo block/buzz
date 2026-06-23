@@ -21,8 +21,6 @@ import {
 } from "@/shared/api/relayClientShared";
 import {
   AUX_BACKFILL_CHUNK_SIZE,
-  buildChannelAuxDeletionFilter,
-  buildChannelAuxFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
   buildChannelMentionFilter,
@@ -168,25 +166,23 @@ export class RelayClient {
     );
   }
 
-  async fetchAuxEventsForMessages(
+  /**
+   * Fetch auxiliary events referencing the given ids by `#e`, chunked and
+   * per-chunk resilient. Caller picks the kind filter so reactions ride their
+   * own REQ, isolated from the slow kind:5 scan — see {@link backfillAuxForMessages}.
+   */
+  async fetchAuxEventsByReference(
     channelId: string,
-    messageIds: string[],
+    referencedEventIds: string[],
+    buildFilter: (
+      channelId: string,
+      eventIds: string[],
+    ) => RelaySubscriptionFilter,
   ): Promise<RelayEvent[]> {
     return this.fetchChunkedAuxEvents(
       channelId,
-      messageIds,
-      buildChannelAuxFilter,
-    );
-  }
-
-  async fetchAuxDeletionEventsForAuxEvents(
-    channelId: string,
-    auxEventIds: string[],
-  ): Promise<RelayEvent[]> {
-    return this.fetchChunkedAuxEvents(
-      channelId,
-      auxEventIds,
-      buildChannelAuxDeletionFilter,
+      referencedEventIds,
+      buildFilter,
     );
   }
 
@@ -213,12 +209,19 @@ export class RelayClient {
       chunks.push(eventIds.slice(i, i + AUX_BACKFILL_CHUNK_SIZE));
     }
 
-    const batches: RelayEvent[][] = [];
-    for (const ids of chunks) {
-      batches.push(await this.requestHistory(buildFilter(channelId, ids)));
-    }
+    // Per-chunk resilient: a single chunk that times out or errors must not
+    // strand the reactions that other chunks already returned. Chunks run in
+    // parallel (independent REQs) and `allSettled` keeps the fulfilled ones —
+    // the prior sequential `await` loop both serialized latency and rejected
+    // the whole batch on the first failure, so one slow chunk blanked every
+    // reaction in the view.
+    const settled = await Promise.allSettled(
+      chunks.map((ids) => this.requestHistory(buildFilter(channelId, ids))),
+    );
 
-    return batches.flat();
+    return settled.flatMap((result) =>
+      result.status === "fulfilled" ? result.value : [],
+    );
   }
 
   private async fetchHistory(filter: RelaySubscriptionFilter) {

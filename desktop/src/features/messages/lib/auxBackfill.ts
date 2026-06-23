@@ -5,6 +5,11 @@ import {
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
 import { relayClient } from "@/shared/api/relayClient";
+import {
+  buildChannelAuxDeletionFilter,
+  buildChannelReactionAuxFilter,
+  buildChannelStructuralAuxFilter,
+} from "@/shared/api/relayChannelFilters";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -64,6 +69,42 @@ export async function mergeAuxEventsWithDeletionBackfill(input: {
   return [...input.fetchedAuxEvents, ...auxDeletionEvents];
 }
 
+export interface AuxBackfillDeps {
+  fetchReactionAuxEventsForMessages: (
+    channelId: string,
+    messageIds: string[],
+  ) => Promise<RelayEvent[]>;
+  fetchStructuralAuxEventsForMessages: (
+    channelId: string,
+    messageIds: string[],
+  ) => Promise<RelayEvent[]>;
+  fetchAuxDeletionEventsForAuxEvents: (
+    channelId: string,
+    auxEventIds: string[],
+  ) => Promise<RelayEvent[]>;
+}
+
+const defaultAuxBackfillDeps: AuxBackfillDeps = {
+  fetchReactionAuxEventsForMessages: (channelId, messageIds) =>
+    relayClient.fetchAuxEventsByReference(
+      channelId,
+      messageIds,
+      buildChannelReactionAuxFilter,
+    ),
+  fetchStructuralAuxEventsForMessages: (channelId, messageIds) =>
+    relayClient.fetchAuxEventsByReference(
+      channelId,
+      messageIds,
+      buildChannelStructuralAuxFilter,
+    ),
+  fetchAuxDeletionEventsForAuxEvents: (channelId, auxEventIds) =>
+    relayClient.fetchAuxEventsByReference(
+      channelId,
+      auxEventIds,
+      buildChannelAuxDeletionFilter,
+    ),
+};
+
 /**
  * After a content-kinds-only history fetch, pull the auxiliary events
  * (reactions, edits, deletions) that reference the loaded messages — keyed by
@@ -76,40 +117,61 @@ export async function mergeAuxEventsWithDeletionBackfill(input: {
  * outside any fetched time window — so aux must be pulled by reference, or a
  * visible message renders stale (un-edited / not-deleted).
  *
- * Best-effort: failures are logged but never reject, so a flaky overlay fetch
- * can't blank the freshly-loaded messages.
+ * Reactions and the structural overlay (edits/deletions) are fetched and
+ * committed *independently*: reactions ride their own fast kind:7 REQ and land
+ * first, so the slow kind:5 deletion scan — which on a busy workspace queued
+ * past the history-load timeout — can no longer strand them. Each half has its
+ * own try/catch; a failure in one is logged but never blanks the other.
  */
 export async function backfillAuxForMessages(
   queryClient: QueryClient,
   channelId: string,
   historyEvents: RelayEvent[],
+  deps: AuxBackfillDeps = defaultAuxBackfillDeps,
 ): Promise<void> {
   const messageIds = collectMessageIdsForAuxBackfill(historyEvents);
   if (messageIds.length === 0) {
     return;
   }
 
+  const cacheKey = channelMessagesKey(channelId);
+  const commit = (events: RelayEvent[]) => {
+    if (events.length === 0) {
+      return;
+    }
+    queryClient.setQueryData<RelayEvent[]>(cacheKey, (current = []) =>
+      sortMessages([...current, ...events]),
+    );
+  };
+
+  // Reactions first, on their own fast REQ — the half that actually shows up
+  // as data loss when it's dropped. Commit as soon as they land.
   try {
-    const cacheKey = channelMessagesKey(channelId);
+    const reactionEvents = await deps.fetchReactionAuxEventsForMessages(
+      channelId,
+      messageIds,
+    );
+    commit(reactionEvents);
+  } catch (error) {
+    console.error("Failed to backfill reactions for channel", channelId, error);
+  }
+
+  // Structural overlay (edits/deletions) second, isolated. A failure here only
+  // leaves a message un-edited / not-deleted until the next backfill — never
+  // blanks the reactions already committed above.
+  try {
     const cachedEvents = queryClient.getQueryData<RelayEvent[]>(cacheKey) ?? [];
-    const auxEvents = await relayClient.fetchAuxEventsForMessages(
+    const structuralEvents = await deps.fetchStructuralAuxEventsForMessages(
       channelId,
       messageIds,
     );
     const mergedAuxEvents = await mergeAuxEventsWithDeletionBackfill({
       channelId,
       cachedEvents,
-      fetchedAuxEvents: auxEvents,
-      fetchAuxEventsForMessages: (...args) =>
-        relayClient.fetchAuxDeletionEventsForAuxEvents(...args),
+      fetchedAuxEvents: structuralEvents,
+      fetchAuxEventsForMessages: deps.fetchAuxDeletionEventsForAuxEvents,
     });
-    if (mergedAuxEvents.length === 0) {
-      return;
-    }
-
-    queryClient.setQueryData<RelayEvent[]>(cacheKey, (current = []) =>
-      sortMessages([...current, ...mergedAuxEvents]),
-    );
+    commit(mergedAuxEvents);
   } catch (error) {
     console.error(
       "Failed to backfill auxiliary events for channel",

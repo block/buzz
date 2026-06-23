@@ -70,6 +70,7 @@ export default defineConfig({
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
         "**/mesh-compute.spec.ts",
+        "**/reaction-coldload-repro.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

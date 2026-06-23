@@ -18,6 +18,7 @@ import type {
  * rather than listing the whole mutation as a dependency.
  */
 export function useChannelPaneHandlers({
+  channelId,
   deleteMessageMutation,
   editMessageMutation,
   editTargetId,
@@ -36,6 +37,7 @@ export function useChannelPaneHandlers({
   threadReplyTargetId,
   toggleReactionMutation,
 }: {
+  channelId: string | null;
   deleteMessageMutation: ReturnType<typeof useDeleteMessageMutation>;
   editMessageMutation: ReturnType<typeof useEditMessageMutation>;
   editTargetId: string | null;
@@ -80,6 +82,9 @@ export function useChannelPaneHandlers({
 
   const toggleMutateRef = React.useRef(toggleReactionMutation.mutateAsync);
   toggleMutateRef.current = toggleReactionMutation.mutateAsync;
+
+  const channelIdRef = React.useRef(channelId);
+  channelIdRef.current = channelId;
 
   const handleCancelThreadReply = React.useCallback(() => {
     setThreadReplyTargetId(openThreadHeadIdRef.current);
@@ -283,6 +288,7 @@ export function useChannelPaneHandlers({
         emoji,
         eventId: message.id,
         remove,
+        channelId: channelIdRef.current ?? undefined,
       });
     },
     [],
