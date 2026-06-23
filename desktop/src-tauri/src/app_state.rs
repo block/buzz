@@ -294,7 +294,7 @@ fn resolve_identity_with_store(
         }
     }
 
-    generate_and_persist(store, legacy_path)
+    generate_and_persist(store, legacy_path, data_dir)
 }
 
 /// Recover from a corrupt nsec in the keyring (parse failed). Clear the bad
@@ -316,7 +316,7 @@ fn recover_from_keyring(
             return Ok(keys);
         }
     }
-    generate_and_persist(store, legacy_path)
+    generate_and_persist(store, legacy_path, data_dir)
 }
 
 /// Load the `0o600` identity file, quarantining corruption, else generate and
@@ -416,13 +416,38 @@ fn write_migration_marker(marker_path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("commit migration marker: {e}"))
 }
 
+/// Which backend `persist_identity` wrote to. The caller writes the migration
+/// marker only after a keyring success — on the file-fallback arm the key is on
+/// disk and a marker would wrongly trip the next Unreachable boot into failing
+/// closed.
+enum PersistBackend {
+    Keyring,
+    File,
+}
+
 /// Generate a fresh identity, persist it through the store, return it.
+///
+/// On a keyring-backed persist no file is written, so a later
+/// keyring-Unreachable boot would see "no file, no marker" (identical to a
+/// fresh install) and silently rotate the identity. Writing the marker here
+/// makes that boot fail closed. If the marker write fails, fall back to the
+/// `0o600` file so the key is never keyring-only-without-marker.
 fn generate_and_persist(
     store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
+    data_dir: &std::path::Path,
 ) -> Result<Keys, String> {
     let keys = Keys::generate();
-    persist_identity(store, &keys, legacy_path)?;
+    if let PersistBackend::Keyring = persist_identity(store, &keys, legacy_path)? {
+        let marker_path = migration_marker_path(data_dir);
+        if let Err(e) = write_migration_marker(&marker_path) {
+            eprintln!(
+                "buzz-desktop: stored identity in keyring but failed to write migration marker \
+                 ({e}); saving identity.key fallback so the key is not stranded"
+            );
+            save_key_file(legacy_path, &keys)?;
+        }
+    }
     eprintln!(
         "buzz-desktop: generated and saved identity pubkey {}",
         keys.public_key().to_hex()
@@ -431,21 +456,23 @@ fn generate_and_persist(
 }
 
 /// Persist `keys` through the store, falling back to the `0o600` file when the
-/// keyring write fails on an availability error.
+/// keyring write fails on an availability error. Reports which backend held the
+/// key so the caller can write the migration marker only on keyring success.
 fn persist_identity(
     store: &impl IdentityKeyStore,
     keys: &Keys,
     legacy_path: &std::path::Path,
-) -> Result<(), String> {
+) -> Result<PersistBackend, String> {
     let nsec = keys
         .secret_key()
         .to_bech32()
         .map_err(|e| format!("encode nsec: {e}"))?;
     match store.store(IDENTITY_KEY_NAME, &nsec) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(PersistBackend::Keyring),
         Err(keyring_err) => {
             eprintln!("buzz-desktop: keyring write failed ({keyring_err}), using file fallback");
-            save_key_file(legacy_path, keys)
+            save_key_file(legacy_path, keys)?;
+            Ok(PersistBackend::File)
         }
     }
 }
@@ -696,6 +723,9 @@ mod tests {
         probe: KeyringProbe,
         slot: RefCell<HashMap<String, String>>,
         deleted: RefCell<Vec<String>>,
+        /// When true, `store` returns an availability error, driving the
+        /// keyring-write-failure → file-fallback arm of `persist_identity`.
+        store_fails: bool,
     }
 
     impl FakeIdentityStore {
@@ -706,6 +736,7 @@ mod tests {
                 probe: KeyringProbe::Present,
                 slot: RefCell::new(slot),
                 deleted: RefCell::new(Vec::new()),
+                store_fails: false,
             }
         }
 
@@ -716,6 +747,7 @@ mod tests {
                 probe: KeyringProbe::Unreachable,
                 slot: RefCell::new(HashMap::new()),
                 deleted: RefCell::new(Vec::new()),
+                store_fails: false,
             }
         }
 
@@ -726,6 +758,18 @@ mod tests {
                 probe: KeyringProbe::ReachableButEmpty,
                 slot: RefCell::new(HashMap::new()),
                 deleted: RefCell::new(Vec::new()),
+                store_fails: false,
+            }
+        }
+
+        /// Reachable-but-empty probe whose `store` always fails — exercises the
+        /// keyring-write-failure → `0o600` file-fallback arm.
+        fn store_failing() -> Self {
+            Self {
+                probe: KeyringProbe::ReachableButEmpty,
+                slot: RefCell::new(HashMap::new()),
+                deleted: RefCell::new(Vec::new()),
+                store_fails: true,
             }
         }
     }
@@ -738,6 +782,9 @@ mod tests {
             Ok(self.slot.borrow().get(name).cloned())
         }
         fn store(&self, name: &str, value: &str) -> Result<(), String> {
+            if self.store_fails {
+                return Err("simulated keyring write failure".to_string());
+            }
             self.slot
                 .borrow_mut()
                 .insert(name.to_string(), value.to_string());
@@ -889,5 +936,76 @@ mod tests {
         // Marker written, file deleted — the safe resting state.
         assert!(migration_marker_path(dir.path()).exists());
         assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn fresh_keyring_generate_writes_marker() {
+        // Fix 1 (Pinky comment 1): a fresh install generating straight into a
+        // reachable-but-empty keyring must write the marker. Without it, "no
+        // file, no marker" matches a never-launched machine, so a later
+        // Unreachable boot would silently rotate the key.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+        assert!(!legacy_path.exists());
+
+        let store = FakeIdentityStore::reachable_but_empty();
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        // The key was stored in the keyring (not the file), and the marker marks it.
+        assert!(!legacy_path.exists());
+        assert!(migration_marker_path(dir.path()).exists());
+        assert_eq!(
+            store
+                .slot
+                .borrow()
+                .get(IDENTITY_KEY_NAME)
+                .map(String::as_str),
+            Some(resolved.secret_key().to_bech32().unwrap().as_str())
+        );
+    }
+
+    #[test]
+    fn fresh_keyring_generate_then_unreachable_fails_closed() {
+        // The end-to-end guard for Fix 1: after a fresh keyring-created identity
+        // (marker written, no file), a later boot with the keyring unreachable
+        // must FAIL CLOSED rather than generate a new key and rotate identity.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+
+        // First boot: fresh generate into a reachable keyring.
+        let reachable = FakeIdentityStore::reachable_but_empty();
+        resolve_identity_with_store(&reachable, &legacy_path, dir.path()).unwrap();
+        assert!(!legacy_path.exists());
+        assert!(migration_marker_path(dir.path()).exists());
+
+        // Second boot: keyring is down. No file + marker present → fail closed.
+        let unreachable = FakeIdentityStore::unreachable();
+        let result = resolve_identity_with_store(&unreachable, &legacy_path, dir.path());
+
+        assert!(
+            result.is_err(),
+            "must fail closed, not generate a fresh key"
+        );
+        assert!(!legacy_path.exists());
+    }
+
+    #[test]
+    fn fresh_generate_keyring_failure_falls_back_to_file_without_marker() {
+        // Fix 1 correctness on the file-fallback arm: when the keyring write
+        // FAILS during a fresh generate, the key must land in the `0o600` file
+        // and the marker must NOT be written — a marker here would wrongly trip
+        // the next Unreachable boot into failing closed even though the key is
+        // sitting in the file.
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_path = dir.path().join("identity.key");
+
+        let store = FakeIdentityStore::store_failing();
+        let resolved = resolve_identity_with_store(&store, &legacy_path, dir.path()).unwrap();
+
+        // Key persisted to the file (fallback), and recoverable from it.
+        let from_file = load_key_file(&legacy_path).unwrap();
+        assert_key_eq(&resolved, &from_file);
+        // No marker: the file is the authoritative store, not the keyring.
+        assert!(!migration_marker_path(dir.path()).exists());
     }
 }

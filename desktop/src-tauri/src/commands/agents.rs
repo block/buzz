@@ -8,11 +8,12 @@ use crate::{
         find_managed_agent_mut, invoke_provider, load_managed_agents, load_personas,
         managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
         normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
-        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        save_managed_agents, spawn_key_refusal, start_managed_agent_process,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, BackendProviderInfo, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentLogResponse, ManagedAgentRecord,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -148,6 +149,13 @@ fn build_deploy_payload(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
+    // Fail closed when the private key is unavailable (keyring outage leaves it
+    // empty after hydration). Without this, a provider deploy would serialize
+    // `"private_key_nsec": ""` and launch the agent with no identity — the same
+    // hazard the local spawn path already refuses via this guard.
+    if let Some(error) = spawn_key_refusal(record) {
+        return Err(error);
+    }
     // Merge persona env_vars + agent env_vars for provider deploy. Same
     // precedence as local spawn: persona first, agent overrides last. Without
     // this, provider-backed agents wouldn't receive credentials saved on the

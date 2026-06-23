@@ -70,6 +70,11 @@ const overrides = new Map([
   // the Inbox nav badge — a small overage from load-bearing badge plumbing,
   // not generic debt growth. Approved override; still queued to split.
   ["src/app/AppShell.tsx", 1008],
+  // PersistBackend enum + marker-on-keyring-success plumbing and its three
+  // fail-closed regression tests (silent identity rotation on keyring outage).
+  // A small overage from load-bearing security plumbing on a file already at
+  // 893 lines, not generic debt growth. Approved override; still queued to split.
+  ["src-tauri/src/app_state.rs", 1012],
 ]);
 
 await runFileSizeCheck({
