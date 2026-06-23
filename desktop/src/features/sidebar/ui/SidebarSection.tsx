@@ -233,7 +233,10 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasUnread && !isActive && channel.channelType !== "dm" ? (
+      {hasUnread &&
+      unreadCount > 0 &&
+      !isActive &&
+      channel.channelType !== "dm" ? (
         <UnreadCountBadge
           channelName={channel.name}
           className="ml-auto"
