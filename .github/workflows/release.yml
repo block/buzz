@@ -173,7 +173,7 @@ jobs:
           key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
 
       - name: Build unsigned Tauri app
-        run: cd desktop && pnpm tauri build --verbose --no-sign --config src-tauri/tauri.release.conf.json
+        run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --config src-tauri/tauri.release.conf.json
         env:
           BUZZ_UPDATER_PUBLIC_KEY: ${{ secrets.BUZZ_UPDATER_PUBLIC_KEY || secrets.SPROUT_UPDATER_PUBLIC_KEY }}
           BUZZ_UPDATER_ENDPOINT: https://github.com/block/buzz/releases/download/buzz-desktop-latest/latest.json
