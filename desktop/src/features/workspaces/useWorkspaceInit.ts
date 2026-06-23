@@ -67,7 +67,7 @@ export function useWorkspaceInit(
   // On the initial mount we skip resetting singletons (they're fresh).
   const hasInitializedRef = useRef(false);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token) — depending on the whole object would trigger resets on name-only changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
     let cancelled = false;
 
@@ -136,6 +136,7 @@ export function useWorkspaceInit(
           activeWorkspace.relayUrl,
           undefined,
           activeWorkspace.token,
+          activeWorkspace.reposDir,
         );
       } catch (error) {
         console.error("Failed to apply workspace to backend:", error);
@@ -159,6 +160,7 @@ export function useWorkspaceInit(
     activeWorkspace?.id,
     activeWorkspace?.relayUrl,
     activeWorkspace?.token,
+    activeWorkspace?.reposDir,
     isSharedIdentity,
     workspaceKey,
   ]);

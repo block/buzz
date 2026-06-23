@@ -857,8 +857,9 @@ fn migrate_legacy_nest_carries_knowledge_and_skips_repos() {
     std::fs::create_dir_all(legacy.join("REPOS/buzz")).unwrap();
     std::fs::write(legacy.join("REPOS/buzz/huge.bin"), "checkout").unwrap();
 
-    super::migrate_legacy_nest_at(&legacy, &current);
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
 
+    assert!(migrated, "migration ran because legacy nest existed");
     assert!(
         !current.join("REPOS").exists(),
         "REPOS/ must never be migrated"
@@ -925,8 +926,9 @@ fn migrate_legacy_nest_noops_when_legacy_absent() {
     let legacy = dir.path().join(".sprout");
     let current = dir.path().join(".buzz");
 
-    super::migrate_legacy_nest_at(&legacy, &current);
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
 
+    assert!(!migrated, "no migration when legacy nest is absent");
     assert!(
         !current.exists(),
         "no destination created when legacy absent"

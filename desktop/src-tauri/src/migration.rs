@@ -172,22 +172,26 @@ const LEGACY_NEST_KNOWLEDGE: &[&str] = &[
 /// cheap because the copy is tiny and `copy_dir_all` skips files that already
 /// exist in the destination. This relies on `REPOS/` being out of scope; if it
 /// is ever added back, a sentinel or off-thread copy becomes mandatory.
-pub fn migrate_legacy_nest() {
+///
+/// Returns `true` when a legacy `~/.sprout` nest was present (migration ran),
+/// so the caller can emit a one-time hint inviting the user to delete it. The
+/// frontend dedupes the hint, so re-firing while `~/.sprout` lingers is benign.
+pub fn migrate_legacy_nest() -> bool {
     let Some(home) = dirs::home_dir() else {
         eprintln!("buzz-desktop: nest-migration: cannot resolve home directory");
-        return;
+        return false;
     };
-    migrate_legacy_nest_at(&home.join(".sprout"), &home.join(".buzz"));
+    migrate_legacy_nest_at(&home.join(".sprout"), &home.join(".buzz"))
 }
 
 /// Copy the [`LEGACY_NEST_KNOWLEDGE`] entries from `legacy` to `current`.
 ///
 /// Each entry is copied independently with its own log-and-continue, so a
 /// failure on one entry never skips the rest. No-ops cleanly when `legacy` is
-/// absent or an entry does not exist.
-fn migrate_legacy_nest_at(legacy: &Path, current: &Path) {
+/// absent or an entry does not exist. Returns `true` when `legacy` existed.
+fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
     if !legacy.exists() {
-        return;
+        return false;
     }
     for name in LEGACY_NEST_KNOWLEDGE {
         let src = legacy.join(name);
@@ -213,6 +217,7 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) {
             ),
         }
     }
+    true
 }
 
 /// Copy a single file only if the destination does not already exist, matching
