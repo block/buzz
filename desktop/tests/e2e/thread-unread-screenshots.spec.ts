@@ -1000,4 +1000,68 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await expect(badge).toHaveCount(0);
   });
+
+  // The mark-read/unread menu is a SINGLE item whose label toggles by the
+  // clicked message's own read state — driven by the same predicate the unread
+  // badge uses (computeThreadUnreadMarker over the message + its forced-unread
+  // overlay), so the label and badge can never disagree. Pre-fix the menu
+  // rendered TWO simultaneous items ("Mark unread" AND "Mark read") gated only
+  // on prop presence. This pins the single-toggle contract in both states and
+  // through a full round trip.
+  //
+  // A top-level message in the OPEN channel is read-on-open by construction:
+  // ChannelScreen advances the channel frontier to the newest top-level message
+  // and the channel→message fold clears it (this is the badge's own behaviour —
+  // a message in the channel you are looking at is never unread). So the only
+  // route to an unread top-level message here is the mark-unread action itself,
+  // which is exactly what the toggle's forced-unread overlay exists to drive.
+  test("15-mark-read-unread-menu-single-toggle", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Emit an Alice-authored (non-self) top-level message, read-on-open.
+    const message = await emitMockMessage(page, "general", "Toggle me", {
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) - 10,
+    });
+    const messageId = message?.id ?? "";
+
+    const toggle = page.getByTestId(`mark-read-toggle-${messageId}`);
+    const moreActions = page.getByTestId(`more-actions-${messageId}`);
+
+    // Selecting a DropdownMenuItem closes the Radix menu and returns focus to
+    // the trigger. Re-clicking the trigger before that close settles is eaten
+    // by Radix's closing transition (the menu never reopens). Gate each reopen
+    // on the previous menu being fully unmounted — the toggle testid only
+    // exists while the dropdown content is mounted, so count 0 is a reliable
+    // "closed" signal — then re-hover from a clean state before re-clicking.
+    const openMenu = async () => {
+      await expect(toggle).toHaveCount(0);
+      await page.mouse.move(0, 0);
+      await page.getByText("Toggle me").hover();
+      await moreActions.click();
+      await expect(toggle).toHaveCount(1);
+    };
+
+    // Read → the single item reads "Mark unread", and there is exactly one
+    // (never both items at once). Clicking it forces the message unread.
+    await openMenu();
+    await expect(toggle).toHaveText("Mark unread");
+    await toggle.click();
+
+    // Now unread → the same single item shows the inverse label. Clicking it
+    // marks the message read again.
+    await openMenu();
+    await expect(toggle).toHaveText("Mark read");
+    await toggle.click();
+
+    // Back to read → the label has toggled back, still a single item. The
+    // round trip proves the label tracks the live predicate, not prop presence.
+    await openMenu();
+    await expect(toggle).toHaveText("Mark unread");
+  });
 });

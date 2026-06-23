@@ -54,6 +54,7 @@ type MessageTimelineProps = {
   profiles?: UserProfileLookup;
   followThreadById?: (rootId: string) => void;
   isFollowingThreadById?: (rootId: string) => boolean;
+  isMessageUnreadById?: (messageId: string) => boolean;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
@@ -146,6 +147,7 @@ const MessageTimelineBase = React.forwardRef<
     isFetchingOlder = false,
     followThreadById,
     isFollowingThreadById,
+    isMessageUnreadById,
     messageFooters,
     personaLookup,
     profiles,
@@ -535,6 +537,7 @@ const MessageTimelineBase = React.forwardRef<
                     followThreadById={followThreadById}
                     highlightedMessageId={highlightedMessageId}
                     isFollowingThreadById={isFollowingThreadById}
+                    isMessageUnreadById={isMessageUnreadById}
                     messageFooters={messageFooters}
                     messages={deferredMessages}
                     onDelete={onDelete}

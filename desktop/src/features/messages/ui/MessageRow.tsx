@@ -56,6 +56,7 @@ export const MessageRow = React.memo(
     actionBarPlacement = "floating",
     collapseDescendantsLabel,
     isFollowingThread,
+    isUnread,
     layoutVariant = "default",
     message,
     onCollapseDepthGuide,
@@ -89,6 +90,7 @@ export const MessageRow = React.memo(
     actionBarPlacement?: "floating" | "inside";
     collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
+    isUnread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
     onCollapseDepthGuide?: (message: TimelineMessage) => void;
@@ -346,6 +348,7 @@ export const MessageRow = React.memo(
         <MessageActionBar
           channelId={channelId}
           isFollowingThread={isFollowingThread}
+          isUnread={isUnread}
           message={message}
           onDelete={onDelete}
           onEdit={onEdit}
@@ -739,6 +742,7 @@ export const MessageRow = React.memo(
     prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
     prev.hoverBackground === next.hoverBackground &&
     prev.isFollowingThread === next.isFollowingThread &&
+    prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&
     prev.onCollapseDepthGuide === next.onCollapseDepthGuide &&
     prev.onCollapseDepthGuideHoverChange ===

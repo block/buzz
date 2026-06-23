@@ -84,6 +84,7 @@ function MoreActionsMenu({
   onUnfollowThread,
   open,
   isFollowingThread,
+  isUnread,
 }: {
   /** Channel UUID for the "Copy link" action. When null/undefined, the
    *  Copy link entry is hidden (e.g. inbox preview rows that don't have it). */
@@ -99,6 +100,7 @@ function MoreActionsMenu({
   onUnfollowThread?: (message: TimelineMessage) => void;
   open: boolean;
   isFollowingThread?: boolean;
+  isUnread?: boolean;
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   // Set true the moment the user picks "Edit message". The
@@ -157,25 +159,23 @@ function MoreActionsMenu({
             </DropdownMenuItem>
           ) : null}
 
-          {onMarkUnread ? (
+          {onMarkRead || onMarkUnread ? (
             <DropdownMenuItem
+              data-testid={`mark-read-toggle-${message.id}`}
               onClick={() => {
-                onMarkUnread(message);
+                if (isUnread) {
+                  onMarkRead?.(message);
+                } else {
+                  onMarkUnread?.(message);
+                }
               }}
             >
-              <MailOpen className="h-4 w-4" />
-              Mark unread
-            </DropdownMenuItem>
-          ) : null}
-
-          {onMarkRead ? (
-            <DropdownMenuItem
-              onClick={() => {
-                onMarkRead(message);
-              }}
-            >
-              <MailCheck className="h-4 w-4" />
-              Mark read
+              {isUnread ? (
+                <MailCheck className="h-4 w-4" />
+              ) : (
+                <MailOpen className="h-4 w-4" />
+              )}
+              {isUnread ? "Mark read" : "Mark unread"}
             </DropdownMenuItem>
           ) : null}
 
@@ -356,6 +356,7 @@ export function MessageActionBar({
   reactionErrorMessage = null,
   reactions,
   isFollowingThread,
+  isUnread,
 }: {
   /** Channel UUID — required for the "Copy link" action; when omitted the
    *  action is hidden (callers like the home inbox that lack the context). */
@@ -374,6 +375,9 @@ export function MessageActionBar({
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
   isFollowingThread?: boolean;
+  /** Current read state of the clicked message, from the same predicate the
+   *  unread badge uses. Drives the single mark-read/unread toggle label. */
+  isUnread?: boolean;
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
@@ -552,6 +556,7 @@ export function MessageActionBar({
               onUnfollowThread={onUnfollowThread}
               open={isDropdownOpen}
               isFollowingThread={isFollowingThread}
+              isUnread={isUnread}
             />
           ) : null}
         </div>

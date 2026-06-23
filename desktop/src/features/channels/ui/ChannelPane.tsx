@@ -168,6 +168,7 @@ type ChannelPaneProps = {
   followThreadById?: (rootId: string) => void;
   unfollowThreadById?: (rootId: string) => void;
   isFollowingThreadById?: (rootId: string) => boolean;
+  isMessageUnreadById?: (messageId: string) => boolean;
 };
 
 export const ChannelPane = React.memo(function ChannelPane({
@@ -186,6 +187,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   followThreadById,
   isFollowingThread,
   isFollowingThreadById,
+  isMessageUnreadById,
   isJoining = false,
   isSinglePanelView = false,
   isSending,
@@ -658,6 +660,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             hasOlderMessages={hasOlderMessages}
             isFetchingOlder={isFetchingOlder}
             isFollowingThreadById={isFollowingThreadById}
+            isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
             profiles={profiles}
             unfollowThreadById={unfollowThreadById}
@@ -807,6 +810,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 editTarget={threadEditTarget}
                 firstUnreadReplyId={threadFirstUnreadReplyId}
                 isFollowingThread={isFollowingThread}
+                isMessageUnreadById={isMessageUnreadById}
                 isSending={isSending}
                 isSinglePanelView={
                   useSplitAuxiliaryPane ? false : isSinglePanelView

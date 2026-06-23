@@ -89,6 +89,7 @@ type MessageThreadPanelProps = {
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
   isFollowingThread?: boolean;
+  isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
   onUnfollowThread?: () => void;
 };
@@ -348,6 +349,7 @@ export function MessageThreadPanel({
   isSending,
   isSinglePanelView = false,
   isFollowingThread,
+  isMessageUnreadById,
   onCancelEdit,
   onCancelReply,
   onClose,
@@ -644,6 +646,7 @@ export function MessageThreadPanel({
                 highlightedBranch?.id === threadHead.id
               }
               isFollowingThread={isFollowingThread}
+              isUnread={isMessageUnreadById?.(threadHead.id)}
               layoutVariant="thread-reply"
               message={threadHead}
               onCollapseDescendants={
@@ -764,6 +767,7 @@ export function MessageThreadPanel({
                         }
                         highlightThreadLineDepths={highlightedLineDepths}
                         hoverBackground={!entry.summary}
+                        isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}
                         onCollapseDepthGuide={handleCollapseDepthGuide}

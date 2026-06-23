@@ -86,7 +86,10 @@ export function useChannelUnreadState({
   // the marker for such channels to avoid that visible contradiction. The flag
   // is cleared on re-open (a fresh snapshot is recomputed for the channel).
   const forcedUnreadRef = React.useRef(new Set<string>());
-  const [, forceUnreadRender] = React.useReducer((n: number) => n + 1, 0);
+  const [forcedUnreadVersion, forceUnreadRender] = React.useReducer(
+    (n: number) => n + 1,
+    0,
+  );
   // Per-message analog of forcedUnreadRef (LP4 v3 mark-unread). A monotonic
   // grow-only msg:<id> marker cannot move the read-line backward, so a
   // deliberate mark-unread lives in this session-local set, read ONLY as an
@@ -145,6 +148,10 @@ export function useChannelUnreadState({
   );
   const createdAtByMessageId = React.useMemo(
     () => buildCreatedAtByMessageId(timelineMessages),
+    [timelineMessages],
+  );
+  const messageById = React.useMemo(
+    () => new Map(timelineMessages.map((message) => [message.id, message])),
     [timelineMessages],
   );
   const threadPanelIndex = React.useMemo(
@@ -345,6 +352,40 @@ export function useChannelUnreadState({
     ],
   );
 
+  // Per-message unread predicate for the mark-read/unread menu toggle. Reuses
+  // computeThreadUnreadMarker — the exact function the badge counts call
+  // (computeThreadBadgeCounts) — over a single-message array, so the menu label
+  // and the badge can never disagree: one source of truth, no re-derived
+  // predicate to drift. A message absent from the timeline (never loaded) is
+  // treated as read, matching the badge, which only tallies loaded messages.
+  // readStateVersion recomputes on marker advances; forcedUnreadVersion bumps
+  // on every mark-read/unread so the callback identity changes and the value
+  // re-flows through the memoized message subtree (forcedUnreadMsgRef is a ref,
+  // invisible to React on its own). Both keep the menu label and the badge —
+  // which read the same computeThreadUnreadMarker predicate — from drifting.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and forcedUnreadVersion are intentional recompute triggers
+  const isMessageUnread = React.useCallback(
+    (messageId: string): boolean => {
+      const message = messageById.get(messageId);
+      if (!message) return false;
+      const { firstUnreadReplyId } = computeThreadUnreadMarker(
+        [message],
+        getMessageReadAt,
+        currentPubkey,
+        isMsgForcedUnread,
+      );
+      return firstUnreadReplyId !== null;
+    },
+    [
+      messageById,
+      getMessageReadAt,
+      currentPubkey,
+      isMsgForcedUnread,
+      readStateVersion,
+      forcedUnreadVersion,
+    ],
+  );
+
   const handleMarkUnread = React.useCallback(() => {
     if (!activeChannelId) return;
     // Mirror the deliberate mark-unread locally so the timeline marker is
@@ -427,6 +468,7 @@ export function useChannelUnreadState({
     handleMarkMessageRead,
     handleMarkMessageUnread,
     handleMarkUnread,
+    isMessageUnread,
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,

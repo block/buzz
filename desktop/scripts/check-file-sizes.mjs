@@ -39,10 +39,11 @@ const overrides = new Map([
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1295],
-  // onMarkRead prop-pair completion (mirrors the onMarkUnread prop already
-  // threaded here) — a 1-line overage, not generic debt growth. Approved
-  // override; still queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageThreadPanel.tsx", 1002],
+  // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
+  // already here) for the single-toggle mark-read/unread menu item — a small
+  // overage from load-bearing per-message plumbing, not generic debt growth.
+  // Approved override; still queued to split with the rest of this list.
+  ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
 ]);
 
 await runFileSizeCheck({

@@ -394,6 +394,7 @@ export function ChannelScreen({
     getReplyDescendantIdsForMessage,
     handleMarkMessageRead,
     handleMarkMessageUnread,
+    isMessageUnread,
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
@@ -740,6 +741,7 @@ export function ChannelScreen({
                   followThreadById={followThread}
                   unfollowThreadById={unfollowThread}
                   isFollowingThreadById={isFollowingThread}
+                  isMessageUnreadById={isMessageUnread}
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
                   isSinglePanelView={isSinglePanelView}
