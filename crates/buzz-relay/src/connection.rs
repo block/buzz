@@ -283,9 +283,6 @@ async fn heartbeat_loop(
     }
 }
 
-/// NIP-11 advertised max_message_length. Frames exceeding this are rejected.
-pub const MAX_FRAME_BYTES: usize = 65536;
-
 async fn recv_loop(
     mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
     conn: Arc<ConnectionState>,
@@ -298,16 +295,28 @@ async fn recv_loop(
             msg = ws_recv.next() => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
-                        if text.len() > MAX_FRAME_BYTES {
-                            warn!(conn_id = %conn.conn_id, bytes = text.len(), "frame too large — disconnecting");
+                        let max_frame_bytes = state.config.max_frame_bytes;
+                        if text.len() > max_frame_bytes {
+                            warn!(
+                                conn_id = %conn.conn_id,
+                                bytes = text.len(),
+                                max_frame_bytes,
+                                "frame too large — disconnecting"
+                            );
                             break;
                         }
                         trace!(len = text.len(), "frame received");
                         handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
-                        if bytes.len() > MAX_FRAME_BYTES {
-                            warn!(conn_id = %conn.conn_id, bytes = bytes.len(), "binary frame too large — disconnecting");
+                        let max_frame_bytes = state.config.max_frame_bytes;
+                        if bytes.len() > max_frame_bytes {
+                            warn!(
+                                conn_id = %conn.conn_id,
+                                bytes = bytes.len(),
+                                max_frame_bytes,
+                                "binary frame too large — disconnecting"
+                            );
                             break;
                         }
                         // Binary frames: attempt UTF-8 decode and treat as text. Some clients

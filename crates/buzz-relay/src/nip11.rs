@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::connection::MAX_FRAME_BYTES;
+use crate::config::DEFAULT_MAX_FRAME_BYTES;
 
 /// NIPs unconditionally supported by this relay, advertised in the NIP-11
 /// document. Kept as a module-level constant so tests can verify it without
@@ -82,14 +82,14 @@ pub struct RelayLimitation {
 /// unconditionally reject connections that are not in
 /// `AuthState::Authenticated`. This is independent of the REST API token
 /// toggle (`config.require_auth_token`).
-fn relay_limitation() -> RelayLimitation {
+fn relay_limitation(max_message_length: usize) -> RelayLimitation {
     let max_not_before_delta: u64 = std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(31_536_000); // 1 year default
 
     RelayLimitation {
-        max_message_length: Some(MAX_FRAME_BYTES as u64),
+        max_message_length: Some(max_message_length as u64),
         max_subscriptions: Some(1024),
         max_filters: Some(10),
         max_limit: Some(10_000),
@@ -118,7 +118,11 @@ impl RelayInfo {
     /// gates on NIP-43 events — i.e. has a stable key AND enforces
     /// membership. NIP-43 events are verified against `self`, so it is a
     /// programmer error to advertise NIP-43 without a `relay_self`.
-    pub fn build(relay_self: Option<&str>, advertise_nip43: bool) -> Self {
+    pub fn build(
+        relay_self: Option<&str>,
+        advertise_nip43: bool,
+        max_message_length: usize,
+    ) -> Self {
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
             "advertise_nip43=true requires relay_self=Some — NIP-43 events are verified against `self`"
@@ -138,7 +142,7 @@ impl RelayInfo {
             supported_extensions: Some(vec!["nip-er".to_string()]),
             software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            limitation: Some(relay_limitation()),
+            limitation: Some(relay_limitation(max_message_length)),
             relay_self: relay_self.map(|s| s.to_string()),
         }
     }
@@ -149,7 +153,11 @@ pub async fn relay_info_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::state::AppState>>,
 ) -> axum::response::Json<RelayInfo> {
     let (relay_self, advertise_nip43) = nip11_facts(&state);
-    axum::response::Json(RelayInfo::build(relay_self.as_deref(), advertise_nip43))
+    axum::response::Json(RelayInfo::build(
+        relay_self.as_deref(),
+        advertise_nip43,
+        state.config.max_frame_bytes,
+    ))
 }
 
 /// Derives the two NIP-11 facts that depend on runtime config:
@@ -199,7 +207,7 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, false);
+        let info = RelayInfo::build(None, false, DEFAULT_MAX_FRAME_BYTES);
         assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
@@ -208,7 +216,14 @@ mod tests {
         // REQ, EVENT, and COUNT all unconditionally require
         // `AuthState::Authenticated` (see `crates/buzz-relay/src/handlers/`),
         // so the NIP-11 doc must advertise it.
-        assert!(relay_limitation().auth_required);
+        assert!(relay_limitation(DEFAULT_MAX_FRAME_BYTES).auth_required);
+    }
+
+    #[test]
+    fn max_message_length_uses_configured_frame_limit() {
+        let info = RelayInfo::build(None, false, 262_144);
+        let limitation = info.limitation.expect("limitation");
+        assert_eq!(limitation.max_message_length, Some(262_144));
     }
 
     #[test]
@@ -237,7 +252,7 @@ mod tests {
     /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, false);
+        let info = RelayInfo::build(None, false, DEFAULT_MAX_FRAME_BYTES);
         assert!(info.relay_self.is_none());
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -250,7 +265,7 @@ mod tests {
     #[test]
     fn build_open_relay_stable_key_advertises_self_but_not_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), false);
+        let info = RelayInfo::build(Some(pk), false, DEFAULT_MAX_FRAME_BYTES);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -259,7 +274,7 @@ mod tests {
     #[test]
     fn build_membership_relay_advertises_self_and_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), true);
+        let info = RelayInfo::build(Some(pk), true, DEFAULT_MAX_FRAME_BYTES);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -270,6 +285,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, true);
+        let _ = RelayInfo::build(None, true, DEFAULT_MAX_FRAME_BYTES);
     }
 }

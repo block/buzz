@@ -5,6 +5,12 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use tracing::warn;
 
+/// Default maximum inbound WebSocket frame size in bytes.
+///
+/// Must comfortably exceed accepted event content sizes after Nostr JSON and
+/// NIP-44 encryption overhead.
+pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
+
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -37,6 +43,8 @@ pub struct Config {
     pub max_concurrent_handlers: usize,
     /// Per-connection outbound message buffer size (number of messages).
     pub send_buffer_size: usize,
+    /// Maximum inbound WebSocket frame size in bytes.
+    pub max_frame_bytes: usize,
     /// Authentication provider configuration.
     pub auth: buzz_auth::AuthConfig,
     /// Whether REST API requests must present a valid token. Independent of
@@ -158,6 +166,12 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_000);
+
+        let max_frame_bytes = std::env::var("BUZZ_MAX_FRAME_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(DEFAULT_MAX_FRAME_BYTES);
 
         let require_auth_token = std::env::var("BUZZ_REQUIRE_AUTH_TOKEN")
             .map(|v| v == "true" || v == "1")
@@ -360,6 +374,7 @@ impl Config {
             max_connections,
             max_concurrent_handlers,
             send_buffer_size,
+            max_frame_bytes,
             auth,
             require_auth_token,
             cors_origins,
@@ -401,6 +416,7 @@ mod tests {
         assert!(!config.redis_url.is_empty());
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
+        assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
         assert!(
             !config.pubkey_allowlist_enabled,
             "pubkey_allowlist_enabled should default to false"
@@ -426,6 +442,15 @@ mod tests {
         let result = Config::from_env();
         std::env::remove_var("BUZZ_BIND_ADDR");
         assert!(matches!(result, Err(ConfigError::InvalidBindAddr(_))));
+    }
+
+    #[test]
+    fn max_frame_bytes_can_be_configured() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_MAX_FRAME_BYTES", "262144");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
+        assert_eq!(config.max_frame_bytes, 262_144);
     }
 
     #[test]

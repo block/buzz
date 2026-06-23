@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         relay_url = %config.relay_url,
         health_port = config.health_port,
         metrics_port = config.metrics_port,
+        max_frame_bytes = config.max_frame_bytes,
         "Config loaded"
     );
 
