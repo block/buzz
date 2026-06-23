@@ -298,7 +298,7 @@ export function useChannelUnreadState({
   // unread descendant with no separate expanded-subtree gate. readStateVersion
   // is an intentional recompute trigger so the counts re-read after any marker
   // advances.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion is the intentional recompute trigger
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and forcedUnreadVersion are intentional recompute triggers
   const threadReplyUnreadCounts = React.useMemo(
     () =>
       openThreadHeadId
@@ -322,6 +322,7 @@ export function useChannelUnreadState({
       currentPubkey,
       isMsgForcedUnread,
       readStateVersion,
+      forcedUnreadVersion,
     ],
   );
   // Per-thread unread counts for the main-timeline summary rows. Unread is
@@ -330,7 +331,7 @@ export function useChannelUnreadState({
   // the parent resolver, so reading an ancestor never clears a descendant
   // (LP4 Issue 2 by construction). readStateVersion is an intentional recompute
   // trigger so the badge re-reads after any marker advances.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion is the intentional recompute trigger
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and forcedUnreadVersion are intentional recompute triggers
   const threadUnreadCounts = React.useMemo(
     () =>
       computeThreadBadgeCounts(
@@ -349,6 +350,7 @@ export function useChannelUnreadState({
       isThreadMuted,
       isMsgForcedUnread,
       readStateVersion,
+      forcedUnreadVersion,
     ],
   );
 
