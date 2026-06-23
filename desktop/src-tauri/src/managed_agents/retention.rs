@@ -1,8 +1,9 @@
 //! Local SQLite retention store for persona events.
 //!
 //! Provides durable client-side storage for persona events, enabling offline
-//! boot when the relay is unreachable. Uses `INSERT OR REPLACE` keyed on
-//! `(kind, pubkey, d_tag)` for NIP-33 latest-wins semantics.
+//! boot when the relay is unreachable. Upserts via `ON CONFLICT DO UPDATE`
+//! keyed on `(kind, pubkey, d_tag)`, replacing only on a newer-or-equal
+//! `created_at` for NIP-33 latest-wins semantics.
 
 use std::path::Path;
 
@@ -21,8 +22,17 @@ pub struct RetainedEvent {
 }
 
 /// Open (or create) the retention database at the given path.
+///
+/// Sets WAL journaling and a `busy_timeout` on every connection so the
+/// flush-loop connection and command-path connections can write concurrently
+/// without spurious `SQLITE_BUSY` errors.
 pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("failed to open retention db: {e}"))?;
+
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| format!("failed to set WAL mode: {e}"))?;
+    conn.pragma_update(None, "busy_timeout", 5000)
+        .map_err(|e| format!("failed to set busy_timeout: {e}"))?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS persona_events (
@@ -129,14 +139,50 @@ pub fn get_pending_sync(conn: &Connection) -> Result<Vec<RetainedEvent>, String>
         .map_err(|e| format!("failed to read pending sync row: {e}"))
 }
 
-/// Clear the pending_sync flag for a specific event (after relay confirms).
-pub fn mark_synced(conn: &Connection, kind: u32, pubkey: &str, d_tag: &str) -> Result<(), String> {
+/// Clear the `pending_sync` flag for an event the relay just confirmed.
+///
+/// Compare-and-clear: only clears the row if its `created_at` and `content`
+/// still match what was published. A concurrent edit that upserted a newer
+/// version at the same coordinate between the flush loop's read and this call
+/// leaves `pending_sync` set, so the newer edit publishes on the next pass
+/// instead of being silently dropped.
+pub fn mark_synced(
+    conn: &Connection,
+    kind: u32,
+    pubkey: &str,
+    d_tag: &str,
+    created_at: i64,
+    content: &str,
+) -> Result<(), String> {
     conn.execute(
         "UPDATE persona_events SET pending_sync = 0
+         WHERE kind = ?1 AND pubkey = ?2 AND d_tag = ?3
+           AND created_at = ?4 AND content = ?5",
+        params![kind, pubkey, d_tag, created_at, content],
+    )
+    .map_err(|e| format!("failed to mark event synced: {e}"))?;
+
+    Ok(())
+}
+
+/// Delete a retained event by its coordinate.
+///
+/// Called from the synchronous, lock-held delete-persona command body so the
+/// purge serializes against `retain_event` upserts at the same coordinate —
+/// closing the same-second resurrect race where a pending edit would otherwise
+/// publish after the deletion tombstone.
+pub fn delete_retained_event(
+    conn: &Connection,
+    kind: u32,
+    pubkey: &str,
+    d_tag: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM persona_events
          WHERE kind = ?1 AND pubkey = ?2 AND d_tag = ?3",
         params![kind, pubkey, d_tag],
     )
-    .map_err(|e| format!("failed to mark event synced: {e}"))?;
+    .map_err(|e| format!("failed to delete retained event: {e}"))?;
 
     Ok(())
 }
@@ -263,12 +309,12 @@ mod tests {
     }
 
     #[test]
-    fn mark_synced_clears_flag() {
+    fn test_mark_synced_matching_row_clears_flag() {
         let conn = test_db();
         let event = sample_event();
         retain_event(&conn, &event).unwrap();
 
-        mark_synced(&conn, 30175, "abc123", "test-persona").unwrap();
+        mark_synced(&conn, 30175, "abc123", "test-persona", 1000, &event.content).unwrap();
 
         let pending = get_pending_sync(&conn).unwrap();
         assert!(pending.is_empty());
@@ -276,6 +322,53 @@ mod tests {
         let results = get_retained_personas(&conn, "abc123").unwrap();
         assert_eq!(results.len(), 1);
         assert!(!results[0].pending_sync);
+    }
+
+    #[test]
+    fn test_mark_synced_stale_version_leaves_flag_set() {
+        let conn = test_db();
+        let published = sample_event();
+        retain_event(&conn, &published).unwrap();
+
+        // A newer edit lands at the same coordinate before the flush loop
+        // clears the version it published.
+        let mut newer = sample_event();
+        newer.content = r#"{"display_name":"Edited"}"#.to_string();
+        newer.created_at = 2000;
+        retain_event(&conn, &newer).unwrap();
+
+        // Clearing against the OLD version must not touch the newer pending row.
+        mark_synced(
+            &conn,
+            30175,
+            "abc123",
+            "test-persona",
+            1000,
+            &published.content,
+        )
+        .unwrap();
+
+        let pending = get_pending_sync(&conn).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].created_at, 2000);
+    }
+
+    #[test]
+    fn test_delete_retained_event_removes_row() {
+        let conn = test_db();
+        retain_event(&conn, &sample_event()).unwrap();
+
+        delete_retained_event(&conn, 30175, "abc123", "test-persona").unwrap();
+
+        assert!(get_retained_event(&conn, 30175, "abc123", "test-persona")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_delete_retained_event_missing_row_is_noop() {
+        let conn = test_db();
+        delete_retained_event(&conn, 30175, "abc123", "nonexistent").unwrap();
     }
 
     #[test]

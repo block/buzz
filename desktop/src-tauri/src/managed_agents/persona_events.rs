@@ -63,6 +63,18 @@ pub fn build_persona_event(record: &PersonaRecord) -> Result<EventBuilder, Strin
     Ok(EventBuilder::new(Kind::Custom(KIND_PERSONA as u16), content_json).tags(tags))
 }
 
+/// Build a NIP-09 deletion (kind:5) targeting a persona's kind:30175 event.
+///
+/// Carries a single `a`-tag with the NIP-33 coordinate `30175:<owner>:<d_tag>`
+/// and no `e`-tag: an `e`-tag routes the relay to the event-id deletion path,
+/// which leaves the parameterized-replaceable coordinate live. The coordinate
+/// delete removes the persona for every client and across reboots.
+pub fn build_persona_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<EventBuilder, String> {
+    let coord = format!("{KIND_PERSONA}:{owner_pubkey_hex}:{d_tag}");
+    let tag = Tag::parse(["a", coord.as_str()]).map_err(|e| format!("invalid a-tag: {e}"))?;
+    Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
+}
+
 /// Parse a kind:30175 event back into a `PersonaRecord`.
 ///
 /// The event's d-tag becomes the persona ID and slug.
@@ -104,29 +116,77 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
     })
 }
 
-/// Publish a persona event to the relay.
-pub async fn publish_persona_event(
-    record: &PersonaRecord,
+/// Drain every `pending_sync` event from the retention store to the relay.
+///
+/// Each writer (UI create/edit, delete tombstone, launch reconcile) retains a
+/// signed event with `pending_sync = 1`; this loop is the sole publisher.
+///
+/// Per row, the last synchronous read before the network `.await` is a fresh
+/// `get_retained_event` re-check — the connection holds no `Mutex` across the
+/// await, so a concurrent edit or delete is observed here:
+/// - gone (deleted): skip, nothing to publish.
+/// - newer `created_at` or different `content`: skip; the newer row is itself
+///   `pending_sync` and publishes on its own pass.
+///
+/// Only a row that still matches what we read is published, then cleared via
+/// `mark_synced` on the exact `created_at`+`content` the relay accepted — so an
+/// edit landing between publish and clear is never falsely marked synced.
+///
+/// Returns the number of events the relay accepted. Best-effort: a relay
+/// failure on one row leaves it pending for the next sweep and does not abort
+/// the remaining rows.
+pub async fn flush_pending_events(
+    db_path: &std::path::Path,
     state: &AppState,
-) -> Result<String, String> {
-    let builder = build_persona_event(record)?;
-    let response = crate::relay::submit_event(builder, state).await?;
-    Ok(response.event_id)
-}
-
-/// Fetch all persona events authored by the current user from the relay.
-pub async fn fetch_persona_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
-    let pubkey = {
-        let keys = state.keys.lock().map_err(|e| e.to_string())?;
-        keys.public_key().to_hex()
+) -> Result<u32, String> {
+    use crate::managed_agents::retention::{
+        get_pending_sync, get_retained_event, mark_synced, open_retention_db,
     };
+    use nostr::JsonUtil;
 
-    let filter = serde_json::json!({
-        "kinds": [KIND_PERSONA],
-        "authors": [pubkey]
-    });
+    let pending = {
+        let conn = open_retention_db(db_path)?;
+        get_pending_sync(&conn)?
+    }; // connection dropped before any .await
 
-    crate::relay::query_relay(state, &[filter]).await
+    let mut flushed = 0u32;
+    for row in pending {
+        // Re-read immediately before publishing; the row may have been edited
+        // or deleted since the pending snapshot above.
+        let current = {
+            let conn = open_retention_db(db_path)?;
+            get_retained_event(&conn, row.kind, &row.pubkey, &row.d_tag)?
+        };
+        let Some(current) = current else {
+            continue; // deleted out from under us
+        };
+        if current.created_at != row.created_at || current.content != row.content {
+            continue; // superseded by a newer edit; that row publishes itself
+        }
+
+        let event = nostr::Event::from_json(&current.raw_event)
+            .map_err(|e| format!("failed to parse retained event '{}': {e}", current.d_tag))?;
+
+        if crate::relay::submit_signed_event(&event, state)
+            .await
+            .is_err()
+        {
+            continue; // relay unreachable — stays pending for the next sweep
+        }
+
+        let conn = open_retention_db(db_path)?;
+        mark_synced(
+            &conn,
+            current.kind,
+            &current.pubkey,
+            &current.d_tag,
+            current.created_at,
+            &current.content,
+        )?;
+        flushed += 1;
+    }
+
+    Ok(flushed)
 }
 
 /// SHA-256 (lowercase hex) of a persona's canonical content JSON.
@@ -309,6 +369,32 @@ mod tests {
         // Deserialized persona is always non-builtin and active
         assert!(!restored.is_builtin);
         assert!(restored.is_active);
+    }
+
+    #[test]
+    fn build_persona_delete_has_single_a_tag_no_e_tag() {
+        const OWNER: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let builder = build_persona_delete("test-slug", OWNER).unwrap();
+        let keys = nostr::Keys::generate();
+        let event = builder.sign_with_keys(&keys).unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(5));
+
+        let a_tags: Vec<&[String]> = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice())
+            .filter(|v| v.first().map(String::as_str) == Some("a"))
+            .collect();
+        assert_eq!(a_tags.len(), 1);
+        assert_eq!(a_tags[0][1], format!("{KIND_PERSONA}:{OWNER}:test-slug"));
+
+        // An e-tag would route to the event-id deletion path and leave the
+        // replaceable coordinate live — the tombstone must carry none.
+        assert!(event
+            .tags
+            .iter()
+            .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
     }
 
     #[test]

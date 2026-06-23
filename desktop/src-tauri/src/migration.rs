@@ -917,17 +917,20 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
     rename_provider_to_runtime_in_personas(&path);
 }
 
-/// Migrate existing `personas.json` entries to persona events in the local
-/// retention store.
+/// Reconcile `personas.json` into the persona-event retention store.
 ///
 /// Must run AFTER `migrate_packs_to_teams` (depends on field renames being
 /// complete) and AFTER the persisted identity is resolved (it signs every
 /// retained event with the owner's keys).
 ///
-/// Idempotent: skips when the retention store already holds events for the
-/// owner pubkey — the data is the sentinel, so no separate sentinel file is
-/// needed. This avoids re-running (and resetting `pending_sync`) on every
-/// launch when a sentinel write silently fails.
+/// Per-record reconcile: for each non-builtin persona it compares the freshly
+/// serialized event content against the retained row at the same coordinate
+/// and re-retains (marking `pending_sync = 1`) only when the row is absent or
+/// its content differs. An unchanged persona is left untouched, so a launch
+/// after a no-op edit does not churn `pending_sync`; a persona added or edited
+/// on disk between launches is picked up and republished. There is no
+/// whole-store sentinel — comparing per coordinate is what lets newly added
+/// personas reach the relay.
 ///
 /// Strategy: write to local SQLite retention first (durable copy), mark as
 /// `pending_sync = 1` for later relay publish. Migration succeeds on local
@@ -953,15 +956,15 @@ pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
     }
 }
 
-/// Core migration logic, decoupled from the Tauri `AppHandle` for testing.
+/// Core reconcile logic, decoupled from the Tauri `AppHandle` for testing.
 ///
-/// Returns the number of personas written to the retention store. Returns
-/// `Ok(0)` when migration has already run (retention store has rows for the
-/// owner pubkey) or when there are no non-builtin personas to migrate.
+/// Returns the number of personas (re)written to the retention store. Returns
+/// `Ok(0)` when every non-builtin persona already has a matching retained row
+/// (or there are none to reconcile).
 fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
     use crate::managed_agents::{
         persona_events::{build_persona_event, persona_d_tag},
-        retention::{has_retained_personas, open_retention_db, retain_event, RetainedEvent},
+        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
         PersonaRecord,
     };
     use buzz_core_pkg::kind::KIND_PERSONA;
@@ -969,8 +972,7 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
 
     let pubkey = keys.public_key().to_hex();
 
-    // Read personas.json fresh at migration time. Nothing to migrate if the
-    // file is absent.
+    // Read personas.json fresh at reconcile time. Nothing to do if absent.
     let personas_path = base_dir.join("personas.json");
     if !personas_path.exists() {
         return Ok(0);
@@ -991,12 +993,6 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
     let conn =
         open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
 
-    // Idempotency: the retention rows themselves are the sentinel. If the
-    // owner already has retained personas, migration ran on a prior launch.
-    if has_retained_personas(&conn, &pubkey)? {
-        return Ok(0);
-    }
-
     let mut migrated = 0u32;
 
     for record in &records {
@@ -1014,11 +1010,20 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
             .sign_with_keys(keys)
             .map_err(|e| format!("failed to sign event for '{}': {e}", record.display_name))?;
 
+        // Per-coordinate reconcile: skip when an identical body is already
+        // retained, so an unchanged persona doesn't reset `pending_sync`.
+        let event_content = event.content.to_string();
+        if let Some(existing) = get_retained_event(&conn, KIND_PERSONA, &pubkey, &d_tag)? {
+            if existing.content == event_content {
+                continue;
+            }
+        }
+
         let retained = RetainedEvent {
             kind: KIND_PERSONA,
             pubkey: pubkey.clone(),
             d_tag,
-            content: event.content.to_string(),
+            content: event_content,
             // Safety: nostr timestamps are seconds and stay below i64::MAX
             // until year 2262.
             created_at: event.created_at.as_secs() as i64,
