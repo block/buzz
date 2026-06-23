@@ -619,7 +619,7 @@ export function AppSidebar({
         </div>
 
         <SidebarContent
-          className="buzz-sidebar-scrollbar overscroll-none"
+          className="buzz-sidebar-scrollbar overscroll-none pt-4"
           ref={scrollRef}
         >
           {isLoading ? (
@@ -716,9 +716,6 @@ export function AppSidebar({
                   browseAriaLabel="Browse channels"
                   createAriaLabel="Create a channel"
                   draggable
-                  groupClassName={
-                    channelSections.length > 0 ? undefined : "pt-1"
-                  }
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.channels}
                   isActiveChannel={selectedView === "channel"}
@@ -802,7 +799,7 @@ export function AppSidebar({
                 presenceByChannelId={dmPresenceByChannelId}
                 selectedChannelId={selectedChannelId}
                 testId="dm-list"
-                title="Direct Messages"
+                title="Direct messages"
                 unreadChannelCounts={unreadChannelCounts}
                 unreadChannelIds={unreadChannelIds}
                 mutedChannelIds={mutedChannelIds}
