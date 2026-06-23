@@ -498,7 +498,7 @@ bump-relay-version version:
     set -euo pipefail
     # buzz-relay carries its own `version =` (not version.workspace), so the
     # replace targets the package version line only.
-    sed -i '' -E "s/^version = \".*\"/version = \"{{ version }}\"/" crates/buzz-relay/Cargo.toml
+    perl -i -pe 's/^version = ".*"/version = "{{ version }}"/' crates/buzz-relay/Cargo.toml
     cargo update -p buzz-relay
     echo "Bumped buzz-relay to {{ version }} and regenerated Cargo.lock"
 
@@ -508,7 +508,7 @@ bump-mobile-version version:
     set -euo pipefail
     # pubspec carries a `version: X.Y.Z+build`; preserve the `+build` convention
     # (a literal `+1`, matching the desktop lane's prior behavior).
-    sed -i '' "s/^version: .*/version: {{ version }}+1/" mobile/pubspec.yaml
+    perl -i -pe 's/^version: .*/version: {{ version }}+1/' mobile/pubspec.yaml
     (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
     echo "Bumped mobile to {{ version }} and regenerated pubspec.lock"
 
@@ -566,6 +566,7 @@ _release-pr lane version:
             BRANCH_PREFIX="version-bump"
             TAG_FETCH='v*'
             TAG_MATCH='v[0-9]*'
+            TAG_EXCLUDE='*-*'
             TAG_PREFIX="v"
             CHANGELOG="CHANGELOG.md"
             ADD_FILES=(desktop/package.json desktop/src-tauri/tauri.conf.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock pnpm-lock.yaml CHANGELOG.md)
@@ -574,6 +575,7 @@ _release-pr lane version:
             BRANCH_PREFIX="relay-release"
             TAG_FETCH='relay-v*'
             TAG_MATCH='relay-v[0-9]*'
+            TAG_EXCLUDE='relay-v*-*'
             TAG_PREFIX="relay-v"
             CHANGELOG="crates/buzz-relay/CHANGELOG.md"
             ADD_FILES=(crates/buzz-relay/Cargo.toml Cargo.lock crates/buzz-relay/CHANGELOG.md)
@@ -582,6 +584,7 @@ _release-pr lane version:
             BRANCH_PREFIX="mobile-release"
             TAG_FETCH='mobile-v*'
             TAG_MATCH='mobile-v[0-9]*'
+            TAG_EXCLUDE='mobile-v*-*'
             TAG_PREFIX="mobile-v"
             CHANGELOG="mobile/CHANGELOG.md"
             ADD_FILES=(mobile/pubspec.yaml mobile/pubspec.lock mobile/CHANGELOG.md)
@@ -629,7 +632,7 @@ _release-pr lane version:
         mobile)  just bump-mobile-version "$VERSION" ;;
     esac
     # Generate the changelog from commits since this lane's last release tag.
-    LAST_TAG=$(git describe --tags --abbrev=0 --match "$TAG_MATCH" --exclude '*-*' 2>/dev/null || echo "")
+    LAST_TAG=$(git describe --tags --abbrev=0 --match "$TAG_MATCH" --exclude "$TAG_EXCLUDE" 2>/dev/null || echo "")
     REPO=$(git remote get-url origin | sed -E 's|.*github\.com[:/]||; s|\.git$||')
     format_log() {
         local range="$1"

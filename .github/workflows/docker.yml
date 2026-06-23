@@ -155,8 +155,8 @@ jobs:
           # `auto`, which adds :latest for stable semver tags only (not
           # prereleases, not main pushes).
           tags: |
-            type=ref,event=branch
-            type=sha,prefix=sha-,format=short
+            type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
@@ -240,8 +240,8 @@ jobs:
           # value=${{ inputs.version }} carries the rescue-dispatch version,
           # and why :latest is left to flavor.latest=auto.
           tags: |
-            type=ref,event=branch
-            type=sha,prefix=sha-,format=short
+            type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
             type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
