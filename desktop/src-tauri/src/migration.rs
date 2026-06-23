@@ -201,6 +201,13 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
         let dst = current.join(name);
         let result = if src.is_dir() {
             copy_dir_all(&src, &dst)
+        } else if *name == "AGENTS.md" {
+            // `ensure_nest` writes a default `~/.buzz/AGENTS.md` before this
+            // migration runs, so the plain absent-only guard would always skip
+            // the legacy file and strand the user's instructions. Overwrite the
+            // destination only when it is still the untouched generated default;
+            // a user-edited file is left alone.
+            copy_file_over_generated_default(&src, &dst)
         } else {
             copy_file_if_absent(&src, &dst)
         };
@@ -225,6 +232,28 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
 fn copy_file_if_absent(src: &Path, dst: &Path) -> std::io::Result<()> {
     if dst.exists() {
         return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst).map(|_| ())
+}
+
+/// Copy `src` over `dst` when `dst` is absent or still the untouched generated
+/// default `AGENTS.md` (byte-equal to the embedded template). A user-edited
+/// destination — or an older default left by a since-bumped template — is
+/// preserved.
+///
+/// On a first-time migration `ensure_nest` has just written the generated
+/// default, so `copy_file_if_absent` would always skip the legacy file and
+/// strand the user's instructions. This lets the legacy `AGENTS.md` win over
+/// that pristine default while never clobbering content a user has changed.
+fn copy_file_over_generated_default(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if dst.exists() {
+        let current = std::fs::read_to_string(dst)?;
+        if current != crate::managed_agents::AGENTS_MD {
+            return Ok(());
+        }
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;

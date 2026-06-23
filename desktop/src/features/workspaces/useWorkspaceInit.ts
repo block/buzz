@@ -139,7 +139,17 @@ export function useWorkspaceInit(
           activeWorkspace.reposDir,
         );
       } catch (error) {
+        // apply_workspace validates repos_dir before touching relay/keys, so a
+        // hard reject (bad path) leaves the backend on the previous/default
+        // relay with nothing applied. Marking the workspace ready here would
+        // render workspace-scoped UI against the wrong relay — a silent
+        // split-brain. Park on the loading gate (isReady:false, no appliedKey)
+        // instead; the backend already toasts a `repos-dir-error`.
         console.error("Failed to apply workspace to backend:", error);
+        if (!cancelled) {
+          setResult({ isReady: false, needsSetup: false, appliedKey: null });
+        }
+        return;
       }
 
       if (!cancelled) {

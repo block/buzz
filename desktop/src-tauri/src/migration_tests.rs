@@ -934,3 +934,50 @@ fn migrate_legacy_nest_noops_when_legacy_absent() {
         "no destination created when legacy absent"
     );
 }
+
+#[test]
+fn migrate_legacy_nest_overwrites_generated_default_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy team instructions").unwrap();
+
+    // First-time launch order: ensure_nest writes the generated default into
+    // ~/.buzz/AGENTS.md, then migration runs.
+    crate::managed_agents::ensure_nest_at(&current).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        crate::managed_agents::AGENTS_MD,
+        "precondition: ensure_nest writes the generated default"
+    );
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "legacy team instructions",
+        "legacy AGENTS.md must overwrite the untouched generated default"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_preserves_user_edited_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy team instructions").unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join("AGENTS.md"), "user-edited live AGENTS").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "user-edited live AGENTS",
+        "a user-edited live AGENTS.md must never be clobbered"
+    );
+}

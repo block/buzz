@@ -144,6 +144,26 @@ pub fn ensure_repos_symlink(nest_root: &Path, _repos_dir: Option<&str>) -> Resul
     fs::create_dir_all(&repos_path).map_err(|e| format!("create {}: {e}", repos_path.display()))
 }
 
+/// Provision `REPOS` at nest setup, before any configured `repos_dir` is known.
+///
+/// Leaves an existing symlink untouched — `apply_workspace` is the sole
+/// authority over a configured symlink. Clearing it here with `None` would
+/// destroy a symlink restored from a prior session; async-restored agents
+/// would then write into the fresh real dir, and the later FE re-point would
+/// refuse the now-non-empty REPOS — silently breaking `repos_dir` on restart.
+/// Otherwise (absent, or a real dir) lands the default real-dir fallback.
+pub fn ensure_repos_setup_default(nest_root: &Path) -> Result<(), String> {
+    let repos_path = nest_root.join("REPOS");
+    let is_symlink = repos_path
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if is_symlink {
+        return Ok(());
+    }
+    ensure_repos_symlink(nest_root, None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +313,43 @@ mod tests {
         assert!(
             checkout.join("code.rs").exists(),
             "refusal must never delete existing repositories"
+        );
+    }
+
+    // ensure_nest_at must NOT clobber an existing REPOS symlink on startup.
+    // Regression guard for Finding 1: the startup `ensure_repos_symlink(_, None)`
+    // call used to remove a configured symlink and mint an empty real REPOS,
+    // which async-restored agents could write into — the FE re-point then
+    // refused the now-non-empty dir, silently breaking a configured repos_dir.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_nest_startup_preserves_existing_repos_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+
+        // First launch creates the real nest with a real REPOS dir.
+        crate::managed_agents::ensure_nest_at(&root).unwrap();
+
+        // Simulate a configured repos_dir: REPOS points at an external dir
+        // holding agent checkouts.
+        let external = tmp.path().join("Development");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("KEEP.md"), "data").unwrap();
+        fs::remove_dir(root.join("REPOS")).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("REPOS")).unwrap();
+
+        // Next launch must leave the configured symlink intact.
+        crate::managed_agents::ensure_nest_at(&root).unwrap();
+
+        let repos = root.join("REPOS");
+        assert!(
+            repos.symlink_metadata().unwrap().file_type().is_symlink(),
+            "an existing REPOS symlink must survive startup"
+        );
+        assert_eq!(repos.read_link().unwrap(), external);
+        assert!(
+            external.join("KEEP.md").exists(),
+            "the symlink's target contents must be untouched"
         );
     }
 

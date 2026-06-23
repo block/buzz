@@ -35,7 +35,7 @@ const NEST_DIRS: &[&str] = &[
 
 /// Default AGENTS.md content written on first init.
 /// Fully static — no runtime interpolation, no secrets, no user paths.
-const AGENTS_MD: &str = include_str!("nest_agents.md");
+pub(crate) const AGENTS_MD: &str = include_str!("nest_agents.md");
 
 /// Default SKILL.md content for the buzz-cli skill.
 /// Written to ~/.buzz/.agents/skills/buzz-cli/SKILL.md on first init.
@@ -112,10 +112,10 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         fs::create_dir_all(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
     }
 
-    // Provision REPOS separately so it can be a symlink to a user-configured
-    // repos_dir. At setup we have no configured value (it arrives later via
-    // apply_workspace), so this lands the real-dir fallback.
-    super::repos::ensure_repos_symlink(root, None)?;
+    // REPOS is provisioned separately from NEST_DIRS: it may be a symlink to a
+    // user-configured repos_dir (applied later via apply_workspace), so setup
+    // must not clobber an existing configured symlink. See repos.rs.
+    super::repos::ensure_repos_setup_default(root)?;
 
     // Write AGENTS.md only if it doesn't already exist.
     // Uses create_new (O_CREAT|O_EXCL) to atomically check-and-create,
