@@ -49,27 +49,34 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 fn retain_persona_pending(app: &AppHandle, state: &AppState, persona: &PersonaRecord) {
     use crate::managed_agents::{
         managed_agents_base_dir,
-        persona_events::{build_persona_event, persona_d_tag},
-        retention::{open_retention_db, retain_event, RetainedEvent},
+        persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},
+        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     };
     use buzz_core_pkg::kind::KIND_PERSONA;
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
+        let d_tag = persona_d_tag(persona);
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
         let (pubkey, event) = {
             let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            // Monotonic created_at: read the retained head for this coordinate
+            // and bump past it (NIP-AP step 3) so a same-second edit supersedes.
+            let prior =
+                get_retained_event(&conn, KIND_PERSONA, &keys.public_key().to_hex(), &d_tag)?
+                    .map(|row| row.created_at);
             let event = build_persona_event(persona)?
+                .custom_created_at(monotonic_created_at(prior))
                 .sign_with_keys(&keys)
                 .map_err(|e| format!("failed to sign persona event: {e}"))?;
             (keys.public_key().to_hex(), event)
         };
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
         retain_event(
             &conn,
             &RetainedEvent {
                 kind: KIND_PERSONA,
                 pubkey,
-                d_tag: persona_d_tag(persona),
+                d_tag,
                 content: event.content.to_string(),
                 created_at: event.created_at.as_secs() as i64,
                 raw_event: event.as_json(),
@@ -94,11 +101,14 @@ fn retain_persona_pending(app: &AppHandle, state: &AppState, persona: &PersonaRe
 /// pubkey, d_tag)` (distinct from the purged persona row) with `pending_sync =
 /// 1`; the flush loop publishes it. Best-effort: a failure is logged and
 /// swallowed so a retention hiccup never blocks the disk-authoritative delete.
-fn tombstone_persona_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
+pub(super) fn tombstone_persona_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
     use crate::managed_agents::{
         managed_agents_base_dir,
         persona_events::build_persona_delete,
-        retention::{delete_retained_event, open_retention_db, retain_event, RetainedEvent},
+        retention::{
+            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
+            RetainedEvent,
+        },
     };
     use buzz_core_pkg::kind::KIND_PERSONA;
     use nostr::JsonUtil;
@@ -123,7 +133,9 @@ fn tombstone_persona_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
             &RetainedEvent {
                 kind: KIND_DELETE,
                 pubkey,
-                d_tag: d_tag.to_string(),
+                // Key by the target coordinate so cross-kind d-tag tombstones
+                // occupy distinct rows (F2c).
+                d_tag: tombstone_retention_d_tag(KIND_PERSONA, d_tag),
                 content: event.content.to_string(),
                 created_at: event.created_at.as_secs() as i64,
                 raw_event: event.as_json(),
@@ -343,18 +355,25 @@ pub fn reconcile_inbound_persona_event(
         save_managed_agents, save_teams,
         team_events::team_content_from_event,
     };
-    use buzz_core_pkg::kind::{KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
     use nostr::JsonUtil;
 
     let event = nostr::Event::from_json(&event_json)
         .map_err(|e| format!("failed to parse inbound event: {e}"))?;
 
-    // Per-kind scoping: the live filter subscribes to 30175/30176/30177. d-tags
-    // are NOT unique across kinds (a team id and a persona slug could collide),
-    // so each kind is parsed and applied against its OWN store only — the match
-    // below dispatches before any d-tag comparison, so a cross-kind d-tag can
-    // never link a team to a persona or an agent.
+    // The live filter subscribes to 30175/30176/30177 (upserts) plus kind:5
+    // (NIP-09 deletions). d-tags are NOT unique across kinds, so every path
+    // below dispatches on kind FIRST and only ever touches its own store — a
+    // cross-kind d-tag collision can never link a team to a persona or agent.
     let kind = event.kind.as_u16() as u32;
+
+    // kind:5 deletion: a tombstone removes the local record at the coordinate
+    // in its `a` tag (`<target_kind>:<owner>:<d_tag>`). Handled before the
+    // upsert dispatch because its coordinate and retention key differ.
+    if kind == KIND_DELETION {
+        return reconcile_inbound_tombstone(&event, &app, &state);
+    }
+
     if !matches!(kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
         return Ok(());
     }
@@ -422,6 +441,103 @@ pub fn reconcile_inbound_persona_event(
         _ => unreachable!("kind gated above"),
     }
     try_regenerate_nest(&app);
+
+    Ok(())
+}
+
+/// Parse a NIP-09 `a`-tag coordinate `<kind>:<owner_pubkey>:<d_tag>` into its
+/// target kind and d-tag. Returns `None` if the tag is absent or malformed, so
+/// the caller no-ops on a tombstone it can't route.
+fn parse_deletion_coordinate(event: &nostr::Event) -> Option<(u32, String)> {
+    event.tags.iter().find_map(|tag| {
+        let values: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
+        if values.first() != Some(&"a") {
+            return None;
+        }
+        let coord = values.get(1)?;
+        // `<kind>:<owner>:<d_tag>` — d_tag may itself contain ':' so split at
+        // most twice and keep the remainder as the d_tag.
+        let mut parts = coord.splitn(3, ':');
+        let kind: u32 = parts.next()?.parse().ok()?;
+        let _owner = parts.next()?;
+        let d_tag = parts.next()?;
+        Some((kind, d_tag.to_string()))
+    })
+}
+
+/// Apply an inbound kind:5 NIP-09 deletion: remove the local record at the
+/// tombstone's target coordinate, scoped per-kind. Mirrors the upsert spine —
+/// retention resolution under the store lock, then a per-kind store mutation —
+/// but removes rather than patches. Unknown/malformed coordinates no-op.
+fn reconcile_inbound_tombstone(
+    event: &nostr::Event,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    use crate::managed_agents::{
+        load_managed_agents, load_teams, managed_agents_base_dir,
+        retention::{
+            open_retention_db, retain_inbound_event, tombstone_retention_d_tag, InboundOutcome,
+            RetainedEvent,
+        },
+        save_managed_agents, save_teams,
+    };
+    use buzz_core_pkg::kind::{KIND_DELETION, KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
+    use nostr::JsonUtil;
+
+    let Some((target_kind, target_d_tag)) = parse_deletion_coordinate(event) else {
+        return Ok(()); // no routable coordinate — nothing to delete
+    };
+    if !matches!(target_kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
+        return Ok(()); // deletion for a kind we don't track locally
+    }
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    // Resolve against the retained tombstone row (keyed by the target
+    // coordinate, F2c) so a re-received tombstone or one older than a pending
+    // local edit is a no-op.
+    let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+    let outcome = retain_inbound_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_DELETION,
+            pubkey: event.pubkey.to_hex(),
+            d_tag: tombstone_retention_d_tag(target_kind, &target_d_tag),
+            content: event.content.to_string(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: false,
+        },
+    )?;
+    if outcome == InboundOutcome::Skipped {
+        return Ok(());
+    }
+
+    // Remove the local record using the SAME per-kind match rule the apply fns
+    // use: persona by `persona_d_tag`, team by `id`, managed-agent by `pubkey`.
+    match target_kind {
+        KIND_PERSONA => {
+            let mut personas = load_personas(app)?;
+            personas.retain(|record| persona_d_tag(record) != target_d_tag);
+            save_personas(app, &personas)?;
+        }
+        KIND_TEAM => {
+            let mut teams = load_teams(app)?;
+            teams.retain(|record| record.id != target_d_tag);
+            save_teams(app, &teams)?;
+        }
+        KIND_MANAGED_AGENT => {
+            let mut agents = load_managed_agents(app)?;
+            agents.retain(|record| record.pubkey != target_d_tag);
+            save_managed_agents(app, &agents)?;
+        }
+        _ => unreachable!("target kind gated above"),
+    }
+    try_regenerate_nest(app);
 
     Ok(())
 }
@@ -1081,5 +1197,74 @@ mod inbound_tests {
         // Re-receive stays idempotent.
         apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
         assert_eq!(teams.len(), 2, "re-receive of inserted team no-ops");
+    }
+
+    // ── Tombstone (kind:5) consume ────────────────────────────────────────────
+
+    fn deletion_event(coord: &str) -> nostr::Event {
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+        let event = EventBuilder::new(Kind::Custom(5), "")
+            .tags(vec![Tag::parse(["a", coord]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        nostr::Event::from_json(event.as_json()).unwrap()
+    }
+
+    #[test]
+    fn parse_deletion_coordinate_extracts_kind_and_d_tag() {
+        let owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        // Persona / team / agent coordinates all route by their leading kind.
+        let p = deletion_event(&format!("30175:{owner}:my-persona"));
+        assert_eq!(
+            parse_deletion_coordinate(&p),
+            Some((30175, "my-persona".to_string()))
+        );
+        let a = deletion_event(&format!("30177:{owner}:agentpubkeyhex"));
+        assert_eq!(
+            parse_deletion_coordinate(&a),
+            Some((30177, "agentpubkeyhex".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_deletion_coordinate_handles_colon_in_d_tag_and_rejects_malformed() {
+        let owner = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        // A d-tag containing ':' keeps its remainder intact (splitn(3)).
+        let weird = deletion_event(&format!("30176:{owner}:a:b:c"));
+        assert_eq!(
+            parse_deletion_coordinate(&weird),
+            Some((30176, "a:b:c".to_string()))
+        );
+        // Missing d-tag segment / non-numeric kind → None (no-op).
+        assert_eq!(
+            parse_deletion_coordinate(&deletion_event("30175:owner")),
+            None
+        );
+        assert_eq!(
+            parse_deletion_coordinate(&deletion_event("notakind:owner:d")),
+            None
+        );
+    }
+
+    #[test]
+    fn tombstone_removal_predicates_match_apply_fn_keys() {
+        // The deletion path removes by the SAME per-kind key the apply fns use.
+        // Persona: by persona_d_tag (slug/id).
+        let mut personas = vec![local_in_app()];
+        let target = persona_d_tag(&personas[0]);
+        personas.retain(|r| persona_d_tag(r) != target);
+        assert!(personas.is_empty(), "persona removed by its d-tag");
+
+        // Team: by id.
+        let mut teams = vec![local_team()];
+        teams.retain(|r| r.id != TEAM_ID);
+        assert!(teams.is_empty(), "team removed by id");
+
+        // Managed-agent: by pubkey. A non-matching d-tag is a no-op.
+        let mut agents = vec![local_agent()];
+        agents.retain(|r| r.pubkey != "someoneelse");
+        assert_eq!(agents.len(), 1, "non-matching agent tombstone no-ops");
+        agents.retain(|r| r.pubkey != AGENT_PUBKEY);
+        assert!(agents.is_empty(), "agent removed by pubkey");
     }
 }

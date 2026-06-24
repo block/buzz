@@ -1221,7 +1221,7 @@ pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
 /// (or there are none to reconcile).
 fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
     use crate::managed_agents::{
-        persona_events::{build_persona_event, persona_d_tag},
+        persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
         PersonaRecord,
     };
@@ -1261,20 +1261,32 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
 
         let d_tag = persona_d_tag(record);
 
-        let builder = build_persona_event(record)
-            .map_err(|e| format!("failed to build event for '{}': {e}", record.display_name))?;
+        // Fetch the retained head first so the rebuilt event can supersede it:
+        // build at the default `now` and a future-dated head (clock skew, or an
+        // interactive same-second `max(now, head+1)` bump) would make
+        // `retain_event`'s `created_at >= ...` guard SILENTLY skip the UPDATE
+        // while `migrated` over-reports. Mirror the interactive sites' monotonic
+        // bump (F1) so a changed body always lands.
+        let existing = get_retained_event(&conn, KIND_PERSONA, &pubkey, &d_tag)?;
 
-        let event = builder
+        let event = build_persona_event(record)
+            .map_err(|e| format!("failed to build event for '{}': {e}", record.display_name))?
+            .custom_created_at(monotonic_created_at(
+                existing.as_ref().map(|row| row.created_at),
+            ))
             .sign_with_keys(keys)
             .map_err(|e| format!("failed to sign event for '{}': {e}", record.display_name))?;
 
         // Per-coordinate reconcile: skip when an identical body is already
         // retained, so an unchanged persona doesn't reset `pending_sync`.
+        // Content is timestamp-independent, so the monotonic bump above never
+        // forces a spurious republish.
         let event_content = event.content.to_string();
-        if let Some(existing) = get_retained_event(&conn, KIND_PERSONA, &pubkey, &d_tag)? {
-            if existing.content == event_content {
-                continue;
-            }
+        if existing
+            .as_ref()
+            .is_some_and(|row| row.content == event_content)
+        {
+            continue;
         }
 
         let retained = RetainedEvent {
@@ -1289,6 +1301,9 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
             pending_sync: true,
         };
 
+        // The monotonic bump guarantees `created_at > head`, so the upsert's
+        // `>=` guard always lands the UPDATE — `migrated` counts only real,
+        // retained republishes.
         retain_event(&conn, &retained)
             .map_err(|e| format!("failed to retain '{}': {e}", record.display_name))?;
         migrated += 1;
@@ -1332,6 +1347,7 @@ pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
 /// unchanged team is skipped so a launch does not churn `pending_sync`.
 fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
     use crate::managed_agents::{
+        persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
         team_events::build_team_event,
         TeamRecord,
@@ -1371,18 +1387,24 @@ fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, Stri
         // Team d-tag is the team id (team_events.rs: no slug fallback).
         let d_tag = record.id.clone();
 
-        let builder = build_team_event(record)
-            .map_err(|e| format!("failed to build event for team '{}': {e}", record.name))?;
+        // Fetch the head first so the monotonic bump can supersede a
+        // future-dated head — see migrate_personas_in_dir (F1/F8).
+        let existing = get_retained_event(&conn, KIND_TEAM, &pubkey, &d_tag)?;
 
-        let event = builder
+        let event = build_team_event(record)
+            .map_err(|e| format!("failed to build event for team '{}': {e}", record.name))?
+            .custom_created_at(monotonic_created_at(
+                existing.as_ref().map(|row| row.created_at),
+            ))
             .sign_with_keys(keys)
             .map_err(|e| format!("failed to sign event for team '{}': {e}", record.name))?;
 
         let event_content = event.content.to_string();
-        if let Some(existing) = get_retained_event(&conn, KIND_TEAM, &pubkey, &d_tag)? {
-            if existing.content == event_content {
-                continue;
-            }
+        if existing
+            .as_ref()
+            .is_some_and(|row| row.content == event_content)
+        {
+            continue;
         }
 
         let retained = RetainedEvent {
@@ -1395,6 +1417,8 @@ fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, Stri
             pending_sync: true,
         };
 
+        // Monotonic bump guarantees the upsert UPDATE lands — `migrated` counts
+        // only real republishes.
         retain_event(&conn, &retained)
             .map_err(|e| format!("failed to retain team '{}': {e}", record.name))?;
         migrated += 1;

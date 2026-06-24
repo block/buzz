@@ -43,21 +43,27 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
     use crate::managed_agents::{
         managed_agents_base_dir,
-        retention::{open_retention_db, retain_event, RetainedEvent},
+        persona_events::monotonic_created_at,
+        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
         team_events::build_team_event,
     };
     use buzz_core_pkg::kind::KIND_TEAM;
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
         let (pubkey, event) = {
             let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let pubkey = keys.public_key().to_hex();
+            // Monotonic created_at: bump past the retained head (NIP-AP step 3).
+            let prior =
+                get_retained_event(&conn, KIND_TEAM, &pubkey, &team.id)?.map(|row| row.created_at);
             let event = build_team_event(team)?
+                .custom_created_at(monotonic_created_at(prior))
                 .sign_with_keys(&keys)
                 .map_err(|e| format!("failed to sign team event: {e}"))?;
-            (keys.public_key().to_hex(), event)
+            (pubkey, event)
         };
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
         retain_event(
             &conn,
             &RetainedEvent {
@@ -88,7 +94,10 @@ fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
 fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
     use crate::managed_agents::{
         managed_agents_base_dir,
-        retention::{delete_retained_event, open_retention_db, retain_event, RetainedEvent},
+        retention::{
+            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
+            RetainedEvent,
+        },
         team_events::build_team_delete,
     };
     use buzz_core_pkg::kind::KIND_TEAM;
@@ -112,7 +121,9 @@ fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
             &RetainedEvent {
                 kind: KIND_DELETE,
                 pubkey,
-                d_tag: d_tag.to_string(),
+                // Key by the target coordinate so cross-kind d-tag tombstones
+                // occupy distinct rows (F2c).
+                d_tag: tombstone_retention_d_tag(KIND_TEAM, d_tag),
                 content: event.content.to_string(),
                 created_at: event.created_at.as_secs() as i64,
                 raw_event: event.as_json(),
@@ -212,11 +223,16 @@ pub fn delete_team(id: String, app: AppHandle, state: State<'_, AppState>) -> Re
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    delete_team_with_cascade(&app, &id)?;
+    let cascaded_persona_d_tags = delete_team_with_cascade(&app, &id)?;
     // delete_team_with_cascade rejects built-in teams via validate_team_deletion,
     // so reaching here means this team was owner-published — tombstone it. The
     // d_tag is the team id, captured before the record left the store.
     tombstone_team_pending(&app, &state, &id);
+    // Tombstone the cascaded personas too, so their orphaned kind:30175 heads
+    // don't linger on the relay (F4). Each d-tag was captured pre-removal.
+    for persona_d_tag in &cascaded_persona_d_tags {
+        super::personas::tombstone_persona_pending(&app, &state, persona_d_tag);
+    }
     try_regenerate_nest(&app);
     Ok(())
 }

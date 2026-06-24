@@ -34,7 +34,7 @@ const overrides = new Map([
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the
   // rebase, queued to split with the rest of this list.
-  ["src-tauri/src/commands/agents.rs", 1325],
+  ["src-tauri/src/commands/agents.rs", 1350],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
@@ -45,13 +45,15 @@ const overrides = new Map([
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup.
-  ["src-tauri/src/managed_agents/runtime.rs", 1998],
+  ["src-tauri/src/managed_agents/runtime.rs", 2001],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
-  // Phase-2 inbound reconcile: reconcile_inbound_persona_event now dispatches
-  // 30176 (team) + 30177 (managed-agent) inbound alongside 30175, plus the two
-  // apply_inbound_* functions and their preserve/overwrite + secret-injection
-  // test coverage. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/commands/personas.rs", 1086],
+  // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
+  // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
+  // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
+  // event_d_tag/parse_deletion_coordinate helpers, and the preserve/overwrite +
+  // secret-injection + tombstone test coverage. Load-bearing feature growth,
+  // queued to split with the list.
+  ["src-tauri/src/commands/personas.rs", 1271],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
@@ -70,15 +72,15 @@ const overrides = new Map([
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
   // generic debt growth. Approved override; still queued to split.
-  ["src-tauri/src/migration_tests.rs", 1256],
+  ["src-tauri/src/migration_tests.rs", 1410],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
-  ["src-tauri/src/migration.rs", 1420],
+  ["src-tauri/src/migration.rs", 1449],
   // persona-events rebase: boot-time event-sync wiring (run_boot_migrations
   // syncs team-dir edits before all personas.json readers; run_event_sync
   // signs the persona/team retention events post-identity) layered on top of
   // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1025],
+  ["src-tauri/src/lib.rs", 1026],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -87,7 +89,7 @@ const overrides = new Map([
   // useDueReminderBadgeCount hook call + sum to wire due-reminder count into
   // the Inbox nav badge — a small overage from load-bearing badge plumbing,
   // not generic debt growth. Approved override; still queued to split.
-  ["src/app/AppShell.tsx", 1008],
+  ["src/app/AppShell.tsx", 1010],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at

@@ -51,6 +51,19 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Build the retention `d_tag` column value for a kind:5 tombstone row.
+///
+/// Tombstones for all target kinds share `kind = 5` in the retention table, so
+/// keying a tombstone by the bare target d-tag would collide across kinds when
+/// a persona slug, team id, and agent pubkey happen to coincide — one
+/// tombstone row would clobber another's pending publish. Folding the target
+/// kind into the key (`"<target_kind>:<d_tag>"`) gives each its own PK row.
+/// This is the retention-store key only; the published NIP-09 event still
+/// carries the plain `a`-tag coordinate.
+pub fn tombstone_retention_d_tag(target_kind: u32, d_tag: &str) -> String {
+    format!("{target_kind}:{d_tag}")
+}
+
 /// Upsert a persona event into the retention store.
 ///
 /// Only replaces if the new event has a newer or equal `created_at` (NIP-33 semantics).
@@ -330,6 +343,43 @@ mod tests {
         assert_eq!(results[0].d_tag, "test-persona");
         assert_eq!(results[0].created_at, 1000);
         assert!(results[0].pending_sync);
+    }
+
+    #[test]
+    fn tombstone_retention_keys_are_distinct_across_kinds() {
+        // A persona slug, team id, and agent pubkey that all happen to equal
+        // "shared" must occupy DISTINCT kind:5 rows so one tombstone's pending
+        // publish never clobbers another's (F2c).
+        let conn = test_db();
+        for target_kind in [30175u32, 30176, 30177] {
+            retain_event(
+                &conn,
+                &RetainedEvent {
+                    kind: 5,
+                    pubkey: "owner".to_string(),
+                    d_tag: tombstone_retention_d_tag(target_kind, "shared"),
+                    content: String::new(),
+                    created_at: 1000,
+                    raw_event: format!("{{\"k\":{target_kind}}}"),
+                    pending_sync: true,
+                },
+            )
+            .unwrap();
+        }
+        // Three distinct rows survive — no PK collision clobbered any of them.
+        for target_kind in [30175u32, 30176, 30177] {
+            let row = get_retained_event(
+                &conn,
+                5,
+                "owner",
+                &tombstone_retention_d_tag(target_kind, "shared"),
+            )
+            .unwrap();
+            assert!(
+                row.is_some(),
+                "tombstone for kind {target_kind} was clobbered"
+            );
+        }
     }
 
     #[test]

@@ -115,7 +115,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
 /// Persona definition event published by the workspace owner. Addressed by
 /// `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
 /// Content is a JSON body containing persona fields (system_prompt,
-/// display_name, avatar_url, runtime, model, provider, name_pool, env_vars).
+/// display_name, avatar_url, runtime, model, provider, name_pool).
 /// Designed for discoverability and sharing — d-tag is not blinded.
 pub const KIND_PERSONA: u32 = 30175;
 

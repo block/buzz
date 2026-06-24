@@ -47,33 +47,39 @@ pub(super) fn retain_managed_agent_pending(
     record: &ManagedAgentRecord,
 ) {
     use crate::managed_agents::{
-        agent_events::build_agent_event,
+        agent_events::{agent_event_content, build_agent_event},
+        persona_events::monotonic_created_at,
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
     };
     use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
     use nostr::JsonUtil;
 
     let result = (|| -> Result<(), String> {
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        // The published content is the opt-IN projection JSON, independent of
+        // signing and created_at. Compute it once to drive the no-republish
+        // guard without signing twice.
+        let content = serde_json::to_string(&agent_event_content(record))
+            .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
         let (owner_pubkey, event) = {
             let keys = state.keys.lock().map_err(|e| e.to_string())?;
-            let event = build_agent_event(record)?
-                .sign_with_keys(&keys)
-                .map_err(|e| format!("failed to sign managed-agent event: {e}"))?;
-            (keys.public_key().to_hex(), event)
-        };
-        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
-        // Skip re-publishing when the projection is unchanged: compare the new
-        // event's content (the opt-IN projection JSON) against the retained
-        // row's. A start/stop or any edit that touched only excluded
-        // runtime/local fields produces an identical projection, so it is a
-        // no-op here — operational churn never re-enqueues a publish.
-        if let Some(existing) =
-            get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?
-        {
-            if existing.content == event.content.as_str() {
+            let owner_pubkey = keys.public_key().to_hex();
+            let existing =
+                get_retained_event(&conn, KIND_MANAGED_AGENT, &owner_pubkey, &record.pubkey)?;
+            // Skip re-publishing when the projection is unchanged: a start/stop
+            // or any edit that touched only excluded runtime/local fields
+            // produces an identical projection, so it is a no-op — operational
+            // churn never re-enqueues a publish.
+            if existing.as_ref().is_some_and(|row| row.content == content) {
                 return Ok(());
             }
-        }
+            // Monotonic created_at: bump past the retained head (NIP-AP step 3).
+            let event = build_agent_event(record)?
+                .custom_created_at(monotonic_created_at(existing.map(|row| row.created_at)))
+                .sign_with_keys(&keys)
+                .map_err(|e| format!("failed to sign managed-agent event: {e}"))?;
+            (owner_pubkey, event)
+        };
         retain_event(
             &conn,
             &RetainedEvent {
@@ -106,7 +112,10 @@ pub(super) fn retain_managed_agent_pending(
 fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubkey: &str) {
     use crate::managed_agents::{
         agent_events::build_agent_delete,
-        retention::{delete_retained_event, open_retention_db, retain_event, RetainedEvent},
+        retention::{
+            delete_retained_event, open_retention_db, retain_event, tombstone_retention_d_tag,
+            RetainedEvent,
+        },
     };
     use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
     use nostr::JsonUtil;
@@ -129,7 +138,9 @@ fn tombstone_managed_agent_pending(app: &AppHandle, state: &AppState, agent_pubk
             &RetainedEvent {
                 kind: KIND_DELETE,
                 pubkey: owner_pubkey,
-                d_tag: agent_pubkey.to_string(),
+                // Key by the target coordinate so cross-kind d-tag tombstones
+                // occupy distinct rows (F2c).
+                d_tag: tombstone_retention_d_tag(KIND_MANAGED_AGENT, agent_pubkey),
                 content: event.content.to_string(),
                 created_at: event.created_at.as_secs() as i64,
                 raw_event: event.as_json(),

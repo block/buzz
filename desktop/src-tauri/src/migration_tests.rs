@@ -1283,3 +1283,127 @@ fn migrate_personas_no_file_is_noop() {
     let keys = nostr::Keys::generate();
     assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
 }
+
+/// F8: a future-dated retained head must be SUPERSEDED on a changed-content
+/// migration, not silently skipped by `retain_event`'s `>=` guard. Without the
+/// monotonic `created_at` bump the rebuilt event lands at `now <= head`, the
+/// upsert's `WHERE excluded.created_at >= ...` drops the UPDATE, and `migrated`
+/// over-reports. The bump (max(now, head+1)) guarantees supersession.
+#[test]
+fn migrate_personas_supersedes_future_dated_head() {
+    use crate::managed_agents::retention::{
+        get_retained_event, open_retention_db, retain_event, RetainedEvent,
+    };
+    use buzz_core_pkg::kind::KIND_PERSONA;
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    // First migrate retains the persona at ~now.
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    // Force the retained head far into the future, simulating a clock-skewed or
+    // same-second `max(now, head+1)` interactive bump.
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let head = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    let future = nostr::Timestamp::now().as_secs() as i64 + 100_000;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            created_at: future,
+            pending_sync: false,
+            ..head
+        },
+    )
+    .unwrap();
+
+    // Change the persona body on disk, then migrate again.
+    let mut edited = one_persona();
+    edited.as_array_mut().unwrap()[0]["system_prompt"] =
+        serde_json::json!("You review code very carefully.");
+    write_base_personas(base.path(), &edited);
+
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).unwrap(),
+        1,
+        "changed content over a future-dated head must report a real migration"
+    );
+
+    let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    // The new body actually landed (not silently skipped) ...
+    assert!(
+        row.content.contains("very carefully"),
+        "changed body must supersede the future-dated head, not be dropped"
+    );
+    // ... at a created_at strictly past the future head (monotonic bump) ...
+    assert_eq!(row.created_at, future + 1);
+    // ... and is queued for republish.
+    assert!(row.pending_sync, "superseding row must be pending_sync");
+}
+
+fn write_base_teams(base_dir: &Path, records: &serde_json::Value) {
+    std::fs::write(
+        base_dir.join("teams.json"),
+        serde_json::to_string_pretty(records).unwrap(),
+    )
+    .unwrap();
+}
+
+/// F8 for the team migration site — same supersede guarantee as personas.
+#[test]
+fn migrate_teams_supersedes_future_dated_head() {
+    use crate::managed_agents::retention::{
+        get_retained_event, open_retention_db, retain_event, RetainedEvent,
+    };
+    use buzz_core_pkg::kind::KIND_TEAM;
+
+    let base = tempfile::tempdir().unwrap();
+    let team = serde_json::json!([{
+        "id": "my-team",
+        "name": "My Team",
+        "description": "first",
+        "persona_ids": ["code-reviewer"],
+        "is_builtin": false,
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+    }]);
+    write_base_teams(base.path(), &team);
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let head = get_retained_event(&conn, KIND_TEAM, &pubkey, "my-team")
+        .unwrap()
+        .unwrap();
+    let future = nostr::Timestamp::now().as_secs() as i64 + 100_000;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            created_at: future,
+            pending_sync: false,
+            ..head
+        },
+    )
+    .unwrap();
+
+    let mut edited = team.clone();
+    edited.as_array_mut().unwrap()[0]["description"] = serde_json::json!("second");
+    write_base_teams(base.path(), &edited);
+
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let row = get_retained_event(&conn, KIND_TEAM, &pubkey, "my-team")
+        .unwrap()
+        .unwrap();
+    assert!(row.content.contains("second"));
+    assert_eq!(row.created_at, future + 1);
+    assert!(row.pending_sync);
+}

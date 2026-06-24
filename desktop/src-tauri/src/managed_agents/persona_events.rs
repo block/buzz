@@ -13,12 +13,19 @@ use super::PersonaRecord;
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
+///
+/// Field order MUST match the NIP-AP reference vectors (`docs/nips/NIP-AP.md`
+/// content body: `display_name, system_prompt, avatar_url, runtime, model,
+/// provider, name_pool`). serde emits fields in declaration order, so this
+/// order pins the exact content bytes and therefore the NIP-01 event id — a
+/// reorder here breaks cross-implementation interop. Guarded by
+/// `content_matches_nip_ap_vector`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
+    pub system_prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
-    pub system_prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,13 +38,78 @@ pub struct PersonaEventContent {
 
 /// Derive the d-tag (persona slug) from a `PersonaRecord`.
 ///
-/// Uses `source_team_persona_slug` if available, otherwise falls back to `id`.
+/// Uses `source_team_persona_slug` if available, otherwise falls back to `id`,
+/// then normalizes to the NIP-AP slug grammar (`^[a-z0-9][a-z0-9_-]{0,63}$`,
+/// `docs/nips/NIP-AP.md:27`) via [`normalize_d_tag`]. Team pack slugs are
+/// `[a-zA-Z0-9_-]+` (mixed case, may lead with `_`/`-`), so an un-normalized
+/// slug like `CodeReviewer` or `_ops` is signed locally but REJECTED by the
+/// relay's identical grammar — pending forever. In-app personas use a
+/// lowercase-hex UUID `id` that is already valid, so they are unaffected.
+///
+/// Both the outbound publish and the inbound match key route through this fn,
+/// so the normalized value is consistent in both directions and cannot drift.
 pub fn persona_d_tag(record: &PersonaRecord) -> String {
-    record
+    let raw = record
         .source_team_persona_slug
         .as_deref()
-        .unwrap_or(&record.id)
-        .to_string()
+        .unwrap_or(&record.id);
+    normalize_d_tag(raw)
+}
+
+/// Normalize a raw slug to the NIP-AP grammar `^[a-z0-9][a-z0-9_-]{0,63}$`.
+///
+/// - ASCII-lowercase every char (pack slugs are `[a-zA-Z0-9_-]+`, so this is
+///   the only transform uppercase slugs need).
+/// - Map any char outside `[a-z0-9_-]` to `-` (defensive; pack slugs never
+///   contain such chars, but `id` fallbacks and future inputs might).
+/// - If the first char is not `[a-z0-9]` (i.e. a leading `_`/`-`), prepend `a`
+///   rather than trimming — trimming `_ops`→`ops` would collide with a real
+///   `ops` pack, whereas the prefix keeps distinct inputs distinct.
+/// - Truncate to 64 bytes (the grammar's max).
+///
+/// The transform is deterministic. It is NOT globally injective (`A-b` and
+/// `a_b` both contain only safe chars and stay distinct, but two slugs
+/// differing only in case — e.g. `Ops` and `ops` — collapse to the same
+/// d-tag). That case-fold collision is inherent to the lowercase relay grammar
+/// and is the correct NIP-33 behavior: same logical persona, one coordinate.
+fn normalize_d_tag(raw: &str) -> String {
+    let mut out: String = raw
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if !out
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        out.insert(0, 'a');
+    }
+    out.truncate(64);
+    out
+}
+
+/// Compute the NIP-AP monotonic `created_at` for a write (`docs/nips/NIP-AP.md:117`
+/// step 3): `max(now, T + 1)` where `T` is the retained head's `created_at`
+/// (or 0 when no head exists).
+///
+/// NIP-33 keeps the greatest `created_at` per coordinate, breaking ties by
+/// lowest event id. The local retention upsert (`retain_event`) replaces on
+/// `>=`, so without this bump a same-second second edit is kept LOCALLY while
+/// the relay's lowest-id tiebreak may keep the OLDER event — divergence, and
+/// the flush can mark the local row synced against a head the relay rejected.
+/// Bumping past the head guarantees a fresh write always supersedes regardless
+/// of clock skew.
+pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timestamp {
+    let now = nostr::Timestamp::now().as_secs() as i64;
+    let floor = prior_head_created_at.map_or(0, |t| t + 1);
+    nostr::Timestamp::from(now.max(floor) as u64)
 }
 
 /// Build a kind:30175 event from a `PersonaRecord`.
@@ -282,6 +354,28 @@ mod tests {
     }
 
     #[test]
+    fn monotonic_created_at_bumps_past_head() {
+        // No head: uses now (floor 0).
+        let now = nostr::Timestamp::now().as_secs() as i64;
+        let none = monotonic_created_at(None).as_secs() as i64;
+        assert!(none >= now, "no-head write must be >= now");
+
+        // Head in the FUTURE (same-second or clock-skewed): must bump to head+1,
+        // never reuse now (which would be <= head and lose the NIP-33 tiebreak).
+        let future_head = now + 1000;
+        let bumped = monotonic_created_at(Some(future_head)).as_secs() as i64;
+        assert_eq!(
+            bumped,
+            future_head + 1,
+            "must supersede a future head by +1"
+        );
+
+        // Head in the PAST: now already exceeds it, so now wins.
+        let past = monotonic_created_at(Some(now - 1000)).as_secs() as i64;
+        assert!(past >= now, "past head must not drag created_at backward");
+    }
+
+    #[test]
     fn d_tag_uses_slug_when_available() {
         let record = sample_persona();
         assert_eq!(persona_d_tag(&record), "test-slug");
@@ -292,6 +386,52 @@ mod tests {
         let mut record = sample_persona();
         record.source_team_persona_slug = None;
         assert_eq!(persona_d_tag(&record), "test-persona");
+    }
+
+    /// Mirror of the relay slug grammar (`ingest.rs:923` `^[a-z0-9][a-z0-9_-]{0,63}$`)
+    /// so the normalization tests assert what the relay actually enforces.
+    fn passes_relay_slug_grammar(d: &str) -> bool {
+        let bytes = d.as_bytes();
+        !d.is_empty()
+            && d.len() <= 64
+            && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+            && bytes[1..]
+                .iter()
+                .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    }
+
+    #[test]
+    fn d_tag_normalizes_pack_slug_to_relay_grammar() {
+        // The cited failing cases: mixed-case and leading-underscore pack slugs
+        // that the relay rejects un-normalized → pending forever.
+        for (raw, expected) in [
+            ("CodeReviewer", "codereviewer"),
+            ("_ops", "a_ops"),
+            ("Code-Reviewer", "code-reviewer"),
+            ("UPPER_snake", "upper_snake"),
+            ("-leading-dash", "a-leading-dash"),
+        ] {
+            let mut record = sample_persona();
+            record.source_team_persona_slug = Some(raw.to_string());
+            let d = persona_d_tag(&record);
+            assert_eq!(d, expected, "normalization of {raw:?}");
+            assert!(
+                passes_relay_slug_grammar(&d),
+                "normalized {raw:?} -> {d:?} still fails the relay grammar"
+            );
+        }
+    }
+
+    #[test]
+    fn d_tag_already_valid_slug_is_unchanged() {
+        // In-app personas use a lowercase-hex UUID id — already valid, must pass
+        // through untouched (no spurious coordinate change on existing data).
+        let mut record = sample_persona();
+        record.source_team_persona_slug = None;
+        record.id = "11111111-2222-3333-4444-555555555555".to_string();
+        let d = persona_d_tag(&record);
+        assert_eq!(d, "11111111-2222-3333-4444-555555555555");
+        assert!(passes_relay_slug_grammar(&d));
     }
 
     #[test]
@@ -331,6 +471,59 @@ mod tests {
         );
         assert!(!restored.is_builtin);
         assert!(restored.is_active);
+    }
+
+    /// NIP-AP reference vector (Event 1, `docs/nips/NIP-AP.md:195-207`): the
+    /// serialized content bytes MUST match the spec exactly, byte-for-byte.
+    /// serde emits fields in declaration order, so this pins the content
+    /// encoding — and therefore the NIP-01 event id — for cross-implementation
+    /// interop. The field order is `display_name, system_prompt, avatar_url,
+    /// runtime, model, provider, name_pool`.
+    #[test]
+    fn content_matches_nip_ap_vector() {
+        // Exact body from NIP-AP.md Event 1 (no trailing whitespace, no BOM).
+        const VECTOR: &str = r#"{"display_name":"Test Agent","system_prompt":"You are a test assistant.","avatar_url":"https://example.com/avatar.png","runtime":"goose","model":"claude-opus-4","provider":"anthropic","name_pool":["Alpha","Beta"]}"#;
+
+        let content = PersonaEventContent {
+            display_name: "Test Agent".to_string(),
+            system_prompt: "You are a test assistant.".to_string(),
+            avatar_url: Some("https://example.com/avatar.png".to_string()),
+            runtime: Some("goose".to_string()),
+            model: Some("claude-opus-4".to_string()),
+            provider: Some("anthropic".to_string()),
+            name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
+        };
+        assert_eq!(
+            serde_json::to_string(&content).unwrap(),
+            VECTOR,
+            "serialized content drifted from the NIP-AP Event 1 vector"
+        );
+
+        // An event built from this content carries the byte-exact vector as its
+        // signed content, so a second implementer following the spec computes
+        // the same NIP-01 id.
+        let record = PersonaRecord {
+            id: "test-agent".to_string(),
+            display_name: "Test Agent".to_string(),
+            avatar_url: Some("https://example.com/avatar.png".to_string()),
+            system_prompt: "You are a test assistant.".to_string(),
+            runtime: Some("goose".to_string()),
+            model: Some("claude-opus-4".to_string()),
+            provider: Some("anthropic".to_string()),
+            name_pool: vec!["Alpha".to_string(), "Beta".to_string()],
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: BTreeMap::new(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let event = build_persona_event(&record)
+            .unwrap()
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert_eq!(event.content, VECTOR);
     }
 
     #[test]
