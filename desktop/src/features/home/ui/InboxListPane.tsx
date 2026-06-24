@@ -173,7 +173,7 @@ export function InboxListPane({
       >
         <button
           className={cn(
-            "relative block w-full border-l px-3 py-4 text-left transition-colors after:pointer-events-none after:absolute after:bottom-0 after:left-[3.375rem] after:right-0 after:h-px after:bg-border/45 after:content-['']",
+            "relative block w-full border-l px-3 py-4 text-left transition-colors after:pointer-events-none after:absolute after:bottom-0 after:left-[3.625rem] after:right-0 after:h-px after:bg-border/45 after:content-['']",
             isSelected
               ? "border-l-transparent bg-[var(--inbox-row-highlight-bg)]"
               : "border-l-transparent group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] active:bg-muted/40",
@@ -186,7 +186,7 @@ export function InboxListPane({
             <div className="relative shrink-0">
               <UserAvatar
                 avatarUrl={item.avatarUrl}
-                className="h-8 w-8"
+                className="h-9 w-9"
                 displayName={item.senderLabel}
                 size="md"
               />

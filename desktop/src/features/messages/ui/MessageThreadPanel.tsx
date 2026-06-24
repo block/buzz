@@ -98,7 +98,7 @@ type MessageThreadPanelProps = {
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
 const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";
-const THREAD_PANEL_SUMMARY_INDENT_OFFSET_PX = -2;
+const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = -0.125;
 
 type MessageThreadPanelSkeletonProps = {
   isSinglePanelView?: boolean;
@@ -696,7 +696,9 @@ export function MessageThreadPanel({
                   message={threadHead}
                   onOpenThread={expandThreadHeadReplies}
                   summary={visibleThreadHeadSummary}
-                  summaryIndentOffsetPx={THREAD_PANEL_SUMMARY_INDENT_OFFSET_PX}
+                  summaryIndentOffsetRem={
+                    THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM
+                  }
                   unreadCount={threadUnreadCount}
                 />
               </div>
@@ -820,8 +822,8 @@ export function MessageThreadPanel({
                           }
                           onOpenThread={onExpandReplies}
                           summary={entry.summary}
-                          summaryIndentOffsetPx={
-                            THREAD_PANEL_SUMMARY_INDENT_OFFSET_PX
+                          summaryIndentOffsetRem={
+                            THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM
                           }
                           showDepthGuides={shouldShowThreadBranchGuides}
                           unreadCount={threadReplyUnreadCounts?.get(

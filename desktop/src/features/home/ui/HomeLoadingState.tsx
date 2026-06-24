@@ -22,7 +22,7 @@ export function HomeLoadingState() {
                 key={row}
               >
                 <div className="relative shrink-0">
-                  <Skeleton className="h-8 w-8 rounded-full" />
+                  <Skeleton className="h-9 w-9 rounded-full" />
                   {row === "first" || row === "third" ? (
                     <Skeleton className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full" />
                   ) : null}
@@ -71,7 +71,7 @@ export function HomeLoadingState() {
                   <div className="mx-1 mb-3 border-t border-border/60" />
                 ) : null}
                 <article className="relative flex items-start gap-2.5">
-                  <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
+                  <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0">
                       <Skeleton className="h-4 w-24" />

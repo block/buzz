@@ -8,10 +8,11 @@ import type { TimelineMessage } from "@/features/messages/types";
 import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import {
-  getThreadReplyAvatarCenterPx,
-  getThreadReplyIndentPx,
-  THREAD_REPLY_BODY_OFFSET_PX,
-  THREAD_REPLY_LINE_WIDTH_PX,
+  getThreadReplyAvatarCenterRem,
+  getThreadReplyIndentRem,
+  threadReplyLength,
+  THREAD_REPLY_BODY_OFFSET_REM,
+  THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -59,7 +60,7 @@ export function MessageThreadSummaryRow({
   onOpenThread,
   showDepthGuides = true,
   summary,
-  summaryIndentOffsetPx = 0,
+  summaryIndentOffsetRem = 0,
   unreadCount,
 }: {
   collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
@@ -75,12 +76,12 @@ export function MessageThreadSummaryRow({
   onOpenThread: (message: TimelineMessage) => void;
   showDepthGuides?: boolean;
   summary: TimelineThreadSummary;
-  summaryIndentOffsetPx?: number;
+  summaryIndentOffsetRem?: number;
   unreadCount?: number;
 }) {
-  const indentPx = getThreadReplyIndentPx(depth);
-  const marginLeftPx =
-    indentPx + THREAD_REPLY_BODY_OFFSET_PX + summaryIndentOffsetPx;
+  const indentRem = getThreadReplyIndentRem(depth);
+  const marginLeftRem =
+    indentRem + THREAD_REPLY_BODY_OFFSET_REM + summaryIndentOffsetRem;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
   const summaryAriaLabel = summary.lastReplyAt
     ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
@@ -90,7 +91,7 @@ export function MessageThreadSummaryRow({
     : Array.from({ length: depth }, (_, index) => index);
   const depthGuideItems = guideDepths.map((guideDepth) => ({
     depth: guideDepth,
-    offset: getThreadReplyAvatarCenterPx(guideDepth),
+    offset: getThreadReplyAvatarCenterRem(guideDepth),
   }));
   const collapseDepthGuideActionsByDepth = new Map(
     collapseDepthGuideActions?.map((action) => [action.depth, action]) ?? [],
@@ -108,7 +109,7 @@ export function MessageThreadSummaryRow({
             collapseDepthGuideActionsByDepth.size === 0 &&
               "pointer-events-none",
           )}
-          style={{ bottom: "-4px", top: "-4px" }}
+          style={{ bottom: "-0.25rem", top: "-0.25rem" }}
         >
           {depthGuideItems.map(({ depth: guideDepth, offset }) => {
             const collapseAction =
@@ -125,11 +126,13 @@ export function MessageThreadSummaryRow({
                     aria-hidden
                     className={cn(
                       "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
-                      isHighlighted ? "border-primary" : "border-border",
+                      isHighlighted ? "border-primary" : "border-border/45",
                     )}
                     style={{
-                      borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-                      left: `${offset}px`,
+                      borderLeftWidth: threadReplyLength(
+                        THREAD_REPLY_LINE_WIDTH_REM,
+                      ),
+                      left: threadReplyLength(offset),
                     }}
                   />
                   <button
@@ -166,7 +169,7 @@ export function MessageThreadSummaryRow({
                         false,
                       )
                     }
-                    style={{ left: `${offset}px` }}
+                    style={{ left: threadReplyLength(offset) }}
                     type="button"
                   />
                 </React.Fragment>
@@ -178,12 +181,14 @@ export function MessageThreadSummaryRow({
                 aria-hidden
                 className={cn(
                   "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
-                  isHighlighted ? "border-primary" : "border-border",
+                  isHighlighted ? "border-primary" : "border-border/45",
                 )}
                 key={`${message.id}-summary-depth-guide-${offset}`}
                 style={{
-                  borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-                  left: `${offset}px`,
+                  borderLeftWidth: threadReplyLength(
+                    THREAD_REPLY_LINE_WIDTH_REM,
+                  ),
+                  left: threadReplyLength(offset),
                 }}
               />
             );
@@ -197,7 +202,7 @@ export function MessageThreadSummaryRow({
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
-        style={{ marginLeft: `${marginLeftPx}px` }}
+        style={{ marginLeft: threadReplyLength(marginLeftRem) }}
         type="button"
       >
         <div className="ml-0.5 flex shrink-0 items-center">

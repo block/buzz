@@ -11,7 +11,7 @@ type UserAvatarSize = "xs" | "sm" | "md";
 const sizeClasses: Record<UserAvatarSize, string> = {
   xs: "h-5 w-5 text-3xs",
   sm: "h-6 w-6 text-2xs",
-  md: "h-10 w-10 text-xs",
+  md: "h-9 w-9 text-xs",
 };
 
 type UserAvatarProps = {
