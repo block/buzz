@@ -419,7 +419,7 @@ export function UserProfilePanel({
       ) : null}
 
       {view === "memories" ? (
-        <MemoryFocusedView agentPubkey={pubkey} isOwner={viewerIsOwner} />
+        <MemoryFocusedView agentPubkey={pubkey} viewerIsOwner={viewerIsOwner} />
       ) : null}
 
       {view === "channels" ? (
