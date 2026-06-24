@@ -228,64 +228,40 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
 
     // Persist each key to the keyring; on success blank the inline copy so it
     // is skipped from JSON (`skip_serializing_if = "String::is_empty"`). If the
-    // keyring is unreachable, the key stays inline and the JSON gets 0o600.
-    let mut any_inline_key = false;
-    persist_agent_keys(&mut sorted, &mut any_inline_key);
+    // keyring is unreachable, the key stays inline.
+    persist_agent_keys(&mut sorted);
 
     let path = managed_agents_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
-    atomic_write_json(&path, &payload)?;
-
-    // The JSON only carries plaintext keys in the keyringless fallback; lock it
-    // down to owner-only in that case.
-    if any_inline_key {
-        restrict_json_permissions(&path);
-    }
-    Ok(())
+    // `managed-agents.json` carries plaintext agent nsecs in the keyringless
+    // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
+    // keyring-backed case (it is the user's own agent store) and closes the
+    // umask window a post-write `chmod` would leave open.
+    atomic_write_json_restricted(&path, &payload)
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy
-/// on success. Sets `any_inline_key` if any key had to stay in the JSON because
-/// the keyring was unreachable. Mutates `records` (a save-local clone) — the
-/// caller's in-memory records keep their keys.
-fn persist_agent_keys(records: &mut [ManagedAgentRecord], any_inline_key: &mut bool) {
+/// on success. Keys that cannot be persisted (keyring unreachable) stay inline
+/// in the JSON. Mutates `records` (a save-local clone) — the caller's in-memory
+/// records keep their keys.
+fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         // No keyring backend: keys stay inline.
-        *any_inline_key = records.iter().any(|r| !r.private_key_nsec.is_empty());
         return;
     };
     for record in records.iter_mut() {
-        match migrate_inline_key(&store, record) {
-            // Verified in the keyring — drop the inline copy so it stays out of
-            // JSON. Safe: this is a save-local clone, callers keep their keys.
-            KeyMigration::Persisted => record.private_key_nsec.clear(),
-            // Only ever returned for a non-empty key — JSON will carry it, so
-            // the file must be locked down.
-            KeyMigration::KeptInline => *any_inline_key = true,
-            // Empty key: nothing inline to carry and nothing to clear. Do not
-            // treat as persisted — there is no verified keyring entry to claim.
-            KeyMigration::Nothing => {}
+        // Only a verified keyring entry lets us drop the inline copy. Both
+        // other outcomes keep the key inline: `KeptInline` (keyring
+        // unreachable) so it is not lost, and `Nothing` (empty key) because
+        // there is no verified entry to claim. This is a save-local clone, so
+        // callers keep their keys regardless.
+        if migrate_inline_key(&store, record) == KeyMigration::Persisted {
+            record.private_key_nsec.clear();
         }
     }
 }
-
-#[cfg(unix)]
-fn restrict_json_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if let Err(e) = std::fs::set_permissions(&resolved, std::fs::Permissions::from_mode(0o600)) {
-        eprintln!(
-            "buzz-desktop: failed to restrict {} permissions: {e}",
-            resolved.display()
-        );
-    }
-}
-
-#[cfg(not(unix))]
-fn restrict_json_permissions(_path: &Path) {}
-
 /// Remove an agent's key from the keyring (best-effort). Called when an agent
 /// is deleted so its secret does not linger in the OS store.
 pub fn delete_agent_key(pubkey: &str) {
@@ -305,6 +281,34 @@ pub(crate) fn atomic_write_json(path: &Path, payload: &[u8]) -> Result<(), Strin
     std::fs::write(&tmp, payload).map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &resolved)
         .map_err(|e| format!("failed to rename {}: {e}", resolved.display()))
+}
+
+/// Atomic, symlink-preserving JSON write that creates the file `0o600` BEFORE
+/// any bytes hit disk — closing the umask window the post-write `chmod` left
+/// open. Used for `managed-agents.json`, which carries plaintext agent nsecs in
+/// the keyringless fallback. Mirrors [`crate::app_state::save_key_file`].
+///
+/// Canonicalizes `path` first so the write lands at the real target, preserving
+/// any symlink at `path` exactly like [`atomic_write_json`].
+pub(crate) fn atomic_write_json_restricted(path: &Path, payload: &[u8]) -> Result<(), String> {
+    use atomic_write_file::AtomicWriteFile;
+
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut file = AtomicWriteFile::open(&resolved)
+        .map_err(|e| format!("open {} for atomic write: {e}", resolved.display()))?;
+
+    // Set owner-only permissions before writing the secret bytes.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("set {} permissions: {e}", resolved.display()))?;
+    }
+
+    file.write_all(payload)
+        .map_err(|e| format!("write {}: {e}", resolved.display()))?;
+    file.commit()
+        .map_err(|e| format!("commit {}: {e}", resolved.display()))
 }
 
 /// Maximum log file size before rotation (10 MB).
@@ -659,6 +663,32 @@ mod tests {
         let mut file = NamedTempFile::new().expect("temp log");
         file.write_all(content.as_bytes()).expect("write log");
         file
+    }
+
+    /// The keyringless fallback write must land `0o600` from the write itself —
+    /// not a post-write `chmod` — so a crash in the umask window can never leave
+    /// plaintext agent nsecs world-readable (Wes storage.rs:239, SECURITY.md:90).
+    #[cfg(unix)]
+    #[test]
+    fn restricted_write_lands_owner_only_without_post_write_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("managed-agents.json");
+
+        super::atomic_write_json_restricted(&path, br#"[{"private_key_nsec":"nsec1secret"}]"#)
+            .expect("restricted write");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "secret-bearing write must be owner-only");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            r#"[{"private_key_nsec":"nsec1secret"}]"#
+        );
     }
 
     #[test]
