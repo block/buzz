@@ -683,6 +683,7 @@ const MessageTimelineBase = React.forwardRef<
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
+                    key={scrollContainerDomKey}
                     agentPubkeys={agentPubkeys}
                     channelId={channelId}
                     channelName={channelName}

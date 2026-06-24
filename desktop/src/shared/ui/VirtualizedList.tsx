@@ -121,7 +121,12 @@ export function VirtualizedList<T>({
     scrollMargin,
   });
 
-  React.useEffect(() => {
+  // Register in a layout effect, not a passive one: when this list remounts on
+  // channel switch the parent's mount-pin runs in a layout effect on the same
+  // commit, and child layout effects fire before parent layout effects. A
+  // passive effect would publish the fresh virtualizer too late and the parent
+  // would pin against the previous channel's stale instance.
+  React.useLayoutEffect(() => {
     onVirtualizer?.(virtualizer);
   }, [onVirtualizer, virtualizer]);
 

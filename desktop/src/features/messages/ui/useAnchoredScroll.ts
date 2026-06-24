@@ -677,6 +677,7 @@ export function useAnchoredScroll({
   // async embed expand, late font load, markdown that expands) silently
   // pushes the reading row around.
   // ---------------------------------------------------------------------------
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on a channel switch the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous channel's detached node and re-observe the live one.
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
@@ -722,7 +723,7 @@ export function useAnchoredScroll({
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [contentRef, scrollContainerRef]);
+  }, [channelId, contentRef, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from
