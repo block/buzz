@@ -347,6 +347,13 @@ export type CreateManagedAgentInput = {
   relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
+  /**
+   * True when `agentCommand` is a runtime the user deliberately picked to
+   * override the linked persona (a deploy-dialog runtime selector). Lets the
+   * backend distinguish a real pin from a missing-runtime fallback. Omit/false
+   * for persona-less creates and fallback divergence — both inherit.
+   */
+  harnessOverride?: boolean;
   agentArgs?: string[];
   mcpCommand?: string;
   turnTimeoutSeconds?: number;

@@ -1007,6 +1007,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
+        harnessOverride: input.harnessOverride ?? false,
         agentArgs: input.agentArgs,
         mcpCommand: input.mcpCommand,
         mcpToolsets: input.mcpToolsets,
