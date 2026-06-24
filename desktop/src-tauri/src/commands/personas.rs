@@ -371,11 +371,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_persona_files_accepts_plain_md_with_avatar_ref() {
+    fn parse_persona_files_carries_opaque_avatar_ref() {
         let md = br#"---
 name: fizz
 display_name: Fizz
-avatar: app-avatar:persona-12
+avatar: https://example.com/avatars/fizz.png
 runtime: goose
 ---
 You are Fizz.
@@ -388,7 +388,7 @@ You are Fizz.
         assert_eq!(result.personas[0].display_name, "Fizz");
         assert_eq!(
             result.personas[0].avatar_ref.as_deref(),
-            Some("app-avatar:persona-12")
+            Some("https://example.com/avatars/fizz.png")
         );
         assert_eq!(result.personas[0].source_file, "fizz.md");
     }

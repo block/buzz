@@ -22,7 +22,6 @@ import type {
   UsersBatchResponse,
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { isGooseAppAvatarRef } from "@/shared/avatars/gooseAppAvatarRefs";
 import { getAvatarSnapshotUrl } from "@/shared/lib/animatedAvatar";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import {
@@ -56,9 +55,7 @@ async function persistSelfProfile(
   profile: Profile,
 ): Promise<void> {
   const existing = readSelfProfileCache(relayUrl, pubkey);
-  const avatarSnapshotUrl = isGooseAppAvatarRef(profile.avatarUrl)
-    ? null
-    : getAvatarSnapshotUrl(profile.avatarUrl);
+  const avatarSnapshotUrl = getAvatarSnapshotUrl(profile.avatarUrl);
   const fetched =
     shouldFetchAvatar(profile.avatarUrl, existing) && avatarSnapshotUrl !== null
       ? await fetchAvatarDataUrl(rewriteRelayUrl(avatarSnapshotUrl))

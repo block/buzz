@@ -404,12 +404,12 @@ fn parse_json_malformed() {
 }
 
 #[test]
-fn parse_md_persona_preserves_app_avatar_ref() {
+fn parse_md_persona_preserves_avatar_ref() {
     let md = br#"---
 name: goosey
 display_name: Goosey
 description: Goose internal agent.
-avatar: app-avatar:persona-19
+avatar: https://example.com/avatars/goosey.png
 model: anthropic:claude-sonnet-4
 runtime: goose
 ---
@@ -418,7 +418,10 @@ You are Goosey.
     let result = parse_md_persona(md).unwrap();
     assert_eq!(result.display_name, "Goosey");
     assert_eq!(result.avatar_data_url, None);
-    assert_eq!(result.avatar_ref.as_deref(), Some("app-avatar:persona-19"));
+    assert_eq!(
+        result.avatar_ref.as_deref(),
+        Some("https://example.com/avatars/goosey.png")
+    );
     assert_eq!(result.model.as_deref(), Some("claude-sonnet-4"));
     assert_eq!(result.provider.as_deref(), Some("anthropic"));
     assert_eq!(result.runtime.as_deref(), Some("goose"));
@@ -446,7 +449,7 @@ fn parse_md_persona_accepts_goose_internal_frontmatter() {
     let md = br#"---
 name: block.md
 description: Opinionated guide to Block's intelligence operating model.
-avatar: app-avatar:persona-19
+avatar: https://avatars.example.com/block-md.png
 metadata:
   gooseInternalBundled: true
 ---
@@ -454,7 +457,10 @@ You are block.md.
 "#;
     let result = parse_md_persona(md).unwrap();
     assert_eq!(result.display_name, "block.md");
-    assert_eq!(result.avatar_ref.as_deref(), Some("app-avatar:persona-19"));
+    assert_eq!(
+        result.avatar_ref.as_deref(),
+        Some("https://avatars.example.com/block-md.png")
+    );
     assert_eq!(result.system_prompt, "You are block.md.\n");
 }
 
@@ -495,7 +501,7 @@ fn parse_zip_with_plain_md_persona_preserves_avatar_ref() {
 name: fizz
 display_name: Fizz
 description: Engineering agent.
-avatar: app-avatar:persona-12
+avatar: https://avatars.example.com/fizz.png
 runtime: goose
 model: anthropic:claude-sonnet-4
 ---
@@ -508,7 +514,7 @@ You are Fizz.
     assert_eq!(result.personas[0].display_name, "Fizz");
     assert_eq!(
         result.personas[0].avatar_ref.as_deref(),
-        Some("app-avatar:persona-12")
+        Some("https://avatars.example.com/fizz.png")
     );
     assert_eq!(result.personas[0].source_file, "fizz.md");
 }

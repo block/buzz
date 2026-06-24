@@ -1,10 +1,35 @@
 import type { ParsePersonaFilesResult } from "@/shared/api/tauriPersonas";
-import { resolveImportedPersonaAvatarUrl } from "@/shared/avatars/gooseAppAvatarRefs";
 import type {
   AgentPersona,
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+
+function isPersistableAvatarUrl(value: string): boolean {
+  return /^(?:https?:|data:image\/|blob:)/i.test(value);
+}
+
+/**
+ * Picks an avatar URL to seed the import dialog with. Only persistable
+ * http(s)/data/blob URLs survive; anything else (e.g. a bare filename or an
+ * unrenderable symbolic ref) is dropped so the dialog starts blank rather than
+ * carrying a value the app can't display.
+ */
+function resolveImportedPersonaAvatarUrl({
+  avatarDataUrl,
+  avatarRef,
+}: {
+  avatarDataUrl?: string | null;
+  avatarRef?: string | null;
+}): string | null {
+  for (const candidate of [avatarRef, avatarDataUrl]) {
+    const trimmed = candidate?.trim();
+    if (trimmed && isPersistableAvatarUrl(trimmed)) {
+      return trimmed;
+    }
+  }
+  return null;
+}
 
 export type PersonaDialogState = {
   description: string;
