@@ -6610,6 +6610,7 @@ export function maybeInstallE2eTauriMocks() {
           agentDefaultModel: null,
           selectedModel: null,
           supportsSwitching: false,
+          configurationError: null,
         };
       case "update_managed_agent":
         return handleUpdateManagedAgent(
