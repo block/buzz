@@ -993,7 +993,6 @@ mod tests {
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: None,
-            avatar_url_cleared: false,
             acp_command: String::new(),
             agent_command: String::new(),
             agent_args: vec![],

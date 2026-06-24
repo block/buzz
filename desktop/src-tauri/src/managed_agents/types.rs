@@ -107,9 +107,6 @@ pub struct ManagedAgentRecord {
     /// `#[serde(default)]` so pre-existing records deserialize as `None`.
     #[serde(default)]
     pub avatar_url: Option<String>,
-    /// True when `avatar_url: None` came from an explicit user clear.
-    #[serde(default)]
-    pub avatar_url_cleared: bool,
     pub acp_command: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
@@ -695,13 +692,7 @@ mod tests {
 
         assert_eq!(record.auth_tag, None);
         assert_eq!(record.avatar_url, None);
-        assert!(!record.avatar_url_cleared);
         assert_eq!(record.pubkey, "abcd1234");
-
-        let mut value = serde_json::to_value(&record).expect("should serialize");
-        value["avatar_url_cleared"] = true.into();
-        let cleared: ManagedAgentRecord = serde_json::from_value(value).unwrap();
-        assert!(cleared.avatar_url_cleared);
     }
 
     /// Agent records WITH an auth_tag round-trip correctly through serde.

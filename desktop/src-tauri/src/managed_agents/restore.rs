@@ -210,11 +210,7 @@ pub async fn restore_managed_agents_on_launch(
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
                         avatar_url: record.avatar_url.clone(),
-                        avatar_url_cleared: record.avatar_url_cleared,
                         auth_tag: record.auth_tag.clone(),
-                        pubkey: record.pubkey.clone(),
-                        agent_command: record.agent_command.clone(),
-                        persona_id: record.persona_id.clone(),
                     },
                 ))
             })
@@ -229,10 +225,7 @@ pub async fn restore_managed_agents_on_launch(
         let reconcile_app = app.clone();
         tauri::async_runtime::spawn(async move {
             let state = reconcile_app.state::<AppState>();
-            if let Err(e) =
-                crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
-                    .await
-            {
+            if let Err(e) = crate::commands::reconcile_agent_profile(&state, &pubkey, &data).await {
                 eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
             }
         });

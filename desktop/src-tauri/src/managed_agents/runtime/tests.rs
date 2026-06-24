@@ -130,7 +130,6 @@ fn fixture(
         auth_tag,
         relay_url: "ws://localhost:3000".into(),
         avatar_url: None,
-        avatar_url_cleared: false,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
         agent_args: vec![],

@@ -30,7 +30,7 @@ const rules = [
 // Do not add to this list; split the file instead. Remove each entry as its
 // file is broken up. Tracked as a follow-up.
 const overrides = new Map([
-  ["src-tauri/src/commands/agents.rs", 1294],
+  ["src-tauri/src/commands/agents.rs", 1110],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
@@ -41,11 +41,6 @@ const overrides = new Map([
   ["src-tauri/src/managed_agents/runtime.rs", 1953],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
-  // avatar_url_cleared flag + app-avatar ref plumbing pushed this over the
-  // 1000-line cap once the branch caught up with main — a small overage from
-  // load-bearing avatar persistence plumbing, not generic debt growth.
-  // Approved override; still queued to split with the rest of this list.
-  ["src-tauri/src/managed_agents/types.rs", 1002],
   // applyWorkspace reposDir parameter threaded through the Tauri invoke for
   // configurable repos_dir — a 3-line overage from load-bearing parameter
   // plumbing, not generic debt growth. Approved override; still queued to split.
