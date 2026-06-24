@@ -279,7 +279,7 @@ async function expectSameLeftInset(
   expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(4);
 }
 
-async function expectIntroBalancedAroundDayDivider(
+async function expectIntroSpacedAboveDayDivider(
   page: import("@playwright/test").Page,
   introTestId: string,
 ) {
@@ -300,14 +300,16 @@ async function expectIntroBalancedAroundDayDivider(
   const gapAboveDivider = dividerBox.y - (introBox.y + introBox.height);
   const gapBelowDivider = messageBox.y - (dividerBox.y + dividerBox.height);
 
-  // The intro is a flex sibling above the timeline, while the day divider and
-  // the first message-row are virtualized items positioned by translateY inside
-  // the scroll container. The intro -> divider gap now spans those two layout
-  // regimes (it includes the wrapper flex gap), so it no longer matches the
-  // divider -> message gap within a pixel. Assert the intended layout instead:
-  // intro, divider, then the first message in reading order, each cleanly
-  // separated with no overlap.
-  expect(gapAboveDivider).toBeGreaterThanOrEqual(0);
+  // The intro is a flex sibling above the timeline; the day divider and first
+  // message-row are virtualized items positioned by translateY inside the
+  // scroll container. The intro -> divider gap is the wrapper flex spacing the
+  // layout controls (8px, stable), so guard THAT with a tight band — a layout
+  // regression that collapses or balloons it fails here. The divider -> message
+  // gap is NOT a layout-spacing contract: virtualized rows are positioned
+  // back-to-back (no inter-item gap), so it is ~0 by construction plus
+  // MessageRow avatar/font render jitter, genuinely variable run-to-run. Assert
+  // only non-overlap on it (reading order: intro, divider, then message).
+  expect(Math.abs(gapAboveDivider - 8)).toBeLessThanOrEqual(2);
   expect(gapBelowDivider).toBeGreaterThanOrEqual(0);
 }
 
@@ -1165,7 +1167,7 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
     "Unread update for the DM",
   );
   await expectSameLeftInset(page, "message-dm-intro", "message-row");
-  await expectIntroBalancedAroundDayDivider(page, "message-dm-intro");
+  await expectIntroSpacedAboveDayDivider(page, "message-dm-intro");
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
 });
 
