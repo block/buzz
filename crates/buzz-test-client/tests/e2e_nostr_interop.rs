@@ -84,12 +84,27 @@ async fn create_test_channel(keys: &Keys) -> String {
 
 /// Send a message via a signed kind:9 event and return the event_id hex.
 async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> String {
+    send_rest_message_at(keys, channel_id, content, None).await
+}
+
+/// Like `send_rest_message` but lets the caller pin `created_at` to a specific
+/// unix-seconds timestamp. Useful when a test needs the recency tiebreak to be
+/// meaningful (the default `Timestamp::now()` collapses all back-to-back sends
+/// onto the same wall-clock second).
+async fn send_rest_message_at(
+    keys: &Keys,
+    channel_id: &str,
+    content: &str,
+    created_at: Option<i64>,
+) -> String {
     let client = reqwest::Client::new();
     let pubkey_hex = keys.public_key().to_hex();
-    let event = EventBuilder::new(Kind::Custom(9), content)
-        .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
-        .sign_with_keys(keys)
-        .unwrap();
+    let mut builder = EventBuilder::new(Kind::Custom(9), content)
+        .tags(vec![Tag::parse(["h", channel_id]).unwrap()]);
+    if let Some(secs) = created_at {
+        builder = builder.custom_created_at(nostr::Timestamp::from(secs as u64));
+    }
+    let event = builder.sign_with_keys(keys).unwrap();
     let resp = client
         .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
@@ -1068,7 +1083,20 @@ async fn test_nip17_gift_wrap_not_searchable() {
 }
 
 /// Send 3 messages with varying relevance to a query, wait for indexing, then search.
-/// Verify: the exact-match message is present in results (relevance-based, not just chronological).
+/// Verify: rank-based ordering — a more-relevant *older* message ranks above a
+/// less-relevant *newer* one, proving the result order is driven by relevance
+/// rather than recency.
+///
+/// Discriminator: **term proximity**. msg1 has the query terms adjacent;
+/// msg3 has the query terms separated by intervening words. Both Postgres
+/// `ts_rank_cd` (cover-density) and Typesense `_text_match` reward adjacency,
+/// so a recency-only ordering would put msg3 first; a rank-based ordering
+/// puts msg1 first.
+///
+/// We deliberately do NOT use term-frequency as the discriminator: Typesense
+/// default `_text_match` does not reward repeated query terms (verified
+/// empirically against the spike collection — repeated and single-occurrence
+/// docs tie). Proximity is the property both backends agree on.
 #[tokio::test]
 #[ignore]
 async fn test_nip50_search_relevance_order() {
@@ -1078,13 +1106,23 @@ async fn test_nip50_search_relevance_order() {
 
     // Unique prefix to isolate this test's messages from other test runs.
     let prefix = uuid::Uuid::new_v4().simple().to_string();
-    let msg1 = format!("{prefix} alpha bravo charlie"); // oldest, exact match
-    let msg2 = format!("{prefix} delta echo foxtrot"); // middle, no match
-    let msg3 = format!("{prefix} alpha bravo"); // newest, partial match
+    // Anchor created_at offsets so msg1 is genuinely older than msg3 in seconds.
+    // Without this, all three sends share the same wall-clock second and
+    // `created_at DESC` becomes a coin flip (heap-scan order on PG, insertion
+    // order on Typesense) — which silently makes the test pass regardless of
+    // rank ordering. Spreading them by 30s each guarantees the recency-only
+    // ordering would put msg3 first, so a passing test really means rank wins.
+    let now = nostr::Timestamp::now().as_secs() as i64;
+    // msg1: oldest, query terms ADJACENT — highest expected rank.
+    let msg1 = format!("{prefix} alpha bravo");
+    // msg2: middle, no overlap with query — should not match at all.
+    let msg2 = format!("{prefix} delta echo foxtrot");
+    // msg3: newest, query terms SEPARATED by filler — lower expected rank.
+    let msg3 = format!("{prefix} alpha xx yy zz bravo");
 
-    let id1 = send_rest_message(&keys, &channel, &msg1).await;
-    send_rest_message(&keys, &channel, &msg2).await;
-    send_rest_message(&keys, &channel, &msg3).await;
+    let id1 = send_rest_message_at(&keys, &channel, &msg1, Some(now - 60)).await;
+    send_rest_message_at(&keys, &channel, &msg2, Some(now - 30)).await;
+    let id3 = send_rest_message_at(&keys, &channel, &msg3, Some(now)).await;
 
     // Wait for Typesense indexing.
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -1092,7 +1130,9 @@ async fn test_nip50_search_relevance_order() {
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     let sid = sub_id("nip50-relevance");
-    let query = format!("{prefix} alpha bravo charlie");
+    // Two-term query; both msg1 and msg3 contain both terms (so both pass the
+    // WHERE / filter), but only msg1 has them adjacent. msg2 has neither term.
+    let query = format!("{prefix} alpha bravo");
     let filter = Filter::new()
         .kind(Kind::Custom(9))
         .search(&query)
@@ -1108,17 +1148,33 @@ async fn test_nip50_search_relevance_order() {
         .await
         .expect("collect until EOSE");
 
-    // Must have at least 1 result.
-    assert!(!events.is_empty(), "expected search results, got none");
-
-    // The FIRST result must be the exact-match message (msg1), not the newer
-    // partial match (msg3). This proves relevance ordering, not chronological.
-    let first = &events[0];
+    // Both msg1 and msg3 must be present — otherwise the test isn't
+    // discriminating ordering, it's just checking presence.
+    let returned_ids: Vec<String> = events.iter().map(|e| e.id.to_hex()).collect();
     assert!(
-        first.id.to_hex() == id1 || first.content.contains("alpha bravo charlie"),
-        "expected exact-match message as FIRST result (relevance order), \
-         but got: '{}'. All results: {:?}",
-        first.content,
+        returned_ids.contains(&id1),
+        "msg1 (adjacent terms) missing from results — query/index parity broken. \
+         All results: {:?}",
+        events.iter().map(|e| &e.content).collect::<Vec<_>>()
+    );
+    assert!(
+        returned_ids.contains(&id3),
+        "msg3 (separated terms) missing from results — query/index parity broken. \
+         All results: {:?}",
+        events.iter().map(|e| &e.content).collect::<Vec<_>>()
+    );
+
+    // The FIRST result must be msg1 (older, adjacent terms), not msg3 (newer,
+    // separated terms). No `|| content.contains(...)` escape hatch — id
+    // equality only. A recency-only ordering would put msg3 first; a
+    // rank-based ordering (ts_rank_cd / _text_match) puts msg1 first.
+    assert_eq!(
+        events[0].id.to_hex(),
+        id1,
+        "expected msg1 (adjacent-term match) as FIRST result via rank ordering, \
+         but got msg id {} content '{}'. All results in order: {:?}",
+        events[0].id.to_hex(),
+        events[0].content,
         events.iter().map(|e| &e.content).collect::<Vec<_>>()
     );
 

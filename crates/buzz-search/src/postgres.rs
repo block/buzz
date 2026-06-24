@@ -16,9 +16,10 @@
 //!                          is present
 //! - `since` / `until`   → `created_at >= … AND created_at <= …`
 //!
-//! Results are ordered by `created_at DESC` — NIP-50 does not require strict
-//! relevance ordering, and chronological ordering is what the existing Buzz
-//! clients expect.
+//! Results are ordered by `ts_rank_cd` (cover-density relevance) when the
+//! query has searchable text, with `created_at DESC` as a tiebreaker. When
+//! the query is empty/`"*"` (no tsquery), ordering falls back to
+//! `created_at DESC` only.
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
@@ -67,13 +68,7 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     // cleaner, but the dynamic shape (optional clauses) is small enough that
     // hand-rolling a query with a stable parameter ordering is more readable
     // and easier to audit.
-    let mut sql = String::from(
-        "SELECT id, pubkey, kind, channel_id, created_at, content, \
-                COUNT(*) OVER () AS total \
-         FROM events \
-         WHERE deleted_at IS NULL",
-    );
-
+    //
     // `simple` matches the tokenizer used by the `content_tsv` generated
     // column in migration 0004. plainto_tsquery treats the input as a plain
     // string (handles spaces, ignores punctuation) — closest analogue to
@@ -81,10 +76,28 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
     let mut binds = Binds::new();
     let q_trim = query.q.trim();
     let has_text = !q_trim.is_empty() && q_trim != "*";
-    if has_text {
-        let q_idx = binds.push_text(q_trim);
+    // Bind the query text first so the rank expression in the SELECT list and
+    // the @@ predicate in WHERE can both reference `$q_idx`. Postgres allows
+    // the same parameter slot to appear multiple times in a single statement.
+    let q_idx = if has_text {
+        Some(binds.push_text(q_trim))
+    } else {
+        None
+    };
+
+    let mut sql = String::from("SELECT id, pubkey, kind, channel_id, created_at, content");
+    if let Some(idx) = q_idx {
+        // `ts_rank_cd` (cover-density rank) rewards documents where the query
+        // terms cluster together — closer match to Typesense's text relevance
+        // than plain `ts_rank`. Returned as `rank REAL`.
         sql.push_str(&format!(
-            " AND content_tsv @@ plainto_tsquery('simple', ${q_idx})"
+            ", ts_rank_cd(content_tsv, plainto_tsquery('simple', ${idx})) AS rank"
+        ));
+    }
+    sql.push_str(", COUNT(*) OVER () AS total FROM events WHERE deleted_at IS NULL");
+    if let Some(idx) = q_idx {
+        sql.push_str(&format!(
+            " AND content_tsv @@ plainto_tsquery('simple', ${idx})"
         ));
     }
 
@@ -120,7 +133,14 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
         sql.push_str(&format!(" AND created_at <= ${idx}"));
     }
 
-    sql.push_str(" ORDER BY created_at DESC");
+    if has_text {
+        // ts_rank_cd-then-recency: relevance dominates, recency breaks ties.
+        sql.push_str(" ORDER BY rank DESC, created_at DESC");
+    } else {
+        // No tsquery → no rank column. Fall back to chronological ordering,
+        // matching the historical Buzz client expectation.
+        sql.push_str(" ORDER BY created_at DESC");
+    }
     let limit_idx = binds.push_i64(per_page);
     sql.push_str(&format!(" LIMIT ${limit_idx}"));
     let offset_idx = binds.push_i64(offset);
@@ -155,10 +175,16 @@ pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, 
             pubkey: hex::encode(&pubkey),
             channel_id: channel_uuid.map(|u| u.to_string()),
             created_at: created_at.timestamp(),
-            // Postgres backend doesn't expose a relevance score on the hit;
-            // ts_rank_cd is available but unused by the consumer (req.rs
-            // ignores `score` entirely). Leave at 0.0 for honesty.
-            score: 0.0,
+            // `rank` is only in the result set when the query had searchable
+            // text; otherwise the SELECT omits the column. ts_rank_cd is
+            // typically <1.0 for short docs and grows with match density;
+            // we surface it raw, matching Typesense's `text_match` shape.
+            // ts_rank_cd returns REAL (f32); widen to the SearchHit::score f64.
+            score: if has_text {
+                row.try_get::<f32, _>("rank").unwrap_or(0.0) as f64
+            } else {
+                0.0
+            },
         });
     }
 
