@@ -79,7 +79,80 @@ pub fn retain_event(conn: &Connection, event: &RetainedEvent) -> Result<(), Stri
     Ok(())
 }
 
+/// Outcome of an inbound retain — whether the local store now reflects the
+/// inbound event, so the caller knows whether to patch `personas.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundOutcome {
+    /// The inbound event was applied (no row, or it was strictly newer than a
+    /// non-conflicting local row). The caller patches the local record store.
+    Applied,
+    /// The inbound event was NOT applied: either it is older than the retained
+    /// row, or it collides at the same `created_at` with a pending local edit.
+    /// The local record store is left untouched and the pending edit republishes.
+    Skipped,
+}
+
+/// Retain an event arriving FROM the relay, resolving it against any local row.
+///
+/// Inbound events are already on the relay, so they are retained with
+/// `pending_sync = 0`. The resolution is deliberately narrower than
+/// [`retain_event`]'s blind newer-or-equal upsert, which would clobber a
+/// pending local edit's `pending_sync` flag and silently drop its publish:
+///
+/// - No local row, or inbound strictly newer (`created_at >`): apply the
+///   inbound event, clearing `pending_sync`. Inbound wins; a stale local edit
+///   the relay already superseded stops republishing instead of looping.
+/// - Equal `created_at`: skip. Nostr time is seconds-granularity, so a pending
+///   local edit and an inbound event can share a timestamp; applying here would
+///   clear `pending_sync` and drop the local publish. Skipping leaves the
+///   pending row intact so the flush republishes and the relay resolves
+///   last-writer-wins. (A re-received echo at equal time is also a no-op.)
+/// - Inbound older: skip — nothing to change.
+pub fn retain_inbound_event(
+    conn: &Connection,
+    event: &RetainedEvent,
+) -> Result<InboundOutcome, String> {
+    let existing = get_retained_event(conn, event.kind, &event.pubkey, &event.d_tag)?;
+
+    let apply = match &existing {
+        None => true,
+        Some(row) if event.created_at > row.created_at => true,
+        // Equal or older: skip. Equal time may collide with a pending local
+        // edit, so we never clear its `pending_sync`; older is stale.
+        Some(_) => false,
+    };
+
+    if !apply {
+        return Ok(InboundOutcome::Skipped);
+    }
+
+    // Inbound is strictly newer (or there was no row): overwrite and clear
+    // `pending_sync`. No upsert guard is needed — the Rust check above already
+    // established that this event wins.
+    conn.execute(
+        "INSERT INTO persona_events (kind, pubkey, d_tag, content, created_at, raw_event, pending_sync)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)
+         ON CONFLICT (kind, pubkey, d_tag) DO UPDATE SET
+            content = excluded.content,
+            created_at = excluded.created_at,
+            raw_event = excluded.raw_event,
+            pending_sync = 0",
+        params![
+            event.kind,
+            event.pubkey,
+            event.d_tag,
+            event.content,
+            event.created_at,
+            event.raw_event,
+        ],
+    )
+    .map_err(|e| format!("failed to retain inbound event: {e}"))?;
+
+    Ok(InboundOutcome::Applied)
+}
+
 /// Load all retained persona events for a given pubkey.
+#[cfg(test)]
 pub fn get_retained_personas(
     conn: &Connection,
     pubkey: &str,
@@ -188,6 +261,7 @@ pub fn delete_retained_event(
 }
 
 /// Check if the retention store has any persona events for the given pubkey.
+#[cfg(test)]
 pub fn has_retained_personas(conn: &Connection, pubkey: &str) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM persona_events WHERE pubkey = ?1)",
@@ -406,5 +480,104 @@ mod tests {
 
         let results = get_retained_personas(&conn, "abc123").unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn inbound_no_local_row_applies() {
+        let conn = test_db();
+        let mut event = sample_event();
+        event.pending_sync = false;
+
+        assert_eq!(
+            retain_inbound_event(&conn, &event).unwrap(),
+            InboundOutcome::Applied
+        );
+
+        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.created_at, 1000);
+        assert!(!row.pending_sync);
+    }
+
+    #[test]
+    fn inbound_equal_second_skips_and_preserves_pending() {
+        let conn = test_db();
+        // Pending local edit at t=1000.
+        let local = sample_event();
+        retain_event(&conn, &local).unwrap();
+
+        // Inbound at the SAME second with different content.
+        let inbound = RetainedEvent {
+            content: r#"{"display_name":"Remote"}"#.to_string(),
+            pending_sync: false,
+            ..sample_event()
+        };
+        assert_eq!(
+            retain_inbound_event(&conn, &inbound).unwrap(),
+            InboundOutcome::Skipped
+        );
+
+        // Local pending row is untouched: flag preserved, content unchanged so
+        // the flush republishes and the relay resolves last-writer-wins.
+        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
+            .unwrap()
+            .unwrap();
+        assert!(row.pending_sync);
+        assert!(row.content.contains("Test"));
+    }
+
+    #[test]
+    fn inbound_strictly_newer_applies_and_clears_pending() {
+        let conn = test_db();
+        // Pending local edit at t=1000.
+        let local = sample_event();
+        retain_event(&conn, &local).unwrap();
+
+        // Inbound strictly newer with different content.
+        let inbound = RetainedEvent {
+            content: r#"{"display_name":"Remote"}"#.to_string(),
+            created_at: 2000,
+            pending_sync: false,
+            ..sample_event()
+        };
+        assert_eq!(
+            retain_inbound_event(&conn, &inbound).unwrap(),
+            InboundOutcome::Applied
+        );
+
+        // Inbound wins: content replaced and pending cleared, so the stale
+        // local edit stops republishing instead of looping.
+        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.created_at, 2000);
+        assert!(!row.pending_sync);
+        assert!(row.content.contains("Remote"));
+    }
+
+    #[test]
+    fn inbound_older_skips() {
+        let conn = test_db();
+        let mut local = sample_event();
+        local.created_at = 2000;
+        retain_event(&conn, &local).unwrap();
+
+        let inbound = RetainedEvent {
+            content: r#"{"display_name":"Stale"}"#.to_string(),
+            created_at: 1000,
+            pending_sync: false,
+            ..sample_event()
+        };
+        assert_eq!(
+            retain_inbound_event(&conn, &inbound).unwrap(),
+            InboundOutcome::Skipped
+        );
+
+        let row = get_retained_event(&conn, 30175, "abc123", "test-persona")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.created_at, 2000);
+        assert!(!row.content.contains("Stale"));
     }
 }

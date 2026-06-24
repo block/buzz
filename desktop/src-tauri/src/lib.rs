@@ -521,19 +521,8 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
 
-            // Copy legacy app data into the Buzz app data directory
-            // before any state is loaded from disk.
-            migration::migrate_legacy_app_data_dir(&app_handle);
-
-            // Sync shared agent data from the canonical dev data directory to
-            // this worktree's data directory. Must run before
-            // restore_managed_agents_on_launch (which reads managed-agents.json).
-            migration::sync_shared_agent_data(&app_handle);
-            migration::migrate_packs_to_teams(&app_handle);
-            migration::reconcile_persona_team_dirs(&app_handle);
-            migration::migrate_persona_provider_to_runtime(&app_handle);
-            migration::reconcile_legacy_command_names(&app_handle);
-            migration::reconcile_provider_mcp_commands(&app_handle);
+            // Run all pre-identity data migrations before state loads from disk.
+            migration::run_boot_migrations(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
@@ -552,6 +541,7 @@ pub fn run() {
                 .map(|k| k.clone())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             migration::migrate_personas_to_events(&app_handle, &owner_keys);
+            migration::migrate_teams_to_events(&app_handle, &owner_keys);
 
             if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
                 eprintln!("buzz-desktop: sync-team-personas: {e}");
@@ -852,6 +842,7 @@ pub fn run() {
             update_persona,
             delete_persona,
             set_persona_active,
+            reconcile_inbound_persona_event,
             list_channel_templates,
             create_channel_template,
             update_channel_template,

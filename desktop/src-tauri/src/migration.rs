@@ -101,6 +101,22 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Run every data migration that must complete before identity resolution and
+/// agent restore. Ordering is load-bearing: `migrate_legacy_app_data_dir` must
+/// precede any disk read, and `sync_shared_agent_data` must precede
+/// `restore_managed_agents_on_launch` (which reads `managed-agents.json`).
+/// Identity-dependent migrations (persona/team event signing) run separately in
+/// boot setup after the persisted identity is resolved.
+pub fn run_boot_migrations(app: &tauri::AppHandle) {
+    migrate_legacy_app_data_dir(app);
+    sync_shared_agent_data(app);
+    migrate_packs_to_teams(app);
+    reconcile_persona_team_dirs(app);
+    migrate_persona_provider_to_runtime(app);
+    reconcile_legacy_command_names(app);
+    reconcile_provider_mcp_commands(app);
+}
+
 /// Copy one-time app state from the legacy app identifier directory to
 /// the current Buzz identifier directory. The Tauri identifier controls the app
 /// data path, so without this copy a product rename would look like a fresh
@@ -1258,6 +1274,112 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
     Ok(migrated)
 }
 
+/// Reconcile `teams.json` into kind:30176 team events in the retention store.
+///
+/// Mirrors [`migrate_personas_to_events`] for teams: it picks up team metadata
+/// edits (name/description/persona_ids) made on disk between launches and
+/// queues them for relay publish. Managed agents (kind:30177) are deliberately
+/// NOT reconciled here — they have no pack/dir source and are backfilled from
+/// `managed-agents.json` elsewhere.
+///
+/// Must run after the persisted identity is resolved (it signs each event with
+/// the owner's keys).
+pub fn migrate_teams_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
+    use crate::managed_agents::managed_agents_base_dir;
+
+    let Ok(base_dir) = managed_agents_base_dir(app) else {
+        return;
+    };
+
+    match migrate_teams_in_dir(&base_dir, keys) {
+        Ok(0) => {}
+        Ok(migrated) => {
+            eprintln!("buzz-desktop: team-event-migration: {migrated} teams migrated to retention");
+        }
+        Err(e) => {
+            eprintln!("buzz-desktop: team-event-migration: {e}");
+        }
+    }
+}
+
+/// Core team reconcile logic, decoupled from the Tauri `AppHandle` for testing.
+///
+/// Returns the number of teams (re)written to the retention store. The
+/// per-coordinate content compare matches [`migrate_personas_in_dir`]: an
+/// unchanged team is skipped so a launch does not churn `pending_sync`.
+fn migrate_teams_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, String> {
+    use crate::managed_agents::{
+        retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
+        team_events::build_team_event,
+        TeamRecord,
+    };
+    use buzz_core_pkg::kind::KIND_TEAM;
+    use nostr::JsonUtil;
+
+    let pubkey = keys.public_key().to_hex();
+
+    let teams_path = base_dir.join("teams.json");
+    if !teams_path.exists() {
+        return Ok(0);
+    }
+
+    let content = std::fs::read_to_string(&teams_path)
+        .map_err(|e| format!("failed to read teams.json: {e}"))?;
+
+    let records: Vec<TeamRecord> =
+        serde_json::from_str(&content).map_err(|e| format!("failed to parse teams.json: {e}"))?;
+
+    if records.is_empty() {
+        return Ok(0);
+    }
+
+    let db_path = base_dir.join("retention.db");
+    let conn =
+        open_retention_db(&db_path).map_err(|e| format!("failed to open retention db: {e}"))?;
+
+    let mut migrated = 0u32;
+
+    for record in &records {
+        // Skip built-in teams — they're always available from code.
+        if record.is_builtin {
+            continue;
+        }
+
+        // Team d-tag is the team id (team_events.rs: no slug fallback).
+        let d_tag = record.id.clone();
+
+        let builder = build_team_event(record)
+            .map_err(|e| format!("failed to build event for team '{}': {e}", record.name))?;
+
+        let event = builder
+            .sign_with_keys(keys)
+            .map_err(|e| format!("failed to sign event for team '{}': {e}", record.name))?;
+
+        let event_content = event.content.to_string();
+        if let Some(existing) = get_retained_event(&conn, KIND_TEAM, &pubkey, &d_tag)? {
+            if existing.content == event_content {
+                continue;
+            }
+        }
+
+        let retained = RetainedEvent {
+            kind: KIND_TEAM,
+            pubkey: pubkey.clone(),
+            d_tag,
+            content: event_content,
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: true,
+        };
+
+        retain_event(&conn, &retained)
+            .map_err(|e| format!("failed to retain team '{}': {e}", record.name))?;
+        migrated += 1;
+    }
+
+    Ok(migrated)
+}
+
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
 mod test_support;
@@ -1273,3 +1395,7 @@ mod command_tests;
 #[cfg(test)]
 #[path = "migration_team_dir_tests.rs"]
 mod team_dir_tests;
+
+#[cfg(test)]
+#[path = "migration_team_events_tests.rs"]
+mod team_events_tests;

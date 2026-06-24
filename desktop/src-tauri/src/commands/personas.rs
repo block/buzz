@@ -6,10 +6,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         encode_persona_json, load_managed_agents, load_personas, load_teams, parse_json_persona,
-        parse_md_persona, parse_png_persona, parse_zip_personas, save_managed_agents,
-        save_personas, try_regenerate_nest, validate_persona_activation_change,
-        validate_persona_deletion, CreatePersonaRequest, ParsePersonaFilesResult, PersonaRecord,
-        UpdatePersonaRequest,
+        parse_md_persona, parse_png_persona, parse_zip_personas, persona_events::persona_d_tag,
+        save_managed_agents, save_personas, try_regenerate_nest,
+        validate_persona_activation_change, validate_persona_deletion, CreatePersonaRequest,
+        ParsePersonaFilesResult, PersonaRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -303,6 +303,120 @@ pub fn delete_persona(
     Ok(())
 }
 
+/// Apply an inbound kind:30175 persona event from the relay onto the local
+/// store. The frontend's live subscription invokes this per event for our own
+/// authored coordinate so Device B inherits Device A's edits.
+///
+/// Retention is a sync channel that writes INTO `personas.json`, never an
+/// authoritative read source — `load_personas` is untouched, so every agent
+/// keeps resolving its persona by UUID and keeps its provider keys.
+///
+/// MATCH KEY (single source of truth, both directions): an inbound event
+/// matches the local record whose `persona_d_tag(record)` equals the event's
+/// d-tag. Reusing the same derivation the outbound path uses guarantees the
+/// inbound key can never drift from the outbound key — in particular, an
+/// in-app persona (`source_team_persona_slug == None`) whose d-tag IS its
+/// `id` matches its existing UUID row instead of minting a duplicate.
+///
+/// On match: patch ONLY the projected fields; preserve local `id`, `env_vars`,
+/// `source_team`, and `created_at`. On no match: insert the parsed record as-is
+/// — `persona_from_event` already sets `id = d_tag`, so an in-app persona reuses
+/// its d-tag as the id and a re-received event stays idempotent (no duplicate).
+///
+/// The retention store decides whether the inbound event wins over a pending
+/// local edit (`retain_inbound_event`): `personas.json` is only patched when the
+/// retain reports [`InboundOutcome::Applied`], so an equal-second collision with
+/// a pending local edit leaves the local record — and its queued publish —
+/// untouched.
+#[tauri::command]
+pub fn reconcile_inbound_persona_event(
+    event_json: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::managed_agents::{
+        managed_agents_base_dir,
+        persona_events::persona_from_event,
+        retention::{open_retention_db, retain_inbound_event, InboundOutcome, RetainedEvent},
+    };
+    use buzz_core_pkg::kind::KIND_PERSONA;
+    use nostr::JsonUtil;
+
+    let event = nostr::Event::from_json(&event_json)
+        .map_err(|e| format!("failed to parse inbound event: {e}"))?;
+
+    // Per-kind scoping: the live filter subscribes to 30175/30176/30177, but
+    // only persona (30175) inbound is implemented here. Team (30176) and
+    // managed-agent (30177) reconcile is a tracked follow-up; no-op for now so
+    // a d-tag shared across kinds can never cross-link a team and a persona.
+    // follow-up: team/agent inbound parse + patch (30176/30177).
+    if event.kind.as_u16() as u32 != KIND_PERSONA {
+        return Ok(());
+    }
+
+    let inbound = persona_from_event(&event)?;
+    let d_tag = persona_d_tag(&inbound);
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    // Resolve inbound vs. any pending local edit before touching personas.json.
+    let conn = open_retention_db(&managed_agents_base_dir(&app)?.join("retention.db"))?;
+    let outcome = retain_inbound_event(
+        &conn,
+        &RetainedEvent {
+            kind: KIND_PERSONA,
+            pubkey: event.pubkey.to_hex(),
+            d_tag: d_tag.clone(),
+            content: event.content.to_string(),
+            created_at: event.created_at.as_secs() as i64,
+            raw_event: event.as_json(),
+            pending_sync: false,
+        },
+    )?;
+    if outcome == InboundOutcome::Skipped {
+        return Ok(());
+    }
+
+    let mut personas = load_personas(&app)?;
+    apply_inbound_persona(&mut personas, inbound);
+    save_personas(&app, &personas)?;
+    try_regenerate_nest(&app);
+
+    Ok(())
+}
+
+/// Merge a parsed inbound persona into the local set: patch the matching record
+/// in place, or push it when none matches.
+///
+/// The match key is `persona_d_tag` — the same derivation the outbound path
+/// uses — so the inbound and outbound keys can never drift. On match, only the
+/// projected fields are overwritten; local `id`, `env_vars`, `source_team`, and
+/// `created_at` survive. On no match, the parsed record is inserted as-is; since
+/// `persona_from_event` sets `id = d_tag`, an in-app persona reuses its d-tag as
+/// the id and a re-received event stays idempotent (no duplicate row).
+fn apply_inbound_persona(personas: &mut Vec<PersonaRecord>, inbound: PersonaRecord) {
+    let d_tag = persona_d_tag(&inbound);
+    match personas
+        .iter_mut()
+        .find(|record| persona_d_tag(record) == d_tag)
+    {
+        Some(local) => {
+            local.display_name = inbound.display_name;
+            local.avatar_url = inbound.avatar_url;
+            local.system_prompt = inbound.system_prompt;
+            local.runtime = inbound.runtime;
+            local.model = inbound.model;
+            local.provider = inbound.provider;
+            local.name_pool = inbound.name_pool;
+            local.updated_at = inbound.updated_at;
+        }
+        None => personas.push(inbound),
+    }
+}
+
 #[tauri::command]
 pub fn set_persona_active(
     id: String,
@@ -485,4 +599,119 @@ pub async fn export_persona_to_json(
     let slug = crate::util::slugify(&display_name, "persona", 50);
     let filename = format!("{slug}.persona.json");
     save_json_with_dialog(&app, &filename, &json_bytes).await
+}
+
+#[cfg(test)]
+mod inbound_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    const UUID: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
+    /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
+    fn local_in_app() -> PersonaRecord {
+        PersonaRecord {
+            id: UUID.to_string(),
+            display_name: "Local".to_string(),
+            avatar_url: None,
+            system_prompt: "local prompt".to_string(),
+            runtime: Some("goose".to_string()),
+            model: Some("opus".to_string()),
+            provider: Some("anthropic".to_string()),
+            name_pool: vec!["Local".to_string()],
+            is_builtin: false,
+            is_active: true,
+            source_team: Some("team-1".to_string()),
+            source_team_persona_slug: None,
+            env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    /// An inbound persona as `persona_from_event` would produce it: id = d-tag,
+    /// slug = Some(d-tag), empty env_vars, source_team None.
+    fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
+        PersonaRecord {
+            id: d_tag.to_string(),
+            display_name: display_name.to_string(),
+            avatar_url: Some("https://example.com/a.png".to_string()),
+            system_prompt: "remote prompt".to_string(),
+            runtime: Some("acp".to_string()),
+            model: Some("sonnet".to_string()),
+            provider: Some("openai".to_string()),
+            name_pool: vec!["Remote".to_string()],
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: Some(d_tag.to_string()),
+            env_vars: BTreeMap::new(),
+            created_at: "2025-06-01T00:00:00Z".to_string(),
+            updated_at: "2025-06-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn in_app_persona_matches_existing_uuid_and_patches() {
+        let mut personas = vec![local_in_app()];
+        apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+
+        assert_eq!(personas.len(), 1, "no duplicate row");
+        let p = &personas[0];
+        // Projected fields patched.
+        assert_eq!(p.display_name, "Remote");
+        assert_eq!(p.system_prompt, "remote prompt");
+        assert_eq!(p.provider, Some("openai".to_string()));
+        // Local identity + secrets + lineage preserved.
+        assert_eq!(p.id, UUID);
+        assert_eq!(p.env_vars.get("API_KEY"), Some(&"secret".to_string()));
+        assert_eq!(p.source_team, Some("team-1".to_string()));
+        assert_eq!(p.source_team_persona_slug, None);
+        assert_eq!(p.created_at, "2025-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn re_received_in_app_persona_is_idempotent_no_duplicate() {
+        let mut personas = vec![local_in_app()];
+        apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+        // Same event arrives again (e.g. reconnect backfill).
+        apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
+
+        assert_eq!(personas.len(), 1, "re-receive must not duplicate");
+        assert_eq!(personas[0].id, UUID);
+    }
+
+    #[test]
+    fn team_persona_matches_on_slug_and_patches() {
+        let mut local = local_in_app();
+        local.id = "local-uuid".to_string();
+        local.source_team_persona_slug = Some("team-slug".to_string());
+        let mut personas = vec![local];
+
+        apply_inbound_persona(&mut personas, inbound_for("team-slug", "Renamed"));
+
+        assert_eq!(personas.len(), 1, "no duplicate row");
+        assert_eq!(personas[0].display_name, "Renamed");
+        // Local UUID survives even though the match key is the slug.
+        assert_eq!(personas[0].id, "local-uuid");
+        assert_eq!(
+            personas[0].source_team_persona_slug,
+            Some("team-slug".to_string())
+        );
+    }
+
+    #[test]
+    fn no_local_match_inserts_inbound_reusing_d_tag_as_id() {
+        let mut personas = vec![local_in_app()];
+        let other = "99999999-8888-7777-6666-555555555555";
+        apply_inbound_persona(&mut personas, inbound_for(other, "New"));
+
+        assert_eq!(personas.len(), 2, "unmatched inbound is inserted");
+        let inserted = personas.iter().find(|p| p.id == other).unwrap();
+        assert_eq!(inserted.display_name, "New");
+        // Re-receiving the inserted record must still be idempotent.
+        apply_inbound_persona(&mut personas, inbound_for(other, "New"));
+        assert_eq!(personas.len(), 2, "re-receive of inserted record no-ops");
+    }
 }

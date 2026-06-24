@@ -171,3 +171,12 @@ export async function parsePersonaFiles(
 export async function exportPersonaToJson(id: string): Promise<boolean> {
   return invokeTauri<boolean>("export_persona_to_json", { id });
 }
+
+// Patches a single inbound persona/team/agent projection event into the local
+// store (personas.json). The backend resolves the match key and the
+// pending-edit race; the frontend only forwards the raw Nostr event JSON.
+export async function reconcileInboundPersonaEvent(
+  eventJson: string,
+): Promise<void> {
+  await invokeTauri("reconcile_inbound_persona_event", { eventJson });
+}
