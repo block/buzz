@@ -471,6 +471,11 @@ test("messageLinkUrlTransform: preserves buzz://message href", () => {
   assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
 });
 
+test("messageLinkUrlTransform: preserves buzz://message autolink href", () => {
+  const html = renderMarkdown("<buzz://message?channel=abc&id=xyz>");
+  assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+});
+
 test("messageLinkUrlTransform: preserves buzz://message href with thread", () => {
   const html = renderMarkdown(
     "[link](buzz://message?channel=c1&id=m1&thread=t1)",
