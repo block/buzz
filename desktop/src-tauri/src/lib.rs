@@ -532,20 +532,14 @@ pub fn run() {
             resolve_persisted_identity(&app_handle, &state)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-            // Persona-event migration signs every retained event with the
-            // owner's keys, so it must run after the persisted identity is
-            // resolved (not before — at that point keys may still be ephemeral).
+            // Sync team-dir edits and reconcile persona/team events. Needs the
+            // resolved owner keys, so it runs after identity resolution.
             let owner_keys = state
                 .keys
                 .lock()
                 .map(|k| k.clone())
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
-            migration::migrate_personas_to_events(&app_handle, &owner_keys);
-            migration::migrate_teams_to_events(&app_handle, &owner_keys);
-
-            if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
-                eprintln!("buzz-desktop: sync-team-personas: {e}");
-            }
+            migration::run_event_sync(&app_handle, &owner_keys);
 
             // Backfill the pinned persona snapshot for any pre-existing agent
             // that predates the record-authoritative-spawn cutover (persona_id

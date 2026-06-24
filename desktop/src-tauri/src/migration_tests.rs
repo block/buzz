@@ -884,6 +884,53 @@ fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
 }
 
 #[test]
+fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
+    // Gate (b): sync_team_personas (writer) MUST run before
+    // reconcile_provider_mcp_commands (reader) on the same launch, so a team-dir
+    // harness edit reaches the derived mcp_command immediately, not a launch
+    // behind. This drives the writer→reader sequence at the file layer the boot
+    // path exercises: load_persona_runtimes reads the same personas.json the
+    // sync writes. Reader-first would derive the OLD mcp_command (asserted), so
+    // the post-write derivation of the NEW value is the ordering regression catch.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "buzz-agent",
+            "mcp_command": ""
+        }]),
+    );
+    // Pre-edit launch state: persona runtime is goose (no mcp_command). A
+    // reader running against this stale file derives the empty goose value.
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    assert_eq!(
+        read_agents_json(dir.path())[0]["mcp_command"],
+        "",
+        "reader-before-writer would see only the stale goose runtime"
+    );
+
+    // Same launch: sync_team_personas propagates a team-dir harness edit
+    // (goose → buzz-agent) into personas.json. The reader runs AFTER, so it
+    // must derive the NEW buzz-agent mcp_command without a second launch.
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "buzz-agent"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    assert_eq!(
+        read_agents_json(dir.path())[0]["mcp_command"],
+        "buzz-dev-mcp",
+        "writer-before-reader must surface the new runtime's mcp_command same launch"
+    );
+}
+
+#[test]
 fn reconcile_mcp_commands_honors_explicit_override_over_persona() {
     // An explicit per-instance pin (agent_command_override) beats the persona
     // runtime: persona is goose (no mcp) but the pin is buzz-agent, so the

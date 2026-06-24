@@ -101,12 +101,32 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Reconcile personas and teams into signed retention events. Both readers
+/// consume the already-synced `personas.json`/`teams.json` that
+/// `sync_team_personas` wrote in [`run_boot_migrations`] (see its `# Ordering`
+/// guard). Event signing needs the resolved owner keys, so this runs after
+/// identity resolution, not in [`run_boot_migrations`].
+pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
+    migrate_personas_to_events(app, owner_keys);
+    migrate_teams_to_events(app, owner_keys);
+}
+
 /// Run every data migration that must complete before identity resolution and
 /// agent restore. Ordering is load-bearing: `migrate_legacy_app_data_dir` must
 /// precede any disk read, and `sync_shared_agent_data` must precede
 /// `restore_managed_agents_on_launch` (which reads `managed-agents.json`).
 /// Identity-dependent migrations (persona/team event signing) run separately in
 /// boot setup after the persisted identity is resolved.
+///
+/// # Ordering
+/// `sync_team_personas` is the sole writer of team-dir persona-runtime edits
+/// into `personas.json`/`teams.json`; it MUST run before every reader of those
+/// files. The pre-identity reader is `reconcile_provider_mcp_commands` (derives
+/// `mcp_command` from each persona's effective harness); the post-identity
+/// readers are `migrate_personas_to_events`/`migrate_teams_to_events` in
+/// [`run_event_sync`]. Sync touches only JSON (no owner keys, no `retention.db`),
+/// so it runs pre-identity here ahead of all readers — reader-first loses a
+/// launch (stale harness/`mcp_command` until the next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
@@ -114,6 +134,9 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
+    if let Err(e) = crate::managed_agents::sync_team_personas(app) {
+        eprintln!("buzz-desktop: sync-team-personas: {e}");
+    }
     reconcile_provider_mcp_commands(app);
 }
 
