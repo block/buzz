@@ -20,6 +20,9 @@ export function ManagedAgentLogPanel({
   variant?: "inline" | "section";
 }) {
   const isInline = variant === "inline";
+  const logFileLabel = selectedAgent
+    ? describeLogFile(selectedAgent.logPath)
+    : null;
 
   if (!selectedAgent && isInline) {
     return null;
@@ -28,27 +31,32 @@ export function ManagedAgentLogPanel({
   return (
     <section
       className={cn(
+        "flex flex-col",
         isInline
-          ? ""
+          ? "h-full min-h-0"
           : "rounded-[28px] border border-border/70 bg-card/90 p-5 shadow-xs",
       )}
     >
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h3 className="text-sm font-semibold tracking-tight">Harness log</h3>
-          <p className="text-sm text-muted-foreground">
-            {selectedAgent
-              ? `${selectedAgent.name} · ${describeLogFile(selectedAgent.logPath)}`
-              : "Select a local agent to inspect recent output."}
-          </p>
+      {!selectedAgent ? (
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold tracking-tight">
+              Harness log
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              Select a local agent to inspect recent output.
+            </p>
+          </div>
         </div>
-        {selectedAgent ? (
-          <CopyButton label="Copy log" value={logContent ?? ""} />
-        ) : null}
-      </div>
+      ) : null}
 
       {!selectedAgent ? (
-        <div className="mt-4 rounded-xl border border-dashed border-border/80 bg-background/70 px-6 py-10 text-center">
+        <div
+          className={cn(
+            "mt-4 rounded-xl border border-dashed border-border/80 bg-background/70 px-6 py-10 text-center",
+            isInline && "flex min-h-0 flex-1 flex-col justify-center",
+          )}
+        >
           <p className="text-sm font-semibold tracking-tight">
             No local agent selected
           </p>
@@ -57,27 +65,42 @@ export function ManagedAgentLogPanel({
           </p>
         </div>
       ) : isLoading ? (
-        <div className="mt-4 rounded-xl border border-border/70 bg-background/80 p-4">
-          <Skeleton className="h-4 w-48" />
-          <Skeleton className="mt-3 h-4 w-full" />
-          <Skeleton className="mt-2 h-4 w-full" />
-          <Skeleton className="mt-2 h-4 w-3/4" />
+        <div
+          className={cn(
+            "overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100",
+            isInline ? "flex min-h-0 flex-1 flex-col" : "mt-4",
+          )}
+        >
+          <HarnessLogHeader logContent={logContent ?? ""} />
+          <div className="p-4">
+            <Skeleton className="h-4 w-48 bg-white/10" />
+            <Skeleton className="mt-3 h-4 w-full bg-white/10" />
+            <Skeleton className="mt-2 h-4 w-full bg-white/10" />
+            <Skeleton className="mt-2 h-4 w-3/4 bg-white/10" />
+          </div>
         </div>
       ) : (
-        <div className="mt-4 overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100">
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-2xs uppercase tracking-[0.18em] text-zinc-400">
-            <span>{selectedAgent.name}</span>
-            <span>{selectedAgent.status}</span>
-          </div>
+        <div
+          className={cn(
+            "overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100",
+            isInline && "flex min-h-0 flex-1 flex-col",
+            !isInline && "mt-4",
+          )}
+        >
+          <HarnessLogHeader logContent={logContent ?? ""} />
           <pre
             className={cn(
               "overflow-auto whitespace-pre-wrap px-4 py-4",
-              isInline ? "max-h-[18rem]" : "max-h-[22rem]",
+              isInline ? "min-h-0 flex-1" : "max-h-88",
             )}
             data-testid="managed-agent-log-content"
           >
             {logContent?.trim() ? logContent : "No log output yet."}
           </pre>
+          <HarnessLogFooter
+            logFileLabel={logFileLabel ?? ""}
+            selectedAgent={selectedAgent}
+          />
         </div>
       )}
 
@@ -88,5 +111,43 @@ export function ManagedAgentLogPanel({
         </p>
       ) : null}
     </section>
+  );
+}
+
+function HarnessLogHeader({ logContent }: { logContent: string }) {
+  return (
+    <div className="flex min-h-9 items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
+      <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-[0.18em] text-zinc-300">
+        Harness log
+      </span>
+      <CopyButton
+        className="h-6 rounded-md bg-black/40 px-2 text-zinc-300 hover:bg-black/70 hover:text-white"
+        label="Copy log"
+        size="xs"
+        value={logContent}
+        variant="ghost"
+      />
+    </div>
+  );
+}
+
+function HarnessLogFooter({
+  logFileLabel,
+  selectedAgent,
+}: {
+  logFileLabel: string;
+  selectedAgent: ManagedAgent;
+}) {
+  const fileTitle = `${selectedAgent.name} · ${logFileLabel}`;
+
+  return (
+    <div className="flex min-h-8 items-center border-t border-white/10 px-3 py-2">
+      <span
+        className="min-w-0 truncate font-mono text-2xs text-zinc-500"
+        title={fileTitle}
+      >
+        {selectedAgent.name} · {logFileLabel}
+      </span>
+    </div>
   );
 }

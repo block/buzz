@@ -8,7 +8,6 @@ import {
   ChevronRight,
   ChevronUp,
   Cpu,
-  FileText,
   Hash,
   MessageSquare,
   Pencil,
@@ -25,6 +24,7 @@ import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { ModelPicker } from "@/features/agents/ui/ModelPicker";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
@@ -89,6 +89,7 @@ export type ProfileSummaryViewProps = {
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: string | null;
   modelLabel: string;
+  onOpenActivity: () => void;
   onOpenAgentConfiguration: () => void;
   onOpenChannels: () => void;
   onOpenDiagnostics: () => void;
@@ -136,6 +137,7 @@ export function ProfileSummaryView({
   diagnosticsFields,
   diagnosticsSummary,
   modelLabel,
+  onOpenActivity,
   onOpenAgentConfiguration,
   onOpenChannels,
   onOpenDiagnostics,
@@ -165,12 +167,18 @@ export function ProfileSummaryView({
   const showAgentConfigurationIngress =
     showInstructionIngress || showModelIngress || showAgentSettingsIngress;
   const showDiagnosticsIngress =
-    diagnosticsFields.length > 0 || canOpenAgentLogs || canViewActivity;
+    diagnosticsFields.length > 0 || canOpenAgentLogs;
+  const showActivityIngress = canViewActivity;
   const agentConfigurationTrailing = showModelIngress
     ? modelLabel
     : handleEditPersona
       ? "Edit"
       : "View";
+  const diagnosticsStatusField = diagnosticsFields.find(
+    (field) => field.label === "Status",
+  );
+  const diagnosticsTrailing =
+    diagnosticsStatusField?.displayNode ?? diagnosticsSummary ?? "View";
   const topLevelAgentInfoFields = agentInfoFields.filter(
     (field) => field.label === "Public key" || field.label === "Owned by",
   );
@@ -239,6 +247,7 @@ export function ProfileSummaryView({
       showMemoriesIngress ||
       showChannelsIngress ||
       showDiagnosticsIngress ||
+      showActivityIngress ||
       showTopLevelAgentInfo ? (
         <section className="space-y-2">
           {showAgentConfigurationIngress ? (
@@ -286,7 +295,16 @@ export function ProfileSummaryView({
               label="Diagnostics"
               onClick={onOpenDiagnostics}
               testId="user-profile-diagnostics-ingress"
-              trailing={diagnosticsSummary ?? "View"}
+              trailing={diagnosticsTrailing}
+            />
+          ) : null}
+          {showActivityIngress ? (
+            <ProfileIngressRow
+              icon={Activity}
+              label="Activity log"
+              onClick={onOpenActivity}
+              testId={`user-profile-view-activity-${pubkey}`}
+              trailing="View"
             />
           ) : null}
           {showTopLevelAgentInfo ? (
@@ -667,8 +685,10 @@ function ProfileIngressRow({
   label: string;
   onClick: () => void;
   testId: string;
-  trailing?: string;
+  trailing?: React.ReactNode;
 }) {
+  const trailingTitle = typeof trailing === "string" ? trailing : undefined;
+
   return (
     <button
       className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
@@ -686,7 +706,7 @@ function ProfileIngressRow({
       {trailing ? (
         <span
           className="max-w-[45%] truncate text-right text-sm text-muted-foreground"
-          title={trailing}
+          title={trailingTitle}
         >
           {trailing}
         </span>
@@ -982,47 +1002,38 @@ function AgentConfigurationSection({
 
 export function DiagnosticsFocusedView({
   canOpenAgentLogs,
-  canViewActivity,
   fields,
+  logContent,
+  logError,
+  logLoading,
   managedAgent,
-  onOpenActivity,
-  onOpenAgentLogs,
-  pubkey,
 }: {
   canOpenAgentLogs: boolean;
-  canViewActivity: boolean;
   fields: ProfileField[];
+  logContent: string | null;
+  logError: Error | null;
+  logLoading: boolean;
   managedAgent: ManagedAgent | undefined;
-  onOpenActivity: () => void;
-  onOpenAgentLogs: () => void;
-  pubkey: string | null;
 }) {
-  const hasActions = canOpenAgentLogs || canViewActivity;
+  const hasLog = canOpenAgentLogs && managedAgent !== undefined;
 
-  if (fields.length === 0 && !hasActions) {
+  if (fields.length === 0 && !hasLog) {
     return null;
   }
 
   return (
-    <div className="space-y-3 pt-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 pt-4">
       {fields.length > 0 ? <ProfileFieldGroup fields={fields} /> : null}
-      {canOpenAgentLogs && managedAgent ? (
-        <ProfileIngressRow
-          icon={FileText}
-          label="Harness log"
-          onClick={onOpenAgentLogs}
-          testId={`user-profile-agent-logs-${managedAgent.pubkey}`}
-          trailing="View"
-        />
-      ) : null}
-      {canViewActivity ? (
-        <ProfileIngressRow
-          icon={Activity}
-          label="Activity log"
-          onClick={onOpenActivity}
-          testId={`user-profile-view-activity-${pubkey}`}
-          trailing="View"
-        />
+      {hasLog ? (
+        <div className="min-h-0 flex-1">
+          <ManagedAgentLogPanel
+            error={logError}
+            isLoading={logLoading}
+            logContent={logContent}
+            selectedAgent={managedAgent}
+            variant="inline"
+          />
+        </div>
       ) : null}
     </div>
   );

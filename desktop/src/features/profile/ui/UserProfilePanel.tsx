@@ -36,7 +36,6 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import {
@@ -242,7 +241,8 @@ export function UserProfilePanel({
     (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
   );
   const managedAgentLogQuery = useManagedAgentLogQuery(
-    view === "logs" && managedAgent?.backend.type === "local"
+    (view === "diagnostics" || view === "logs") &&
+      managedAgent?.backend.type === "local"
       ? managedAgent.pubkey
       : null,
   );
@@ -796,11 +796,15 @@ export function UserProfilePanel({
       </Button>
     </div>
   );
+  const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
 
   const profileBody = (
     <div
       className={cn(
-        "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
+        "min-h-0 flex-1 px-4 pb-6",
+        isDiagnosticsLikeView
+          ? "flex flex-col overflow-hidden"
+          : "overflow-y-auto",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
@@ -845,6 +849,7 @@ export function UserProfilePanel({
           diagnosticsFields={diagnosticsFields}
           diagnosticsSummary={diagnosticsSummary}
           modelLabel={modelLabel}
+          onOpenActivity={handleOpenActivity}
           onOpenAgentConfiguration={() => setView("configuration")}
           onOpenChannels={() => setView("channels")}
           onOpenDiagnostics={() => setView("diagnostics")}
@@ -887,12 +892,15 @@ export function UserProfilePanel({
       {view === "diagnostics" ? (
         <DiagnosticsFocusedView
           canOpenAgentLogs={canOpenAgentLogs}
-          canViewActivity={canViewActivity}
           fields={diagnosticsFields}
+          logContent={managedAgentLogQuery.data?.content ?? null}
+          logError={
+            managedAgentLogQuery.error instanceof Error
+              ? managedAgentLogQuery.error
+              : null
+          }
+          logLoading={managedAgentLogQuery.isLoading}
           managedAgent={managedAgent}
-          onOpenActivity={handleOpenActivity}
-          onOpenAgentLogs={() => setView("logs")}
-          pubkey={effectivePubkey}
         />
       ) : null}
 
@@ -908,16 +916,17 @@ export function UserProfilePanel({
       ) : null}
 
       {view === "logs" ? (
-        <ManagedAgentLogPanel
-          error={
+        <DiagnosticsFocusedView
+          canOpenAgentLogs={canOpenAgentLogs}
+          fields={[]}
+          logContent={managedAgentLogQuery.data?.content ?? null}
+          logError={
             managedAgentLogQuery.error instanceof Error
               ? managedAgentLogQuery.error
               : null
           }
-          isLoading={managedAgentLogQuery.isLoading}
-          logContent={managedAgentLogQuery.data?.content ?? null}
-          selectedAgent={managedAgent ?? null}
-          variant="inline"
+          logLoading={managedAgentLogQuery.isLoading}
+          managedAgent={managedAgent}
         />
       ) : null}
     </div>
