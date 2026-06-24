@@ -1,6 +1,5 @@
-use std::{collections::BTreeMap, path::PathBuf, process::Child};
-
 use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -80,8 +79,9 @@ pub struct RelayAgentInfo {
     pub status: String,
     #[serde(default)]
     pub respond_to: Option<RespondTo>,
+    #[serde(default)]
+    pub respond_to_allowlist: Vec<String>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,

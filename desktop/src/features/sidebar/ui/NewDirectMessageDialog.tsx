@@ -337,6 +337,7 @@ export function NewDirectMessageDialog({
       ? normalizePubkey(currentPubkey)
       : null;
     const eligibleAgentPubkeys = getMentionableAgentPubkeys({
+      currentPubkey,
       managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
         (agent) => agent.pubkey,
       ),

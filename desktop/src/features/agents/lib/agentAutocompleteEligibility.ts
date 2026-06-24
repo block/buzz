@@ -10,21 +10,33 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 }
 
 export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo">,
+  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   sharedChannelIds: ReadonlySet<string>,
+  currentPubkey?: string | null,
 ) {
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+
+  if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
+    return agent.respondToAllowlist
+      .map((pubkey) => normalizePubkey(pubkey))
+      .includes(normalizedCurrentPubkey);
+  }
+
   return (
-    // RelayAgent does not expose respondTo allowlists yet, so only shared "anyone" agents are safely mentionable.
     agent.respondTo === "anyone" &&
     agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
   );
 }
 
 export function getMentionableAgentPubkeys({
+  currentPubkey,
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
 }: {
+  currentPubkey?: string | null;
   managedAgentPubkeys: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
@@ -34,7 +46,7 @@ export function getMentionableAgentPubkeys({
   );
 
   for (const agent of relayAgents ?? []) {
-    if (relayAgentIsSharedWithUser(agent, sharedChannelIds)) {
+    if (relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
   }

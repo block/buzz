@@ -45,27 +45,60 @@ test("getSharedChannelIds: includes only active joined channels", () => {
   );
 });
 
-test("relayAgentIsSharedWithUser: requires anyone response and a shared channel", () => {
+test("relayAgentIsSharedWithUser: accepts shared anyone agents and rejects unshared ones", () => {
   const sharedChannelIds = new Set(["general"]);
 
   assert.equal(
     relayAgentIsSharedWithUser(
-      { respondTo: "anyone", channelIds: ["general"] },
+      { respondTo: "anyone", respondToAllowlist: [], channelIds: ["general"] },
       sharedChannelIds,
     ),
     true,
   );
   assert.equal(
     relayAgentIsSharedWithUser(
-      { respondTo: "owner-only", channelIds: ["general"] },
+      {
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
       sharedChannelIds,
     ),
     false,
   );
   assert.equal(
     relayAgentIsSharedWithUser(
-      { respondTo: "anyone", channelIds: ["other"] },
+      { respondTo: "anyone", respondToAllowlist: [], channelIds: ["other"] },
       sharedChannelIds,
+    ),
+    false,
+  );
+});
+
+test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user", () => {
+  const sharedChannelIds = new Set(["general"]);
+
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [OTHER_OWNER_PUBKEY, CURRENT_PUBKEY.toUpperCase()],
+        channelIds: ["other"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [OTHER_OWNER_PUBKEY],
+        channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
     ),
     false,
   );
@@ -74,15 +107,31 @@ test("relayAgentIsSharedWithUser: requires anyone response and a shared channel"
 test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents", () => {
   const result = getMentionableAgentPubkeys({
     managedAgentPubkeys: [PUB_A],
+    currentPubkey: CURRENT_PUBKEY,
     relayAgents: [
-      { pubkey: PUB_B, respondTo: "anyone", channelIds: ["general"] },
-      { pubkey: PUB_C, respondTo: "owner-only", channelIds: ["general"] },
-      { pubkey: PUB_D, respondTo: "anyone", channelIds: ["other"] },
+      {
+        pubkey: PUB_B,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      {
+        pubkey: PUB_C,
+        respondTo: "allowlist",
+        respondToAllowlist: [CURRENT_PUBKEY],
+        channelIds: ["other"],
+      },
+      {
+        pubkey: PUB_D,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["other"],
+      },
     ],
     sharedChannelIds: new Set(["general"]),
   });
 
-  assert.deepEqual(result, new Set([PUB_A, PUB_B]));
+  assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
 });
 
 test("coalesceAgentAutocompleteCandidates: merges agents with the same persona id", () => {

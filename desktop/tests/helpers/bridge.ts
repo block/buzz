@@ -52,6 +52,8 @@ type MockManagedAgentSeed = {
   backend?:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockSearchProfileSeed = {
@@ -62,6 +64,16 @@ type MockSearchProfileSeed = {
   about?: string | null;
   ownerPubkey?: string | null;
   isAgent?: boolean;
+};
+
+type MockRelayAgentSeed = {
+  pubkey: string;
+  name: string;
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
+  channelNames?: string[];
+  channelIds?: string[];
+  status?: "online" | "away" | "offline";
 };
 
 export type MockEngramEntry = {
@@ -92,6 +104,7 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  relayAgents?: MockRelayAgentSeed[];
   createManagedAgentDelayMs?: number;
   channelsReadError?: string;
   feedReadError?: string;

@@ -18,6 +18,8 @@ const OUT_OF_CHANNEL_PROVIDER_AGENT_PUBKEY =
   "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const REUSABLE_PERSONA_AGENT_PUBKEY =
   "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const ALLOWLIST_RELAY_AGENT_PUBKEY =
+  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
@@ -425,6 +427,54 @@ test("own profile-only agents are hidden from channel mentions", async ({
 
   const input = page.getByTestId("message-input");
   await input.fill("@mira");
+
+  await expect(autocomplete(page)).toHaveCount(0);
+});
+
+test("allowlisted relay agents are visible in channel mentions", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: ["deadbeef".repeat(8)],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("quinn")).toBeVisible();
+  await expect(dropdown.getByText("agent")).toBeVisible();
+});
+
+test("non-allowlisted relay agents stay hidden from channel mentions", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
 
   await expect(autocomplete(page)).toHaveCount(0);
 });

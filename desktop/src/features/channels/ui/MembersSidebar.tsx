@@ -286,6 +286,7 @@ export function MembersSidebar({
     );
     const sharedChannelIds = getSharedChannelIds(channelsQuery.data);
     const eligibleAgentPubkeys = getMentionableAgentPubkeys({
+      currentPubkey,
       managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
         (agent) => agent.pubkey,
       ),

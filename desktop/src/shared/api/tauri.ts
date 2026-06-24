@@ -1,5 +1,4 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -189,8 +188,8 @@ type RawRelayAgent = {
   capabilities: string[];
   status: RelayAgent["status"];
   respond_to?: RelayAgent["respondTo"];
+  respond_to_allowlist?: string[];
 };
-
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
@@ -846,6 +845,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     capabilities: agent.capabilities,
     status: agent.status,
     respondTo: agent.respond_to ?? null,
+    respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
 }
 

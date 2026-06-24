@@ -227,11 +227,17 @@ export function useMentions(
   const mentionableAgentPubkeys = React.useMemo(
     () =>
       getMentionableAgentPubkeys({
+        currentPubkey,
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
       }),
-    [managedAgentPubkeys, relayAgentsQuery.data, sharedChannelIds],
+    [
+      currentPubkey,
+      managedAgentPubkeys,
+      relayAgentsQuery.data,
+      sharedChannelIds,
+    ],
   );
   const personaNameByPubkey = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];

@@ -44,6 +44,18 @@ type MockManagedAgentSeed = {
   channelNames?: string[];
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
+  respondTo?: RawManagedAgent["respond_to"];
+  respondToAllowlist?: string[];
+};
+
+type MockRelayAgentSeed = {
+  pubkey: string;
+  name: string;
+  respondTo?: RawRelayAgent["respond_to"];
+  respondToAllowlist?: string[];
+  channelNames?: string[];
+  channelIds?: string[];
+  status?: PresenceStatus;
 };
 
 type MockSearchProfileSeed = {
@@ -67,6 +79,7 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    relayAgents?: MockRelayAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
@@ -355,6 +368,7 @@ type RawRelayAgent = {
   capabilities: string[];
   status: PresenceStatus;
   respond_to?: "owner-only" | "allowlist" | "anyone";
+  respond_to_allowlist?: string[];
 };
 
 type RawManagedAgent = {
@@ -1010,14 +1024,44 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     start_on_app_launch: true,
     backend: seed.backend ?? { type: "local" },
     backend_agent_id: null,
-    respond_to: "owner-only",
-    respond_to_allowlist: [],
+    respond_to: seed.respondTo ?? "owner-only",
+    respond_to_allowlist: seed.respondToAllowlist ?? [],
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
       `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
       "profile created; harness not started",
     ],
   };
+}
+
+function resetMockRelayAgents(config?: E2eConfig) {
+  mockRelayAgents = defaultMockRelayAgents.map((agent) => ({
+    ...agent,
+    channels: [...agent.channels],
+    channel_ids: [...agent.channel_ids],
+    capabilities: [...agent.capabilities],
+    respond_to_allowlist: [...(agent.respond_to_allowlist ?? [])],
+  }));
+
+  for (const seed of config?.mock?.relayAgents ?? []) {
+    const channels = mockChannels.filter((channel) => {
+      return (
+        seed.channelIds?.includes(channel.id) ||
+        seed.channelNames?.includes(channel.name)
+      );
+    });
+    mockRelayAgents.push({
+      pubkey: seed.pubkey,
+      name: seed.name,
+      agent_type: "goose",
+      channels: channels.map((channel) => channel.name),
+      channel_ids: channels.map((channel) => channel.id),
+      capabilities: ["messages", "channels", "mcp"],
+      status: seed.status ?? "online",
+      respond_to: seed.respondTo ?? "owner-only",
+      respond_to_allowlist: seed.respondToAllowlist ?? [],
+    });
+  }
 }
 
 function resetMockManagedAgents(config?: E2eConfig) {
@@ -1563,7 +1607,7 @@ function resetMockMesh() {
 }
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
-let mockRelayAgents: RawRelayAgent[] = [
+const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
     name: "alice",
@@ -1576,6 +1620,7 @@ let mockRelayAgents: RawRelayAgent[] = [
     capabilities: ["search", "summaries", "workflows"],
     status: "online",
     respond_to: "anyone",
+    respond_to_allowlist: [],
   },
   {
     pubkey: CHARLIE_PUBKEY,
@@ -1586,8 +1631,16 @@ let mockRelayAgents: RawRelayAgent[] = [
     capabilities: ["code", "reviews"],
     status: "away",
     respond_to: "anyone",
+    respond_to_allowlist: [],
   },
 ];
+let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({
+  ...agent,
+  channels: [...agent.channels],
+  channel_ids: [...agent.channel_ids],
+  capabilities: [...agent.capabilities],
+  respond_to_allowlist: [...(agent.respond_to_allowlist ?? [])],
+}));
 
 // ── Workflow mocks ─────────────────────────────────────────────────────────
 
@@ -1874,6 +1927,7 @@ function syncMockRelayAgentsFromManagedAgents() {
             ? "online"
             : "offline",
         respond_to: agent.respond_to,
+        respond_to_allowlist: [...agent.respond_to_allowlist],
       };
     },
   );
@@ -6131,6 +6185,7 @@ export function maybeInstallE2eTauriMocks() {
   }
 
   resetMockRelayMembers(config);
+  resetMockRelayAgents(config);
   resetMockManagedAgents(config);
   resetMockPersonas(config);
   resetMockTeams();

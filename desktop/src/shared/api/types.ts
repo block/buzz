@@ -265,6 +265,7 @@ export type RelayAgent = {
   capabilities: string[];
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
+  respondToAllowlist: string[];
 };
 
 export type ManagedAgentBackend =
