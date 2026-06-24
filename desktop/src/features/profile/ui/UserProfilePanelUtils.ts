@@ -18,10 +18,8 @@ export type ProfileChannelLink = {
 export type ProfilePanelView =
   | "summary"
   | "info"
-  | "settings"
+  | "configuration"
   | "diagnostics"
-  | "model"
-  | "instructions"
   | "memories"
   | "channels"
   | "logs";
@@ -29,10 +27,8 @@ export type ProfilePanelView =
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
   info: "Agent info",
-  settings: "Agent settings",
+  configuration: "Agent configuration",
   diagnostics: "Diagnostics",
-  model: "Model",
-  instructions: "Agent instruction",
   memories: "Memories",
   channels: "Channels",
   logs: "Harness log",
@@ -42,11 +38,22 @@ const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(
   Object.keys(PROFILE_PANEL_VIEW_TITLES) as ProfilePanelView[],
 );
 
+const LEGACY_PROFILE_PANEL_VIEW_ALIASES: Record<string, ProfilePanelView> = {
+  instructions: "configuration",
+  model: "configuration",
+  settings: "configuration",
+};
+
 export function parseProfilePanelView(value: unknown): ProfilePanelView | null {
-  return typeof value === "string" &&
-    PROFILE_PANEL_VIEWS.has(value as ProfilePanelView)
-    ? (value as ProfilePanelView)
-    : null;
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  if (PROFILE_PANEL_VIEWS.has(value as ProfilePanelView)) {
+    return value as ProfilePanelView;
+  }
+
+  return LEGACY_PROFILE_PANEL_VIEW_ALIASES[value] ?? null;
 }
 
 export function profilePanelViewFromSearch(value: unknown): ProfilePanelView {
