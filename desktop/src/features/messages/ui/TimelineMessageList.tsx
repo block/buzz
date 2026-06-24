@@ -4,6 +4,7 @@ import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
 import {
   buildTimelineItems,
   getTimelineItemKey,
+  resolveActiveDayTimestamp,
   type TimelineItem,
   type TimelineItemsResult,
 } from "@/features/messages/lib/timelineItems";
@@ -23,6 +24,7 @@ import {
   VirtualizedList,
 } from "@/shared/ui/VirtualizedList";
 import { DayDivider } from "./DayDivider";
+import { ActiveDayHeader } from "./ActiveDayHeader";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
@@ -77,6 +79,9 @@ type TimelineMessageListProps = {
   threadUnreadCounts?: ReadonlyMap<string, number>;
   /** Caller-owned scroll container the virtualizer measures and scrolls. */
   scrollContainerRef: React.RefObject<HTMLElement | null>;
+  /** Non-scrolling overlay container the floating active-day header portals
+   *  into — sits OUTSIDE the scroll container so the header cannot drift. */
+  headerOverlayRef: React.RefObject<HTMLElement | null>;
   /** Receives the flattened item stream + index map so the scroll manager can
    *  resolve scroll targets by id. Called whenever the stream is rebuilt. */
   onItems?: (result: TimelineItemsResult) => void;
@@ -113,6 +118,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   threadUnreadCounts,
   unfollowThreadById,
   scrollContainerRef,
+  headerOverlayRef,
   onItems,
   onVirtualizer,
 }: TimelineMessageListProps) {
@@ -255,14 +261,35 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     ],
   );
 
+  // The floating active-day header is portaled by VirtualizedList into the
+  // non-scrolling overlay container (outside the scroll element) and is
+  // re-invoked with the topmost visible row index on every scroll. We resolve
+  // that index back to the day it belongs to so the label tracks the viewport
+  // even after that day's in-stream divider has been windowed out.
+  const renderStickyHeader = React.useCallback(
+    (topVisibleIndex: number | null) => {
+      const headingTimestamp = resolveActiveDayTimestamp(
+        itemsResult.items,
+        topVisibleIndex,
+      );
+      if (headingTimestamp === null) {
+        return null;
+      }
+      return <ActiveDayHeader label={formatDayHeading(headingTimestamp)} />;
+    },
+    [itemsResult.items],
+  );
+
   return (
     <VirtualizedList
       getItemKey={getTimelineItemKey}
+      headerOverlayRef={headerOverlayRef}
       innerClassName="flex flex-col"
       items={itemsResult.items}
       onVirtualizer={onVirtualizer}
       renderItem={renderItem}
       scrollRef={scrollContainerRef}
+      stickyHeader={renderStickyHeader}
     />
   );
 });

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
-import { buildTimelineItems, getTimelineItemKey } from "./timelineItems.ts";
+import {
+  buildTimelineItems,
+  getTimelineItemKey,
+  resolveActiveDayTimestamp,
+} from "./timelineItems.ts";
 
 function dayAt(year, month, day, hour = 12) {
   return Math.floor(
@@ -161,4 +165,67 @@ test("getTimelineItemKey: keys are unique across the stream", () => {
   const { items } = buildTimelineItems(entries, "b");
   const keys = items.map(getTimelineItemKey);
   assert.equal(new Set(keys).size, keys.length);
+});
+
+test("resolveActiveDayTimestamp: null index returns null (nothing in view yet)", () => {
+  const { items } = buildTimelineItems(
+    [entry({ id: "a", createdAt: dayAt(2026, 6, 14) })],
+    null,
+  );
+  assert.equal(resolveActiveDayTimestamp(items, null), null);
+});
+
+test("resolveActiveDayTimestamp: empty stream returns null", () => {
+  assert.equal(resolveActiveDayTimestamp([], 0), null);
+});
+
+test("resolveActiveDayTimestamp: a top row resolves to its own day's heading", () => {
+  const ts = dayAt(2026, 6, 14, 9);
+  const { items } = buildTimelineItems(
+    [entry({ id: "a", createdAt: ts })],
+    null,
+  );
+  // items[0] is the day-divider, items[1] is the message. The message at index
+  // 1 resolves back to the divider above it.
+  assert.equal(resolveActiveDayTimestamp(items, 1), items[0].headingTimestamp);
+});
+
+test("resolveActiveDayTimestamp: a later-day row whose divider scrolled out still resolves to that later day", () => {
+  const day1 = dayAt(2026, 6, 13, 9);
+  const day2 = dayAt(2026, 6, 14, 9);
+  const { items } = buildTimelineItems(
+    [entry({ id: "a", createdAt: day1 }), entry({ id: "b", createdAt: day2 })],
+    null,
+  );
+  // Stream: [div(day1), a, div(day2), b]. Topmost visible = b (index 3); the
+  // day2 divider at index 2 is the nearest divider at or above it.
+  const dividerDay2 = items[2];
+  assert.equal(dividerDay2.kind, "day-divider");
+  assert.equal(
+    resolveActiveDayTimestamp(items, 3),
+    dividerDay2.headingTimestamp,
+  );
+});
+
+test("resolveActiveDayTimestamp: index past the end clamps to the last item", () => {
+  const ts = dayAt(2026, 6, 14, 9);
+  const { items } = buildTimelineItems(
+    [entry({ id: "a", createdAt: ts })],
+    null,
+  );
+  assert.equal(
+    resolveActiveDayTimestamp(items, 999),
+    items[0].headingTimestamp,
+  );
+});
+
+test("resolveActiveDayTimestamp: a divider row at the top resolves to its own heading", () => {
+  const ts = dayAt(2026, 6, 14, 9);
+  const { items } = buildTimelineItems(
+    [entry({ id: "a", createdAt: ts })],
+    null,
+  );
+  // Topmost visible is the divider itself (index 0) — it resolves to itself.
+  assert.equal(items[0].kind, "day-divider");
+  assert.equal(resolveActiveDayTimestamp(items, 0), items[0].headingTimestamp);
 });

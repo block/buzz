@@ -41,6 +41,30 @@ export function getTimelineItemKey(item: TimelineItem): string {
   return item.key;
 }
 
+/**
+ * The `headingTimestamp` of the day the topmost visible row belongs to: the
+ * nearest day-divider at or above `topVisibleIndex`. The floating active-day
+ * header reads this so it always shows the current day even when that day's
+ * in-stream divider has scrolled out of the virtual window. Returns `null`
+ * before any row is in view or when no divider precedes the visible row (an
+ * empty stream).
+ */
+export function resolveActiveDayTimestamp(
+  items: TimelineItem[],
+  topVisibleIndex: number | null,
+): number | null {
+  if (topVisibleIndex === null) {
+    return null;
+  }
+  for (let i = Math.min(topVisibleIndex, items.length - 1); i >= 0; i--) {
+    const item = items[i];
+    if (item.kind === "day-divider") {
+      return item.headingTimestamp;
+    }
+  }
+  return null;
+}
+
 function entryRenderKey(entry: MainTimelineEntry): string {
   return entry.message.renderKey ?? entry.message.id;
 }

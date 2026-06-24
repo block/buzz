@@ -61,6 +61,30 @@ async function getMessagePosition(
   }, messageId);
 }
 
+// The floating active-day header (ActiveDayHeader) is portaled OUTSIDE the
+// scroll container into a non-scrolling overlay, so it pins to a fixed offset
+// instead of drifting at scrollTop 0. We read its label + offset relative to
+// the scroll container's top so a test can assert it neither drifts nor flips
+// day as older history prepends above the anchor.
+async function getActiveDayHeader(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    const timeline = document.querySelector<HTMLElement>(
+      '[data-testid="message-timeline"]',
+    );
+    const pill = document.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-active-day-header"]',
+    );
+    if (!timeline || !pill) {
+      return null;
+    }
+    return {
+      label: pill.dataset.dayLabel ?? pill.textContent ?? "",
+      top:
+        pill.getBoundingClientRect().top - timeline.getBoundingClientRect().top,
+    };
+  });
+}
+
 test("first channel load holds skeleton instead of showing older-history spinner", async ({
   page,
 }) => {
@@ -219,6 +243,15 @@ test("preserves user scroll while older channel history loads", async ({
   const anchorBeforeLanding = await getFirstVisibleMessage(page);
   expect(anchorBeforeLanding).not.toBeNull();
 
+  // The floating active-day header is pinned at the viewport top and reflects
+  // the topmost visible row's day. As older history prepends ABOVE the anchor,
+  // the header must neither move (it's pinned, not part of the prepended flow)
+  // nor flip to a different day (the visible row's day is unchanged). Capture
+  // its label + pinned offset alongside the anchor so the same landing that
+  // proves the message anchor holds also proves the header holds.
+  const headerBeforeLanding = await getActiveDayHeader(page);
+  expect(headerBeforeLanding).not.toBeNull();
+
   // The poll must observe the anchor holding AS a genuine older page lands
   // above it. It only counts a drift reading once BOTH hold in the same sample:
   // the delayed fetch has RESOLVED (inflight back to 0) AND it brought a real
@@ -247,6 +280,15 @@ test("preserves user scroll while older channel history loads", async ({
       },
     )
     .toBeLessThanOrEqual(2);
+
+  // The older page has now landed (the poll above only resolves on it). The
+  // floating day-header must not have drifted or changed day across it.
+  const headerAfterLanding = await getActiveDayHeader(page);
+  expect(headerAfterLanding).not.toBeNull();
+  expect(headerAfterLanding?.label).toBe(headerBeforeLanding?.label);
+  expect(
+    Math.abs((headerAfterLanding?.top ?? 0) - (headerBeforeLanding?.top ?? 0)),
+  ).toBeLessThanOrEqual(2);
 });
 
 // Criterion 2: abandon-to-bottom mid-fetch.

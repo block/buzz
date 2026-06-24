@@ -189,6 +189,9 @@ const MessageTimelineBase = React.forwardRef<
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const contentRef = React.useRef<HTMLDivElement>(null);
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
+  // The floating active-day header portals here — a non-scrolling sibling of
+  // the scroll container — so it pins to a fixed offset and never drifts.
+  const activeDayHeaderRef = React.useRef<HTMLDivElement>(null);
 
   // The convergence fallback for a windowed-out deep-link target. It's defined
   // below (it depends on the anchored-scroll result), so `useAnchoredScroll`
@@ -435,6 +438,18 @@ const MessageTimelineBase = React.forwardRef<
   return (
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {/* Non-scrolling overlay anchored to the outer (non-scrolling) box: the
+            floating active-day header portals in here, so it pins to a fixed
+            offset and cannot drift as older history prepends. Sits below the
+            unread pill / fetch spinner (z-20) in the stack. */}
+        <div
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-x-0 z-[6] flex translate-y-3 justify-center px-4",
+            channelChrome.top,
+          )}
+          ref={activeDayHeaderRef}
+        />
         {showUnreadPill ? (
           <div
             className={cn(
@@ -669,6 +684,7 @@ const MessageTimelineBase = React.forwardRef<
                     threadUnreadCounts={threadUnreadCounts}
                     unfollowThreadById={unfollowThreadById}
                     scrollContainerRef={scrollContainerRef}
+                    headerOverlayRef={activeDayHeaderRef}
                     onItems={handleItems}
                     onVirtualizer={handleVirtualizer}
                   />
