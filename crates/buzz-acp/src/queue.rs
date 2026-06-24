@@ -880,14 +880,16 @@ fn format_event_block(
 
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
-/// Tells the agent to pass `--reply-to <event_id>` on every `buzz messages
-/// send` call in this turn, and not to broadcast to the channel so replies
-/// stay inside the thread.
+/// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
+/// while still allowing an explicit human request to post at the channel root or
+/// top level.
 fn append_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
-        "\nIMPORTANT: When responding, use `--reply-to {event_id}` \
-         on EVERY `buzz messages send` call in this turn. \
-         Do not broadcast to the channel."
+        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
+         on `buzz messages send` so the conversation stays threaded. \
+         If the human explicitly asks for a channel-root, top-level, \
+         or broadcast post, send that message without `--reply-to`. \
+         If the requested destination is ambiguous, ask before sending."
     ));
 }
 
@@ -3043,8 +3045,16 @@ mod tests {
             "channel thread reply should include reply instruction with triggering event ID"
         );
         assert!(
-            prompt.contains("Do not broadcast to the channel"),
-            "channel thread reply should include broadcast suppression hint"
+            prompt.contains("For ordinary replies in this turn"),
+            "channel thread reply should describe reply-to as the default"
+        );
+        assert!(
+            prompt.contains("send that message without `--reply-to`"),
+            "channel thread reply should allow explicit channel-root/top-level requests"
+        );
+        assert!(
+            !prompt.contains("Do not broadcast to the channel"),
+            "reply instruction should not forbid explicit human-requested root posts"
         );
     }
 
@@ -3174,6 +3184,40 @@ mod tests {
         assert!(
             !prompt.contains(&format!("--reply-to {parent_id}")),
             "instruction should NOT use parent_event_id from tags"
+        );
+    }
+
+    #[test]
+    fn test_reply_instruction_allows_explicit_root_post_requests() {
+        let ch = Uuid::new_v4();
+        let root_id = "e".repeat(64);
+        let event = make_event_with_tags(
+            "@bot post your summary in the channel root",
+            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+        );
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "thread reply should still provide the default reply target"
+        );
+        assert!(
+            prompt.contains("channel-root, top-level"),
+            "instruction should tell agents to honor explicit root/top-level requests"
+        );
+        assert!(
+            !prompt.contains("on EVERY `buzz messages send` call"),
+            "instruction should not make reply-to absolute for every send"
         );
     }
 
