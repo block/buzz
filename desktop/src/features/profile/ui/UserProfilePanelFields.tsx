@@ -3,8 +3,8 @@ import {
   Activity,
   Copy,
   Cpu,
+  Ear,
   Fingerprint,
-  MessageSquare,
   Server,
   Terminal,
   UserRound,
@@ -382,6 +382,12 @@ export function buildOwnerFields({
   }
 
   if (managedAgent) {
+    const respondToOwner =
+      managedAgent.respondTo === "owner-only" && ownerDisplayName;
+    const respondToDisplayValue = respondToOwner
+      ? ownerDisplayName
+      : managedAgent.respondTo.replace(/-/g, " ");
+
     fields.push({
       displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
       icon: Server,
@@ -389,8 +395,20 @@ export function buildOwnerFields({
       testId: "user-profile-start-on-launch",
     });
     fields.push({
-      displayValue: managedAgent.respondTo.replace(/-/g, " "),
-      icon: MessageSquare,
+      displayNode: respondToOwner ? (
+        <span className="inline-flex max-w-full items-center gap-2">
+          <UserAvatar
+            avatarUrl={ownerAvatarUrl}
+            className="shrink-0"
+            displayName={ownerHandle ?? respondToDisplayValue}
+            size="xs"
+            testId="user-profile-respond-to-owner-avatar"
+          />
+          <span className="truncate">{respondToDisplayValue}</span>
+        </span>
+      ) : undefined,
+      displayValue: respondToDisplayValue,
+      icon: Ear,
       label: "Respond to",
       testId: "user-profile-respond-to",
     });
@@ -409,11 +427,11 @@ export function buildOwnerFields({
   return fields;
 }
 
-export function ProfileFieldGroup({ fields }: { fields: ProfileField[] }) {
+function orderProfileFields(fields: ProfileField[]) {
   const publicKeyLabel = "Public key";
   const ownedByLabel = "Owned by";
   const statusLabel = "Status";
-  const orderedFields = [
+  return [
     ...fields.filter((field) => field.label === publicKeyLabel),
     ...fields.filter((field) => field.label === ownedByLabel),
     ...fields.filter(
@@ -434,13 +452,23 @@ export function ProfileFieldGroup({ fields }: { fields: ProfileField[] }) {
       return !field.copyValue;
     }),
   ];
+}
 
+export function ProfileFieldRows({ fields }: { fields: ProfileField[] }) {
+  return (
+    <>
+      {orderProfileFields(fields).map((field) => (
+        <ProfileFieldRow field={field} key={field.testId ?? field.label} />
+      ))}
+    </>
+  );
+}
+
+export function ProfileFieldGroup({ fields }: { fields: ProfileField[] }) {
   return (
     <section>
       <div className="overflow-hidden rounded-2xl bg-muted/20">
-        {orderedFields.map((field) => (
-          <ProfileFieldRow field={field} key={field.testId ?? field.label} />
-        ))}
+        <ProfileFieldRows fields={fields} />
       </div>
     </section>
   );

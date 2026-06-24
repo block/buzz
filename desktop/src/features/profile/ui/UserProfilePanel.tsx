@@ -53,13 +53,13 @@ import {
   useUserProfileQuery,
 } from "@/features/profile/hooks";
 import {
-  AgentConfigurationFocusedView,
   AgentInfoFocusedView,
   ChannelsFocusedView,
   DiagnosticsFocusedView,
   MemoryFocusedView,
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
+import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
@@ -797,13 +797,13 @@ export function UserProfilePanel({
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
           diagnosticsSummary={diagnosticsSummary}
-          modelLabel={modelLabel}
           onOpenActivity={handleOpenActivity}
           onOpenAgentConfiguration={() => setView("configuration")}
           onOpenChannels={() => setView("channels")}
           onOpenDiagnostics={() => setView("diagnostics")}
           onOpenMemories={() => setView("memories")}
           onOpenDm={onOpenDm}
+          onToggleAutoStart={handleToggleAgentAutoStart}
           persona={resolvedPersona}
           presenceStatus={presenceStatus}
           profile={profile}
@@ -813,28 +813,21 @@ export function UserProfilePanel({
           userStatus={userStatus}
         />
       ) : null}
-
       {view === "memories" && effectivePubkey ? (
         <MemoryFocusedView agentPubkey={effectivePubkey} isOwner={isOwner} />
       ) : null}
-
       {view === "info" ? (
         <AgentInfoFocusedView metadataFields={agentInfoFields} />
       ) : null}
-
       {view === "configuration" ? (
         <AgentConfigurationFocusedView
           fields={agentSettingsFields}
           instruction={agentInstruction}
-          isActionPending={isAgentActionPending}
           managedAgent={managedAgent}
           modelLabel={modelLabel}
           onEditInstruction={canEditPersona ? handleEditPersona : undefined}
-          onModelChanged={() => void managedAgentsQuery.refetch()}
-          onToggleAutoStart={handleToggleAgentAutoStart}
         />
       ) : null}
-
       {view === "diagnostics" ? (
         <DiagnosticsFocusedView
           canOpenAgentLogs={canOpenAgentLogs}
@@ -849,7 +842,6 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
         />
       ) : null}
-
       {view === "channels" ? (
         <ChannelsFocusedView
           canAddToChannel={managedAgent !== undefined && isOwner === true}
@@ -860,7 +852,6 @@ export function UserProfilePanel({
           onOpenChannel={handleOpenChannel}
         />
       ) : null}
-
       {view === "logs" ? (
         <DiagnosticsFocusedView
           canOpenAgentLogs={canOpenAgentLogs}
@@ -877,7 +868,6 @@ export function UserProfilePanel({
       ) : null}
     </div>
   );
-
   const editAgentDialog =
     canEditAgent && managedAgent ? (
       <EditAgentDialog

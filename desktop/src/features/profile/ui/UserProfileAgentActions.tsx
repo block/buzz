@@ -1,8 +1,9 @@
 import type { LucideIcon } from "lucide-react";
-import { CopyPlus, Download, Trash2 } from "lucide-react";
+import { CopyPlus, Download, Power, Trash2 } from "lucide-react";
 
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { Switch } from "@/shared/ui/switch";
 
 export function UserProfileAgentActions({
   isPending,
@@ -10,6 +11,7 @@ export function UserProfileAgentActions({
   onDelete,
   onDuplicatePersona,
   onExportPersona,
+  onToggleAutoStart,
   personaActionKey,
 }: {
   isPending: boolean;
@@ -17,13 +19,39 @@ export function UserProfileAgentActions({
   onDelete?: () => void;
   onDuplicatePersona?: () => void;
   onExportPersona?: () => void;
+  onToggleAutoStart?: () => void;
   personaActionKey?: string;
 }) {
   const actionKey = managedAgent?.pubkey ?? "persona-draft";
   const personaKey = personaActionKey ?? actionKey;
+  const canToggleAutoStart =
+    managedAgent !== undefined &&
+    managedAgent.backend.type === "local" &&
+    onToggleAutoStart !== undefined;
+  const autoStartSwitchId = `user-profile-agent-auto-start-${actionKey}`;
 
   return (
     <section className="space-y-2">
+      {canToggleAutoStart ? (
+        <div className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+            <Power className="h-4 w-4 text-muted-foreground" />
+          </span>
+          <label
+            className="min-w-0 flex-1 text-sm font-medium text-foreground"
+            htmlFor={autoStartSwitchId}
+          >
+            Auto-start
+          </label>
+          <Switch
+            checked={managedAgent.startOnAppLaunch}
+            data-testid={autoStartSwitchId}
+            disabled={isPending}
+            id={autoStartSwitchId}
+            onCheckedChange={onToggleAutoStart}
+          />
+        </div>
+      ) : null}
       {onDuplicatePersona ? (
         <AgentActionRow
           disabled={isPending}
