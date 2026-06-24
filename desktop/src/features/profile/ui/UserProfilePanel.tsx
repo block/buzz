@@ -796,7 +796,6 @@ export function UserProfilePanel({
           diagnosticsFields={diagnosticsFields}
           diagnosticsSummary={diagnosticsSummary}
           modelLabel={modelLabel}
-          onOpenAgentInfo={() => setView("info")}
           onOpenAgentSettings={() => setView("settings")}
           onOpenChannels={() => setView("channels")}
           onOpenDiagnostics={() => setView("diagnostics")}
