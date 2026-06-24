@@ -37,6 +37,7 @@ import {
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import {
   usePresenceSession,
@@ -139,6 +140,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
   );
   usePersonaSync(identityQuery.data?.pubkey);
+  useAgentsDataRefresh();
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
