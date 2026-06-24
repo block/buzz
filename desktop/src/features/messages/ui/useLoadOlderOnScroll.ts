@@ -17,6 +17,15 @@ type UseLoadOlderOnScrollOptions = {
    * non-virtualized path's restore is a single synchronous `scrollTop` write.
    */
   setLoadOlderRestoreInFlight?: (inFlight: boolean) => void;
+  /**
+   * Live read of whether the user is stuck-to-bottom. If the user abandons the
+   * fetch by jumping to bottom WHILE the index restore owns scroll, the restore
+   * loop must re-aim at the bottom rather than the captured mid-history anchor
+   * — otherwise it lands the old anchor offset (short of the true floor) and the
+   * ceded ResizeObserver never chases the last rows down. Only meaningful with a
+   * virtualizer; the non-virtualized path restores synchronously.
+   */
+  getAnchorIsAtBottom?: () => boolean;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   sentinelRef: React.RefObject<HTMLDivElement | null>;
   /**
@@ -34,6 +43,40 @@ type UseLoadOlderOnScrollOptions = {
 };
 
 /**
+ * The scroll offset the prepend-restore loop should hold this frame. Returns
+ * `undefined` when there's nothing to aim at (no virtualizer, no growth yet, or
+ * the captured anchor row isn't resolvable). Resolved off the virtualizer's
+ * live measurement each frame so the loop chases the offset as prepended rows
+ * grow `getTotalSize()`.
+ *   - `abandonedToBottom`: the user jumped to bottom mid-prepend → the last
+ *     row's END offset (the true floor), not the stale mid-history anchor.
+ *   - otherwise: the captured first-visible row's START offset minus the gap
+ *     that was above it, holding the reader's eye-line across the prepend.
+ */
+function resolveTarget({
+  instance,
+  abandonedToBottom,
+  lastIndex,
+  newIndex,
+  anchorTop,
+}: {
+  instance: ListVirtualizer | null;
+  abandonedToBottom: boolean;
+  lastIndex: number;
+  newIndex: number | undefined;
+  anchorTop: number;
+}): number | undefined {
+  if (!instance) return undefined;
+  if (abandonedToBottom) {
+    if (lastIndex < 0) return undefined;
+    return instance.getOffsetForIndex(lastIndex, "end")?.[0];
+  }
+  if (newIndex === undefined) return undefined;
+  const start = instance.getOffsetForIndex(newIndex, "start");
+  return start === undefined ? undefined : start[0] - anchorTop;
+}
+
+/**
  * Triggers `fetchOlder` when a sentinel element near the top of the scroll
  * container enters the viewport, then restores the scroll position so the
  * visible content doesn't jump.
@@ -44,6 +87,7 @@ export function useLoadOlderOnScroll({
   isLoading,
   restoreScrollPosition,
   setLoadOlderRestoreInFlight,
+  getAnchorIsAtBottom,
   scrollContainerRef,
   sentinelRef,
   virtualizer = null,
@@ -57,6 +101,12 @@ export function useLoadOlderOnScroll({
   const setInFlightRef = React.useRef(setLoadOlderRestoreInFlight);
   React.useEffect(() => {
     setInFlightRef.current = setLoadOlderRestoreInFlight;
+  });
+  // Mirror the at-bottom getter so the prepend loop reads the live abandon
+  // state without re-subscribing the long-lived observer per render.
+  const getAnchorIsAtBottomRef = React.useRef(getAnchorIsAtBottom);
+  React.useEffect(() => {
+    getAnchorIsAtBottomRef.current = getAnchorIsAtBottom;
   });
   // Mirror the virtualizer option into a ref so the long-lived Intersection
   // observer reads the live getter + count without re-subscribing per render.
@@ -168,38 +218,50 @@ export function useLoadOlderOnScroll({
                 const after = virtualizerRef.current;
                 const grew =
                   (after?.itemCount ?? previousCount) > previousCount;
+                // Resolve this frame's target offset. Two cases, one mechanism:
+                //   - Abandon: the user jumped to bottom while this loop owned
+                //     scroll. Hold the BOTTOM (last row's end offset), not the
+                //     captured mid-history anchor — that old offset sits short of
+                //     the true floor and would strand the view there, since the
+                //     ResizeObserver re-pin is ceded to this loop for the whole
+                //     window.
+                //   - Normal: hold the captured first-visible row at its viewport
+                //     gap (its start offset minus the gap that was above it).
+                // Either way we drive `scrollToOffset` — NOT `scrollToIndex` — so
+                // the library's reconcile holds a FIXED offset instead of
+                // re-resolving each frame and overwriting it. As the prepended
+                // rows measure, `getOffsetForIndex` grows and we recompute and
+                // re-issue. Re-issue ONLY when the target moves — re-issuing an
+                // unchanged offset resets the library's stable-frame counter and
+                // spins. Same single-issue discipline as the convergence adapter.
+                const abandonedToBottom =
+                  getAnchorIsAtBottomRef.current?.() ?? false;
                 const newIndex =
                   anchorId !== null
                     ? after?.indexByMessageId.get(anchorId)
                     : undefined;
-                if (instance && grew && newIndex !== undefined) {
-                  // Target offset that puts the anchored row back at its captured
-                  // viewport gap: the row's start (top at viewport top) minus the
-                  // gap that was above it. We drive `scrollToOffset` — NOT
-                  // `scrollToIndex` — so the library's reconcile holds a FIXED
-                  // offset (`scrollState.index` is null) instead of re-resolving
-                  // the index to row-top each frame and overwriting our gap. As
-                  // the prepended rows measure, `getOffsetForIndex` grows and we
-                  // recompute the target and re-issue. Re-issue ONLY when the
-                  // target moves — re-issuing an unchanged offset resets the
-                  // library's stable-frame counter and spins. Same single-issue
-                  // discipline as the convergence adapter; one mechanism.
-                  const start = instance.getOffsetForIndex(newIndex, "start");
-                  if (start !== undefined) {
-                    const target = start[0] - anchorTop;
-                    if (target !== lastTarget) {
-                      instance.scrollToOffset(target, { align: "start" });
-                      lastTarget = target;
-                      stableFrames = 0;
-                    } else if ((instance.scrollOffset ?? 0) === target) {
-                      // The offset reached its target and the target stopped
-                      // moving (measurement settled). Two stable frames guards
-                      // against ending before the last row measures.
-                      stableFrames += 1;
-                      if (stableFrames >= 2) {
-                        finishPrepend();
-                        return;
-                      }
+                const target = resolveTarget({
+                  instance: grew ? instance : null,
+                  abandonedToBottom,
+                  lastIndex: (after?.itemCount ?? previousCount) - 1,
+                  newIndex,
+                  anchorTop,
+                });
+                if (instance && target !== undefined) {
+                  if (target !== lastTarget) {
+                    instance.scrollToOffset(target, { align: "start" });
+                    lastTarget = target;
+                    stableFrames = 0;
+                  } else if ((instance.scrollOffset ?? 0) >= target) {
+                    // Reached the target and it stopped moving (measurement
+                    // settled). `>=` not `===`: the abandon path aims at the
+                    // last possible offset, which the container clamps, so the
+                    // realized `scrollOffset` can sit at-or-past it. Two stable
+                    // frames guard against ending before the last row measures.
+                    stableFrames += 1;
+                    if (stableFrames >= 2) {
+                      finishPrepend();
+                      return;
                     }
                   }
                 }

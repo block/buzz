@@ -204,6 +204,17 @@ const MessageTimelineBase = React.forwardRef<
     return convergeToTargetRef.current(messageId);
   }, []);
 
+  // The mount bottom-pin driven through the virtualizer. Defined here as a
+  // stable wrapper over a ref (assigned below, once the virtualizer/item count
+  // are known) so `useAnchoredScroll` stays virtualizer-agnostic — same
+  // indirection as `convergeToTarget`. Returns `true` once it issued the
+  // index scroll; `false` (thread panel, no virtualizer) → the hook falls back
+  // to its raw bottom pin.
+  const pinToBottomByIndexRef = React.useRef<() => boolean>(() => false);
+  const pinToBottomByIndex = React.useCallback(() => {
+    return pinToBottomByIndexRef.current();
+  }, []);
+
   // The virtualizer instance and the flattened item stream are owned by the
   // child TimelineMessageList (which mounts the VirtualizedList) and reported
   // up here so the scroll manager can resolve scroll targets by index. The
@@ -287,6 +298,7 @@ const MessageTimelineBase = React.forwardRef<
     scrollToBottomOnNextUpdate,
     scrollToMessage,
     setLoadOlderRestoreInFlight,
+    getAnchorIsAtBottom,
   } = useAnchoredScroll({
     channelId,
     contentRef,
@@ -294,6 +306,7 @@ const MessageTimelineBase = React.forwardRef<
     isLoading: showTimelineSkeleton,
     messages: deferredMessages,
     onTargetReached,
+    pinToBottomByIndex,
     scrollContainerRef,
     targetMessageId,
   });
@@ -362,6 +375,22 @@ const MessageTimelineBase = React.forwardRef<
       ? convergeToMessage
       : () => false;
   }, [convergeToMessage, virtualizerOption]);
+  // Drive the mount bottom-pin through the virtualizer when one is present.
+  // Assigned during render (not an effect) because `useAnchoredScroll`'s
+  // mount pin runs in a layout effect on the SAME first commit — a passive
+  // effect would assign too late and the hook would fall back to the raw pin
+  // on the very mount the index pin exists to fix. The virtualizer instance
+  // arrives via the child's `onVirtualizer` (child refs resolve before this
+  // parent's layout effects), so `getVirtualizer()` is live by pin time.
+  pinToBottomByIndexRef.current = virtualizerOption
+    ? () => {
+        const virtualizer = getVirtualizer();
+        const lastIndex = virtualizerOption.itemCount - 1;
+        if (!virtualizer || lastIndex < 0) return false;
+        virtualizer.scrollToIndex(lastIndex, { align: "end" });
+        return true;
+      }
+    : () => false;
   // Abandon any in-flight convergence on channel switch so a stale loop can't
   // hijack the new channel's scroll position.
   // biome-ignore lint/correctness/useExhaustiveDependencies: cancel on channel switch only
@@ -424,6 +453,7 @@ const MessageTimelineBase = React.forwardRef<
     isLoading: showTimelineSkeleton,
     restoreScrollPosition,
     setLoadOlderRestoreInFlight,
+    getAnchorIsAtBottom,
     scrollContainerRef,
     sentinelRef: topSentinelRef,
     virtualizer: virtualizerOption,

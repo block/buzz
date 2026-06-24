@@ -39,6 +39,16 @@ type UseAnchoredScrollOptions = {
    *  on settle. Returns `true` once it owns the target (the hook marks it
    *  handled, no further dispatch). Absent (thread panel) → DOM-only retry. */
   convergeToTarget?: (messageId: string) => boolean;
+  /** Optional: pin the initial mount view to the last row through the
+   *  virtualizer's own `scrollToIndex(lastIndex, {align:"end"})`, rather than a
+   *  raw `scrollTo(scrollHeight)`. At mount the virtualizer's rows are still
+   *  estimate-sized, so `scrollHeight` is short of the true total and a raw pin
+   *  lands above the real bottom (and re-pins chase a moving floor). Driving the
+   *  last index through the library lets it own landing that row at the bottom
+   *  across its own measurement. Returns `true` once it issued (caller keeps the
+   *  at-bottom anchor); `false` when no virtualizer is available (thread panel),
+   *  so the hook falls back to the raw bottom pin. */
+  pinToBottomByIndex?: () => boolean;
 };
 
 type UseAnchoredScrollResult = {
@@ -71,6 +81,11 @@ type UseAnchoredScrollResult = {
    *  the ResizeObserver cedes — the index path is the sole `scrollTop` writer
    *  across the prepend, mirroring the `convergingTargetIdRef` cede. */
   setLoadOlderRestoreInFlight: (inFlight: boolean) => void;
+  /** Live read of whether the anchor is stuck-to-bottom. The load-older index
+   *  restore loop polls this each frame so a mid-prepend jump-to-bottom
+   *  (abandon) re-aims it at the bottom instead of the captured mid-history
+   *  anchor. */
+  getAnchorIsAtBottom: () => boolean;
 };
 
 function isAtBottomNow(container: HTMLDivElement) {
@@ -195,7 +210,19 @@ function restoreAnchorToMessage(
   }
 
   if (!anchorEl) {
-    // Anchor message and all subsequent rendered messages are gone.
+    // The anchor row is not in the DOM. Two distinct causes — only one means
+    // "go to bottom":
+    //   1. Deleted: the anchor and all newer rows are gone from `messages`
+    //      (e.g. message deletion). Nothing newer to anchor to → pin to bottom.
+    //   2. Windowed out: the virtualizer dropped the anchor row from its
+    //      rendered window because the user scrolled it off-screen (it is still
+    //      present in `messages`). Pinning to bottom here would yank the view
+    //      back down mid-scroll — the wheel-up-snaps-back regression. Leave the
+    //      scroll where the user put it and keep the anchor; the virtualizer
+    //      will render the row again when it re-enters the window.
+    if (messages.some((m) => m.id === anchor.messageId)) {
+      return anchor;
+    }
     container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
     return { kind: "at-bottom" };
   }
@@ -219,6 +246,7 @@ export function useAnchoredScroll({
   targetMessageId = null,
   onTargetReached,
   convergeToTarget,
+  pinToBottomByIndex,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
   // Anchor lives in a ref because it must survive renders and is updated
   // both on scroll (commit-time read) and in the layout effect (post-render
@@ -240,6 +268,12 @@ export function useAnchoredScroll({
   // live callback without re-subscribing on every consumer render.
   const convergeToTargetRef = React.useRef(convergeToTarget);
   convergeToTargetRef.current = convergeToTarget;
+  // Mirror the index-driven mount pin into a ref for the same reason — the
+  // layout effect reads the live callback without re-subscribing on every
+  // consumer render. Absent (thread panel, no virtualizer) → falls back to the
+  // raw bottom pin.
+  const pinToBottomByIndexRef = React.useRef(pinToBottomByIndex);
+  pinToBottomByIndexRef.current = pinToBottomByIndex;
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
   // Tracks the FRONT (oldest) rendered id so the restore effect can detect a
   // load-older prepend (front changed, tail unchanged) and cede it to the
@@ -269,6 +303,12 @@ export function useAnchoredScroll({
   // appends, we snap to bottom even if they had scrolled up to read history.
   // Consumed (and cleared) by the next append in the restoration effect.
   const forceBottomOnNextAppendRef = React.useRef(false);
+  // True from the initial bottom pin until the virtualizer's row measurement
+  // settles and the view reaches a true at-bottom. During this window `onScroll`
+  // ignores the transient gap the settle opens (see the guard there). A `ref`,
+  // not state — the guard runs on a native scroll event, outside React's render
+  // cycle.
+  const settlingRef = React.useRef(false);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -287,6 +327,7 @@ export function useAnchoredScroll({
     convergingTargetIdRef.current = null;
     loadOlderRestoreInFlightRef.current = false;
     forceBottomOnNextAppendRef.current = false;
+    settlingRef.current = false;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
@@ -298,6 +339,17 @@ export function useAnchoredScroll({
       const container = scrollContainerRef.current;
       if (!container) return;
       anchorRef.current = { kind: "at-bottom" };
+      // A smooth (animated) jump-to-latest is not atomic: the browser scrolls
+      // over several frames, and each intermediate `scroll` event would drive
+      // `onScroll` → `computeAnchor`, which latches a mid-history message anchor
+      // because the view is transiently NOT at the bottom. The ResizeObserver
+      // then "restores" that stale anchor and strands the view mid-list. Arm
+      // the same settle window the mount pin uses so `onScroll` holds the
+      // at-bottom anchor until the animation lands a true at-bottom; the
+      // observer's at-bottom re-pin then keeps the view glued as late row
+      // measurement grows `scrollHeight`. (An instant "auto" scroll completes
+      // before any scroll event, so it needs no guard.)
+      if (behavior === "smooth") settlingRef.current = true;
       container.scrollTo({ top: container.scrollHeight, behavior });
       setIsAtBottom(true);
       setNewMessageCount(0);
@@ -409,12 +461,41 @@ export function useAnchoredScroll({
     loadOlderRestoreInFlightRef.current = inFlight;
   }, []);
 
+  // Live read of whether the anchor is stuck-to-bottom, for the load-older
+  // restore loop. If the user jumps to bottom (abandon) WHILE that loop owns
+  // scroll, the loop is re-aiming `scrollToOffset` at the captured mid-history
+  // anchor and would land there, not at the bottom the user asked for — and the
+  // ResizeObserver re-pin is ceded to the loop for the whole window, so nothing
+  // chases the last rows to the true floor. The loop reads this each frame to
+  // detect the abandon and re-aim to the bottom instead.
+  const getAnchorIsAtBottom = React.useCallback(
+    () => anchorRef.current.kind === "at-bottom",
+    [],
+  );
+
   // Scroll handler: recompute anchor + bottom state from the current
   // scroll position. Cheap enough to run on every scroll event — a single
   // `getBoundingClientRect` walk plus rect reads.
   const onScroll = React.useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    // A virtualizer settle grows `scrollHeight` (rows below the fold measure a
+    // frame or two after the initial bottom pin) and emits scroll events while
+    // `scrollTop` holds at the old floor — opening a transient gap above the
+    // true bottom. `computeAnchor` would read that gap as a deliberate
+    // scroll-up and latch a message anchor, freezing the view short of the
+    // bottom (the non-virtualized list had full height at pin time, so it never
+    // produced this gap). While settling, keep the anchor at-bottom so the
+    // resize observer's re-pin can finish chasing the floor; clear the window
+    // once a scroll event reads a genuine at-bottom. Scoped to the initial
+    // settle so post-settle user scroll-up re-evaluates the anchor normally.
+    if (settlingRef.current) {
+      if (isAtBottomNow(container)) {
+        settlingRef.current = false;
+      } else {
+        return;
+      }
+    }
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
@@ -446,6 +527,20 @@ export function useAnchoredScroll({
     // to the requested target message, or to the bottom by default.
     if (!hasInitializedRef.current) {
       if (isLoading) return;
+      // Mount bottom pin. Prefer the virtualizer's own
+      // `scrollToIndex(lastIndex, {align:"end"})` (via `pinToBottomByIndex`):
+      // at mount the rows are estimate-sized, so a raw `scrollTo(scrollHeight)`
+      // lands above the true bottom and the last rows may not render into the
+      // window. Driving the last index through TanStack lands that row at the
+      // bottom across its own measurement. Falls back to the raw pin when no
+      // virtualizer is present (thread panel) or it declines.
+      const pinToBottomOnMount = () => {
+        if (pinToBottomByIndexRef.current?.()) {
+          anchorRef.current = { kind: "at-bottom" };
+          return;
+        }
+        scrollToBottomImperative("auto");
+      };
       if (targetMessageId) {
         // A cold deep-link target may not be in the DOM on this first
         // commit — the route screen fetches it by id and splices it in a
@@ -461,12 +556,16 @@ export function useAnchoredScroll({
           // the param sticks and re-clicking the same deep link is a no-op.
           onTargetReached?.(targetMessageId);
         } else {
-          scrollToBottomImperative("auto");
+          pinToBottomOnMount();
         }
       } else {
-        scrollToBottomImperative("auto");
+        pinToBottomOnMount();
       }
       hasInitializedRef.current = true;
+      // Arm the settle window only when we pinned to bottom — that's the path
+      // that suffers the late spacer growth. A successful deep-link target
+      // leaves a message anchor and must not be treated as a settling bottom.
+      settlingRef.current = anchorRef.current.kind === "at-bottom";
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
       prevFirstMessageIdRef.current = messages[0]?.id;
       prevMessageCountRef.current = messages.length;
@@ -699,5 +798,6 @@ export function useAnchoredScroll({
     scrollToMessage: scrollToMessageImperative,
     restoreScrollPosition,
     setLoadOlderRestoreInFlight,
+    getAnchorIsAtBottom,
   };
 }

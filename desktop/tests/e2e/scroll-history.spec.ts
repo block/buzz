@@ -411,8 +411,16 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
   // Sanity: we did move away from the bottom and the prepend has NOT yet
   // resolved (otherwise the abandon scenario doesn't exist).
   expect(duringFetch.scrollTop).toBeLessThan(500);
-  expect(duringFetch.scrollHeight).toBeLessThanOrEqual(
-    baseline.scrollHeight + 100,
+  // "Prepend not yet resolved" tested directly via the in-flight indicator the
+  // suite already keys on (it renders while `isFetchingOlder` OR the prepended
+  // rows have not painted yet — line 127 asserts its ABSENCE at idle load). The
+  // older `scrollHeight <= baseline + 100` proxy assumed scrollHeight only
+  // changes when DOM rows are added — true for a non-virtualized list, but a
+  // virtualizer grows `getTotalSize()` purely from lazy row measurement (no
+  // prepend), so that proxy false-fails here. This signal is agnostic to how
+  // scrollHeight evolves.
+  await expect(page.getByTestId("message-timeline-fetching-older")).toHaveCount(
+    1,
   );
 
   // Abandon: jump back to bottom while the fetch is still in flight.
@@ -588,9 +596,13 @@ test("deep-link to a message in older history scrolls and highlights it", async 
   // that sits well outside the initial-render window.
   const prependedIds: string[] = await page.evaluate(() => {
     for (let index = 0; index < 40; index += 1) {
+      // Monotonic createdAt so `visible current 39` (seeded last) sorts to the
+      // genuine last row rather than a random UUID-tiebreak position; matches
+      // the channel-intro seed precedent. The :630 assertion stays untouched.
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `visible current ${index}\nsecond line ${index}`,
+        createdAt: 1_700_000_000 + index,
       });
     }
     const events = window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
@@ -805,9 +817,13 @@ test("find-bar active match scrolls and highlights row regardless of position", 
         } else if (i === bravoIndex) {
           body = `filler message ${i}\n${bravo}`;
         }
+        // Monotonic createdAt so ALPHA/BRAVO land at their true sorted
+        // positions (index 20 / 110) rather than random UUID-tiebreak slots;
+        // matches the channel-intro seed precedent. Needle assertions untouched.
         window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
           channelName: "general",
           content: body,
+          createdAt: 1_700_000_000 + i,
         });
       }
     },
@@ -1022,9 +1038,16 @@ test("composer expansion does not push bottom row out of viewport", async ({
     ({ total, bottom }) => {
       for (let i = 0; i < total; i += 1) {
         const body = i === total - 1 ? bottom : `filler message ${i}`;
+        // Monotonic createdAt: without it all rows share one whole-second
+        // stamp and `sortMessages` tiebreaks by random UUID, so BOTTOM_NEEDLE
+        // (seeded last) lands at a random sorted index — often outside the
+        // virtualized window, so `toContainText(BOTTOM_NEEDLE)` flakes. A
+        // distinct stamp per row sorts the needle to the true last row.
+        // Matches the channel-intro seed precedent (1_700_000_001 + index).
         window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
           channelName: "general",
           content: body,
+          createdAt: 1_700_000_000 + i,
         });
       }
     },
@@ -1148,9 +1171,13 @@ test("in-viewport reflow above the anchor row does not push it down", async ({
   // rows above whatever we anchor to.
   await page.evaluate(() => {
     for (let index = 0; index < 60; index += 1) {
+      // Monotonic createdAt so `resize-anchor row 59` (seeded last) sorts to
+      // the genuine last row rather than a random UUID-tiebreak position; see
+      // the composer seed for the full rationale.
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `resize-anchor row ${index}\nsecond line ${index}\nthird line ${index}`,
+        createdAt: 1_700_000_000 + index,
       });
     }
   });
