@@ -349,11 +349,36 @@ fn fast_path_eligible(manifest: &super::manifest::Manifest) -> bool {
     })
 }
 
+/// Largest payload a single pkt-line can carry: the 4-hex length prefix counts
+/// itself, so the total frame is bounded to `0xffff` and the payload to
+/// `0xffff - 4`.
+const PKT_LINE_MAX_PAYLOAD: usize = 0xffff - 4;
+
 /// Encode one pkt-line: 4-char lowercase-hex length prefix (counting itself)
 /// followed by `payload`. Appends to `out`.
+///
+/// The 4-hex prefix can only express a frame length up to `0xffff`. A payload
+/// past [`PKT_LINE_MAX_PAYLOAD`] would make `format!("{len:04x}")` emit *five*
+/// hex digits — not a truncation but a silent stream corruption (the next
+/// reader takes the first four as the length). Callers on the manifest fast
+/// path are already gated by [`fast_path_eligible`]'s length cap, but this is
+/// the construction boundary: rather than trust every present and future
+/// caller, an overlong payload here is dropped (emitting an empty `0004`
+/// pkt-line) and logged at `error`, instead of writing a malformed length.
+/// Non-panicking in every build profile — the worst case is a ref-short
+/// advertisement that fails cleanly client-side, never a corrupted stream.
 fn pkt_line(out: &mut Vec<u8>, payload: &[u8]) {
+    if payload.len() > PKT_LINE_MAX_PAYLOAD {
+        tracing::error!(
+            payload_len = payload.len(),
+            limit = PKT_LINE_MAX_PAYLOAD,
+            "pkt-line payload exceeds 0xffff-4 frame limit; dropping (bug: caller \
+             bypassed the fast-path length gate)"
+        );
+        out.extend_from_slice(b"0004"); // empty pkt-line; never a 5-hex length
+        return;
+    }
     let len = payload.len() + 4;
-    // pkt-line length is bounded to 0xffff; refnames + oids never approach it.
     out.extend_from_slice(format!("{len:04x}").as_bytes());
     out.extend_from_slice(payload);
 }
@@ -1246,6 +1271,33 @@ mod track_c_tests {
         let long = format!("refs/heads/{}", "a".repeat(MAX_FAST_PATH_REFNAME_LEN));
         m.refs.insert(long, oid_sha1());
         assert!(!fast_path_eligible(&m));
+    }
+
+    #[test]
+    fn pkt_line_encodes_max_payload_without_overflow() {
+        // The largest payload that still fits a 4-hex frame length emits a
+        // single valid `ffff` (= 0xffff) frame — the boundary the guard
+        // protects, exercised on the safe side.
+        let payload = vec![b'a'; PKT_LINE_MAX_PAYLOAD];
+        let mut out = Vec::new();
+        pkt_line(&mut out, &payload);
+        assert_eq!(&out[..4], b"ffff", "frame length prefix");
+        assert_eq!(out.len(), 4 + PKT_LINE_MAX_PAYLOAD, "no truncation");
+        let frames = parse_pkt_lines(&out);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), PKT_LINE_MAX_PAYLOAD);
+    }
+
+    // The overlong-payload guard degrades to an empty `0004` pkt-line in every
+    // build profile (no 5-hex length, stream stays parseable) and logs at
+    // `error`. Non-panicking, so it's testable directly.
+    #[test]
+    fn pkt_line_overlong_payload_degrades_to_empty_frame() {
+        let payload = vec![b'a'; PKT_LINE_MAX_PAYLOAD + 1];
+        let mut out = Vec::new();
+        pkt_line(&mut out, &payload);
+        // Empty pkt-line, payload dropped — never a malformed 5-hex length.
+        assert_eq!(out, b"0004");
     }
 
     #[test]
