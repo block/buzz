@@ -112,6 +112,57 @@ pub async fn filter_fanout_by_access(
     allowed
 }
 
+/// Fan out one event received from Redis pub/sub to this relay's local subscribers.
+pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
+    // Nil UUID is the sentinel for channel-less global events (see
+    // `handle_ephemeral_event`'s global branch). Convert back to None so
+    // `fan_out()` uses the global subscriber index.
+    let channel_id = if channel_event.channel_id.is_nil() {
+        None
+    } else {
+        Some(channel_event.channel_id)
+    };
+    let stored = StoredEvent::new(channel_event.event, channel_id);
+
+    // Skip events that were already fanned out in-process (local echo). The
+    // cache has TTL-based eviction (60s) so entries are bounded regardless of
+    // subscriber health.
+    let event_id_bytes = stored.event.id.to_bytes();
+    if state.local_event_ids.get(&event_id_bytes).is_some() {
+        state.local_event_ids.invalidate(&event_id_bytes);
+        return;
+    }
+
+    let matches = state.sub_registry.fan_out(&stored);
+    let matches = filter_fanout_by_access(state, &stored, matches).await;
+    metrics::counter!("buzz_multinode_fanout_total").increment(1);
+    if matches.is_empty() {
+        return;
+    }
+
+    let event_json = match serde_json::to_string(&stored.event) {
+        Ok(json) => json,
+        Err(e) => {
+            tracing::error!("Failed to serialize event for multi-node fan-out: {e}");
+            return;
+        }
+    };
+    let mut drop_count = 0u32;
+    for (conn_id, sub_id) in &matches {
+        let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
+        if !state.conn_manager.send_to(*conn_id, msg) {
+            drop_count += 1;
+        }
+    }
+    if drop_count > 0 {
+        tracing::warn!(
+            event_id = %stored.event.id.to_hex(),
+            drop_count,
+            "multi-node fan-out: {drop_count} connection(s) dropped"
+        );
+    }
+}
+
 /// Publish a stored event to subscribers and kick off async side effects.
 pub(crate) async fn dispatch_persistent_event(
     state: &Arc<AppState>,
@@ -474,28 +525,9 @@ async fn handle_ephemeral_event(
             let _ = state.pubsub.set_presence(&auth_pubkey, &status).await;
         }
 
-        let stored_event = StoredEvent::new(event.clone(), None);
-        let matches = state.sub_registry.fan_out(&stored_event);
-        metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
-        let event_json = serde_json::to_string(&event)
-            .expect("nostr::Event serialization is infallible for well-formed events");
-        let mut drop_count = 0u32;
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-            if !state.conn_manager.send_to(*target_conn_id, msg) {
-                drop_count += 1;
-            }
-        }
-        if drop_count > 0 {
-            tracing::warn!(
-                event_id = %event_id_hex,
-                drop_count,
-                "fan-out: {drop_count} connection(s) cancelled due to full/closed buffers"
-            );
-        }
-
-        conn.send(RelayMessage::ok(event_id_hex, true, ""));
-        return;
+        // Presence is a channel-less ephemeral event. After updating Redis
+        // presence state, let it fall through to the shared global ephemeral
+        // publish/fan-out path below so other relay nodes receive the live delta.
     }
 
     // Mesh status report (kind:24620). An authenticated relay member reports its
@@ -1001,6 +1033,188 @@ mod tests {
         assert!(err.contains("NIP-44"));
     }
 
+    mod pubsub_fanout {
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+
+        use axum::extract::ws::Message;
+        use buzz_core::kind::KIND_PRESENCE_UPDATE;
+        use buzz_pubsub::ChannelEvent;
+        use nostr::{EventBuilder, Filter, Keys, Kind};
+        use tokio::sync::{mpsc, Mutex};
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        use crate::handlers::event::fan_out_pubsub_event;
+        use crate::state::AppState;
+
+        async fn test_state() -> Arc<AppState> {
+            super::fanout_access::test_state().await
+        }
+
+        fn register_presence_sub(
+            state: &AppState,
+            sub_id: &str,
+        ) -> (Uuid, mpsc::Receiver<Message>) {
+            let conn_id = Uuid::new_v4();
+            let (tx, rx) = mpsc::channel(10);
+            state.conn_manager.register(
+                conn_id,
+                tx,
+                CancellationToken::new(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+            );
+            state.sub_registry.register(
+                conn_id,
+                sub_id.to_string(),
+                vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
+                None,
+            );
+            (conn_id, rx)
+        }
+
+        fn presence_event(status: &str) -> nostr::Event {
+            EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+                .sign_with_keys(&Keys::generate())
+                .expect("sign presence")
+        }
+
+        fn event_from_ws_message(msg: Message) -> nostr::Event {
+            let Message::Text(text) = msg else {
+                panic!("expected text ws message");
+            };
+            let v: serde_json::Value = serde_json::from_str(&text).expect("EVENT frame JSON");
+            assert_eq!(v[0], "EVENT");
+            serde_json::from_value(v[2].clone()).expect("nostr event")
+        }
+
+        #[tokio::test]
+        async fn global_presence_pubsub_event_fans_out_to_local_subscribers() {
+            let state = test_state().await;
+            let (_conn_id, mut rx) = register_presence_sub(&state, "presence");
+            let event = presence_event("online");
+            let event_id = event.id;
+
+            fan_out_pubsub_event(
+                &state,
+                ChannelEvent {
+                    channel_id: Uuid::nil(),
+                    event,
+                },
+            )
+            .await;
+
+            let delivered = event_from_ws_message(rx.try_recv().expect("presence delivered"));
+            assert_eq!(delivered.id, event_id);
+            assert!(rx.try_recv().is_err(), "presence is delivered once");
+        }
+
+        #[tokio::test]
+        async fn local_echo_presence_pubsub_event_is_not_delivered_twice() {
+            let state = test_state().await;
+            let (_conn_id, mut rx) = register_presence_sub(&state, "presence");
+            let event = presence_event("online");
+
+            state.mark_local_event(&event.id);
+            fan_out_pubsub_event(
+                &state,
+                ChannelEvent {
+                    channel_id: Uuid::nil(),
+                    event,
+                },
+            )
+            .await;
+
+            assert!(
+                rx.try_recv().is_err(),
+                "Redis echo of locally fanned-out presence must be suppressed"
+            );
+        }
+
+        async fn redis_url_if_available() -> Option<String> {
+            let redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            let pool = deadpool_redis::Config::from_url(&redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .ok()?;
+            let mut conn = pool.get().await.ok()?;
+            redis::cmd("PING")
+                .query_async::<String>(&mut conn)
+                .await
+                .ok()?;
+            Some(redis_url)
+        }
+
+        fn spawn_pubsub_fanout_loop(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+            let mut rx = state.pubsub.subscribe_local();
+            tokio::spawn(async move {
+                while let Ok(channel_event) = rx.recv().await {
+                    fan_out_pubsub_event(&state, channel_event).await;
+                }
+            })
+        }
+
+        #[tokio::test]
+        async fn redis_presence_publish_reaches_second_relay_and_suppresses_origin_echo() {
+            let Some(redis_url) = redis_url_if_available().await else {
+                eprintln!("skipping Redis round-trip presence fan-out test: Redis unavailable");
+                return;
+            };
+
+            let origin = super::fanout_access::test_state_with_redis_url(&redis_url).await;
+            let receiver = super::fanout_access::test_state_with_redis_url(&redis_url).await;
+
+            let origin_subscriber = tokio::spawn(origin.pubsub.clone().run_subscriber());
+            let receiver_subscriber = tokio::spawn(receiver.pubsub.clone().run_subscriber());
+            let origin_fanout = spawn_pubsub_fanout_loop(origin.clone());
+            let receiver_fanout = spawn_pubsub_fanout_loop(receiver.clone());
+
+            let (_origin_conn, mut origin_rx) = register_presence_sub(&origin, "origin-presence");
+            let (_receiver_conn, mut receiver_rx) =
+                register_presence_sub(&receiver, "receiver-presence");
+
+            // Match buzz-pubsub's own Redis round-trip test: give PSUBSCRIBE a
+            // bounded moment to attach before publishing the single test event.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            let event = presence_event("online");
+            let event_id = event.id;
+            origin.mark_local_event(&event.id);
+            origin
+                .pubsub
+                .publish_event(Uuid::nil(), &event)
+                .await
+                .expect("publish presence through Redis");
+
+            let delivered =
+                tokio::time::timeout(std::time::Duration::from_secs(2), receiver_rx.recv())
+                    .await
+                    .expect("presence reached second relay")
+                    .expect("receiver connection still open");
+            let delivered = event_from_ws_message(delivered);
+            assert_eq!(delivered.id, event_id);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), receiver_rx.recv())
+                    .await
+                    .is_err(),
+                "second relay receives the presence event exactly once"
+            );
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(250), origin_rx.recv())
+                    .await
+                    .is_err(),
+                "origin relay suppresses the Redis echo after local fan-out"
+            );
+
+            origin_subscriber.abort();
+            receiver_subscriber.abort();
+            origin_fanout.abort();
+            receiver_fanout.abort();
+        }
+    }
+
     mod fanout_access {
         use std::collections::HashMap;
         use std::sync::atomic::AtomicU8;
@@ -1015,15 +1229,16 @@ mod tests {
         use crate::handlers::event::filter_fanout_by_access;
         use crate::state::AppState;
 
-        fn test_config() -> crate::config::Config {
+        pub(super) fn test_config() -> crate::config::Config {
             let mut config = crate::config::Config::from_env().expect("default config loads");
             config.require_relay_membership = false;
             config.redis_url = "redis://127.0.0.1:1".to_string();
             config
         }
 
-        async fn test_state() -> Arc<AppState> {
-            let config = test_config();
+        pub(super) async fn test_state_with_redis_url(redis_url: &str) -> Arc<AppState> {
+            let mut config = test_config();
+            config.redis_url = redis_url.to_string();
             let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
             let db = buzz_db::Db::from_pool(pool.clone());
             let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
@@ -1060,6 +1275,10 @@ mod tests {
                 media_storage,
             );
             Arc::new(state)
+        }
+
+        pub(super) async fn test_state() -> Arc<AppState> {
+            test_state_with_redis_url("redis://127.0.0.1:1").await
         }
 
         fn register_conn(state: &AppState, pubkey: Option<Vec<u8>>) -> Uuid {
