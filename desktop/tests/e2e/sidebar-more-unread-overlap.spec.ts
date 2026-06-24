@@ -2,18 +2,17 @@
  * Visual regression for the sidebar `MoreUnreadButton` (top variant)
  * overlapping the macOS traffic-light region in the global top chrome.
  *
- * The bug: `position="top"` anchored the pill at `top-0` inside a column
- * starting at window y=0, so it sat inside the 40px chrome strip — where
- * the macOS traffic lights live on the native window.
+ * The old bug: `position="top"` anchored the pill at `top-0` inside a column
+ * starting at window y=0, so it sat inside the 40px chrome strip where the
+ * macOS traffic lights live on the native window.
  *
- * The fix: anchor the top pill to `topChromeInset.top`
- * (`top-(--buzz-top-chrome-height,2.5rem)`) so it lines up with
- * `SidebarContent`'s existing top margin.
+ * The current layout keeps the global top chrome in normal flow above the
+ * sidebar row, so `top-0` inside the sidebar starts below the traffic-light
+ * strip.
  *
- * This spec injects two synthetic pill elements into the live sidebar's
- * relative container — one with the legacy `top-0` className and one with
- * the fixed `top-(--buzz-top-chrome-height,2.5rem)` className — and
- * screenshots each next to the chrome strip so the difference is visible.
+ * This spec injects a synthetic pill into the live sidebar's relative
+ * container and screenshots it next to the chrome strip so the positioning is
+ * visible.
  */
 import { expect, test } from "@playwright/test";
 
@@ -21,8 +20,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/sidebar-more-unread-overlap";
 
-const LEGACY_TOP_CLASS = "top-0";
-const FIXED_TOP_CLASS = "top-(--buzz-top-chrome-height,2.5rem)";
+const TOP_CLASS = "top-0";
 
 const PILL_BASE =
   "pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1";
@@ -72,38 +70,19 @@ test.describe("sidebar MoreUnreadButton top chrome overlap", () => {
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
   });
 
-  test("before fix: top-0 overlaps traffic-light strip", async ({ page }) => {
-    await injectSyntheticPill(page, LEGACY_TOP_CLASS, "synthetic-before");
-    const pill = page.getByTestId("synthetic-before");
+  test("top pill clears the in-flow traffic-light strip", async ({ page }) => {
+    await injectSyntheticPill(page, TOP_CLASS, "synthetic-top");
+    const pill = page.getByTestId("synthetic-top");
     await expect(pill).toBeVisible();
 
     const box = await pill.boundingBox();
     expect(box).not.toBeNull();
-    // Pre-fix: pill is anchored at y=0, inside the 40px chrome strip.
-    expect(box?.y ?? Number.NaN).toBeLessThan(20);
-
-    // Screenshot the top-left corner of the sidebar with the chrome strip
-    // visible above it.
-    await page.screenshot({
-      path: `${SHOTS}/before-top-0-overlap.png`,
-      clip: { x: 0, y: 0, width: 320, height: 120 },
-    });
-  });
-
-  test("after fix: top-(--buzz-top-chrome-height) clears chrome strip", async ({
-    page,
-  }) => {
-    await injectSyntheticPill(page, FIXED_TOP_CLASS, "synthetic-after");
-    const pill = page.getByTestId("synthetic-after");
-    await expect(pill).toBeVisible();
-
-    const box = await pill.boundingBox();
-    expect(box).not.toBeNull();
-    // Post-fix: pill sits below the 40px chrome strip.
+    // The pill is anchored at the top of the sidebar row, below the 40px
+    // in-flow chrome strip.
     expect(box?.y ?? Number.NaN).toBeGreaterThanOrEqual(40);
 
     await page.screenshot({
-      path: `${SHOTS}/after-top-chrome-inset.png`,
+      path: `${SHOTS}/top-pill-below-in-flow-chrome.png`,
       clip: { x: 0, y: 0, width: 320, height: 120 },
     });
   });

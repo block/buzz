@@ -954,7 +954,6 @@ export function AppShell() {
                           onStarChannel={starChannel}
                           onUnstarChannel={unstarChannel}
                         />
-
                         <MainInsetProvider mainInsetRef={mainInsetRef}>
                           <SidebarInset
                             ref={mainInsetRef}
@@ -971,7 +970,6 @@ export function AppShell() {
                         </MainInsetProvider>
                       </div>
                     )}
-
                     <AppShellOverlays
                       activeChannel={activeChannel}
                       browseDialogType={browseDialogType}
