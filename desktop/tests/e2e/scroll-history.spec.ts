@@ -111,47 +111,25 @@ test("first channel load holds skeleton instead of showing older-history spinner
 
 test("preserves user scroll while older channel history loads", async ({
   page,
-}) => {
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
   await installMockBridge(page);
   await page.goto("/");
   await page.waitForFunction(
-    () =>
-      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
-      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
   );
 
-  await page.evaluate(() => {
-    for (let index = 0; index < 40; index += 1) {
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
-        content: `visible current ${index}\nsecond line ${index}`,
-      });
-    }
-    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
-      channelName: "general",
-      count: 600,
-      lineCount: 3,
-    });
-  });
-
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  // Use the `deep-history` channel: its store is seeded with 600 messages,
+  // more than CHANNEL_HISTORY_LIMIT (300, hooks.ts), so the cold load windows
+  // to the newest 300 and leaves ~300 genuinely older messages behind the
+  // `until` cursor. A shallow seed (store < 300) is fully drained by the cold
+  // load, so the wheel `fetchOlder` returns only already-cached duplicates that
+  // dedup to zero net growth -- the anchor never has a real prepend to hold and
+  // the assertion would measure virtualizer re-measure, not scroll preservation.
+  await page.getByTestId("channel-deep-history").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
   const timeline = page.getByTestId("message-timeline");
-  await expect(timeline).toContainText("visible current 39");
-
-  // Initial load should receive enough history to make the page scrollable.
-  // Delay only the next history request, so the test isolates pagination while
-  // the user is actively scrolling.
-  await page.evaluate(() => {
-    window.__BUZZ_E2E__ = {
-      ...window.__BUZZ_E2E__,
-      mock: {
-        ...window.__BUZZ_E2E__?.mock,
-        historyDelayMs: 1_000,
-      },
-    };
-  });
-
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
   await page.waitForFunction(() => {
     const element = document.querySelector(
       '[data-testid="message-timeline"]',
@@ -159,48 +137,110 @@ test("preserves user scroll while older channel history loads", async ({
     return element && element.scrollHeight > element.clientHeight + 1000;
   });
 
-  // Move away from the bottom before jumping near the top; otherwise the
-  // timeline's sticky-bottom guard can intentionally pin the first upward jump.
-  const beforeFetch = await getTimelineMetrics(page);
-  await timeline.evaluate((element) => {
-    const timelineElement = element as HTMLDivElement;
-    timelineElement.scrollTop = timelineElement.scrollHeight;
-    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
-  await page.waitForTimeout(50);
+  // The lowest "Deep history message #N" index currently rendered. The seed
+  // numbers messages 0 (oldest) .. 599 (newest), so a smaller index = older.
+  const oldestRenderedIndex = () =>
+    timeline.evaluate((element) => {
+      let min = Number.POSITIVE_INFINITY;
+      for (const row of (
+        element as HTMLDivElement
+      ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const match = row.textContent?.match(/#(\d+)/);
+        if (match) min = Math.min(min, Number(match[1]));
+      }
+      return Number.isFinite(min) ? min : null;
+    });
 
-  const nearTop = await timeline.evaluate((element) => {
-    const timelineElement = element as HTMLDivElement;
-    timelineElement.scrollTop = 180;
-    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
-    return timelineElement.scrollTop;
-  });
-  expect(nearTop).toBeLessThan(260);
+  // PHASE 1 -- walk into mid-history with NO history delay. Each fetchOlder
+  // resolves instantly, the prepend lands, the oldest-rendered index advances,
+  // and the next wheel re-enters a fresh top sentinel. This sustained climb is
+  // how a deep seed reaches the sentinel under real wheel (the `count:2100`
+  // sibling relies on the same mechanic). We stop in mid-history -- not at the
+  // top -- so a genuine older page still sits behind the `until` cursor for
+  // phase 2 to fetch, and so the anchor we hold has older content arriving
+  // ABOVE it (the actual scroll-preservation scenario, not the at-top edge).
+  await timeline.hover();
+  let deepest = Number.POSITIVE_INFINITY;
+  let stallStreak = 0;
+  for (let attempt = 0; attempt < 120 && deepest > 250; attempt += 1) {
+    await page.mouse.wheel(0, -4000);
+    await page.waitForTimeout(70);
+    const current = await oldestRenderedIndex();
+    if (current !== null && current < deepest) {
+      deepest = current;
+      stallStreak = 0;
+    } else {
+      stallStreak += 1;
+      if (stallStreak > 20) break;
+    }
+  }
+  // Confirm phase 1 actually paginated into mid-history -- if it never climbed
+  // off the newest window the rest of the test is meaningless.
+  expect(deepest).toBeLessThan(400);
 
-  await page.waitForTimeout(100);
-  const duringFetch = await timeline.evaluate((element) => {
-    const timelineElement = element as HTMLDivElement;
-    timelineElement.scrollTop = timelineElement.scrollTop + 160;
-    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
-    return timelineElement.scrollTop;
+  // PHASE 2 -- now delay the next history page so it stays in flight long
+  // enough to observe the anchor across the landing. historyDelayMs is read
+  // live by the bridge, so toggling it here applies to the next fetch only.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 1_000 },
+    };
+    (
+      window as unknown as { __HISTORY_INFLIGHT__?: number }
+    ).__HISTORY_INFLIGHT__ = 0;
   });
-  expect(duringFetch).toBeGreaterThan(nearTop);
-  const anchorDuringFetch = await getFirstVisibleMessage(page);
-  expect(anchorDuringFetch).not.toBeNull();
+  const inflightCount = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __HISTORY_INFLIGHT__?: number })
+          .__HISTORY_INFLIGHT__ ?? 0,
+    );
 
+  // Snapshot the oldest rendered index BEFORE firing the delayed page, so the
+  // poll's growth gate can require a genuinely NEW older index after it lands.
+  const oldestBeforeLanding = await oldestRenderedIndex();
+  expect(oldestBeforeLanding).not.toBeNull();
+
+  // One wheel tick to fire the delayed older-history page.
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if ((await inflightCount()) > 0) break;
+    await page.mouse.wheel(0, -4000);
+    await page.waitForTimeout(50);
+  }
+  expect(await inflightCount()).toBeGreaterThan(0);
+
+  // Capture the first-visible row id AFTER the fire wheel but WHILE the page is
+  // still in flight (the prepend lands ~historyDelayMs later). The fire wheel
+  // moves the viewport, so the anchor must be read at this settled in-flight
+  // position -- a row captured before the fire wheel can scroll out of the
+  // virtualized window before the prepend lands. This row exists before the
+  // prepend and is the one the restore must hold.
+  const anchorBeforeLanding = await getFirstVisibleMessage(page);
+  expect(anchorBeforeLanding).not.toBeNull();
+
+  // The poll must observe the anchor holding AS a genuine older page lands
+  // above it. It only counts a drift reading once BOTH hold in the same sample:
+  // the delayed fetch has RESOLVED (inflight back to 0) AND it brought a real
+  // older index that was not rendered before the prepend (proof the page was
+  // not a duplicate-only fetch). Until then it returns Infinity and keeps
+  // sampling, so it cannot pass against the settled pre-landing window.
   await expect
     .poll(
       async () => {
-        const [anchor, metrics] = await Promise.all([
-          getMessagePosition(page, anchorDuringFetch?.id ?? ""),
-          getTimelineMetrics(page),
+        const [inflight, oldestNow, anchor] = await Promise.all([
+          inflightCount(),
+          oldestRenderedIndex(),
+          getMessagePosition(page, anchorBeforeLanding?.id ?? ""),
         ]);
-        if (metrics.scrollHeight <= beforeFetch.scrollHeight + 1000) {
+        const landed =
+          inflight === 0 &&
+          oldestNow !== null &&
+          oldestNow < (oldestBeforeLanding ?? 0);
+        if (!landed || !anchor) {
           return Number.POSITIVE_INFINITY;
         }
-        return anchor
-          ? Math.abs(anchor.top - (anchorDuringFetch?.top ?? 0))
-          : Number.POSITIVE_INFINITY;
+        return Math.abs(anchor.top - (anchorBeforeLanding?.top ?? 0));
       },
       {
         timeout: 3_000,
@@ -569,28 +609,75 @@ test("deep-link to a message in older history scrolls and highlights it", async 
   const targetRow = timeline.locator(`[data-message-id="${targetId}"]`);
   await expect(targetRow).toBeVisible({ timeout: 5_000 });
 
-  // (b) Geometry: target row sits inside the timeline viewport AND near
-  // the vertical center. "Near center" is defined as within one row-height
-  // worth of slack of half the timeline's clientHeight -- generous enough
-  // to tolerate centering implementation choices but tight enough to catch
-  // "row is technically visible but at the top edge" regressions.
+  // (b)/(c) Geometry + highlight. The convergence adapter re-aims the
+  // virtualizer across several frames (scrollToIndex on an estimated index,
+  // then re-resolved once rows measure), and only applies the highlight on
+  // the settled frame via `onConverged`. The row therefore becomes DOM-
+  // visible (passing `toBeVisible` above) at an intermediate overshoot
+  // position one or more frames before it is centered and highlighted. We
+  // poll the row's placement until it satisfies the full settled contract --
+  // centered AND carrying the highlight class -- inside the 2s highlight-fade
+  // window. A single synchronous read here would race the convergence loop.
   const placement = await timeline.evaluate((timelineEl, id) => {
     const t = timelineEl as HTMLDivElement;
-    const row = t.querySelector<HTMLElement>(
-      `[data-message-id="${CSS.escape(id)}"]`,
-    );
-    if (!row) {
-      return null;
-    }
-    const tRect = t.getBoundingClientRect();
-    const rRect = row.getBoundingClientRect();
-    return {
-      rowTopRelative: rRect.top - tRect.top,
-      rowBottomRelative: rRect.bottom - tRect.top,
-      timelineHeight: tRect.height,
-      rowHeight: rRect.height,
-      className: row.className,
-    };
+    return new Promise<{
+      rowTopRelative: number;
+      rowBottomRelative: number;
+      timelineHeight: number;
+      rowHeight: number;
+      className: string;
+    } | null>((resolve) => {
+      const deadline = performance.now() + 3_000;
+      const tick = () => {
+        const row = t.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(id)}"]`,
+        );
+        if (row) {
+          const tRect = t.getBoundingClientRect();
+          const rRect = row.getBoundingClientRect();
+          const result = {
+            rowTopRelative: rRect.top - tRect.top,
+            rowBottomRelative: rRect.bottom - tRect.top,
+            timelineHeight: tRect.height,
+            rowHeight: rRect.height,
+            className: row.className,
+          };
+          const centered =
+            Math.abs(
+              (result.rowTopRelative + result.rowBottomRelative) / 2 -
+                result.timelineHeight / 2,
+            ) <=
+            result.timelineHeight / 2;
+          if (
+            centered &&
+            result.className.includes("route-target-highlight-fade")
+          ) {
+            resolve(result);
+            return;
+          }
+        }
+        if (performance.now() > deadline) {
+          resolve(
+            row
+              ? {
+                  rowTopRelative:
+                    row.getBoundingClientRect().top -
+                    t.getBoundingClientRect().top,
+                  rowBottomRelative:
+                    row.getBoundingClientRect().bottom -
+                    t.getBoundingClientRect().top,
+                  timelineHeight: t.getBoundingClientRect().height,
+                  rowHeight: row.getBoundingClientRect().height,
+                  className: row.className,
+                }
+              : null,
+          );
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    });
   }, targetId);
   expect(placement).not.toBeNull();
   const p = placement as NonNullable<typeof placement>;

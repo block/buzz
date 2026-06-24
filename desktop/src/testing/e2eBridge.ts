@@ -1569,6 +1569,37 @@ const mockChannels: MockChannel[] = [
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 700),
     ],
   }),
+  // Deep history channel for the load-older-under-virtualization E2E. Seeded
+  // with more messages than CHANNEL_HISTORY_LIMIT (300) so the initial load
+  // windows to the newest page and a `fetchOlder` (until-cursor) prepend has
+  // genuinely older rows to add — exercising the scroll-restore anchor under
+  // virtualization. Its own channel so existing channels' row-index and unread
+  // assertions stay undisturbed.
+  createMockChannel({
+    id: "feedf00d-0000-4000-8000-000000000007",
+    name: "deep-history",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Channel with paginated history for load-older tests",
+    topic: null,
+    purpose: null,
+    last_message_at: isoMinutesAgo(1),
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 2000,
+    updated_minutes_ago: 1,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 2000),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1900),
+    ],
+  }),
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
@@ -2374,7 +2405,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 sig: "mocksig".repeat(20).slice(0, 128),
               },
             ]
-          : [];
+          : channelId === "feedf00d-0000-4000-8000-000000000007"
+            ? // 600 messages > CHANNEL_HISTORY_LIMIT (300): the initial load
+              // windows to the newest 300, leaving 300 older behind the until
+              // cursor — enough for several full fetchOlder pages (batch 100),
+              // so the load-older anchor restore is exercised across REPEATED
+              // prepend cycles, not a single lucky pass. created_at increases
+              // with index (oldest first) so message N+1 is newer than N — the
+              // anchor restores the first-visible row across each prepend.
+              Array.from({ length: 600 }, (_, index) => ({
+                id: `mock-deep-history-${index}`,
+                pubkey: index % 2 === 0 ? ALICE_PUBKEY : MOCK_IDENTITY_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - (600 - index) * 60,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: `Deep history message #${index}`,
+                sig: "mocksig".repeat(20).slice(0, 128),
+              }))
+            : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;
