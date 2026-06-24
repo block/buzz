@@ -185,6 +185,80 @@ test("inbox feed shows channel and agent activity sections", async ({
   );
 });
 
+test("inbox composer replies to the selected thread parent, not the latest comment", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  const { firstReplyId, latestReplyId, latestReplyContent } =
+    await page.evaluate(() => {
+      const emitMessage = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock Buzz bridge helpers are unavailable.");
+      }
+
+      const root = emitMessage({
+        channelName: "general",
+        content: "Inbox parent target root",
+      });
+      const firstReply = emitMessage({
+        channelName: "general",
+        content: "Inbox parent target first reply",
+        parentEventId: root.id,
+      });
+      const latestReply = emitMessage({
+        channelName: "general",
+        content: "Inbox parent target latest reply",
+        parentEventId: firstReply.id,
+      });
+
+      pushFeedItem({
+        id: latestReply.id,
+        kind: latestReply.kind,
+        pubkey: latestReply.pubkey,
+        content: latestReply.content,
+        created_at: latestReply.created_at,
+        channel_id: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+        channel_name: "general",
+        tags: latestReply.tags,
+        category: "activity",
+      });
+
+      return {
+        firstReplyId: firstReply.id,
+        latestReplyId: latestReply.id,
+        latestReplyContent: latestReply.content,
+      };
+    });
+
+  const reply = `Inbox parent-target reply ${Date.now()}`;
+  const inboxList = page.getByTestId("home-inbox-list");
+  await expect(inboxList).toContainText(latestReplyContent);
+  await inboxList.getByText(latestReplyContent).click();
+  await expect(page.getByTestId("home-inbox-detail")).toContainText(
+    latestReplyContent,
+  );
+
+  await page.getByTestId("message-input").fill(reply);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("home-inbox-detail")).toContainText(reply);
+
+  const sendPayload = await page.evaluate((content) => {
+    const entry = [...(window.__BUZZ_E2E_COMMAND_LOG__ ?? [])]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.command === "send_channel_message" &&
+          (candidate.payload as { content?: string }).content === content,
+      );
+    return entry?.payload as { parentEventId?: string | null } | undefined;
+  }, reply);
+
+  expect(sendPayload?.parentEventId).toBe(firstReplyId);
+  expect(sendPayload?.parentEventId).not.toBe(latestReplyId);
+});
+
 test("opens a mocked forum activity item from the inbox feed", async ({
   page,
 }) => {

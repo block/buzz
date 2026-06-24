@@ -99,3 +99,14 @@ export function getReactionTargetId(tags: string[][]) {
 
   return null;
 }
+
+export function getInboxDefaultReplyParentEventId(item: FeedItem): string {
+  const thread = getThreadReference(item.tags);
+
+  // Inbox rows are grouped by thread and surface the latest activity. If the
+  // latest activity is itself a reply, sending from the bottom composer should
+  // continue the selected item's parent thread, not create a new child under
+  // that latest activity. Explicit per-message reply targets still override
+  // this default in InboxDetailPane.
+  return thread.parentId ?? thread.rootId ?? item.id;
+}

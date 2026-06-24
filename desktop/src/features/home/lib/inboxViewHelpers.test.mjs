@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getContextMessageDepth,
+  getInboxDefaultReplyParentEventId,
   getReactionTargetId,
   isInboxThreadContextEvent,
   matchesInboxFilter,
@@ -182,6 +183,44 @@ test("getContextMessageDepth does not loop forever on a cycle", () => {
   ]);
   // From a: hop to b (depth 1); b's parent is a, already seen -> stop.
   assert.equal(getContextMessageDepth(a, map), 1);
+});
+
+// --- getInboxDefaultReplyParentEventId ---
+
+function feedItem(id, tags = []) {
+  return {
+    id,
+    pubkey: "x",
+    createdAt: 0,
+    kind: 9,
+    tags,
+    content: "",
+    category: "activity",
+    channelId: "channel-a",
+    channelName: "bugs",
+  };
+}
+
+test("getInboxDefaultReplyParentEventId uses the selected item's parent for reply rows", () => {
+  assert.equal(
+    getInboxDefaultReplyParentEventId(
+      feedItem("latest-reply", [
+        ["h", "channel-a"],
+        ["e", "thread-root", "", "root"],
+        ["e", "parent-comment", "", "reply"],
+      ]),
+    ),
+    "parent-comment",
+  );
+});
+
+test("getInboxDefaultReplyParentEventId falls back to the selected item for roots", () => {
+  assert.equal(
+    getInboxDefaultReplyParentEventId(
+      feedItem("thread-root", [["h", "channel-a"]]),
+    ),
+    "thread-root",
+  );
 });
 
 // --- isInboxThreadContextEvent ---

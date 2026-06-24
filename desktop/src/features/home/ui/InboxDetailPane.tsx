@@ -12,6 +12,7 @@ import {
   type InboxDisplayMessage,
   InboxMessageRow,
 } from "@/features/home/ui/InboxMessageRow";
+import { getInboxDefaultReplyParentEventId } from "@/features/home/lib/inboxViewHelpers";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
@@ -210,7 +211,8 @@ export function InboxDetailPane({
         ];
   const replyTarget =
     displayMessages.find((message) => message.id === replyTargetId) ?? null;
-  const composerParentEventId = replyTarget?.id ?? item.id;
+  const composerParentEventId =
+    replyTarget?.id ?? getInboxDefaultReplyParentEventId(item.item);
   const composerReplyTarget =
     replyTarget && replyTarget.id !== item.id
       ? {
