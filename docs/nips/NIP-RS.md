@@ -172,16 +172,23 @@ parent message):
 effective(msg:<event-id>) = max(merged[msg:<event-id>], merged[<channelId>])
 ```
 
+When a surface evaluates a reply inside a known thread, it MAY additionally fold
+in the thread frontier:
+
+```
+effective(reply) = max(effective(msg:<reply-id>), effective(thread:<root>))
+```
+
 A thread is unread iff at least one reply is unread. A reply is unread iff
-`reply.created_at > effective(msg:<reply-id>)` for clients that implement
-per-message contexts; clients that only implement thread contexts MAY instead
-use `latestReplyAt > effective(thread:<root>)`. Because both rules are `max()`
-over the same grow-only registers defined in the Merge Rule, they remain
-monotone state-based CvRDT interpretations — no change to the merge rule is
-required. Marking a channel read clears unread state on any thread/message whose
-relevant event predates the channel frontier, since each child context inherits
-the channel term; replies newer than the channel frontier remain unread until
-their own message marker or thread marker is advanced.
+`reply.created_at > effective(reply)` for clients that implement per-message
+contexts; clients that only implement thread contexts MAY instead use
+`latestReplyAt > effective(thread:<root>)`. Because both rules are `max()` over
+the same grow-only registers defined in the Merge Rule, they remain monotone
+state-based CvRDT interpretations — no change to the merge rule is required.
+Marking a channel read clears unread state on any thread/message whose relevant
+event predates the channel frontier, since each child context inherits the
+channel term; replies newer than the channel frontier remain unread until their
+own message marker or thread marker is advanced.
 
 If the thread root or message event (and therefore its parent channel) cannot be
 resolved from the event graph, `effective(thread:<root>)` or

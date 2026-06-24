@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { InboxItem } from "@/features/home/lib/inbox";
+import { maxReadAt } from "@/features/channels/readState/readStateFormat";
 import {
   getThreadReference,
   isThreadReply,
@@ -80,14 +81,6 @@ export function hasGroupedUnreadOverride(
   return getGroupedInboxItemIds(item).some((id) => localUnreadSet.has(id));
 }
 
-function maxReadAt(...markers: Array<number | null>): number | null {
-  return markers.reduce<number | null>((latest, marker) => {
-    if (marker === null) return latest;
-    if (latest === null || marker > latest) return marker;
-    return latest;
-  }, null);
-}
-
 export function resolveInboxItemReadAt(
   item: InboxItem,
   options: {
@@ -149,6 +142,7 @@ export function useHomeInboxReadState({
         continue;
       }
 
+      const threadRootId = getInboxThreadRootId(item);
       const readAt = resolveInboxItemReadAt(item, {
         getChannelReadAt,
         getMessageReadAt,
@@ -158,6 +152,10 @@ export function useHomeInboxReadState({
         if (item.latestActivityAt <= readAt) {
           result.add(item.id);
         }
+        continue;
+      }
+
+      if (threadRootId !== null || item.item.channelId) {
         continue;
       }
 

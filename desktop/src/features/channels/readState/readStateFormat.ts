@@ -20,10 +20,20 @@ export const THREAD_PREFIX = "thread:";
 
 const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
 
+export function maxReadAt(...markers: Array<number | null>): number | null {
+  return markers.reduce<number | null>((latest, marker) => {
+    if (marker === null) return latest;
+    if (latest === null || marker > latest) return marker;
+    return latest;
+  }, null);
+}
+
 export function msgContextKey(messageId: string): string {
   return `${MSG_PREFIX}${messageId}`;
 }
 
+// Spec-conformance helpers for well-known interoperable context keys. Runtime
+// folding/eviction remains prefix-based so opaque client-local keys still work.
 export function isThreadContextKey(value: string): value is `thread:${string}` {
   if (!value.startsWith(THREAD_PREFIX)) return false;
   return EVENT_ID_PATTERN.test(value.slice(THREAD_PREFIX.length));

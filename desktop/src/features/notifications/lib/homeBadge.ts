@@ -1,4 +1,5 @@
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { maxReadAt } from "@/features/channels/readState/readStateFormat";
 import {
   getThreadReference,
   isBroadcastReply,
@@ -104,7 +105,7 @@ export function resolveHomeBadgeFeedItemReadAt(
   const threadRootId = feedItemThreadRootId(item);
   const markers: Array<number | null> = [];
 
-  if (item.channelId) {
+  if (item.channelId && !threadRootId) {
     markers.push(options.getChannelReadAt(item.channelId));
   }
   if (threadRootId) {
@@ -112,9 +113,5 @@ export function resolveHomeBadgeFeedItemReadAt(
     markers.push(options.getMessageReadAt?.(item.id) ?? null);
   }
 
-  return markers.reduce<number | null>((latest, marker) => {
-    if (marker === null) return latest;
-    if (latest === null || marker > latest) return marker;
-    return latest;
-  }, null);
+  return maxReadAt(...markers);
 }

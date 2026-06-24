@@ -125,6 +125,27 @@ test("grouped unread override matches any item represented by the row", () => {
   );
 });
 
+test("thread inbox row without a marker ignores local done fallback", () => {
+  const replyItem = feedItem({
+    id: "reply-event",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "root-event", "", "root"],
+      ["e", "parent-event", "", "reply"],
+    ],
+  });
+
+  assert.equal(
+    resolveInboxItemReadAt(inboxItem([replyItem]), {
+      getChannelReadAt: () => 100,
+      getThreadReadAt: () => null,
+      getMessageReadAt: () => null,
+    }),
+    null,
+  );
+});
+
 test("thread inbox row read state includes per-message marker", () => {
   const replyItem = feedItem({
     id: "reply-event",

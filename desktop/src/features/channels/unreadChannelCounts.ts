@@ -1,3 +1,5 @@
+import { maxReadAt } from "@/features/channels/readState/readStateFormat";
+
 export type ObservedUnreadEvent = {
   id: string;
   createdAt: number;
@@ -130,9 +132,5 @@ export function observedUnreadEventReadAt(
     markers.push(getThreadOwnMarker(event.rootId));
   }
 
-  return markers.reduce<number | null>((latest, marker) => {
-    if (marker === null) return latest;
-    if (latest === null || marker > latest) return marker;
-    return latest;
-  }, null);
+  return maxReadAt(...markers);
 }
