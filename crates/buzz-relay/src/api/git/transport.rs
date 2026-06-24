@@ -28,7 +28,9 @@ use tracing::{error, info, warn};
 
 use super::cas_publish::{cas_publish, CasError, ParentState};
 use super::hook::install_hook;
-use super::hydrate::{hydrate_for_read, hydrate_for_write, HydrateError, HydratedRepo};
+use super::hydrate::{
+    hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
+};
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
 
@@ -296,16 +298,122 @@ pub struct GitRepoParams {
     repo: String,
 }
 
+// ── Manifest-Driven Advertisement (Track C) ──────────────────────────────────
+
+/// Whether the `info/refs` fast path can serve this manifest without shelling
+/// out. The manifest carries only `refname → oid`, so it cannot reproduce the
+/// `^{}` peel line an **annotated** tag advertises (the peeled commit oid is
+/// not stored — see RESEARCH/GIT_REF_ADVERTISEMENT_FORMAT.md). We cannot tell
+/// an annotated tag from a lightweight one at the manifest level, so **any**
+/// `refs/tags/*` forces the subprocess fallback for byte-correctness. We also
+/// require the symbolic `head` to resolve to a ref we actually advertise —
+/// otherwise the `symref=HEAD:<ref>` capability would point at a ref the
+/// client never sees. The dominant clone case (branches only, HEAD→a branch)
+/// takes the fast path; everything else stays exactly as it is today.
+fn fast_path_eligible(manifest: &super::manifest::Manifest) -> bool {
+    if manifest.refs.keys().any(|r| r.starts_with("refs/tags/")) {
+        return false;
+    }
+    // HEAD must resolve to an advertised ref. (Detached HEAD — head not in
+    // refs — can't be expressed as a symref; fall back.)
+    manifest.refs.contains_key(&manifest.head)
+}
+
+/// Encode one pkt-line: 4-char lowercase-hex length prefix (counting itself)
+/// followed by `payload`. Appends to `out`.
+fn pkt_line(out: &mut Vec<u8>, payload: &[u8]) {
+    let len = payload.len() + 4;
+    // pkt-line length is bounded to 0xffff; refnames + oids never approach it.
+    out.extend_from_slice(format!("{len:04x}").as_bytes());
+    out.extend_from_slice(payload);
+}
+
+/// Build the **complete** `info/refs` HTTP body for `git-upload-pack` directly
+/// from the published manifest — no hydrate, no subprocess. Byte-compatible
+/// with `git upload-pack --advertise-refs` for the branches-only case that
+/// [`fast_path_eligible`] gates on.
+///
+/// Layout (matches the subprocess oracle, git 2.51):
+/// ```text
+/// <pkt># service=git-upload-pack\n
+/// 0000
+/// <pkt><head-oid> HEAD\0<caps> symref=HEAD:<head-ref> object-format=<fmt> agent=buzz-git\n
+/// <pkt><oid> <refname>\n        # each ref, sorted ascending (BTreeMap order)
+/// 0000
+/// ```
+/// The advertised capabilities are a fixed conservative **offer**; the client
+/// re-negotiates against the real `upload-pack` subprocess in its follow-up
+/// POST, so any subset the real upload-pack supports is safe. `object-format`
+/// is derived from the oid width (40 hex = sha1, 64 = sha256) rather than
+/// hardcoded. Caller guarantees [`fast_path_eligible`] returned true.
+fn build_upload_pack_advertisement(manifest: &super::manifest::Manifest) -> Vec<u8> {
+    // head ref is guaranteed present by `fast_path_eligible`.
+    let head_oid = &manifest.refs[&manifest.head];
+    let object_format = if head_oid.len() == 64 {
+        "sha256"
+    } else {
+        "sha1"
+    };
+
+    // Capability offer. Conservative, version-agnostic. The symref tells the
+    // client which branch HEAD tracks (so `git clone` checks it out).
+    let caps = format!(
+        "multi_ack thin-pack side-band side-band-64k ofs-delta shallow \
+         deepen-since deepen-not deepen-relative no-progress include-tag \
+         multi_ack_detailed no-done symref=HEAD:{head} object-format={fmt} \
+         agent=buzz-git",
+        head = manifest.head,
+        fmt = object_format,
+    );
+
+    let mut out = Vec::new();
+
+    // 1. service header + flush.
+    let svc_line = b"# service=git-upload-pack\n";
+    pkt_line(&mut out, svc_line);
+    out.extend_from_slice(b"0000");
+
+    // 2. First line: HEAD with NUL-joined caps.
+    let mut first = Vec::new();
+    first.extend_from_slice(head_oid.as_bytes());
+    first.extend_from_slice(b" HEAD\0");
+    first.extend_from_slice(caps.as_bytes());
+    first.push(b'\n');
+    pkt_line(&mut out, &first);
+
+    // 3. Each ref, sorted (BTreeMap iterates ascending — matches git).
+    for (refname, oid) in &manifest.refs {
+        let mut line = Vec::new();
+        line.extend_from_slice(oid.as_bytes());
+        line.push(b' ');
+        line.extend_from_slice(refname.as_bytes());
+        line.push(b'\n');
+        pkt_line(&mut out, &line);
+    }
+
+    // 4. Trailing flush.
+    out.extend_from_slice(b"0000");
+    out
+}
+
 /// `GET /git/{owner}/{repo}/info/refs?service={service}`
 ///
 /// Advertises refs for clone (git-upload-pack) or push (git-receive-pack).
+///
+/// **Track C fast path:** for `git-upload-pack` on a branches-only repo
+/// ([`fast_path_eligible`]), the advertisement is built directly from the
+/// published manifest — **no hydrate, no subprocess, no git semaphore
+/// permit**. This is the dominant clone case, and it's exactly what the
+/// W=20 permit used to serialize. Repos with any `refs/tags/*`, or the
+/// `git-receive-pack` advertisement (different cap set), fall back to the
+/// subprocess path — which still acquires a permit and hydrates, preserving
+/// today's behavior byte-for-byte.
 ///
 /// **Read fail-closed (Max's blocker):** pointer-absent → 404 (repo
 /// never existed). *Any* below-pointer failure (manifest 404 under a
 /// non-empty pointer, digest mismatch, pack 404, `index-pack` failure)
 /// → 5xx via `HydrateError`. The legacy "leave disk as-is on hydrate
-/// error" behavior is gone — A1 detectability now holds end-to-end on
-/// the read side too.
+/// error" behavior is gone — A1 detectability holds on the read side too.
 pub async fn info_refs(
     State(state): State<Arc<AppState>>,
     _auth: GitAuth,
@@ -319,11 +427,55 @@ pub async fn info_refs(
     };
     let _repo_name = validate_repo_id(&params.owner, &params.repo)?;
 
-    let _permit = acquire_git_permit(&state)?;
+    // Track C fast path: only for clone advertisement. The receive-pack
+    // advertisement carries a different capability set (report-status,
+    // delete-refs, atomic, …) that we don't reproduce, so it always takes
+    // the subprocess path below.
+    if service == "git-upload-pack" {
+        // Load just the verified manifest — no object materialization, no
+        // permit. `Ok(None)` = pointer absent = repo never existed → 404.
+        match load_manifest_for_read(&state.git_store, &params.owner, &params.repo).await {
+            Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
+                let body = build_upload_pack_advertisement(&manifest);
+                return Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(
+                        header::CONTENT_TYPE,
+                        "application/x-git-upload-pack-advertisement",
+                    )
+                    .header(header::CACHE_CONTROL, "no-cache")
+                    .body(Body::from(body))
+                    .unwrap());
+            }
+            // Eligible repo but has tags, or below-pointer failure handling:
+            // a present-but-ineligible manifest falls through to the
+            // subprocess path. Pointer-absent is a definitive 404 here —
+            // no point hydrating a repo that doesn't exist.
+            Ok(Some(_)) => { /* ineligible (has tags) → subprocess fallback */ }
+            Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
+            Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
+        }
+    }
 
-    // Hydrate the published state into an ephemeral bare repo. `Ok(None)`
-    // = pointer absent = repo never existed → 404. `Err(_)` = below-pointer
-    // failure → 5xx.
+    // Subprocess path: receive-pack advertisement, or upload-pack for a
+    // tagged repo. Acquires a permit and hydrates — today's behavior.
+    info_refs_subprocess(&state, service, &params).await
+}
+
+/// Subprocess-backed `info/refs` advertisement: hydrate the published state
+/// into an ephemeral bare repo and shell out to `git <svc> --advertise-refs`.
+///
+/// This is the fallback from the Track C fast path (tagged repos, and the
+/// `git-receive-pack` advertisement). The advertisement is O(refs), not
+/// O(pack), so it stays buffered — streaming would buy nothing and would
+/// lose the clean timeout/error mapping that buffering gives us.
+async fn info_refs_subprocess(
+    state: &Arc<AppState>,
+    service: &str,
+    params: &GitRepoParams,
+) -> Result<Response, Response> {
+    let _permit = acquire_git_permit(state)?;
+
     let repo = match hydrate_for_read(&state.git_store, &params.owner, &params.repo).await {
         Ok(Some(repo)) => repo,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
@@ -333,7 +485,7 @@ pub async fn info_refs(
     // Git's smart HTTP protocol uses service names like "git-upload-pack" and
     // "git-receive-pack", but the actual git subcommands are "upload-pack" and
     // "receive-pack" (without the "git-" prefix).
-    let git_subcmd = service.strip_prefix("git-").unwrap_or(service.as_str());
+    let git_subcmd = service.strip_prefix("git-").unwrap_or(service);
 
     let mut cmd = Command::new("git");
     cmd.arg(git_subcmd)
@@ -413,9 +565,21 @@ pub async fn upload_pack(
         Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
     };
 
-    let output = run_git_at(repo.path(), "upload-pack", body, &[]).await?;
-    drop(repo);
-    Ok(build_git_response("upload-pack", output))
+    // Track A: stream the subprocess stdout straight into the response body
+    // instead of buffering the whole pack into RAM. `repo` (the hydrated
+    // tempdir) is moved into the stream and stays alive until the last byte
+    // is drained — the streaming analogue of the old `drop(repo)`. The
+    // `_permit` (git semaphore) is bound for the function scope; binding it
+    // here keeps it held only until the response head is built, not for the
+    // whole drain. That's intentional — see Track C notes on permit hold time.
+    stream_git_read(
+        repo,
+        "upload-pack",
+        &[],
+        body,
+        Vec::new(),
+        "application/x-git-upload-pack-result".to_string(),
+    )
 }
 
 /// `POST /git/{owner}/{repo}/git-receive-pack`
@@ -618,6 +782,133 @@ async fn run_git_at(
     Ok(PackOutput {
         stdout: output.stdout,
     })
+}
+
+// ── Read-Path Streaming Runner (Track A) ─────────────────────────────────────
+
+/// Keeps the git subprocess and its hydrated workspace alive for exactly as
+/// long as the response body is being streamed.
+///
+/// The HTTP body is a [`tokio_util::io::ReaderStream`] over the child's
+/// stdout. That borrows nothing it can keep alive on its own: the `Child`
+/// (whose `kill_on_drop` would otherwise reap the process mid-stream) and the
+/// [`HydratedRepo`] tempdir (whose objects the subprocess is still reading)
+/// must outlive the last byte. We park both here and drop them only when the
+/// stream is exhausted or the client disconnects — the structural analogue of
+/// the `drop(repo)` the buffered path did after `wait_with_output`.
+///
+/// Why streaming is safe here but **not** on the push path: these are
+/// read-only operations (`upload-pack`, `info/refs --advertise-refs`). They
+/// never mutate published state, so there is no fence to preserve — contrast
+/// `receive_pack`, which must buffer into [`PackOutput`] so [`finalize_push`]
+/// can sequence the pointer CAS *before* any 2xx byte exists.
+struct StreamingGit {
+    inner: tokio_util::io::ReaderStream<tokio::process::ChildStdout>,
+    /// Held purely to extend lifetime. `kill_on_drop(true)` means dropping
+    /// this after the stream completes reaps any lingering process; on the
+    /// happy path the child has already exited by then.
+    _child: tokio::process::Child,
+    /// The ephemeral bare repo the subprocess reads objects from. Must not be
+    /// removed from disk until the subprocess is done — i.e. until the stream
+    /// ends.
+    _repo: HydratedRepo,
+}
+
+impl futures_util::Stream for StreamingGit {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+/// Spawn a read-only `git --stateless-rpc <service>` subprocess and return a
+/// streaming [`Response`] whose body is the child's stdout, optionally
+/// preceded by `prefix` bytes (used by `info/refs` for the
+/// `# service=…\n0000` pkt-line header).
+///
+/// The request `body` is pumped to the child's stdin concurrently. The
+/// returned response owns the child + the hydrated workspace via
+/// [`StreamingGit`], so neither is torn down until the body is fully drained.
+///
+/// **Read-path only.** Errors after the response head is sent cannot change
+/// the status code (it's already 200), which is exactly git's smart-HTTP
+/// contract: protocol-level failures are reported in-band within the pack
+/// stream, not via HTTP status. The buffered [`run_git_at`] stays the push
+/// path's runner precisely because the fence needs the bytes in hand before
+/// committing to a status.
+#[allow(clippy::result_large_err)]
+fn stream_git_read(
+    repo: HydratedRepo,
+    service: &'static str,
+    extra_args: &[&str],
+    body: Body,
+    prefix: Vec<u8>,
+    content_type: String,
+) -> Result<Response, Response> {
+    let mut cmd = Command::new("git");
+    cmd.arg(service).arg("--stateless-rpc");
+    for a in extra_args {
+        cmd.arg(a);
+    }
+    cmd.arg(repo.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    harden_git_env(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        error!(error = %e, service = %service, "git subprocess failed to spawn");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+
+    // Pump the request body into git's stdin, then close it (EOF). Detached:
+    // the task ends on its own when the body ends or the write fails.
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    tokio::spawn(async move {
+        use futures_util::StreamExt;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if tokio::io::AsyncWriteExt::write_all(&mut stdin, &bytes)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        drop(stdin); // close stdin → EOF for git
+    });
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let git_stream = StreamingGit {
+        inner: tokio_util::io::ReaderStream::new(stdout),
+        _child: child,
+        _repo: repo,
+    };
+
+    // Prepend any protocol header (info/refs) ahead of git's stdout. The
+    // prefix is a single ready chunk; the rest streams from the subprocess.
+    let prefix_stream =
+        futures_util::stream::once(
+            async move { Ok::<_, std::io::Error>(bytes::Bytes::from(prefix)) },
+        );
+    let body_stream = futures_util::StreamExt::chain(prefix_stream, git_stream);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(body_stream))
+        .unwrap())
 }
 
 /// Build the canonical `application/x-git-{service}-result` response from
@@ -831,4 +1122,121 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod track_c_tests {
+    use super::*;
+    use crate::api::git::manifest::Manifest;
+    use std::collections::BTreeMap;
+
+    fn oid_sha1() -> String {
+        "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    fn branches_only_manifest() -> Manifest {
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/feature".to_string(), oid_sha1());
+        refs.insert("refs/heads/main".to_string(), oid_sha1());
+        Manifest {
+            version: 1,
+            head: "refs/heads/main".to_string(),
+            refs,
+            packs: vec!["packs/deadbeef".to_string()],
+            parent: None,
+        }
+    }
+
+    /// Split a pkt-line stream into `(len_prefix, payload)` frames, validating
+    /// that each 4-hex length counts itself and that `0000` is a flush.
+    fn parse_pkt_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 4 <= bytes.len() {
+            let len_hex = std::str::from_utf8(&bytes[i..i + 4]).unwrap();
+            let len = usize::from_str_radix(len_hex, 16).unwrap();
+            if len == 0 {
+                out.push(Vec::new()); // flush marker
+                i += 4;
+                continue;
+            }
+            assert!(len >= 4, "pkt-line length must count its own 4 bytes");
+            let payload = bytes[i + 4..i + len].to_vec();
+            out.push(payload);
+            i += len;
+        }
+        assert_eq!(i, bytes.len(), "pkt-line stream must consume exactly");
+        out
+    }
+
+    #[test]
+    fn fast_path_eligible_branches_only() {
+        assert!(fast_path_eligible(&branches_only_manifest()));
+    }
+
+    #[test]
+    fn fast_path_rejects_any_tag() {
+        let mut m = branches_only_manifest();
+        m.refs.insert("refs/tags/v1".to_string(), oid_sha1());
+        // Any tag → subprocess fallback (can't peel annotated tags from manifest).
+        assert!(!fast_path_eligible(&m));
+    }
+
+    #[test]
+    fn fast_path_rejects_head_not_in_refs() {
+        let mut m = branches_only_manifest();
+        m.head = "refs/heads/nonexistent".to_string();
+        // HEAD must resolve to an advertised ref to emit symref=HEAD:<ref>.
+        assert!(!fast_path_eligible(&m));
+    }
+
+    #[test]
+    fn advertisement_framing_matches_git_oracle_shape() {
+        let body = build_upload_pack_advertisement(&branches_only_manifest());
+        let frames = parse_pkt_lines(&body);
+
+        // Layout: [service header, flush, HEAD line, feature, main, flush]
+        assert_eq!(frames.len(), 6, "frame count");
+
+        // 0: service header
+        assert_eq!(frames[0], b"# service=git-upload-pack\n");
+        // 1: flush after service header
+        assert!(frames[1].is_empty());
+
+        // 2: HEAD line — "<oid> HEAD\0<caps>\n"
+        let head = &frames[2];
+        let nul = head.iter().position(|&b| b == 0).expect("NUL in HEAD line");
+        assert_eq!(&head[..nul], format!("{} HEAD", oid_sha1()).as_bytes());
+        let caps = std::str::from_utf8(&head[nul + 1..head.len() - 1]).unwrap();
+        assert_eq!(*head.last().unwrap(), b'\n');
+        // symref + object-format are the load-bearing caps.
+        assert!(caps.contains("symref=HEAD:refs/heads/main"));
+        assert!(caps.contains("object-format=sha1"));
+        assert!(caps.contains("side-band-64k"));
+
+        // 3,4: refs sorted ascending — feature before main (BTreeMap order),
+        // each "<oid> <refname>\n", no NUL.
+        assert_eq!(
+            frames[3],
+            format!("{} refs/heads/feature\n", oid_sha1()).into_bytes()
+        );
+        assert_eq!(
+            frames[4],
+            format!("{} refs/heads/main\n", oid_sha1()).into_bytes()
+        );
+
+        // 5: trailing flush
+        assert!(frames[5].is_empty());
+    }
+
+    #[test]
+    fn advertisement_picks_sha256_from_oid_width() {
+        let mut m = branches_only_manifest();
+        let oid256 = "a".repeat(64);
+        m.refs.insert("refs/heads/main".to_string(), oid256.clone());
+        m.refs.insert("refs/heads/feature".to_string(), oid256);
+        let body = build_upload_pack_advertisement(&m);
+        let caps = String::from_utf8_lossy(&body);
+        assert!(caps.contains("object-format=sha256"));
+    }
 }
