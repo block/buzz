@@ -89,12 +89,10 @@ export type ProfileSummaryViewProps = {
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: string | null;
   modelLabel: string;
-  onOpenAgentSettings: () => void;
+  onOpenAgentConfiguration: () => void;
   onOpenChannels: () => void;
   onOpenDiagnostics: () => void;
-  onOpenInstruction: () => void;
   onOpenMemories: () => void;
-  onOpenModel: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
   persona?: AgentPersona;
   presenceStatus: "online" | "away" | "offline" | undefined;
@@ -138,12 +136,10 @@ export function ProfileSummaryView({
   diagnosticsFields,
   diagnosticsSummary,
   modelLabel,
-  onOpenAgentSettings,
+  onOpenAgentConfiguration,
   onOpenChannels,
   onOpenDiagnostics,
-  onOpenInstruction,
   onOpenMemories,
-  onOpenModel,
   onOpenDm,
   persona,
   presenceStatus,
@@ -166,8 +162,15 @@ export function ProfileSummaryView({
   const showAgentSettingsIngress =
     isOwner === true &&
     (agentSettingsFields.length > 0 || managedAgent?.backend.type === "local");
+  const showAgentConfigurationIngress =
+    showInstructionIngress || showModelIngress || showAgentSettingsIngress;
   const showDiagnosticsIngress =
     diagnosticsFields.length > 0 || canOpenAgentLogs || canViewActivity;
+  const agentConfigurationTrailing = showModelIngress
+    ? modelLabel
+    : handleEditPersona
+      ? "Edit"
+      : "View";
   const topLevelAgentInfoFields = agentInfoFields.filter(
     (field) => field.label === "Public key" || field.label === "Owned by",
   );
@@ -232,30 +235,19 @@ export function ProfileSummaryView({
         </div>
       ) : null}
 
-      {showInstructionIngress ||
-      showModelIngress ||
+      {showAgentConfigurationIngress ||
       showMemoriesIngress ||
       showChannelsIngress ||
-      showAgentSettingsIngress ||
       showDiagnosticsIngress ||
       showTopLevelAgentInfo ? (
         <section className="space-y-2">
-          {showInstructionIngress ? (
+          {showAgentConfigurationIngress ? (
             <ProfileIngressRow
-              icon={FileText}
-              label="Agent instruction"
-              onClick={onOpenInstruction}
-              testId="user-profile-agent-instruction-ingress"
-              trailing={handleEditPersona ? "Edit" : "View"}
-            />
-          ) : null}
-          {showModelIngress ? (
-            <ProfileIngressRow
-              icon={Cpu}
-              label="Model"
-              onClick={onOpenModel}
-              testId="user-profile-model-ingress"
-              trailing={modelLabel}
+              icon={Settings}
+              label="Agent configuration"
+              onClick={onOpenAgentConfiguration}
+              testId="user-profile-agent-configuration-ingress"
+              trailing={agentConfigurationTrailing}
             />
           ) : null}
           {showMemoriesIngress ? (
@@ -286,15 +278,6 @@ export function ProfileSummaryView({
                     ? String(channelCount)
                     : "None"
               }
-            />
-          ) : null}
-          {showAgentSettingsIngress ? (
-            <ProfileIngressRow
-              icon={Settings}
-              label="Agent settings"
-              onClick={onOpenAgentSettings}
-              testId="user-profile-agent-settings-ingress"
-              trailing="View"
             />
           ) : null}
           {showDiagnosticsIngress ? (
@@ -821,10 +804,12 @@ export function AgentInfoFocusedView({
 }
 
 export function ModelFocusedView({
+  className,
   managedAgent,
   modelLabel,
   onModelChanged,
 }: {
+  className?: string;
   managedAgent: ManagedAgent | undefined;
   modelLabel: string;
   onModelChanged: () => void;
@@ -832,7 +817,7 @@ export function ModelFocusedView({
   const canPickModel = managedAgent?.backend.type === "local";
 
   return (
-    <div className="space-y-3 pt-4">
+    <div className={cn("space-y-3 pt-4", className)}>
       <div className="flex items-center gap-3 rounded-2xl bg-muted/20 px-4 py-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
           <Cpu className="h-4 w-4 text-muted-foreground" />
@@ -858,11 +843,13 @@ export function ModelFocusedView({
 }
 
 export function AgentSettingsFocusedView({
+  className,
   fields,
   isActionPending,
   managedAgent,
   onToggleAutoStart,
 }: {
+  className?: string;
   fields: ProfileField[];
   isActionPending: boolean;
   managedAgent: ManagedAgent | undefined;
@@ -876,7 +863,7 @@ export function AgentSettingsFocusedView({
   }
 
   return (
-    <div className="space-y-3 pt-4">
+    <div className={cn("space-y-3 pt-4", className)}>
       {canToggleAutoStart && managedAgent ? (
         <ProfileIngressRow
           disabled={isActionPending}
@@ -893,6 +880,103 @@ export function AgentSettingsFocusedView({
       ) : null}
       {fields.length > 0 ? <ProfileFieldGroup fields={fields} /> : null}
     </div>
+  );
+}
+
+export function AgentConfigurationFocusedView({
+  fields,
+  instruction,
+  isActionPending,
+  managedAgent,
+  modelLabel,
+  onEditInstruction,
+  onModelChanged,
+  onToggleAutoStart,
+}: {
+  fields: ProfileField[];
+  instruction: string | null;
+  isActionPending: boolean;
+  managedAgent: ManagedAgent | undefined;
+  modelLabel: string;
+  onEditInstruction?: () => void;
+  onModelChanged: () => void;
+  onToggleAutoStart: () => void;
+}) {
+  const trimmedInstruction = instruction?.trim() ?? "";
+  const showInstructions =
+    trimmedInstruction.length > 0 || onEditInstruction !== undefined;
+  const showModel = managedAgent !== undefined || modelLabel.trim().length > 0;
+  const showSettings =
+    fields.length > 0 || managedAgent?.backend.type === "local";
+
+  if (!showInstructions && !showModel && !showSettings) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-6 pt-4">
+      {showInstructions ? (
+        <AgentConfigurationSection
+          description="The prompt this agent uses to decide how to behave."
+          title="Instructions"
+        >
+          <AgentInstructionFocusedView
+            className="pt-0"
+            instruction={instruction}
+            onEdit={onEditInstruction}
+          />
+        </AgentConfigurationSection>
+      ) : null}
+
+      {showModel ? (
+        <AgentConfigurationSection
+          description="The model and runtime target selected for this agent."
+          title="Model"
+        >
+          <ModelFocusedView
+            className="pt-0"
+            managedAgent={managedAgent}
+            modelLabel={modelLabel}
+            onModelChanged={onModelChanged}
+          />
+        </AgentConfigurationSection>
+      ) : null}
+
+      {showSettings ? (
+        <AgentConfigurationSection
+          description="Operational settings that affect how this agent starts and responds."
+          title="Settings"
+        >
+          <AgentSettingsFocusedView
+            className="pt-0"
+            fields={fields}
+            isActionPending={isActionPending}
+            managedAgent={managedAgent}
+            onToggleAutoStart={onToggleAutoStart}
+          />
+        </AgentConfigurationSection>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentConfigurationSection({
+  children,
+  description,
+  title,
+}: {
+  children: React.ReactNode;
+  description: string;
+  title: string;
+}) {
+  return (
+    <section className="space-y-2">
+      <div className="space-y-1 px-1">
+        <h3 className="font-medium text-sm text-foreground">{title}</h3>
+        <p className="text-muted-foreground text-xs leading-5">{description}</p>
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -945,16 +1029,18 @@ export function DiagnosticsFocusedView({
 }
 
 export function AgentInstructionFocusedView({
+  className,
   instruction,
   onEdit,
 }: {
+  className?: string;
   instruction: string | null;
   onEdit?: () => void;
 }) {
   const trimmedInstruction = instruction?.trim() ?? "";
 
   return (
-    <div className="space-y-3 pt-4">
+    <div className={cn("space-y-3 pt-4", className)}>
       <div className="rounded-2xl bg-muted/20 px-4 py-3">
         {trimmedInstruction ? (
           <div data-testid="user-profile-agent-instruction">

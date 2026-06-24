@@ -54,13 +54,11 @@ import {
   useUserProfileQuery,
 } from "@/features/profile/hooks";
 import {
+  AgentConfigurationFocusedView,
   AgentInfoFocusedView,
-  AgentInstructionFocusedView,
-  AgentSettingsFocusedView,
   ChannelsFocusedView,
   DiagnosticsFocusedView,
   MemoryFocusedView,
-  ModelFocusedView,
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
@@ -796,12 +794,10 @@ export function UserProfilePanel({
           diagnosticsFields={diagnosticsFields}
           diagnosticsSummary={diagnosticsSummary}
           modelLabel={modelLabel}
-          onOpenAgentSettings={() => setView("settings")}
+          onOpenAgentConfiguration={() => setView("configuration")}
           onOpenChannels={() => setView("channels")}
           onOpenDiagnostics={() => setView("diagnostics")}
-          onOpenInstruction={() => setView("instructions")}
           onOpenMemories={() => setView("memories")}
-          onOpenModel={() => setView("model")}
           onOpenDm={onOpenDm}
           persona={resolvedPersona}
           presenceStatus={presenceStatus}
@@ -817,30 +813,19 @@ export function UserProfilePanel({
         <MemoryFocusedView agentPubkey={effectivePubkey} isOwner={isOwner} />
       ) : null}
 
-      {view === "instructions" ? (
-        <AgentInstructionFocusedView
-          instruction={agentInstruction}
-          onEdit={canEditPersona ? handleEditPersona : undefined}
-        />
-      ) : null}
-
       {view === "info" ? (
         <AgentInfoFocusedView metadataFields={agentInfoFields} />
       ) : null}
 
-      {view === "model" ? (
-        <ModelFocusedView
-          managedAgent={managedAgent}
-          modelLabel={modelLabel}
-          onModelChanged={() => void managedAgentsQuery.refetch()}
-        />
-      ) : null}
-
-      {view === "settings" ? (
-        <AgentSettingsFocusedView
+      {view === "configuration" ? (
+        <AgentConfigurationFocusedView
           fields={agentSettingsFields}
+          instruction={agentInstruction}
           isActionPending={isAgentActionPending}
           managedAgent={managedAgent}
+          modelLabel={modelLabel}
+          onEditInstruction={canEditPersona ? handleEditPersona : undefined}
+          onModelChanged={() => void managedAgentsQuery.refetch()}
           onToggleAutoStart={handleToggleAgentAutoStart}
         />
       ) : null}

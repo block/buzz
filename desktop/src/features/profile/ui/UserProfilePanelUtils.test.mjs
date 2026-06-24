@@ -157,15 +157,19 @@ test("parseProfilePanelView accepts all profile panel subviews", () => {
   for (const view of [
     "summary",
     "info",
-    "settings",
+    "configuration",
     "diagnostics",
-    "model",
-    "instructions",
     "memories",
     "channels",
     "logs",
   ]) {
     assert.equal(parseProfilePanelView(view), view);
+  }
+});
+
+test("parseProfilePanelView maps legacy agent config subviews to configuration", () => {
+  for (const view of ["instructions", "model", "settings"]) {
+    assert.equal(parseProfilePanelView(view), "configuration");
   }
 });
 
