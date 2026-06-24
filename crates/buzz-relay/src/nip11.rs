@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use crate::config::DEFAULT_MAX_FRAME_BYTES;
 
 /// NIPs unconditionally supported by this relay, advertised in the NIP-11
