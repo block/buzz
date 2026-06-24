@@ -16,7 +16,6 @@ import {
 import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
-import { useOptionalSidebar } from "@/shared/ui/sidebar";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -132,9 +131,6 @@ export function InboxListPane({
   reminderPubkey,
   unreadOnly,
 }: InboxListPaneProps) {
-  const sidebar = useOptionalSidebar();
-  const clearCollapsedTopChromeControls =
-    sidebar?.state === "collapsed" && !sidebar.isMobile;
   const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
   const isReminders = filter === "reminders";
   const scrollRef = React.useRef<HTMLDivElement>(null);
@@ -329,13 +325,8 @@ export function InboxListPane({
       )}
     >
       <TopChromeInsetHeader flush>
-        <div
-          className={cn(
-            "px-5 py-2 transition-[padding] duration-200 ease-linear",
-            clearCollapsedTopChromeControls && "pl-[184px]",
-          )}
-        >
-          <div className="flex min-h-10 w-full min-w-0 items-center justify-between gap-3">
+        <div className="px-5 py-2">
+          <div className="flex min-h-9 w-full min-w-0 items-center justify-between gap-3">
             <Popover>
               <PopoverTrigger asChild>
                 <button
