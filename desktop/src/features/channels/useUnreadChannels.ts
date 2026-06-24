@@ -826,8 +826,11 @@ export function useUnreadChannels(
         );
         const channelReadAt = getEffectiveTimestamp(channel.id);
         const readAtForObservedEvent = (event: ObservedUnreadEvent) =>
-          observedUnreadEventReadAt(event, channelReadAt, (rootId) =>
-            getOwnTimestamp(`thread:${rootId}`),
+          observedUnreadEventReadAt(
+            event,
+            channelReadAt,
+            (rootId) => getOwnTimestamp(`thread:${rootId}`),
+            (messageId) => getOwnTimestamp(`msg:${messageId}`),
           );
 
         const unreadCount = countUnreadObservedEvents(

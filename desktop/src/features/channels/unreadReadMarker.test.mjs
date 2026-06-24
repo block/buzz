@@ -118,6 +118,34 @@ test("observedUnreadEventReadAt_openedThreadReplyUsesThreadMarker", () => {
   assert.equal(event.createdAt > readAt, false);
 });
 
+test("observedUnreadEventReadAt_openedMessageReplyUsesMessageMarker", () => {
+  const event = observed("reply", 500, "root-1");
+
+  const readAt = observedUnreadEventReadAt(
+    event,
+    300,
+    () => null,
+    (messageId) => (messageId === "reply" ? 500 : null),
+  );
+
+  assert.equal(readAt, 500);
+  assert.equal(event.createdAt > readAt, false);
+});
+
+test("observedUnreadEventReadAt_usesNewestAvailableMarker", () => {
+  const event = observed("reply", 500, "root-1");
+
+  assert.equal(
+    observedUnreadEventReadAt(
+      event,
+      300,
+      () => 450,
+      () => 400,
+    ),
+    450,
+  );
+});
+
 test("observedUnreadEventReadAt_topLevelUsesChannelMarker", () => {
   assert.equal(
     observedUnreadEventReadAt(observed("top", 500), 300, () => 900),
@@ -156,12 +184,13 @@ function observed(
   };
 }
 
-function readAtFor(channelMarker, threadMarkers) {
+function readAtFor(channelMarker, threadMarkers, messageMarkers = new Map()) {
   return (event) =>
     observedUnreadEventReadAt(
       event,
       channelMarker,
       (rootId) => threadMarkers.get(rootId) ?? null,
+      (messageId) => messageMarkers.get(messageId) ?? null,
     );
 }
 
@@ -202,6 +231,32 @@ test("sidebarPipeline_openThreadClearsOnlyUnreadThreadContribution", () => {
   // the observed reply against that thread marker (not just the channel marker),
   // which clears the channel count for the reported scenario.
   const afterOpenReadAt = readAtFor(300, new Map([[rootId, 500]]));
+  assert.equal(
+    countUnreadObservedEvents(
+      observedByChannel.get(channelId),
+      afterOpenReadAt,
+    ),
+    0,
+  );
+});
+
+test("sidebarPipeline_openedReplyMessageMarkerClearsDelayedReplay", () => {
+  const channelId = "chan";
+  const rootId = "root-1";
+  const reply = observed("reply", 500, rootId);
+  const observedByChannel = new Map();
+  recordObservedUnreadEvent(observedByChannel, channelId, reply, 20);
+
+  const beforeOpenReadAt = readAtFor(300, new Map(), new Map());
+  assert.equal(
+    countUnreadObservedEvents(
+      observedByChannel.get(channelId),
+      beforeOpenReadAt,
+    ),
+    1,
+  );
+
+  const afterOpenReadAt = readAtFor(300, new Map(), new Map([["reply", 500]]));
   assert.equal(
     countUnreadObservedEvents(
       observedByChannel.get(channelId),

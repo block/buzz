@@ -125,6 +125,7 @@ export function HomeView({
   const {
     getChannelReadAt,
     getThreadReadAt,
+    getMessageReadAt,
     feedItemState,
     markChannelRead,
     markThreadRead,
@@ -202,6 +203,7 @@ export function HomeView({
       items: inboxItems,
       getChannelReadAt,
       getThreadReadAt,
+      getMessageReadAt,
       readStateVersion,
       localDoneSet: doneSet,
       localUnreadSet: unreadSet,

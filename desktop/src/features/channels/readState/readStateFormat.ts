@@ -18,17 +18,20 @@ export const MAX_CONTEXTS = 10_000;
 export const MSG_PREFIX = "msg:";
 export const THREAD_PREFIX = "thread:";
 
+const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
+
 export function msgContextKey(messageId: string): string {
   return `${MSG_PREFIX}${messageId}`;
 }
 
-// A well-formed per-message context key: the msg: prefix with a non-empty id
-// that does NOT itself start with thread: (guards against a thread key being
-// mistaken for, or double-prefixed into, a message key).
+export function isThreadContextKey(value: string): value is `thread:${string}` {
+  if (!value.startsWith(THREAD_PREFIX)) return false;
+  return EVENT_ID_PATTERN.test(value.slice(THREAD_PREFIX.length));
+}
+
 export function isMsgContextKey(value: string): value is `msg:${string}` {
   if (!value.startsWith(MSG_PREFIX)) return false;
-  const id = value.slice(MSG_PREFIX.length);
-  return id.length > 0 && !id.startsWith(THREAD_PREFIX);
+  return EVENT_ID_PATTERN.test(value.slice(MSG_PREFIX.length));
 }
 
 export function localReadStateKey(pubkey: string): string {

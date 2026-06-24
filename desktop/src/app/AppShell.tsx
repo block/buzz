@@ -405,6 +405,7 @@ export function AppShell() {
       feedItemState.unreadSet,
       threadActivityFeedItems,
       getThreadReadAt,
+      getMessageReadAt,
     );
 
   const dueReminderBadge = useDueReminderBadgeCount(

@@ -122,13 +122,17 @@ export function observedUnreadEventReadAt(
   event: ObservedUnreadEvent,
   channelReadAt: number | null,
   getThreadOwnMarker: (rootId: string) => number | null,
+  getMessageOwnMarker: (messageId: string) => number | null = () => null,
 ): number | null {
-  if (event.rootId === null) return channelReadAt;
+  const markers = [channelReadAt, getMessageOwnMarker(event.id)];
 
-  const threadReadAt = getThreadOwnMarker(event.rootId);
-  if (threadReadAt === null) return channelReadAt;
-  if (channelReadAt === null || threadReadAt > channelReadAt) {
-    return threadReadAt;
+  if (event.rootId !== null) {
+    markers.push(getThreadOwnMarker(event.rootId));
   }
-  return channelReadAt;
+
+  return markers.reduce<number | null>((latest, marker) => {
+    if (marker === null) return latest;
+    if (latest === null || marker > latest) return marker;
+    return latest;
+  }, null);
 }
