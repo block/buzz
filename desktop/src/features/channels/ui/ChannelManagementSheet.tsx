@@ -53,11 +53,11 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import {
+  AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
   auxiliaryPanelContentPaddingClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
-import { channelChrome } from "@/shared/layout/chromeLayout";
 import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,
@@ -675,33 +675,28 @@ function ChannelManagementPanelContent({
   return (
     <>
       {isSplitLayout ? (
-        <div
-          className={cn(
-            "pointer-events-none relative z-30 bg-background/80 backdrop-blur-md after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border/35 after:content-[''] supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-            channelChrome.negativeMargin,
-          )}
-        >
-          <div className="pointer-events-auto relative z-30 flex min-h-8 shrink-0 cursor-default select-none items-center gap-2.5 px-4 py-1.5 sm:pr-3">
-            <AuxiliaryPanelHeaderGroup className="gap-0.5">
-              {activeView === "canvas" ? (
-                <Button
-                  aria-label="Back to channel"
-                  className="-ml-2 h-7 w-7"
-                  data-testid="channel-management-back"
-                  onClick={() => setActiveView("summary")}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <ChevronLeft />
-                </Button>
-              ) : null}
-              <DialogPrimitive.Title asChild>
-                <AuxiliaryPanelTitle>
-                  {activeView === "canvas" ? "Canvas" : "Channel"}
-                </AuxiliaryPanelTitle>
-              </DialogPrimitive.Title>
-            </AuxiliaryPanelHeaderGroup>
+        <AuxiliaryPanelHeader>
+          <AuxiliaryPanelHeaderGroup>
+            {activeView === "canvas" ? (
+              <Button
+                aria-label="Back to channel"
+                className="shrink-0"
+                data-testid="channel-management-back"
+                onClick={() => setActiveView("summary")}
+                size="icon"
+                type="button"
+                variant="outline"
+              >
+                <ChevronLeft />
+              </Button>
+            ) : null}
+            <DialogPrimitive.Title asChild>
+              <AuxiliaryPanelTitle>
+                {activeView === "canvas" ? "Canvas" : "Channel"}
+              </AuxiliaryPanelTitle>
+            </DialogPrimitive.Title>
+          </AuxiliaryPanelHeaderGroup>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
             <Button
               aria-label="Close channel management"
               className="relative z-[60]"
@@ -718,11 +713,11 @@ function ChannelManagementPanelContent({
             >
               <X />
             </Button>
-            <DialogPrimitive.Description className="sr-only">
-              Channel settings
-            </DialogPrimitive.Description>
           </div>
-        </div>
+          <DialogPrimitive.Description className="sr-only">
+            Channel settings
+          </DialogPrimitive.Description>
+        </AuxiliaryPanelHeader>
       ) : (
         <div
           className={cn(
