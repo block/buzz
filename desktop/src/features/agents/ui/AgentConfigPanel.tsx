@@ -97,6 +97,7 @@ function NormalizedRow({
                   // secondary value, not struck through.
                   field.origin !== "runtimeOverride" && "line-through",
                 )}
+                title={field.overriddenValue ?? undefined}
               >
                 {field.overriddenValue}
               </span>
