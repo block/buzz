@@ -654,6 +654,36 @@ fn migrate_packs_to_teams_rewrites_agents_json() {
     assert!(records[0].get("persona_name_in_pack").is_none());
 }
 
+/// `patch_json_records` rewrites `managed-agents.json`, which carries plaintext
+/// agent nsecs on a keyringless host — the writeback must land `0o600` from the
+/// write itself (no post-write `chmod`), or a launch-time reconcile reopens the
+/// umask window SECURITY.md:90 closes (Thufir, migration.rs:288).
+#[cfg(unix)]
+#[test]
+fn patch_json_records_rewrites_secret_store_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{ "private_key_nsec": "nsec1secret", "provider": "goose" }]),
+    );
+    let path = dir.path().join("agents/managed-agents.json");
+
+    // Mutate so the write actually fires (it only writes back on `changed`).
+    patch_json_records(&path, |obj| {
+        let provider = obj.remove("provider").unwrap();
+        obj.insert("runtime".to_string(), provider);
+        true
+    });
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "secret-bearing rewrite must be owner-only");
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["private_key_nsec"], "nsec1secret");
+    assert_eq!(records[0]["runtime"], "goose");
+}
+
 #[test]
 fn rename_provider_to_runtime_migrates_field() {
     let dir = tempfile::tempdir().unwrap();

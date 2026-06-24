@@ -263,6 +263,11 @@ fn copy_file_over_generated_default(src: &Path, dst: &Path) -> std::io::Result<(
 
 /// Read a JSON array of objects from `path`, apply `f` to each object,
 /// and write back if any mutation returned `true`.
+///
+/// Writes back via [`crate::managed_agents::atomic_write_json_restricted`]
+/// (owner-only `0o600`): the store files this rewrites can carry plaintext
+/// agent nsecs on a keyringless host, so the write must not reopen the umask
+/// window SECURITY.md:90 closes.
 fn patch_json_records(
     path: &Path,
     mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> bool,
@@ -285,7 +290,7 @@ fn patch_json_records(
     }
     if changed {
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            if let Err(e) = crate::managed_agents::atomic_write_json(path, &bytes) {
+            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
                 eprintln!("buzz-desktop: patch-json-records: {e}");
             }
         }

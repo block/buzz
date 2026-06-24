@@ -41,7 +41,7 @@ const overrides = new Map([
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup.
-  ["src-tauri/src/managed_agents/runtime.rs", 1966],
+  ["src-tauri/src/managed_agents/runtime.rs", 1969],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
@@ -53,11 +53,15 @@ const overrides = new Map([
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
-  // types.rs adds the persona/instance harness fields; migration_tests.rs adds
-  // the harness-sync migration coverage. Load-bearing, not generic debt.
+  // types.rs adds the persona/instance harness fields. Load-bearing, not
+  // generic debt.
   ["src-tauri/src/managed_agents/discovery.rs", 1043],
   ["src-tauri/src/managed_agents/types.rs", 1010],
-  ["src-tauri/src/migration_tests.rs", 1033],
+  // migration_tests.rs carries the harness-sync migration coverage plus the
+  // patch_json_records owner-only writeback regression test (SECURITY.md:90
+  // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
+  // generic debt growth. Approved override; still queued to split.
+  ["src-tauri/src/migration_tests.rs", 1063],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1295],
