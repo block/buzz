@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import type { ProfilePanelView } from "@/features/profile/ui/UserProfilePanel";
+import {
+  profilePanelViewFromSearch,
+  type ProfilePanelView,
+} from "@/features/profile/ui/UserProfilePanelUtils";
 import {
   type HistorySearchSetterOptions,
   useHistorySearchState,
@@ -31,10 +34,6 @@ const CHANNEL_SEARCH_KEYS = [
   "thread",
   "threadRootId",
 ] as const;
-
-function asProfilePanelView(value: string | null): ProfilePanelView {
-  return value === "memories" || value === "channels" ? value : "summary";
-}
 
 export function useChannelPanelHistoryState() {
   const { applyPatch, values } = useHistorySearchState(CHANNEL_SEARCH_KEYS);
@@ -74,7 +73,7 @@ export function useChannelPanelHistoryState() {
     openAgentSessionPubkey: values.agentSession,
     openThreadHeadId: values.thread,
     profilePanelPubkey: values.profile,
-    profilePanelView: asProfilePanelView(values.profileView),
+    profilePanelView: profilePanelViewFromSearch(values.profileView),
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
     setProfilePanelPubkey,
