@@ -586,6 +586,22 @@ pub fn run() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
 
+            // Resolve the REPOS symlink from the persisted repos_dir BEFORE
+            // agents are restored below. The frontend's apply_workspace runs
+            // only after React mounts — later than the async agent restore — so
+            // without this, an agent could clone into the empty real REPOS dir,
+            // and once REPOS is non-empty ensure_repos_symlink refuses forever.
+            // Reading the backend-persisted dotfile here closes that race.
+            // Non-fatal: no toast path exists pre-mount, so log and continue.
+            if let Some(nest) = managed_agents::nest_dir() {
+                let persisted = managed_agents::read_persisted_repos_dir(&nest);
+                if let Err(error) =
+                    managed_agents::ensure_repos_symlink(&nest, persisted.as_deref())
+                {
+                    eprintln!("buzz-desktop: repos dir setup failed at boot: {error}");
+                }
+            }
+
             // Carry the agent's knowledge from the legacy nest (~/.sprout) into
             // the live nest (~/.buzz) after it exists. Must run after
             // ensure_nest() so the destination is present. Non-fatal.

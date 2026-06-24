@@ -3,7 +3,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::AppState;
-use crate::managed_agents::{ensure_repos_symlink, nest_dir, try_regenerate_nest};
+use crate::managed_agents::{
+    ensure_repos_symlink, nest_dir, try_regenerate_nest, write_persisted_repos_dir,
+};
 use crate::relay;
 
 #[derive(Serialize)]
@@ -81,10 +83,16 @@ pub fn apply_workspace(
     }
 
     // ── Filesystem side-effect (non-fatal) ────────────────────────────────
-    // Re-point REPOS to match repos_dir. Failure here (downgrade refused,
-    // external target gone) must NOT fail the command — relay/keys are already
-    // applied. Surface it via a `repos-dir-error` event the frontend toasts.
+    // Persist repos_dir for the backend to read at boot, then re-point REPOS
+    // to match. Persisting first makes the dotfile authoritative even if the
+    // symlink apply fails here (e.g. a non-empty real REPOS): the next boot
+    // reads the persisted value and resolves the symlink before any agent can
+    // clone into REPOS. Failure of either must NOT fail the command — relay/
+    // keys are already applied. Surface symlink errors via `repos-dir-error`.
     if let Some(nest) = nest_dir() {
+        if let Err(error) = write_persisted_repos_dir(&nest, repos_dir.as_deref()) {
+            eprintln!("buzz-desktop: persist repos dir failed: {error}");
+        }
         if let Err(error) = ensure_repos_symlink(&nest, repos_dir.as_deref()) {
             eprintln!("buzz-desktop: repos dir setup failed: {error}");
             let _ = app.emit("repos-dir-error", error);

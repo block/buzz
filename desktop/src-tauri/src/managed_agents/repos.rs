@@ -164,6 +164,42 @@ pub fn ensure_repos_setup_default(nest_root: &Path) -> Result<(), String> {
     ensure_repos_symlink(nest_root, None)
 }
 
+/// Filename of the dotfile persisting the active workspace's `repos_dir`.
+const REPOS_DIR_FILE: &str = ".repos-dir";
+
+/// Read the persisted `repos_dir` from `nest_root/.repos-dir`.
+///
+/// Returns the trimmed value, or `None` when the file is absent, unreadable,
+/// or empty. This is the backend's sole knowledge of `repos_dir` at boot —
+/// the frontend persists it via [`write_persisted_repos_dir`] on every
+/// `apply_workspace`, so the setup hook can resolve the `REPOS` symlink
+/// before any agent is restored.
+pub fn read_persisted_repos_dir(nest_root: &Path) -> Option<String> {
+    fs::read_to_string(nest_root.join(REPOS_DIR_FILE))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Persist the active workspace's `repos_dir` to `nest_root/.repos-dir`.
+///
+/// Writes the trimmed value (one line). A `None`/empty value clears the
+/// override by removing the file, so a later boot reverts `REPOS` to a real
+/// in-nest directory. Removing an absent file is not an error. Mirrors the
+/// `.nest-agents-version` dotfile pattern.
+pub fn write_persisted_repos_dir(nest_root: &Path, repos_dir: Option<&str>) -> Result<(), String> {
+    let path = nest_root.join(REPOS_DIR_FILE);
+    match repos_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(value) => fs::write(&path, format!("{value}\n"))
+            .map_err(|e| format!("write {}: {e}", path.display())),
+        None => match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("remove {}: {e}", path.display())),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +416,127 @@ mod tests {
         assert!(
             validate_repos_dir(&root, parent.to_str().unwrap()).is_err(),
             "a parent of the nest would nest REPOS inside its own target"
+        );
+    }
+
+    // ── persisted repos_dir dotfile ───────────────────────────────────────
+
+    #[test]
+    fn persisted_repos_dir_roundtrips_write_read_clear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(read_persisted_repos_dir(&root), None, "absent → None");
+
+        write_persisted_repos_dir(&root, Some("  /Users/me/Development  ")).unwrap();
+        assert_eq!(
+            read_persisted_repos_dir(&root).as_deref(),
+            Some("/Users/me/Development"),
+            "value is trimmed on write/read"
+        );
+
+        write_persisted_repos_dir(&root, None).unwrap();
+        assert_eq!(read_persisted_repos_dir(&root), None, "cleared → None");
+        assert!(
+            !root.join(".repos-dir").exists(),
+            "clearing removes the dotfile"
+        );
+    }
+
+    #[test]
+    fn persisted_repos_dir_empty_value_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        write_persisted_repos_dir(&root, Some("/Users/me/Development")).unwrap();
+
+        write_persisted_repos_dir(&root, Some("   ")).unwrap();
+        assert_eq!(
+            read_persisted_repos_dir(&root),
+            None,
+            "a whitespace-only value clears the override"
+        );
+    }
+
+    #[test]
+    fn persisted_repos_dir_clear_when_absent_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+
+        write_persisted_repos_dir(&root, None).expect("clearing an absent dotfile is not an error");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boot_resolves_symlink_from_persisted_value_into_empty_repos() {
+        // Mirrors the boot sequence: ensure_nest leaves REPOS an empty real
+        // dir, then the setup hook reads the persisted value and symlinks.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(root.join("REPOS")).unwrap();
+        let external = tmp.path().join("Development");
+        fs::create_dir_all(&external).unwrap();
+
+        write_persisted_repos_dir(&root, Some(external.to_str().unwrap())).unwrap();
+        let persisted = read_persisted_repos_dir(&root);
+        ensure_repos_symlink(&root, persisted.as_deref()).unwrap();
+
+        let repos = root.join("REPOS");
+        assert!(
+            repos.symlink_metadata().unwrap().file_type().is_symlink(),
+            "boot must convert the empty real REPOS into a symlink"
+        );
+        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boot_leaves_already_correct_symlink_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        let external = tmp.path().join("Development");
+        fs::create_dir_all(&external).unwrap();
+
+        write_persisted_repos_dir(&root, Some(external.to_str().unwrap())).unwrap();
+        // First boot converts; second boot must be a noop.
+        let persisted = read_persisted_repos_dir(&root);
+        ensure_repos_symlink(&root, persisted.as_deref()).unwrap();
+        ensure_repos_symlink(&root, persisted.as_deref()).unwrap();
+
+        let repos = root.join("REPOS");
+        assert!(repos.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn boot_with_cleared_value_reverts_symlink_to_real_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        let external = tmp.path().join("Development");
+        fs::create_dir_all(&external).unwrap();
+        fs::write(external.join("KEEP.md"), "data").unwrap();
+
+        // Configure, then clear the field.
+        write_persisted_repos_dir(&root, Some(external.to_str().unwrap())).unwrap();
+        ensure_repos_symlink(&root, read_persisted_repos_dir(&root).as_deref()).unwrap();
+        write_persisted_repos_dir(&root, None).unwrap();
+
+        // Next boot reads None and reverts REPOS to a real in-nest dir.
+        ensure_repos_symlink(&root, read_persisted_repos_dir(&root).as_deref()).unwrap();
+
+        let repos = root.join("REPOS");
+        assert!(
+            !repos.symlink_metadata().unwrap().file_type().is_symlink(),
+            "clearing the persisted value reverts REPOS to a real dir"
+        );
+        assert!(
+            external.join("KEEP.md").exists(),
+            "reverting must not touch the external target's contents"
         );
     }
 
