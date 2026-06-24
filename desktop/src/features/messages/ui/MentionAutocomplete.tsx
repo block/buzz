@@ -18,6 +18,7 @@ export type MentionSuggestion = {
   avatarUrl?: string | null;
   isAgent?: boolean;
   notInChannel?: boolean;
+  ownerLabel?: string | null;
   role?: string | null;
 };
 
@@ -121,16 +122,18 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     <Badge variant="secondary">{suggestion.role}</Badge>
                   ) : null}
                 </span>
-                {suggestion.notInChannel ? (
+                {suggestion.ownerLabel || suggestion.notInChannel ? (
                   <span
                     className={cn(
-                      "ml-auto shrink-0 text-xs",
+                      "ml-auto min-w-0 shrink truncate text-xs",
                       index === selectedIndex
                         ? "text-accent-foreground/65"
                         : "text-muted-foreground",
                     )}
                   >
-                    not in channel
+                    {suggestion.ownerLabel
+                      ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
+                      : "not in channel"}
                   </span>
                 ) : null}
               </span>

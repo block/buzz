@@ -1391,6 +1391,60 @@ test("channel header omits the add agent action", async ({ page }) => {
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
 });
 
+test("members sidebar collapses same-persona managed agents", async ({
+  page,
+}) => {
+  const inChannelAgentPubkey =
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const outOfChannelAgentPubkey =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: outOfChannelAgentPubkey,
+        name: "Pinky",
+        personaId: "builtin:fizz",
+        status: "stopped",
+      },
+      {
+        pubkey: inChannelAgentPubkey,
+        name: "Pinky",
+        personaId: "builtin:fizz",
+        status: "running",
+        channelNames: ["general"],
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: outOfChannelAgentPubkey,
+        displayName: "Pinky",
+        ownerPubkey: MOCK_IDENTITY_PUBKEY,
+        isAgent: true,
+      },
+      {
+        pubkey: inChannelAgentPubkey,
+        displayName: "Pinky",
+        ownerPubkey: MOCK_IDENTITY_PUBKEY,
+        isAgent: true,
+      },
+    ],
+    userSearchDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("pi");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${inChannelAgentPubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
+  ).toHaveCount(0);
+  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(1);
+});
+
 test("private-channel members can add members and bots without admin", async ({
   page,
 }) => {

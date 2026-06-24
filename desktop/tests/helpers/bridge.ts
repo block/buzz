@@ -60,6 +60,7 @@ type MockSearchProfileSeed = {
   avatarUrl?: string | null;
   nip05Handle?: string | null;
   about?: string | null;
+  ownerPubkey?: string | null;
   isAgent?: boolean;
 };
 

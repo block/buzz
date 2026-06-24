@@ -5,15 +5,29 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import {
+  coalesceAgentAutocompleteCandidates,
+  getMentionableAgentPubkeys,
+  getSharedChannelIds,
+} from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
-import { useUserSearchQuery } from "@/features/profile/hooks";
+import {
+  useUserSearchQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
 import { truncatePubkey } from "@/features/profile/lib/identity";
 import {
   getKeyboardSearchSelection,
   rankUserCandidatesBySearch,
 } from "@/features/profile/lib/userCandidateSearch";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import type { UserSearchResult } from "@/shared/api/types";
+import { useChannelsQuery } from "@/features/channels/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import type {
+  ManagedAgent,
+  UserSearchResult,
+  UserProfileSummary,
+} from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
@@ -47,6 +61,44 @@ function formatUserName(user: UserSearchResult) {
     user.nip05Handle?.trim() ||
     truncatePubkey(user.pubkey)
   );
+}
+
+function formatOwnerName(
+  user: UserSearchResult,
+  ownerProfiles?: Record<string, UserProfileSummary>,
+) {
+  if (!user.ownerPubkey) {
+    return null;
+  }
+
+  const owner = ownerProfiles?.[normalizePubkey(user.ownerPubkey)];
+  return (
+    owner?.displayName?.trim() ||
+    owner?.nip05Handle?.trim() ||
+    truncatePubkey(user.ownerPubkey)
+  );
+}
+
+type DirectMessageSearchCandidate = UserSearchResult & {
+  isManagedAgent?: boolean;
+  isMember?: boolean;
+  personaId?: string | null;
+};
+
+function directMessageCandidateWithAgentMetadata(
+  candidate: UserSearchResult,
+  managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
+): DirectMessageSearchCandidate {
+  const agent = managedAgentsByPubkey.get(normalizePubkey(candidate.pubkey));
+  return {
+    ...candidate,
+    isManagedAgent: Boolean(agent),
+    personaId: agent?.personaId,
+  };
+}
+
+function formatDirectMessageSearchName(user: DirectMessageSearchCandidate) {
+  return formatUserName(user);
 }
 
 function prefersReducedMotion() {
@@ -263,8 +315,10 @@ export function NewDirectMessageDialog({
     () => new Set(selectedUsers.map((user) => normalizePubkey(user.pubkey))),
     [selectedUsers],
   );
+  const identityQuery = useIdentityQuery();
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: open });
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: open });
+  const channelsQuery = useChannelsQuery({ enabled: open });
   const userSearchQuery = useUserSearchQuery(deferredSearchQuery, {
     allowEmpty: true,
     enabled: open && !hasReachedRecipientLimit,
@@ -272,20 +326,25 @@ export function NewDirectMessageDialog({
   });
   const isArchivedDiscovery = useIsArchivedPredicate();
   const searchResults = React.useMemo(() => {
-    const candidatesByPubkey = new Map<string, UserSearchResult>();
+    const candidatesByPubkey = new Map<string, DirectMessageSearchCandidate>();
+    const managedAgentsByPubkey = new Map(
+      (managedAgentsQuery.data ?? []).map((agent) => [
+        normalizePubkey(agent.pubkey),
+        agent,
+      ]),
+    );
     const currentPubkeyNormalized = currentPubkey
       ? normalizePubkey(currentPubkey)
       : null;
-    const eligibleAgentPubkeys = new Set([
-      ...(managedAgentsQuery.data ?? []).map((agent) =>
-        normalizePubkey(agent.pubkey),
+    const eligibleAgentPubkeys = getMentionableAgentPubkeys({
+      managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
+        (agent) => agent.pubkey,
       ),
-      ...(relayAgentsQuery.data ?? [])
-        .filter((agent) => agent.respondTo === "anyone")
-        .map((agent) => normalizePubkey(agent.pubkey)),
-    ]);
+      relayAgents: relayAgentsQuery.data,
+      sharedChannelIds: getSharedChannelIds(channelsQuery.data),
+    });
 
-    const addCandidate = (candidate: UserSearchResult) => {
+    const addCandidate = (candidate: DirectMessageSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
 
       if (
@@ -318,15 +377,20 @@ export function NewDirectMessageDialog({
         nip05Handle: current.nip05Handle ?? candidate.nip05Handle ?? null,
         ownerPubkey: current.ownerPubkey ?? candidate.ownerPubkey ?? null,
         isAgent: current.isAgent || candidate.isAgent,
+        isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
+        isMember: current.isMember || candidate.isMember,
+        personaId: current.personaId ?? candidate.personaId,
       });
     };
 
     for (const user of userSearchQuery.data ?? []) {
-      addCandidate(user);
+      addCandidate(
+        directMessageCandidateWithAgentMetadata(user, managedAgentsByPubkey),
+      );
     }
 
     for (const agent of relayAgentsQuery.data ?? []) {
-      if (agent.respondTo !== "anyone") {
+      if (!eligibleAgentPubkeys.has(normalizePubkey(agent.pubkey))) {
         continue;
       }
 
@@ -346,19 +410,30 @@ export function NewDirectMessageDialog({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
-        ownerPubkey: null,
+        ownerPubkey: currentPubkey ?? null,
         isAgent: true,
+        isManagedAgent: true,
+        personaId: agent.personaId,
       });
     }
 
+    const coalescedCandidates = coalesceAgentAutocompleteCandidates(
+      [...candidatesByPubkey.values()],
+      {
+        currentPubkey,
+        getLabel: formatDirectMessageSearchName,
+      },
+    );
+
     return rankUserCandidatesBySearch({
       allowEmptyQuery: true,
-      candidates: [...candidatesByPubkey.values()],
+      candidates: coalescedCandidates,
       getLabel: formatUserName,
       limit: DIRECT_MESSAGE_RECIPIENT_LIMIT,
       query: deferredSearchQuery,
     });
   }, [
+    channelsQuery.data,
     currentPubkey,
     deferredSearchQuery,
     isArchivedDiscovery,
@@ -370,7 +445,28 @@ export function NewDirectMessageDialog({
   const isDirectoryLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
-    relayAgentsQuery.isLoading;
+    relayAgentsQuery.isLoading ||
+    channelsQuery.isLoading;
+
+  const searchOwnerPubkeys = React.useMemo(
+    () => [
+      ...new Set(
+        searchResults
+          .map((user) => user.ownerPubkey)
+          .filter((pubkey): pubkey is string =>
+            Boolean(
+              pubkey &&
+                pubkey.toLowerCase() !==
+                  identityQuery.data?.pubkey?.toLowerCase(),
+            ),
+          ),
+      ),
+    ],
+    [identityQuery.data?.pubkey, searchResults],
+  );
+  const ownerProfilesQuery = useUsersBatchQuery(searchOwnerPubkeys, {
+    enabled: open && searchOwnerPubkeys.length > 0,
+  });
 
   React.useEffect(() => {
     if (!open) {
@@ -605,79 +701,91 @@ export function NewDirectMessageDialog({
             <div className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70">
               {searchResults.length > 0 ? (
                 <div>
-                  {searchResults.map((user) => (
-                    <div
-                      className={cn(
-                        "group/dm-result relative flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
-                        DM_RESULT_ROW_INSET_DIVIDER_CLASS,
-                      )}
-                      key={user.pubkey}
-                    >
-                      <button
-                        aria-label={`Add ${formatUserName(user)}`}
-                        className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-                        data-testid={`new-dm-result-${user.pubkey}`}
-                        disabled={isPending || hasReachedRecipientLimit}
-                        onClick={() => {
-                          handleSelectUser(user);
-                        }}
-                        type="button"
-                      />
-                      <ProfileAvatar
-                        avatarUrl={user.avatarUrl}
-                        className="pointer-events-none relative z-10 h-8 w-8 text-xs shadow-none"
-                        iconClassName="h-4 w-4"
-                        label={formatUserName(user)}
-                      />
-                      <div className="pointer-events-none relative z-10 min-w-0 flex-1">
-                        {user.isAgent ? (
-                          <div className="relative min-w-0">
-                            <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
-                              <span className="truncate text-sm font-medium tracking-tight">
-                                {formatUserName(user)}
-                              </span>
-                              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                                <Bot
-                                  aria-hidden="true"
-                                  className="h-3 w-3"
-                                  data-testid="new-dm-agent-icon"
-                                />
-                                agent
+                  {searchResults.map((user) => {
+                    const ownerLabel = formatOwnerName(
+                      user,
+                      ownerProfilesQuery.data?.profiles,
+                    );
+
+                    return (
+                      <div
+                        className={cn(
+                          "group/dm-result relative flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
+                          DM_RESULT_ROW_INSET_DIVIDER_CLASS,
+                        )}
+                        key={user.pubkey}
+                      >
+                        <button
+                          aria-label={`Add ${formatUserName(user)}`}
+                          className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                          data-testid={`new-dm-result-${user.pubkey}`}
+                          disabled={isPending || hasReachedRecipientLimit}
+                          onClick={() => {
+                            handleSelectUser(user);
+                          }}
+                          type="button"
+                        />
+                        <ProfileAvatar
+                          avatarUrl={user.avatarUrl}
+                          className="pointer-events-none relative z-10 h-8 w-8 text-xs shadow-none"
+                          iconClassName="h-4 w-4"
+                          label={formatUserName(user)}
+                        />
+                        <div className="pointer-events-none relative z-10 min-w-0 flex-1">
+                          {user.isAgent ? (
+                            <div className="relative min-w-0">
+                              <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
+                                <span className="truncate text-sm font-medium tracking-tight">
+                                  {formatUserName(user)}
+                                </span>
+                                <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                                  <Bot
+                                    aria-hidden="true"
+                                    className="h-3 w-3"
+                                    data-testid="new-dm-agent-icon"
+                                  />
+                                  agent
+                                </span>
+                              </div>
+                              {ownerLabel ? (
+                                <span className="block truncate text-xs text-muted-foreground transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
+                                  owned by {ownerLabel}
+                                </span>
+                              ) : null}
+                              <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100">
+                                <span className="truncate font-mono text-sm text-muted-foreground">
+                                  {truncatePubkey(user.pubkey)}
+                                </span>
                               </span>
                             </div>
-                            <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100">
-                              <span className="truncate font-mono text-sm text-muted-foreground">
-                                {truncatePubkey(user.pubkey)}
-                              </span>
+                          ) : (
+                            <span className="block truncate text-sm font-medium tracking-tight">
+                              {formatUserName(user)}
                             </span>
-                          </div>
-                        ) : (
-                          <span className="block truncate text-sm font-medium tracking-tight">
-                            {formatUserName(user)}
-                          </span>
-                        )}
+                          )}
+                        </div>
+                        <Button
+                          aria-label={`Add ${formatUserName(user)}`}
+                          className={cn(
+                            "relative z-20 shrink-0 transition-opacity duration-150 ease-out",
+                            isPending
+                              ? "invisible opacity-0 disabled:opacity-0"
+                              : "opacity-0 group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100",
+                          )}
+                          data-testid={`new-dm-add-${user.pubkey}`}
+                          disabled={isPending || hasReachedRecipientLimit}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleSelectUser(user);
+                          }}
+                          size="sm"
+                          type="button"
+                        >
+                          Add
+                        </Button>
                       </div>
-                      <Button
-                        aria-label={`Add ${formatUserName(user)}`}
-                        className={cn(
-                          "relative z-20 shrink-0 transition-opacity duration-150 ease-out",
-                          isPending
-                            ? "invisible opacity-0 disabled:opacity-0"
-                            : "opacity-0 group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100",
-                        )}
-                        data-testid={`new-dm-add-${user.pubkey}`}
-                        disabled={isPending || hasReachedRecipientLimit}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          handleSelectUser(user);
-                        }}
-                        size="sm"
-                        type="button"
-                      >
-                        Add
-                      </Button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : isDirectoryLoading ? (
                 <p className="px-4 py-3 text-sm text-muted-foreground">
