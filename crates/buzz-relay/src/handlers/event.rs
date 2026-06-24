@@ -1065,6 +1065,7 @@ mod tests {
                 CancellationToken::new(),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
+                3,
             );
             state.sub_registry.register(
                 conn_id,
