@@ -32,6 +32,14 @@ tauri-build = { version = "2", features = [] }
 libc = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
+# Used directly (alongside tauri-plugin-notification) so we can hold the posting
+# D-Bus connection open. GNOME 46+ dismisses a notification the moment that
+# connection is dropped, which the plugin does immediately. Default features
+# keep the pure-Rust zbus backend, matching the plugin (no libdbus needed).
+notify-rust = "4"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
@@ -39,9 +47,6 @@ keyring = { version = "3.6.3", default-features = false, features = ["apple-nati
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
 
 [dependencies]
 atomic-write-file = "0.3"

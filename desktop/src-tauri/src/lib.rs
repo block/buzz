@@ -765,6 +765,7 @@ pub fn run() {
             add_reaction,
             remove_reaction,
             get_event,
+            show_native_notification,
             upload_media,
             pick_and_upload_media,
             upload_media_bytes,

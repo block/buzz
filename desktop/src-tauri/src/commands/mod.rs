@@ -17,6 +17,7 @@ mod media_transcode;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
 mod messages;
+mod notifications;
 pub mod pairing;
 mod personas;
 mod prevent_sleep;
@@ -45,6 +46,7 @@ pub use media_download::*;
 #[cfg(feature = "mesh-llm")]
 pub use mesh_llm::*;
 pub use messages::*;
+pub use notifications::*;
 pub use pairing::*;
 pub use personas::*;
 pub use prevent_sleep::*;
