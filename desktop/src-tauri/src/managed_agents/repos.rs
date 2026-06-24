@@ -172,9 +172,9 @@ const REPOS_DIR_FILE: &str = ".repos-dir";
 /// Returns the trimmed value, or `None` when the file is absent, unreadable,
 /// or empty. This is the backend's sole knowledge of `repos_dir` at boot —
 /// the frontend persists it via [`write_persisted_repos_dir`] on every
-/// `apply_workspace`, so the setup hook can resolve the `REPOS` symlink
-/// before any agent is restored.
-pub fn read_persisted_repos_dir(nest_root: &Path) -> Option<String> {
+/// `apply_workspace`, so [`resolve_repos_at_boot`] can resolve the `REPOS`
+/// symlink before any agent is restored.
+fn read_persisted_repos_dir(nest_root: &Path) -> Option<String> {
     fs::read_to_string(nest_root.join(REPOS_DIR_FILE))
         .ok()
         .map(|s| s.trim().to_string())
@@ -198,6 +198,43 @@ pub fn write_persisted_repos_dir(nest_root: &Path, repos_dir: Option<&str>) -> R
             Err(e) => Err(format!("remove {}: {e}", path.display())),
         },
     }
+}
+
+/// Decide whether launch-time agent restore is safe given the boot symlink
+/// outcome. Fails CLOSED: when a `repos_dir` was configured but its symlink
+/// could not be resolved, restoring agents would let one clone into the empty
+/// real `REPOS` that `ensure_nest` provisioned — the wrong location — and once
+/// it is non-empty [`ensure_repos_symlink`] refuses forever, permanently
+/// re-triggering the race. Skipping restore is recoverable on the next boot
+/// once the external target is reachable; a misplaced clone is not.
+///
+/// The no-`repos_dir` case (`persisted_present == false`) is always safe: the
+/// real in-nest `REPOS` default is exactly where clones belong.
+fn should_restore_agents(persisted_present: bool, symlink_result: &Result<(), String>) -> bool {
+    !(persisted_present && symlink_result.is_err())
+}
+
+/// Resolve the `REPOS` symlink at boot from the persisted `repos_dir` and
+/// report whether agent restore is safe to proceed.
+///
+/// Runs in the synchronous setup hook, after `ensure_nest` and before the
+/// async agent restore is spawned, so `REPOS` is the user's configured symlink
+/// before any agent can clone. Logs on failure (no toast path exists
+/// pre-mount) and returns the fail-closed [`should_restore_agents`] decision.
+pub fn resolve_repos_at_boot(nest_root: &Path) -> bool {
+    let persisted = read_persisted_repos_dir(nest_root);
+    let symlink_result = ensure_repos_symlink(nest_root, persisted.as_deref());
+    if let Err(error) = &symlink_result {
+        eprintln!("buzz-desktop: repos dir setup failed at boot: {error}");
+    }
+    let restore = should_restore_agents(persisted.is_some(), &symlink_result);
+    if !restore {
+        eprintln!(
+            "buzz-desktop: skipping agent restore — configured repos_dir `{}` could not be resolved at boot; will retry on next launch",
+            persisted.as_deref().unwrap_or_default()
+        );
+    }
+    restore
 }
 
 #[cfg(test)]
@@ -537,6 +574,102 @@ mod tests {
         assert!(
             external.join("KEEP.md").exists(),
             "reverting must not touch the external target's contents"
+        );
+    }
+
+    // ── resolve_repos_at_boot (boot sequence + fail-closed gate) ──────────
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_repos_at_boot_converts_empty_real_repos_and_allows_restore() {
+        // Drives the real boot sequence: ensure_repos_setup_default (called by
+        // ensure_nest) provisions REPOS as an empty real dir, then the setup
+        // hook calls resolve_repos_at_boot. Asserts the convert happens at that
+        // position and restore is allowed.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        let external = tmp.path().join("Development");
+        fs::create_dir_all(&external).unwrap();
+        write_persisted_repos_dir(&root, Some(external.to_str().unwrap())).unwrap();
+
+        ensure_repos_setup_default(&root).unwrap();
+        let repos = root.join("REPOS");
+        assert!(
+            repos.is_dir() && !repos.symlink_metadata().unwrap().file_type().is_symlink(),
+            "ensure_nest provisions REPOS as an empty real dir before the boot resolve"
+        );
+
+        let restore = resolve_repos_at_boot(&root);
+
+        assert!(restore, "restore proceeds when the symlink resolves");
+        assert!(
+            repos.symlink_metadata().unwrap().file_type().is_symlink(),
+            "boot resolve converts the empty real REPOS into the configured symlink"
+        );
+        assert_eq!(repos.read_link().unwrap(), external.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_repos_at_boot_fails_closed_when_target_unresolvable() {
+        // Persisted repos_dir whose target does not exist at boot (transiently
+        // unavailable external volume) → ensure_repos_symlink Errs. Restore must
+        // be skipped and REPOS left as the empty real dir, never the symlink, so
+        // no agent clones into the wrong place.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        let missing = tmp.path().join("not-mounted-yet");
+        write_persisted_repos_dir(&root, Some(missing.to_str().unwrap())).unwrap();
+        ensure_repos_setup_default(&root).unwrap();
+
+        let restore = resolve_repos_at_boot(&root);
+
+        assert!(
+            !restore,
+            "restore must be skipped when a configured repos_dir cannot resolve at boot"
+        );
+        let repos = root.join("REPOS");
+        assert!(
+            !repos.symlink_metadata().unwrap().file_type().is_symlink(),
+            "REPOS must not become a symlink to an unresolved target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_repos_at_boot_allows_restore_with_no_repos_dir() {
+        // No configured repos_dir → the real in-nest REPOS default is correct,
+        // restore proceeds normally (the fail-closed gate must not fire here).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        ensure_repos_setup_default(&root).unwrap();
+
+        assert!(
+            resolve_repos_at_boot(&root),
+            "restore proceeds when no repos_dir is configured"
+        );
+    }
+
+    #[test]
+    fn should_restore_agents_only_blocks_configured_unresolved_boot() {
+        assert!(
+            should_restore_agents(false, &Ok(())),
+            "no repos_dir, symlink ok → restore"
+        );
+        assert!(
+            should_restore_agents(false, &Err("boom".into())),
+            "no repos_dir → real-dir default is correct even on Err → restore"
+        );
+        assert!(
+            should_restore_agents(true, &Ok(())),
+            "configured repos_dir resolved → restore"
+        );
+        assert!(
+            !should_restore_agents(true, &Err("boom".into())),
+            "configured repos_dir unresolved → fail closed, skip restore"
         );
     }
 
