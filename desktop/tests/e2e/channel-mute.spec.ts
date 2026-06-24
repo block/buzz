@@ -5,7 +5,6 @@ import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
 const MUTE_STORAGE_KEY = `buzz-channel-mutes.v1:${MOCK_PUBKEY}`;
-const SHOTS = "test-results/channel-mute";
 
 function seedMuteState(
   page: import("@playwright/test").Page,
@@ -49,7 +48,7 @@ async function waitForMockLiveSubscription(
     .toBe(true);
 }
 
-test.describe("channel muting screenshots", () => {
+test.describe("channel muting", () => {
   test("01 — context menu shows Mute channel", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
@@ -70,11 +69,6 @@ test.describe("channel muting screenshots", () => {
           .map((a) => a.finished) ?? [],
       ),
     );
-
-    await page.screenshot({
-      path: `${SHOTS}/01-context-menu-mute.png`,
-      clip: { x: 0, y: 0, width: 450, height: 720 },
-    });
   });
 
   test("02 — muted channel is dimmed with BellOff icon", async ({ page }) => {
@@ -89,11 +83,6 @@ test.describe("channel muting screenshots", () => {
     await expect(engRow).toBeVisible();
     await expect(engRow).toHaveCSS("opacity", "0.5");
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
-
-    await page.screenshot({
-      path: `${SHOTS}/02-muted-channel-dimmed.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
-    });
   });
 
   test("03 — muted channel with @mention shows unread dot", async ({
@@ -135,11 +124,6 @@ test.describe("channel muting screenshots", () => {
     );
 
     await expect(page.getByTestId("channel-unread-engineering")).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/03-muted-with-mention.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
-    });
   });
 
   test("04 — context menu shows Unmute channel when muted", async ({
@@ -163,11 +147,6 @@ test.describe("channel muting screenshots", () => {
           .map((a) => a.finished) ?? [],
       ),
     );
-
-    await page.screenshot({
-      path: `${SHOTS}/04-context-menu-unmute.png`,
-      clip: { x: 0, y: 0, width: 450, height: 720 },
-    });
   });
 
   test("05 — muted icon visible on selected channel", async ({ page }) => {
@@ -180,10 +159,5 @@ test.describe("channel muting screenshots", () => {
 
     const engRow = page.getByTestId("channel-engineering");
     await expect(engRow.locator("svg.lucide-bell-off")).toHaveCount(1);
-
-    await page.screenshot({
-      path: `${SHOTS}/05-muted-icon-on-selected.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
-    });
   });
 });

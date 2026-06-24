@@ -3,8 +3,6 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
-const SHOTS = "test-results/animated-avatar";
-
 /**
  * Stub getUserMedia with a canvas-generated stream (animated gradient with a
  * moving circle) so the camera phases work headless and deterministically —
@@ -118,8 +116,7 @@ function installFakeCamera(
 }
 
 // The review editor (preview + framing + poster strip + backdrop panel) is
-// taller than the default 720px viewport — raise it so element screenshots
-// capture the whole editor.
+// taller than the default 720px viewport — raise it so the whole editor remains visible.
 test.use({ viewport: { height: 1280, width: 1280 } });
 
 const UPLOADED_PNG_DESCRIPTOR = {
@@ -147,7 +144,7 @@ async function openAnimatedTab(
   await page.waitForTimeout(400);
 }
 
-test.describe("animated avatar screenshots", () => {
+test.describe("animated avatar", () => {
   test("01 — animated tab idle state", async ({ page }) => {
     await openAnimatedTab(page);
     await expect(
@@ -169,9 +166,6 @@ test.describe("animated avatar screenshots", () => {
       page.getByTestId("profile-avatar-animated-camera-select"),
     ).toHaveCount(0);
     await expect(page.getByTestId("profile-avatar-done")).toHaveCount(0);
-    await page
-      .getByTestId("settings-profile")
-      .screenshot({ path: `${SHOTS}/01-animated-tab-idle.png` });
   });
 
   test("02 — live camera preview", async ({ page }) => {
@@ -247,9 +241,6 @@ test.describe("animated avatar screenshots", () => {
       );
     await expect(page.getByTestId("profile-avatar-done")).toHaveCount(0);
     await page.waitForTimeout(500);
-    await page
-      .getByTestId("settings-profile")
-      .screenshot({ path: `${SHOTS}/02-live-camera.png` });
 
     await page.getByTestId("profile-avatar-animated-record").click();
     await expect(
@@ -276,10 +267,6 @@ test.describe("animated avatar screenshots", () => {
       page.getByTestId("profile-avatar-animated-timer-ring"),
     ).toBeVisible();
     await page.waitForTimeout(1500);
-    await page.getByTestId("settings-profile").screenshot({
-      animations: "allow",
-      path: `${SHOTS}/03-recording-ring.png`,
-    });
 
     // Review: the section icon row appears once processing finishes.
     await expect(
@@ -340,10 +327,6 @@ test.describe("animated avatar screenshots", () => {
       },
     });
     await expect(scrubber).not.toHaveAttribute("aria-valuenow", "0");
-    await page.getByTestId("settings-profile").screenshot({
-      animations: "allow",
-      path: `${SHOTS}/06-poster-picker.png`,
-    });
 
     // The Circle tool stays implemented, but it is hidden in the review row for now.
     await expect(
@@ -379,13 +362,9 @@ test.describe("animated avatar screenshots", () => {
       "aria-valuenow",
       initialSizeValue ?? "",
     );
-    // Restore defaults so the screenshot shows the standard framing.
+    // Restore defaults so the standard framing remains covered.
     await page.getByTestId("profile-avatar-animated-reset-framing").click();
     await page.waitForTimeout(400);
-    await page.getByTestId("settings-profile").screenshot({
-      animations: "allow",
-      path: `${SHOTS}/04-review-popout-backdrop.png`,
-    });
 
     // Custom backdrop color panel (shared HSV picker).
     await page.getByTestId("profile-avatar-animated-section-color").click();
@@ -413,10 +392,6 @@ test.describe("animated avatar screenshots", () => {
     await page.waitForTimeout(400);
     const customColorPreview = await previewSnapshot();
     expect(customColorPreview).not.toEqual(beforeCustomColor);
-    await page.getByTestId("settings-profile").screenshot({
-      animations: "allow",
-      path: `${SHOTS}/05-custom-backdrop-color.png`,
-    });
     await page.getByTestId("profile-avatar-animated-custom-color-done").click();
     await expect(
       page.getByTestId("profile-avatar-animated-backdrop-custom"),

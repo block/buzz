@@ -238,8 +238,7 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("env-vars-add").click();
   await expect(page.getByTestId("env-vars-key")).toHaveCount(1);
 
-  // Fill it in. Use realistic-looking keys/values so the screenshot
-  // captured below illustrates the feature for reviewers.
+  // Fill it in with realistic-looking keys/values to cover masked secrets and row controls.
   const keys = page.getByTestId("env-vars-key");
   const values = page.getByTestId("env-vars-value");
   await keys.nth(0).fill("ANTHROPIC_API_KEY");
@@ -250,12 +249,6 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("env-vars-add").click();
   await keys.nth(2).fill("OPENAI_BASE_URL");
   await values.nth(2).fill("https://api.openai.com/v1");
-
-  // Capture a screenshot of the dialog with three env vars filled. Helps
-  // reviewers see the UI at a glance.
-  await page
-    .getByRole("dialog")
-    .screenshot({ path: "test-results/persona-env-dialog.png" });
 
   // Remove the first row to verify per-row removal still works.
   await page.getByTestId("env-vars-remove").first().click();

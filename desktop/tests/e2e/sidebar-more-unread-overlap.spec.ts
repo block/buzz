@@ -11,15 +11,12 @@
  * strip.
  *
  * This spec injects a synthetic pill into the live sidebar's relative
- * container and screenshots it next to the chrome strip so the positioning is
- * visible.
+ * container and asserts the pill clears the chrome strip.
  */
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
-
-const SHOTS = "test-results/sidebar-more-unread-overlap";
 
 const TOP_CLASS = "top-0";
 
@@ -46,7 +43,7 @@ async function injectSyntheticPill(
       ) as HTMLElement | null;
       if (!container) throw new Error("sidebar scroll anchor not found");
 
-      // Remove any prior injection so we can screenshot variants in sequence.
+      // Remove any prior injection so retries start from a clean sidebar.
       container
         .querySelectorAll("[data-synthetic-more-unread]")
         .forEach((el) => {
@@ -83,9 +80,5 @@ test.describe("sidebar MoreUnreadButton top chrome overlap", () => {
     expect(box?.y ?? Number.NaN).toBeGreaterThanOrEqual(40);
 
     await waitForAnimations(page);
-    await page.screenshot({
-      path: `${SHOTS}/top-pill-below-in-flow-chrome.png`,
-      clip: { x: 0, y: 0, width: 320, height: 120 },
-    });
   });
 });

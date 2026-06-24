@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/unread-pill";
-
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -90,9 +88,9 @@ async function emitUnreadMessages(
 
 // Scroll the timeline up so the viewport is no longer pinned to the bottom.
 // The pill auto-dismisses once the user reaches the bottom of the timeline, so
-// it only stays rendered while scrolled up — which is the state these shots
-// need to capture. Scrolling part-way (rather than to the very top) keeps real
-// message context on screen instead of the channel's empty-state intro.
+// it only stays rendered while scrolled up. Scrolling part-way (rather than to
+// the very top) keeps real message context on screen instead of the channel's
+// empty-state intro.
 async function scrollTimelineUp(page: import("@playwright/test").Page) {
   await page.getByTestId("message-timeline").evaluate((el) => {
     el.scrollTop = Math.floor(el.scrollHeight * 0.35);
@@ -100,7 +98,7 @@ async function scrollTimelineUp(page: import("@playwright/test").Page) {
   await page.waitForTimeout(300);
 }
 
-test.describe("unread pill & divider screenshots", () => {
+test.describe("unread pill & divider", () => {
   test("01-unread-pill-visible", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
@@ -127,10 +125,6 @@ test.describe("unread pill & divider screenshots", () => {
     const pill = page.getByTestId("message-unread-pill");
     await expect(pill).toBeVisible();
     await expect(pill).toContainText("20 new messages");
-
-    await page.screenshot({
-      path: `${SHOTS}/01-unread-pill-visible.png`,
-    });
   });
 
   test("02-unread-divider-visible", async ({ page }) => {
@@ -152,13 +146,9 @@ test.describe("unread pill & divider screenshots", () => {
     const divider = page.getByTestId("message-unread-divider");
     await expect(divider).toBeVisible();
 
-    // Scroll the divider into view for a clear screenshot
+    // Scroll the divider into view before asserting it.
     await divider.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
-
-    await page.screenshot({
-      path: `${SHOTS}/02-unread-divider-visible.png`,
-    });
   });
 
   test("03-pill-dismissed-after-scroll", async ({ page }) => {
@@ -191,10 +181,6 @@ test.describe("unread pill & divider screenshots", () => {
 
     const divider = page.getByTestId("message-unread-divider");
     await expect(divider).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/03-pill-dismissed-after-scroll.png`,
-    });
   });
 
   test("04-mark-unread-suppresses-pill", async ({ page }) => {
@@ -222,9 +208,5 @@ test.describe("unread pill & divider screenshots", () => {
     // Pill and divider should NOT appear (suppressed for forced-unread)
     await expect(page.getByTestId("message-unread-pill")).toHaveCount(0);
     await expect(page.getByTestId("message-unread-divider")).toHaveCount(0);
-
-    await page.screenshot({
-      path: `${SHOTS}/04-mark-unread-suppresses-pill.png`,
-    });
   });
 });

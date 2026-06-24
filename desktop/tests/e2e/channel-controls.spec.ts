@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/channel-controls";
-
 // `general` seeds the mock identity as owner, so the owner/admin-gated
 // visibility + ephemeral controls are live and interactive.
 async function openManagementSheet(page: import("@playwright/test").Page) {
@@ -27,7 +25,7 @@ async function settle(page: import("@playwright/test").Page) {
   );
 }
 
-test.describe("channel controls screenshots", () => {
+test.describe("channel controls", () => {
   test("01 — lifecycle section: Private + Ephemeral switches", async ({
     page,
   }) => {
@@ -44,8 +42,6 @@ test.describe("channel controls screenshots", () => {
       page.getByTestId("channel-management-ephemeral-toggle"),
     ).toBeVisible();
     await settle(page);
-
-    await lifecycle.screenshot({ path: `${SHOTS}/01-lifecycle-default.png` });
   });
 
   test("02 — Private toggled on", async ({ page }) => {
@@ -63,8 +59,6 @@ test.describe("channel controls screenshots", () => {
       page.getByTestId("channel-management-save-changes"),
     ).toBeEnabled();
     await settle(page);
-
-    await lifecycle.screenshot({ path: `${SHOTS}/02-private-on.png` });
   });
 
   test("03 — Ephemeral on with friendly timeout field", async ({ page }) => {
@@ -83,8 +77,6 @@ test.describe("channel controls screenshots", () => {
       page.getByTestId("channel-management-save-changes"),
     ).toBeEnabled();
     await settle(page);
-
-    await lifecycle.screenshot({ path: `${SHOTS}/03-ephemeral-ttl.png` });
   });
 
   test("04 — invalid timeout blocks save with inline error", async ({
@@ -105,8 +97,6 @@ test.describe("channel controls screenshots", () => {
       page.getByTestId("channel-management-save-changes"),
     ).toBeDisabled();
     await settle(page);
-
-    await lifecycle.screenshot({ path: `${SHOTS}/04-ttl-invalid.png` });
   });
 
   test("05 — sticky footer pins lifecycle buttons", async ({ page }) => {
@@ -117,8 +107,6 @@ test.describe("channel controls screenshots", () => {
     await expect(footer).toBeVisible();
     await expect(page.getByTestId("channel-management-archive")).toBeVisible();
     await settle(page);
-
-    await footer.screenshot({ path: `${SHOTS}/05-sticky-footer.png` });
   });
 
   test("06 — full sheet with new controls", async ({ page }) => {
@@ -128,8 +116,6 @@ test.describe("channel controls screenshots", () => {
     const sheet = page.getByTestId("channel-management-sheet");
     await expect(sheet).toBeVisible();
     await settle(page);
-
-    await sheet.screenshot({ path: `${SHOTS}/06-management-sheet.png` });
   });
 
   test("07 — saving lifecycle uses unified save", async ({ page }) => {
@@ -137,7 +123,6 @@ test.describe("channel controls screenshots", () => {
     await openManagementSheet(page);
     await openEditDialog(page);
 
-    const sheet = page.getByTestId("channel-management-sheet");
     await page.getByTestId("channel-management-ephemeral-toggle").click();
     await expect(
       page.getByTestId("channel-management-save-changes"),
@@ -147,9 +132,6 @@ test.describe("channel controls screenshots", () => {
     await expect(
       page.getByTestId("channel-management-save-changes"),
     ).toHaveText("Saving...");
-    await sheet.screenshot({
-      path: `${SHOTS}/07-lifecycle-saving-unified-save.png`,
-    });
 
     await expect(
       page.getByRole("dialog", { name: "Edit channel" }),
@@ -187,9 +169,5 @@ test.describe("channel controls screenshots", () => {
     ).toHaveAttribute("data-state", "checked");
     await expect(page.getByTestId("channel-management-ttl")).toHaveValue("7d");
     await settle(page);
-
-    await lifecycle.screenshot({
-      path: `${SHOTS}/08-ephemeral-persisted-after-reopen.png`,
-    });
   });
 });

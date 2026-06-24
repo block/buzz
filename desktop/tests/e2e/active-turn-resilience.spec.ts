@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/active-turn-resilience";
-
 // Mock agent pubkeys (distinct from the relay agents seeded by default).
 const AGENT_PAUL = "aa".repeat(32);
 const AGENT_DUNCAN = "bb".repeat(32);
@@ -61,7 +59,7 @@ async function seedTurns(
   }, turns);
 }
 
-test.describe("active turn badge resilience screenshots", () => {
+test.describe("active turn badge resilience", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
   test("badges persist through an all-at-once liveness gap", async ({
@@ -114,11 +112,6 @@ test.describe("active turn badge resilience screenshots", () => {
     await expect(paulRow).toContainText("Working", { timeout: 5_000 });
     await expect(duncanRow).toContainText("Working", { timeout: 5_000 });
 
-    const agentsSection = page.getByTestId("unified-agents-groups");
-    await agentsSection.screenshot({
-      path: `${SHOTS}/01-badges-before-gap.png`,
-    });
-
     // Simulate the all-at-once relay drop: no further frames, advance the clock
     // past both thresholds. This fires several real prune ticks; shouldPausePrune
     // sees every turn's lastActivityAt stuck at T0 (gap > 20s) and pauses the
@@ -128,9 +121,5 @@ test.describe("active turn badge resilience screenshots", () => {
 
     await expect(paulRow).toContainText("Working");
     await expect(duncanRow).toContainText("Working");
-
-    await agentsSection.screenshot({
-      path: `${SHOTS}/02-badges-survive-gap.png`,
-    });
   });
 });

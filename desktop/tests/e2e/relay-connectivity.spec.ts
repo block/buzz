@@ -2,7 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/relay-connectivity-screenshots";
 const RELAY_UNREACHABLE = "relay unreachable: connection refused";
 
 // Minimal teal 8×8 PNG as a data URL — satisfies avatarDataUrl's data:image/ guard.
@@ -48,7 +47,7 @@ async function driveConnectionDegraded(
   }, state);
 }
 
-test.describe("relay connectivity screenshots", () => {
+test.describe("relay connectivity", () => {
   test("01 — sidebar unreachable card", async ({ page }) => {
     await installMockBridge(page, { channelsReadError: RELAY_UNREACHABLE });
     await page.goto("/");
@@ -62,10 +61,6 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     // Clip to sidebar width (256px) so the card and channel list are both visible.
-    await page.screenshot({
-      path: `${SHOTS}/01-sidebar-unreachable.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
-    });
   });
 
   test("02 — sidebar reconnect card while reconnecting", async ({ page }) => {
@@ -87,10 +82,6 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     // Clip to the sidebar, where degraded relay state is now surfaced.
-    await page.screenshot({
-      path: `${SHOTS}/02-sidebar-reconnecting.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
-    });
   });
 
   test("03 — canvas unreachable in management sheet", async ({ page }) => {
@@ -111,7 +102,7 @@ test.describe("relay connectivity screenshots", () => {
       canvasSection.getByText("Can't reach the relay."),
     ).toBeVisible();
 
-    // Await Radix sheet animations before screenshotting.
+    // Await Radix sheet animations before measuring the settled state.
     const sheet = page.getByTestId("channel-management-sheet");
     await sheet.evaluate((el) =>
       Promise.all(
@@ -124,9 +115,6 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     // Capture the whole sheet so the error renders in its Canvas-section context.
-    await sheet.screenshot({
-      path: `${SHOTS}/03-canvas-unreachable.png`,
-    });
   });
 
   test("04 — cached identity shown offline (avatar + display name)", async ({
@@ -156,10 +144,6 @@ test.describe("relay connectivity screenshots", () => {
     const profileCard = page.getByTestId("sidebar-profile-card");
     await expect(profileCard).toContainText("Tyler Durden");
     await settle(page);
-
-    await profileCard.screenshot({
-      path: `${SHOTS}/04-cached-identity-offline.png`,
-    });
   });
 
   test("05 — no-cache npub fallback when offline", async ({ page }) => {
@@ -171,10 +155,6 @@ test.describe("relay connectivity screenshots", () => {
     // Default mock identity display name is "npub1mock...".
     await expect(profileCard).toContainText("npub1mock");
     await settle(page);
-
-    await profileCard.screenshot({
-      path: `${SHOTS}/05-no-cache-npub-fallback.png`,
-    });
   });
 
   test("06 — sidebar card shows connected after external relay recovery", async ({

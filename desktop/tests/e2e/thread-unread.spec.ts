@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/thread-unread";
-
 type MockMessageEvent = {
   id: string;
   created_at: number;
@@ -111,7 +109,7 @@ async function expandReply(
   await expect.poll(() => replies.count()).toBeGreaterThan(before);
 }
 
-test.describe("thread unread indicator screenshots", () => {
+test.describe("thread unread indicator", () => {
   test("01-thread-unread-badge", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
@@ -167,10 +165,6 @@ test.describe("thread unread indicator screenshots", () => {
     const badge = page.getByTestId("thread-unread-badge");
     await expect(badge).toBeVisible();
     await expect(badge).toContainText("3");
-
-    await page.screenshot({
-      path: `${SHOTS}/01-thread-unread-badge.png`,
-    });
   });
 
   test("02-thread-new-divider", async ({ page }) => {
@@ -222,10 +216,6 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(divider).toBeVisible();
     await divider.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
-
-    await page.screenshot({
-      path: `${SHOTS}/02-thread-new-divider.png`,
-    });
   });
 
   test("03-thread-badge-casual-browse", async ({ page }) => {
@@ -268,10 +258,6 @@ test.describe("thread unread indicator screenshots", () => {
       .getByTestId("thread-unread-badge");
     await expect(badges).toHaveCount(1);
     await expect(badges).toContainText("2");
-
-    await page.screenshot({
-      path: `${SHOTS}/03-thread-badge-casual-browse.png`,
-    });
 
     // Opening a casual, unmuted thread should clear its local badge too. The
     // badge render gate and read-on-open gate must stay aligned.
@@ -378,10 +364,6 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(divider).toBeVisible();
     await divider.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
-
-    await page.screenshot({
-      path: `${SHOTS}/04-thread-deep-nested-unread.png`,
-    });
 
     await page.getByTestId("message-thread-head").scrollIntoViewIfNeeded();
     await page
@@ -510,10 +492,6 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(inPanelBadge).toBeVisible();
     await expect(inPanelBadge).toContainText("2");
 
-    await page.screenshot({
-      path: `${SHOTS}/05-thread-in-panel-subtree-badge.png`,
-    });
-
     // v3 contract: expanding a branch marks only its REVEALED direct children
     // read, never the whole subtree. The unread replies sit two levels under p
     // (p -> c -> c2 -> c2-child), so a single expand of p only reveals c — the
@@ -523,10 +501,6 @@ test.describe("thread unread indicator screenshots", () => {
     // (reveals c2-child, read) -> badge clears to 0.
     await expandReply(page, p.id);
     await expect(inPanelBadge).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/06-thread-expand-clears-subtree-badge.png`,
-    });
 
     await expandReply(page, c.id);
     await expandReply(page, c2.id);
@@ -594,10 +568,6 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: base + 1,
     });
     await expect(inPanelBadge).toContainText("2");
-
-    await page.screenshot({
-      path: `${SHOTS}/07-in-panel-badge-bumps-on-live-reply.png`,
-    });
   });
 
   test("07-expand-clears-own-branch-badge-sibling-survives", async ({
@@ -674,10 +644,6 @@ test.describe("thread unread indicator screenshots", () => {
       .getByTestId("thread-unread-badge");
     await expect(inPanelBadges).toHaveCount(2);
 
-    await page.screenshot({
-      path: `${SHOTS}/08-two-sibling-badges-before-expand.png`,
-    });
-
     // Expand the LATER branch down to where its unread sits: revealing
     // branchNew shows newChild (still collapsed over the unread reply, so the
     // badge survives), then revealing newChild marks the unread reply read and
@@ -688,18 +654,10 @@ test.describe("thread unread indicator screenshots", () => {
     await expandReply(page, newChild.id);
     await expect(inPanelBadges).toHaveCount(1);
 
-    await page.screenshot({
-      path: `${SHOTS}/09-expand-clears-own-branch-sibling-survives.png`,
-    });
-
     // Expanding the older branch to its unread depth clears the last badge.
     await expandReply(page, branchOld.id);
     await expandReply(page, oldChild.id);
     await expect(inPanelBadges).toHaveCount(0);
-
-    await page.screenshot({
-      path: `${SHOTS}/10-both-branches-expanded-all-cleared.png`,
-    });
   });
 
   // Regression guard for the Option-1 channel-marker fix: viewing a channel
@@ -756,10 +714,6 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await expect(badge).toBeVisible();
     await expect(badge).toContainText("3");
-
-    await page.screenshot({
-      path: `${SHOTS}/10-thread-badge-survives-channel-reentry.png`,
-    });
   });
 
   // Thread-only replies now also light the channel sidebar badge. Viewing the
@@ -803,10 +757,6 @@ test.describe("thread unread indicator screenshots", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
     await expect(page.getByTestId("channel-unread-general")).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/11-thread-reply-sidebar-badge.png`,
-    });
   });
 
   // Regression guard for the all-replies window: when the loaded window holds
@@ -845,10 +795,6 @@ test.describe("thread unread indicator screenshots", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/12-thread-reply-all-replies-sidebar-badge.png`,
-    });
   });
 
   // Regression guard for BUG-2 (clear-on-read): opening an unread thread marks
@@ -901,10 +847,6 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(badge).toBeVisible();
     await expect(badge).toContainText("3");
 
-    await page.screenshot({
-      path: `${SHOTS}/13-thread-badge-before-read.png`,
-    });
-
     // The crux: open the thread (mark-read advances the frontier past all three
     // direct replies), then close it. Stay in general the entire time — no
     // channel switch. The badge must clear to zero off the readStateVersion
@@ -916,10 +858,6 @@ test.describe("thread unread indicator screenshots", () => {
 
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await expect(badge).toHaveCount(0);
-
-    await page.screenshot({
-      path: `${SHOTS}/13-thread-badge-clears-on-read.png`,
-    });
   });
 
   // Regression guard for the mention-gate + subtree-count fixes. The viewer is
