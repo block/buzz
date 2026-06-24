@@ -10,7 +10,6 @@ import {
   Cpu,
   FileText,
   Hash,
-  Info,
   MessageSquare,
   Pencil,
   Play,
@@ -90,7 +89,6 @@ export type ProfileSummaryViewProps = {
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: string | null;
   modelLabel: string;
-  onOpenAgentInfo: () => void;
   onOpenAgentSettings: () => void;
   onOpenChannels: () => void;
   onOpenDiagnostics: () => void;
@@ -140,7 +138,6 @@ export function ProfileSummaryView({
   diagnosticsFields,
   diagnosticsSummary,
   modelLabel,
-  onOpenAgentInfo,
   onOpenAgentSettings,
   onOpenChannels,
   onOpenDiagnostics,
@@ -171,7 +168,10 @@ export function ProfileSummaryView({
     (agentSettingsFields.length > 0 || managedAgent?.backend.type === "local");
   const showDiagnosticsIngress =
     diagnosticsFields.length > 0 || canOpenAgentLogs || canViewActivity;
-  const showAgentInfoIngress = agentInfoFields.length > 0;
+  const topLevelAgentInfoFields = agentInfoFields.filter(
+    (field) => field.label === "Public key" || field.label === "Owned by",
+  );
+  const showTopLevelAgentInfo = topLevelAgentInfoFields.length > 0;
   const personaActionKey = persona?.id;
 
   return (
@@ -238,7 +238,7 @@ export function ProfileSummaryView({
       showChannelsIngress ||
       showAgentSettingsIngress ||
       showDiagnosticsIngress ||
-      showAgentInfoIngress ? (
+      showTopLevelAgentInfo ? (
         <section className="space-y-2">
           {showInstructionIngress ? (
             <ProfileIngressRow
@@ -306,14 +306,8 @@ export function ProfileSummaryView({
               trailing={diagnosticsSummary ?? "View"}
             />
           ) : null}
-          {showAgentInfoIngress ? (
-            <ProfileIngressRow
-              icon={Info}
-              label="Agent info"
-              onClick={onOpenAgentInfo}
-              testId="user-profile-agent-info-ingress"
-              trailing="View"
-            />
+          {showTopLevelAgentInfo ? (
+            <ProfileFieldGroup fields={topLevelAgentInfoFields} />
           ) : null}
         </section>
       ) : null}
