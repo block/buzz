@@ -5,11 +5,12 @@ use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        encode_persona_json, load_managed_agents, load_personas, load_teams, parse_json_persona,
-        parse_md_persona, parse_png_persona, parse_zip_personas, persona_events::persona_d_tag,
-        save_managed_agents, save_personas, try_regenerate_nest,
-        validate_persona_activation_change, validate_persona_deletion, CreatePersonaRequest,
-        ParsePersonaFilesResult, PersonaRecord, UpdatePersonaRequest,
+        agent_events::ManagedAgentEventContent, encode_persona_json, load_managed_agents,
+        load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
+        parse_zip_personas, persona_events::persona_d_tag, save_managed_agents, save_personas,
+        team_events::TeamEventContent, try_regenerate_nest, validate_persona_activation_change,
+        validate_persona_deletion, CreatePersonaRequest, ManagedAgentRecord,
+        ParsePersonaFilesResult, PersonaRecord, TeamRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -335,39 +336,53 @@ pub fn reconcile_inbound_persona_event(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     use crate::managed_agents::{
-        managed_agents_base_dir,
+        agent_events::managed_agent_content_from_event,
+        load_managed_agents, load_teams, managed_agents_base_dir,
         persona_events::persona_from_event,
         retention::{open_retention_db, retain_inbound_event, InboundOutcome, RetainedEvent},
+        save_managed_agents, save_teams,
+        team_events::team_content_from_event,
     };
-    use buzz_core_pkg::kind::KIND_PERSONA;
+    use buzz_core_pkg::kind::{KIND_MANAGED_AGENT, KIND_PERSONA, KIND_TEAM};
     use nostr::JsonUtil;
 
     let event = nostr::Event::from_json(&event_json)
         .map_err(|e| format!("failed to parse inbound event: {e}"))?;
 
-    // Per-kind scoping: the live filter subscribes to 30175/30176/30177, but
-    // only persona (30175) inbound is implemented here. Team (30176) and
-    // managed-agent (30177) reconcile is a tracked follow-up; no-op for now so
-    // a d-tag shared across kinds can never cross-link a team and a persona.
-    // follow-up: team/agent inbound parse + patch (30176/30177).
-    if event.kind.as_u16() as u32 != KIND_PERSONA {
+    // Per-kind scoping: the live filter subscribes to 30175/30176/30177. d-tags
+    // are NOT unique across kinds (a team id and a persona slug could collide),
+    // so each kind is parsed and applied against its OWN store only — the match
+    // below dispatches before any d-tag comparison, so a cross-kind d-tag can
+    // never link a team to a persona or an agent.
+    let kind = event.kind.as_u16() as u32;
+    if !matches!(kind, KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT) {
         return Ok(());
     }
 
-    let inbound = persona_from_event(&event)?;
-    let d_tag = persona_d_tag(&inbound);
+    // The d-tag identifies the record within its kind. Persona derives it from
+    // the parsed record (`persona_d_tag`); team/agent carry it as the event's
+    // d-tag directly. The persona is parsed once here and reused in the apply
+    // branch below — team/agent content is parsed in-branch since their d-tag
+    // comes from the event tag, not the content.
+    let inbound_persona = (kind == KIND_PERSONA)
+        .then(|| persona_from_event(&event))
+        .transpose()?;
+    let d_tag = match &inbound_persona {
+        Some(persona) => persona_d_tag(persona),
+        None => event_d_tag(&event)?,
+    };
 
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
 
-    // Resolve inbound vs. any pending local edit before touching personas.json.
+    // Resolve inbound vs. any pending local edit before touching the store.
     let conn = open_retention_db(&managed_agents_base_dir(&app)?.join("retention.db"))?;
     let outcome = retain_inbound_event(
         &conn,
         &RetainedEvent {
-            kind: KIND_PERSONA,
+            kind,
             pubkey: event.pubkey.to_hex(),
             d_tag: d_tag.clone(),
             content: event.content.to_string(),
@@ -380,12 +395,50 @@ pub fn reconcile_inbound_persona_event(
         return Ok(());
     }
 
-    let mut personas = load_personas(&app)?;
-    apply_inbound_persona(&mut personas, inbound);
-    save_personas(&app, &personas)?;
+    match kind {
+        KIND_PERSONA => {
+            let mut personas = load_personas(&app)?;
+            // `inbound_persona` is `Some` for KIND_PERSONA (set above).
+            apply_inbound_persona(
+                &mut personas,
+                inbound_persona.expect("persona parsed above"),
+            );
+            save_personas(&app, &personas)?;
+        }
+        KIND_TEAM => {
+            let mut teams = load_teams(&app)?;
+            apply_inbound_team(&mut teams, d_tag, team_content_from_event(&event)?);
+            save_teams(&app, &teams)?;
+        }
+        KIND_MANAGED_AGENT => {
+            let mut agents = load_managed_agents(&app)?;
+            apply_inbound_managed_agent(
+                &mut agents,
+                &d_tag,
+                managed_agent_content_from_event(&event)?,
+            );
+            save_managed_agents(&app, &agents)?;
+        }
+        _ => unreachable!("kind gated above"),
+    }
     try_regenerate_nest(&app);
 
     Ok(())
+}
+
+/// Extract the `d` tag value from an event, the match key for team (= team id)
+/// and managed-agent (= agent pubkey) inbound reconcile.
+fn event_d_tag(event: &nostr::Event) -> Result<String, String> {
+    event
+        .tags
+        .iter()
+        .find_map(|tag| {
+            let values: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
+            (values.first() == Some(&"d"))
+                .then(|| values.get(1).map(|s| s.to_string()))
+                .flatten()
+        })
+        .ok_or_else(|| "inbound event missing d-tag".to_string())
 }
 
 /// Merge a parsed inbound persona into the local set: patch the matching record
@@ -414,6 +467,73 @@ fn apply_inbound_persona(personas: &mut Vec<PersonaRecord>, inbound: PersonaReco
             local.updated_at = inbound.updated_at;
         }
         None => personas.push(inbound),
+    }
+}
+
+/// Merge an inbound kind:30177 managed-agent projection into the local set.
+///
+/// Matches the local record whose `pubkey` equals the event's d-tag (the d-tag
+/// IS the agent pubkey — see `build_agent_event`). On match, overwrite ONLY the
+/// 10 projected fields; every secret (`private_key_nsec`, `auth_tag`,
+/// `env_vars`, `backend`), the harness pins (`agent_command`,
+/// `agent_command_override`), and all runtime/local fields are preserved
+/// untouched. The projection type carries none of them, so they cannot be
+/// reached here even if a foreign event tried to inject them.
+///
+/// No match is a no-op: managed agents carry device-local secrets and are never
+/// minted from a relay event — an agent that does not already exist locally has
+/// no secret key to run with, so inserting a secretless shell would be useless
+/// and misleading. This diverges from the persona path, which DOES insert on no
+/// match (personas are secretless definitions). Flagged in the reconcile docs.
+fn apply_inbound_managed_agent(
+    agents: &mut [ManagedAgentRecord],
+    d_tag: &str,
+    inbound: ManagedAgentEventContent,
+) {
+    if let Some(local) = agents.iter_mut().find(|record| record.pubkey == d_tag) {
+        local.name = inbound.name;
+        local.persona_id = inbound.persona_id;
+        local.system_prompt = inbound.system_prompt;
+        local.model = inbound.model;
+        local.provider = inbound.provider;
+        local.mcp_toolsets = inbound.mcp_toolsets;
+        local.persona_source_version = inbound.persona_source_version;
+        local.parallelism = inbound.parallelism;
+        local.respond_to = inbound.respond_to;
+        local.respond_to_allowlist = inbound.respond_to_allowlist;
+    }
+}
+
+/// Merge an inbound kind:30176 team projection into the local set.
+///
+/// Matches the local record whose `id` equals the event's d-tag (the d-tag IS
+/// the team id — see `build_team_event`). On match, overwrite ONLY the three
+/// shared fields (`name`, `description`, `persona_ids`); install-specific local
+/// fields (`source_dir`, `is_symlink`, `symlink_target`, `is_builtin`,
+/// `version`, `created_at`) are preserved. On no match, insert a fresh record
+/// reusing the d-tag as the id so a re-received event stays idempotent —
+/// symmetric to the persona path, since a team (like a persona) is a secretless
+/// definition that another device may legitimately learn about from the relay.
+fn apply_inbound_team(teams: &mut Vec<TeamRecord>, d_tag: String, inbound: TeamEventContent) {
+    match teams.iter_mut().find(|record| record.id == d_tag) {
+        Some(local) => {
+            local.name = inbound.name;
+            local.description = inbound.description;
+            local.persona_ids = inbound.persona_ids;
+        }
+        None => teams.push(TeamRecord {
+            id: d_tag,
+            name: inbound.name,
+            description: inbound.description,
+            persona_ids: inbound.persona_ids,
+            is_builtin: false,
+            source_dir: None,
+            is_symlink: false,
+            symlink_target: None,
+            version: None,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+        }),
     }
 }
 
@@ -713,5 +833,253 @@ mod inbound_tests {
         // Re-receiving the inserted record must still be idempotent.
         apply_inbound_persona(&mut personas, inbound_for(other, "New"));
         assert_eq!(personas.len(), 2, "re-receive of inserted record no-ops");
+    }
+
+    // ── Managed-agent (30177) inbound ────────────────────────────────────────
+
+    const AGENT_PUBKEY: &str = "agentpubkeyhex0000000000000000000000000000000000000000000000000000";
+
+    /// A local managed agent carrying every device-local secret that an inbound
+    /// event must NEVER be able to overwrite.
+    fn local_agent() -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: AGENT_PUBKEY.to_string(),
+            name: "Local Agent".to_string(),
+            persona_id: Some("persona-local".to_string()),
+            private_key_nsec: "nsec1localsecret".to_string(),
+            auth_tag: Some("localauthtag".to_string()),
+            relay_url: "wss://relay.local".to_string(),
+            avatar_url: None,
+            acp_command: "buzz-acp".to_string(),
+            agent_command: "goose".to_string(),
+            agent_command_override: Some("claude".to_string()),
+            agent_args: vec![],
+            mcp_command: "buzz-dev-mcp".to_string(),
+            turn_timeout_seconds: 320,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 8,
+            system_prompt: Some("local prompt".to_string()),
+            model: Some("local-model".to_string()),
+            provider: Some("local-provider".to_string()),
+            persona_source_version: Some("local-hash".to_string()),
+            mcp_toolsets: Some("local".to_string()),
+            env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
+            start_on_app_launch: true,
+            runtime_pid: Some(1234),
+            backend: crate::managed_agents::BackendKind::Provider {
+                id: "buzz-backend".to_string(),
+                config: serde_json::json!({ "api_key": "localproviderkey" }),
+            },
+            backend_agent_id: Some("local-remote-id".to_string()),
+            provider_binary_path: Some("/local/bin".to_string()),
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            respond_to: crate::managed_agents::RespondTo::OwnerOnly,
+            respond_to_allowlist: vec![],
+            relay_mesh: None,
+        }
+    }
+
+    /// Sign a kind:30177 event whose content JSON carries the legitimate
+    /// projected fields PLUS injected secret/harness keys — a hostile relay
+    /// event trying to smuggle credentials onto the apply path.
+    fn foreign_agent_event_with_secrets(d_tag: &str) -> nostr::Event {
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+        let content = serde_json::json!({
+            "name": "Remote Agent",
+            "persona_id": "persona-remote",
+            "system_prompt": "remote prompt",
+            "model": "remote-model",
+            "provider": "remote-provider",
+            "mcp_toolsets": "remote",
+            "persona_source_version": "remote-hash",
+            "parallelism": 99,
+            "respond_to": "anyone",
+            "respond_to_allowlist": ["deadbeef"],
+            // Injected — must be dropped at deserialization, never applied.
+            "private_key_nsec": "nsec1INJECTEDSECRET",
+            "auth_tag": "INJECTEDAUTHTAG",
+            "env_vars": { "API_KEY": "INJECTEDKEY" },
+            "agent_command": "INJECTEDHARNESS",
+            "agent_command_override": "INJECTEDOVERRIDE",
+            "backend": { "type": "provider", "id": "x", "config": { "k": "INJECTEDBACKEND" } },
+            "mcp_command": "INJECTEDMCP",
+        });
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(30177), content.to_string())
+            .tags(vec![Tag::parse(["d", d_tag]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        // Round-trip through JSON to mirror the wire path the reconcile command
+        // parses from.
+        nostr::Event::from_json(event.as_json()).unwrap()
+    }
+
+    /// Direct-backend secret-preservation: drive the real parser + apply against
+    /// a foreign event crammed with secrets and assert NONE land on the local
+    /// record, and that every projected field IS updated. The projection type is
+    /// the structural guard — the injected keys cannot even be represented.
+    #[test]
+    fn inbound_managed_agent_drops_injected_secrets_and_harness() {
+        let event = foreign_agent_event_with_secrets(AGENT_PUBKEY);
+        let content =
+            crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+        let mut agents = vec![local_agent()];
+        apply_inbound_managed_agent(&mut agents, AGENT_PUBKEY, content);
+
+        let a = &agents[0];
+        // Secrets / harness / runtime — every one preserved from the local record.
+        assert_eq!(
+            a.private_key_nsec, "nsec1localsecret",
+            "secret key overwritten"
+        );
+        assert_eq!(
+            a.auth_tag,
+            Some("localauthtag".to_string()),
+            "auth tag overwritten"
+        );
+        assert_eq!(
+            a.env_vars.get("API_KEY"),
+            Some(&"localsecret".to_string()),
+            "env var overwritten"
+        );
+        assert_eq!(a.agent_command, "goose", "harness command overwritten");
+        assert_eq!(
+            a.agent_command_override,
+            Some("claude".to_string()),
+            "harness override overwritten"
+        );
+        assert_eq!(a.mcp_command, "buzz-dev-mcp", "mcp command overwritten");
+        assert_eq!(a.relay_url, "wss://relay.local", "relay url overwritten");
+        assert_eq!(a.runtime_pid, Some(1234), "runtime pid overwritten");
+        match &a.backend {
+            crate::managed_agents::BackendKind::Provider { config, .. } => {
+                assert_eq!(
+                    config["api_key"], "localproviderkey",
+                    "backend blob overwritten"
+                );
+            }
+            _ => panic!("backend kind changed"),
+        }
+        // No injected value appears anywhere on the serialized record.
+        let json = serde_json::to_string(a).unwrap();
+        for needle in [
+            "INJECTEDSECRET",
+            "INJECTEDAUTHTAG",
+            "INJECTEDKEY",
+            "INJECTEDHARNESS",
+            "INJECTEDOVERRIDE",
+            "INJECTEDBACKEND",
+            "INJECTEDMCP",
+        ] {
+            assert!(!json.contains(needle), "injected value leaked: {needle}");
+        }
+        // Projected fields ARE updated from the inbound event.
+        assert_eq!(a.name, "Remote Agent");
+        assert_eq!(a.system_prompt, Some("remote prompt".to_string()));
+        assert_eq!(a.model, Some("remote-model".to_string()));
+        assert_eq!(a.provider, Some("remote-provider".to_string()));
+        assert_eq!(a.parallelism, 99);
+        assert_eq!(a.respond_to, crate::managed_agents::RespondTo::Anyone);
+        assert_eq!(a.respond_to_allowlist, vec!["deadbeef".to_string()]);
+    }
+
+    #[test]
+    fn inbound_managed_agent_no_match_is_noop() {
+        let event = foreign_agent_event_with_secrets("someotheragentpubkey");
+        let content =
+            crate::managed_agents::agent_events::managed_agent_content_from_event(&event).unwrap();
+        let mut agents = vec![local_agent()];
+        apply_inbound_managed_agent(&mut agents, "someotheragentpubkey", content);
+
+        // No agent minted from a relay event — it would have no secret key.
+        assert_eq!(agents.len(), 1);
+        assert_eq!(
+            agents[0].name, "Local Agent",
+            "unmatched inbound must not touch the local record"
+        );
+    }
+
+    // ── Team (30176) inbound ─────────────────────────────────────────────────
+
+    const TEAM_ID: &str = "team-local-id";
+
+    fn local_team() -> TeamRecord {
+        TeamRecord {
+            id: TEAM_ID.to_string(),
+            name: "Local Team".to_string(),
+            description: Some("local desc".to_string()),
+            persona_ids: vec!["p-local".to_string()],
+            is_builtin: false,
+            source_dir: Some(std::path::PathBuf::from("/local/team/dir")),
+            is_symlink: true,
+            symlink_target: Some("/external".to_string()),
+            version: Some("1.0".to_string()),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    fn team_content(name: &str) -> TeamEventContent {
+        TeamEventContent {
+            name: name.to_string(),
+            description: Some("remote desc".to_string()),
+            persona_ids: vec!["p-remote-1".to_string(), "p-remote-2".to_string()],
+        }
+    }
+
+    #[test]
+    fn inbound_team_match_patches_shared_preserves_local() {
+        let mut teams = vec![local_team()];
+        apply_inbound_team(
+            &mut teams,
+            TEAM_ID.to_string(),
+            team_content("Renamed Team"),
+        );
+
+        assert_eq!(teams.len(), 1, "no duplicate row");
+        let t = &teams[0];
+        // Shared fields overwritten.
+        assert_eq!(t.name, "Renamed Team");
+        assert_eq!(t.description, Some("remote desc".to_string()));
+        assert_eq!(
+            t.persona_ids,
+            vec!["p-remote-1".to_string(), "p-remote-2".to_string()]
+        );
+        // Install-local fields preserved.
+        assert_eq!(t.id, TEAM_ID);
+        assert_eq!(
+            t.source_dir,
+            Some(std::path::PathBuf::from("/local/team/dir"))
+        );
+        assert!(t.is_symlink);
+        assert_eq!(t.symlink_target, Some("/external".to_string()));
+        assert_eq!(t.version, Some("1.0".to_string()));
+        assert_eq!(t.created_at, "2025-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn inbound_team_no_match_inserts_idempotently() {
+        let mut teams = vec![local_team()];
+        let other = "team-remote-id";
+        apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
+
+        assert_eq!(teams.len(), 2, "unmatched inbound is inserted");
+        let inserted = teams.iter().find(|t| t.id == other).unwrap();
+        assert_eq!(inserted.name, "New Team");
+        assert!(
+            inserted.source_dir.is_none(),
+            "inserted team has no local install dir"
+        );
+        // Re-receive stays idempotent.
+        apply_inbound_team(&mut teams, other.to_string(), team_content("New Team"));
+        assert_eq!(teams.len(), 2, "re-receive of inserted team no-ops");
     }
 }

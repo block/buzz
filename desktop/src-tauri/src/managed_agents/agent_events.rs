@@ -96,6 +96,26 @@ pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, St
     Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags(tags))
 }
 
+/// Parse a kind:30177 event's content into the projection — the inbound
+/// counterpart of [`agent_event_content`].
+///
+/// # Security: the projection type is the structural guard
+///
+/// Returns [`ManagedAgentEventContent`], NOT a [`ManagedAgentRecord`]. The
+/// return type physically cannot represent `private_key_nsec`, `auth_tag`,
+/// `env_vars`, `backend`, `agent_command`/`agent_command_override`, or any
+/// runtime field, so a malicious inbound event carrying those keys cannot
+/// smuggle them onto the apply path — they are dropped at deserialization, not
+/// filtered afterward. The caller patches only these fields onto the local
+/// record (see `apply_inbound_managed_agent`), matching on the d-tag (the
+/// agent's pubkey).
+pub fn managed_agent_content_from_event(
+    event: &nostr::Event,
+) -> Result<ManagedAgentEventContent, String> {
+    serde_json::from_str(event.content.as_ref())
+        .map_err(|e| format!("failed to parse managed-agent event content: {e}"))
+}
+
 /// Build a NIP-09 deletion (kind:5) targeting an agent's kind:30177 event.
 ///
 /// Carries a single `a`-tag with the NIP-33 coordinate
@@ -260,6 +280,48 @@ mod tests {
         let mut edited = agent.clone();
         edited.system_prompt = Some("A different prompt.".to_string());
         assert_ne!(agent_event_content(&agent), agent_event_content(&edited));
+    }
+
+    /// The inbound structural guard: a foreign event whose content JSON crams
+    /// in secrets and harness fields parses successfully but the projection type
+    /// silently DROPS every non-projected key — they can never reach the apply
+    /// path. This is the inbound mirror of
+    /// `content_excludes_secrets_and_runtime_fields`.
+    #[test]
+    fn from_event_drops_injected_secret_and_harness_keys() {
+        use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
+        let content = serde_json::json!({
+            "name": "Agent",
+            "parallelism": 1,
+            "respond_to": "owner-only",
+            // Injected — not part of the projection, must be dropped.
+            "private_key_nsec": "nsec1leak",
+            "auth_tag": "leak",
+            "env_vars": { "K": "leak" },
+            "agent_command": "leak",
+            "agent_command_override": "leak",
+            "backend": { "type": "local" },
+        });
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content.to_string())
+            .tags(vec![Tag::parse(["d", "agentpubkeyhex"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event = nostr::Event::from_json(event.as_json()).unwrap();
+
+        let parsed = managed_agent_content_from_event(&event).unwrap();
+        // The projected fields parse through.
+        assert_eq!(parsed.name, "Agent");
+        assert_eq!(parsed.parallelism, 1);
+        assert_eq!(parsed.respond_to, RespondTo::OwnerOnly);
+        // Re-serializing the projection contains no injected key.
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(!json.contains("nsec1leak"));
+        assert!(!json.contains("private_key"));
+        assert!(!json.contains("auth_tag"));
+        assert!(!json.contains("env_vars"));
+        assert!(!json.contains("agent_command"));
+        assert!(!json.contains("backend"));
     }
 
     #[test]

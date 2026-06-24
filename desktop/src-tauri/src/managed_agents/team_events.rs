@@ -50,6 +50,20 @@ pub fn build_team_event(record: &TeamRecord) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(KIND_TEAM as u16), content).tags(tags))
 }
 
+/// Parse a kind:30176 event's content into the projection — the inbound
+/// counterpart of [`team_event_content`].
+///
+/// Returns [`TeamEventContent`], NOT a [`TeamRecord`]: install-specific local
+/// fields (`source_dir`, `is_symlink`, `symlink_target`, `is_builtin`,
+/// `version`, timestamps) cannot be represented by the return type, so an
+/// inbound event can only ever overwrite the three shared fields. The caller
+/// patches them onto the local record (see `apply_inbound_team`), matching on
+/// the d-tag (the team's id).
+pub fn team_content_from_event(event: &nostr::Event) -> Result<TeamEventContent, String> {
+    serde_json::from_str(event.content.as_ref())
+        .map_err(|e| format!("failed to parse team event content: {e}"))
+}
+
 /// Build a NIP-09 deletion (kind:5) targeting a team's kind:30176 event.
 ///
 /// Carries a single `a`-tag with the NIP-33 coordinate `30176:<owner>:<d_tag>`

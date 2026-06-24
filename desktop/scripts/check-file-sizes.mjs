@@ -47,6 +47,11 @@ const overrides = new Map([
   // unify refactor followup.
   ["src-tauri/src/managed_agents/runtime.rs", 1998],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
+  // Phase-2 inbound reconcile: reconcile_inbound_persona_event now dispatches
+  // 30176 (team) + 30177 (managed-agent) inbound alongside 30175, plus the two
+  // apply_inbound_* functions and their preserve/overwrite + secret-injection
+  // test coverage. Load-bearing feature growth, queued to split with the list.
+  ["src-tauri/src/commands/personas.rs", 1086],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
