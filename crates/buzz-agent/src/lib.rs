@@ -285,7 +285,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         } else {
             format!("{base}\n\n{hints}")
         };
-        // Reject combined prompts exceeding 512KB.
+        // Reject combined prompts exceeding MAX_SYSTEM_PROMPT_BYTES.
         if prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
             return reject(
                 wire_tx,

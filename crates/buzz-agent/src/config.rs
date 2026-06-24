@@ -3,7 +3,10 @@ use std::time::Duration;
 pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
-pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
+/// Ceiling on the combined system prompt (harness prompt + persona + hints).
+/// Raised from 512 KiB to 1 MiB to fit large discovered skill/AGENTS.md hint
+/// sections; matches `MAX_PROMPT_BYTES`.
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 1024 * 1024;
 /// Total per-result byte ceiling (text + images). Sized for image-bearing
 /// results — view_image can legitimately return multi-MiB base64 payloads.
 /// Text is governed by the much smaller `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.

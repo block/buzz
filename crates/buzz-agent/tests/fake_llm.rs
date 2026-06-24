@@ -423,7 +423,7 @@ async fn rejects_oversized_line() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_new_rejects_oversized_system_prompt() {
-    // A systemPrompt exceeding 512KB must produce a JSON-RPC error, not a panic.
+    // A systemPrompt exceeding 1 MiB must produce a JSON-RPC error, not a panic.
     let url = spawn_fake_llm(vec![]).await;
     let mut h = Harness::spawn(&url).await;
     h.send(
@@ -434,8 +434,8 @@ async fn session_new_rejects_oversized_system_prompt() {
     let r = h.recv().await;
     assert_eq!(r["result"]["protocolVersion"], 2);
 
-    // 600KB payload — exceeds the 512KB limit.
-    let big_prompt = "x".repeat(600 * 1024);
+    // 1100KB payload — exceeds the 1 MiB limit.
+    let big_prompt = "x".repeat(1100 * 1024);
     let id = h
         .send(
             "session/new",
@@ -449,8 +449,8 @@ async fn session_new_rejects_oversized_system_prompt() {
     );
     let err_msg = r["error"]["message"].as_str().unwrap_or("");
     assert!(
-        err_msg.contains("512KB limit"),
-        "error message should mention 512KB limit, got: {err_msg}"
+        err_msg.contains("1024KB limit"),
+        "error message should mention 1024KB limit, got: {err_msg}"
     );
     h.shutdown().await;
 }
