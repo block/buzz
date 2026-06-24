@@ -308,6 +308,33 @@ pub fn divergent_agent_command_override(
     }
 }
 
+/// Decide the `agent_command_override` to persist at AGENT CREATE time.
+///
+/// Create differs from edit: a persona-backed create has no UI for the user to
+/// deliberately pin a divergent harness — the command always comes from
+/// `resolvePersonaRuntime`, which sends either the persona's own runtime or, when
+/// that runtime isn't installed locally, a fallback default. So at create a
+/// divergence from the persona is a FALLBACK, never a deliberate pin. Baking it
+/// would freeze the agent on the fallback harness even after the persona's
+/// runtime is installed and the persona is re-edited — the exact bug this resolver
+/// chain exists to prevent. The persona is authoritative at create; deliberate
+/// pins are an edit-only operation (`divergent_agent_command_override` via
+/// `update_agent`).
+///
+/// Persona-less creates (`persona_id` is `None`, e.g. the standalone
+/// CreateAgentDialog) have no persona to inherit, so the picked command is a real
+/// pin and is preserved via `divergent_agent_command_override`.
+pub fn create_time_agent_command_override(
+    persona_id: Option<&str>,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+    picked_command: Option<&str>,
+) -> Option<String> {
+    if persona_id.is_some() {
+        return None;
+    }
+    divergent_agent_command_override(persona_id, personas, picked_command)
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -642,10 +669,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        classify_runtime, default_agent_command, divergent_agent_command_override,
-        effective_agent_command, find_via_login_shell, managed_agent_avatar_url,
-        normalize_agent_args, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-        GOOSE_AVATAR_URL,
+        classify_runtime, create_time_agent_command_override, default_agent_command,
+        divergent_agent_command_override, effective_agent_command, find_via_login_shell,
+        managed_agent_avatar_url, normalize_agent_args, BUZZ_AGENT_AVATAR_URL,
+        CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
     };
     use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -945,6 +972,45 @@ mod tests {
         assert_eq!(
             divergent_agent_command_override(Some("p1"), &personas, None),
             None
+        );
+    }
+
+    #[test]
+    fn create_time_override_none_when_persona_runtime_not_installed() {
+        // CRITICAL-3 (Case 3): a `claude`-persona agent created on a machine
+        // where the claude adapter isn't installed. `resolvePersonaRuntime`
+        // falls back to the default (`buzz-agent`) and sends THAT command.
+        // At create this is a fallback, not a deliberate pin — it must store
+        // `None` so the agent inherits the persona's runtime once it's
+        // installed and the persona is re-edited. Baking `Some("buzz-agent")`
+        // here is the exact bug this resolver chain exists to kill.
+        let personas = vec![persona_with_runtime("p1", Some("claude"))];
+        assert_eq!(
+            create_time_agent_command_override(Some("p1"), &personas, Some("buzz-agent")),
+            None
+        );
+    }
+
+    #[test]
+    fn create_time_override_none_when_persona_runtime_installed() {
+        // Case 2: the persona's runtime is available, so `resolvePersonaRuntime`
+        // sends the persona's own command. Inherits — no pin.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        assert_eq!(
+            create_time_agent_command_override(Some("p1"), &personas, Some("goose")),
+            None
+        );
+    }
+
+    #[test]
+    fn create_time_override_preserves_pin_for_persona_less_create() {
+        // The standalone CreateAgentDialog creates persona-LESS agents. With no
+        // persona to inherit, the picked command IS the agent's harness and must
+        // be preserved as a real pin (divergence from the bundled default).
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        assert_eq!(
+            create_time_agent_command_override(None, &personas, Some("codex-acp")),
+            Some("codex-acp".to_string())
         );
     }
 }

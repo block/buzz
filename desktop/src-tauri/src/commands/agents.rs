@@ -474,13 +474,15 @@ pub async fn create_managed_agent(
         // Load personas once for harness/pack/avatar resolution below.
         let personas = load_personas(&app).unwrap_or_default();
 
-        // Harness resolution: the persona's runtime is authoritative. We store
-        // an explicit `agent_command_override` ONLY when the user deliberately
-        // picks a command that diverges from the persona's runtime — otherwise
-        // `None`, so persona harness edits propagate on the next spawn. This
-        // mirrors the opt-in `model` override and removes the old create-time
-        // baking of `default_agent_command` into every record.
-        let agent_command_override = crate::managed_agents::divergent_agent_command_override(
+        // Harness resolution: the persona's runtime is authoritative. A
+        // persona-backed create NEVER bakes an `agent_command_override` — the
+        // create-time command always comes from `resolvePersonaRuntime`
+        // (persona runtime, or a fallback default when it isn't installed), so a
+        // divergence here is a fallback, not a deliberate pin. Baking it would
+        // freeze the agent on the fallback harness even after the persona's
+        // runtime is installed. Deliberate pins are an edit-only operation. A
+        // persona-less create preserves the picked command as a real pin.
+        let agent_command_override = crate::managed_agents::create_time_agent_command_override(
             requested_persona_id.as_deref(),
             &personas,
             input.agent_command.as_deref(),
