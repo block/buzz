@@ -627,7 +627,7 @@ test("updates presence from the profile menu", async ({ page }) => {
   ).toContainText("Offline");
 });
 
-test("renders agent memories seeded through the Playwright mock bridge", async ({
+test("renders agent profile ingress subviews from the Playwright mock bridge", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -671,6 +671,54 @@ test("renders agent memories seeded through the Playwright mock bridge", async (
   await messageRow.locator("button").first().click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  const openSubview = async (testId: string, title: string) => {
+    await page.getByTestId(testId).click();
+    await expect(
+      page.getByRole("heading", { level: 2, name: title }),
+    ).toBeVisible();
+  };
+  const backToProfile = async () => {
+    await page.getByTestId("user-profile-panel-back").click();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Profile" }),
+    ).toBeVisible();
+  };
+
+  await openSubview(
+    "user-profile-agent-instruction-ingress",
+    "Agent instruction",
+  );
+  await expect(
+    page.getByTestId("user-profile-agent-instruction"),
+  ).toContainText("Watch the channel and help when asked.");
+  await backToProfile();
+
+  await openSubview("user-profile-model-ingress", "Model");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Model" }),
+  ).toBeVisible();
+  await backToProfile();
+
+  await openSubview("user-profile-agent-settings-ingress", "Agent settings");
+  await expect(
+    page.getByTestId(`user-profile-agent-auto-start-${agentPubkey}`),
+  ).toBeVisible();
+  await backToProfile();
+
+  await openSubview("user-profile-diagnostics-ingress", "Diagnostics");
+  await page.getByTestId(`user-profile-agent-logs-${agentPubkey}`).click();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Harness log" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("managed-agent-log-content")).toBeVisible();
+  await backToProfile();
+
+  await openSubview("user-profile-channels-ingress", "Channels");
+  await expect(page.getByTestId("user-profile-channels-list")).toContainText(
+    "#general",
+  );
+  await backToProfile();
+
   const memoriesIngress = page.getByTestId("user-profile-memories-ingress");
   await expect(memoriesIngress).toContainText("Memories");
   await expect(memoriesIngress).toContainText("9");

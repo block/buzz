@@ -6,6 +6,7 @@ import {
   type ProfilePanelView,
   UserProfilePanel,
 } from "@/features/profile/ui/UserProfilePanel";
+import { profilePanelViewFromSearch } from "@/features/profile/ui/UserProfilePanelUtils";
 import { PulseView } from "@/features/pulse/ui/PulseView";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
@@ -18,10 +19,7 @@ export function PulseScreen() {
   const identityQuery = useIdentityQuery();
   const { applyPatch, values } = useHistorySearchState(PULSE_PANEL_SEARCH_KEYS);
   const profilePanelPubkey = values.profile;
-  const profilePanelView: ProfilePanelView =
-    values.profileView === "memories" || values.profileView === "channels"
-      ? values.profileView
-      : "summary";
+  const profilePanelView = profilePanelViewFromSearch(values.profileView);
   const handleOpenProfilePanel = React.useCallback(
     (pubkey: string) => applyPatch({ profile: pubkey, profileView: null }),
     [applyPatch],
