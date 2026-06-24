@@ -842,3 +842,142 @@ fn reconcile_mcp_commands_skips_record_without_agent_command() {
     reconcile_mcp_commands_in_file(&path);
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
 }
+
+#[test]
+fn migrate_legacy_nest_carries_knowledge_and_skips_repos() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    // Knowledge: a top-level file plus a nested dir.
+    std::fs::create_dir_all(legacy.join("RESEARCH")).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "agents").unwrap();
+    std::fs::write(legacy.join("RESEARCH/NOTES.md"), "notes").unwrap();
+    // A fat REPOS/ that must NOT be copied.
+    std::fs::create_dir_all(legacy.join("REPOS/buzz")).unwrap();
+    std::fs::write(legacy.join("REPOS/buzz/huge.bin"), "checkout").unwrap();
+
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert!(migrated, "migration ran because legacy nest existed");
+    assert!(
+        !current.join("REPOS").exists(),
+        "REPOS/ must never be migrated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "agents"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("RESEARCH/NOTES.md")).unwrap(),
+        "notes"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_does_not_clobber_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(legacy.join("RESEARCH")).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy-agents").unwrap();
+    std::fs::write(legacy.join("RESEARCH/NOTES.md"), "legacy-notes").unwrap();
+    // Pre-existing live content the migration must preserve.
+    std::fs::create_dir_all(current.join("RESEARCH")).unwrap();
+    std::fs::write(current.join("AGENTS.md"), "live-agents").unwrap();
+    std::fs::write(current.join("RESEARCH/NOTES.md"), "live-notes").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "live-agents",
+        "existing top-level file must not be clobbered"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("RESEARCH/NOTES.md")).unwrap(),
+        "live-notes",
+        "existing nested file must not be clobbered"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_is_idempotent_on_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(legacy.join("PLANS")).unwrap();
+    std::fs::write(legacy.join("PLANS/PLAN.md"), "plan").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("PLANS/PLAN.md")).unwrap(),
+        "plan"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_noops_when_legacy_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert!(!migrated, "no migration when legacy nest is absent");
+    assert!(
+        !current.exists(),
+        "no destination created when legacy absent"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_overwrites_generated_default_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy team instructions").unwrap();
+
+    // First-time launch order: ensure_nest writes the generated default into
+    // ~/.buzz/AGENTS.md, then migration runs.
+    crate::managed_agents::ensure_nest_at(&current).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        crate::managed_agents::AGENTS_MD,
+        "precondition: ensure_nest writes the generated default"
+    );
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "legacy team instructions",
+        "legacy AGENTS.md must overwrite the untouched generated default"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_preserves_user_edited_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy team instructions").unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join("AGENTS.md"), "user-edited live AGENTS").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "user-edited live AGENTS",
+        "a user-edited live AGENTS.md must never be clobbered"
+    );
+}

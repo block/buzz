@@ -4,20 +4,17 @@ import {
   SettingsOptionGroup,
   SettingsOptionRow,
 } from "./ui/SettingsOptionGroup";
+import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
 
 export function UpdateChecker() {
   const { status, checkForUpdate, relaunch } = useUpdaterContext();
 
   return (
-    <section className="min-w-0">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">
-          Software Updates
-        </h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Keep Buzz up to date with the latest features and fixes.
-        </p>
-      </div>
+    <section className="min-w-0" data-testid="settings-updates">
+      <SettingsSectionHeader
+        title="Software Updates"
+        description="Keep Buzz up to date with the latest features and fixes."
+      />
 
       <SettingsOptionGroup>
         {status.state === "idle" && (

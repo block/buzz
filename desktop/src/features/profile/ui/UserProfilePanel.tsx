@@ -114,6 +114,7 @@ export function UserProfilePanel({
   layout = "standalone",
   onClose,
   onOpenDm,
+  onOpenProfile,
   onResetWidth,
   onResizeStart,
   onViewChange,
@@ -229,6 +230,8 @@ export function UserProfilePanel({
     persona: resolvedPersona,
     profile: profileQuery.data,
   });
+  const ownerPubkey = profile?.ownerPubkey ?? null;
+  const ownerProfileQuery = useUserProfileQuery(ownerPubkey ?? undefined);
   const presenceStatus = pubkeyLower
     ? presenceQuery.data?.[pubkeyLower]
     : undefined;
@@ -644,20 +647,37 @@ export function UserProfilePanel({
     },
     [goChannel],
   );
-
   const displayName = resolveProfileDisplayName({
     persona: resolvedPersona,
     profile,
     pubkey: effectivePubkey,
   });
-  const ownerHandle = resolveOwnerHandle(
-    currentProfileQuery.data,
-    currentPubkey,
-  );
-  const ownerDisplayName = ownerHandle ? `${ownerHandle} (you)` : null;
-  const memoryCount =
-    memoryQuery.data &&
-    (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length;
+  const ownerHandle = ownerPubkey
+    ? resolveOwnerHandle(ownerProfileQuery.data, ownerPubkey)
+    : isOwner === true
+      ? resolveOwnerHandle(currentProfileQuery.data, currentPubkey)
+      : null;
+  const isCurrentUserOwner =
+    currentPubkey !== undefined &&
+    ownerPubkey !== null &&
+    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  const ownerDisplayName = ownerHandle
+    ? isCurrentUserOwner || (!ownerPubkey && isOwner === true)
+      ? `${ownerHandle} (you)`
+      : ownerHandle
+    : null;
+  const ownerAvatarUrl = ownerPubkey
+    ? (ownerProfileQuery.data?.avatarUrl ?? null)
+    : (currentProfileQuery.data?.avatarUrl ?? null);
+  const handleOpenOwner = React.useCallback(() => {
+    if (!ownerPubkey) return;
+    onOpenProfile?.(ownerPubkey);
+  }, [onOpenProfile, ownerPubkey]);
+  const onOpenOwner =
+    ownerPubkey && onOpenProfile ? handleOpenOwner : undefined;
+  const memoryCount = memoryQuery.data
+    ? (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length
+    : undefined;
   const agentInstruction = resolveAgentInstruction(
     managedAgent,
     resolvedPersona,
@@ -676,8 +696,11 @@ export function UserProfilePanel({
     isBot,
     isOwner,
     managedAgent,
+    onOpenOwner,
+    ownerAvatarUrl,
     ownerDisplayName,
     ownerHandle,
+    ownerPubkey,
     persona: resolvedPersona,
     presenceLoaded: presenceQuery.isSuccess,
     presenceStatus,
@@ -974,7 +997,7 @@ export function UserProfilePanel({
             isSinglePanelView
               ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[4.75rem] min-h-[4.75rem] shrink-0 gap-2.5 bg-transparent pb-1 pl-4 pr-2 pt-[2.625rem] sm:pl-6 sm:pr-3`
               : isOverlay
-                ? "relative z-50 min-h-11 shrink-0 gap-3 bg-background/80 px-3 py-1.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+                ? "relative z-50 min-h-14 shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
                 : "absolute inset-x-0 top-[2.625rem] z-50 min-h-8 gap-3 bg-transparent px-3 py-1 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
           )}
           data-tauri-drag-region

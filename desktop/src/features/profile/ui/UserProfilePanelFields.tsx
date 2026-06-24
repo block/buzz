@@ -20,6 +20,7 @@ import type {
   Profile,
   RelayAgent,
 } from "@/shared/api/types";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const RUNTIME_LABELS: Record<string, string> = {
   goose: "Goose",
@@ -80,8 +81,11 @@ export function useProfileFieldBuckets({
   isBot,
   isOwner,
   managedAgent,
+  onOpenOwner,
+  ownerAvatarUrl,
   ownerDisplayName,
   ownerHandle,
+  ownerPubkey,
   persona,
   presenceLoaded,
   presenceStatus,
@@ -92,8 +96,11 @@ export function useProfileFieldBuckets({
   isBot: boolean;
   isOwner: boolean | undefined;
   managedAgent: ManagedAgent | undefined;
+  onOpenOwner?: () => void;
+  ownerAvatarUrl: string | null;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
+  ownerPubkey: string | null;
   persona: AgentPersona | undefined;
   presenceLoaded: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
@@ -104,11 +111,15 @@ export function useProfileFieldBuckets({
   return React.useMemo(() => {
     const metadataFields = [
       ...buildPublicFields({ pubkey, profile, relayAgent, isBot, persona }),
-      ...(isOwner === true
+      ...(ownerDisplayName || isOwner === true
         ? buildOwnerFields({
+            includeOperationalFields: isOwner === true,
             managedAgent,
+            onOpenOwner,
+            ownerAvatarUrl,
             ownerDisplayName,
             ownerHandle,
+            ownerPubkey,
             persona,
             presenceLoaded,
             presenceStatus,
@@ -133,8 +144,11 @@ export function useProfileFieldBuckets({
     isBot,
     isOwner,
     managedAgent,
+    onOpenOwner,
+    ownerAvatarUrl,
     ownerDisplayName,
     ownerHandle,
+    ownerPubkey,
     persona,
     presenceLoaded,
     presenceStatus,
@@ -212,17 +226,25 @@ export function buildPublicFields({
 }
 
 export function buildOwnerFields({
+  includeOperationalFields,
   managedAgent,
+  onOpenOwner,
+  ownerAvatarUrl,
   ownerDisplayName,
   ownerHandle,
+  ownerPubkey,
   persona,
   presenceLoaded,
   presenceStatus,
   relayAgent,
 }: {
+  includeOperationalFields: boolean;
   managedAgent: ManagedAgent | undefined;
+  onOpenOwner?: () => void;
+  ownerAvatarUrl: string | null;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
+  ownerPubkey: string | null;
   persona?: AgentPersona;
   presenceLoaded: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
@@ -232,12 +254,38 @@ export function buildOwnerFields({
 
   if (ownerDisplayName) {
     fields.push({
-      copyValue: ownerHandle ?? undefined,
+      copyValue: onOpenOwner
+        ? undefined
+        : (ownerPubkey ?? ownerHandle ?? undefined),
       displayValue: ownerDisplayName,
+      displayNode: onOpenOwner ? (
+        <button
+          className="inline-flex max-w-full items-center gap-2 rounded text-left text-sm text-muted-foreground transition-colors hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenOwner();
+          }}
+          title={ownerDisplayName}
+          type="button"
+        >
+          <UserAvatar
+            avatarUrl={ownerAvatarUrl}
+            className="shrink-0"
+            displayName={ownerHandle ?? ownerDisplayName}
+            size="xs"
+            testId="user-profile-owner-avatar"
+          />
+          <span className="truncate">{ownerDisplayName}</span>
+        </button>
+      ) : undefined,
       icon: UserRound,
       label: "Owned by",
       testId: "user-profile-owned-by",
     });
+  }
+
+  if (!includeOperationalFields) {
+    return fields;
   }
 
   if (managedAgent?.agentCommand) {

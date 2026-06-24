@@ -38,6 +38,7 @@ type TimelineMessageListProps = {
   isFollowingThreadById?: (rootId: string) => boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   messageFooters?: Record<string, React.ReactNode>;
+  mainEntries?: ReturnType<typeof buildMainTimelineEntries>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
@@ -103,13 +104,15 @@ type TimelineDayGroup = {
 };
 
 function buildTimelineRenderRows({
+  entries,
   firstUnreadMessageId,
   messages,
 }: {
+  entries?: ReturnType<typeof buildMainTimelineEntries>;
   firstUnreadMessageId: string | null;
   messages: TimelineMessage[];
 }): TimelineRenderRow[] {
-  const entries = buildMainTimelineEntries(messages);
+  entries ??= buildMainTimelineEntries(messages);
   const rows: TimelineRenderRow[] = [];
   let previousMessage: TimelineMessage | null = null;
 
@@ -191,6 +194,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   isFollowingThreadById,
   isMessageUnreadById,
   messageFooters,
+  mainEntries,
   messages,
   onDelete,
   onEdit,
@@ -208,8 +212,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   unfollowThreadById,
 }: TimelineMessageListProps) {
   const rows = React.useMemo(
-    () => buildTimelineRenderRows({ firstUnreadMessageId, messages }),
-    [firstUnreadMessageId, messages],
+    () =>
+      buildTimelineRenderRows({
+        entries: mainEntries,
+        firstUnreadMessageId,
+        messages,
+      }),
+    [firstUnreadMessageId, mainEntries, messages],
   );
   const dayGroups = React.useMemo(() => buildTimelineDayGroups(rows), [rows]);
 

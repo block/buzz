@@ -101,8 +101,9 @@ function setChannelArchivedState(
   );
 }
 
-export function useChannelsQuery() {
+export function useChannelsQuery(options?: { enabled?: boolean }) {
   return useQuery({
+    enabled: options?.enabled ?? true,
     queryKey: channelsQueryKey,
     queryFn: async () => sortChannels(await getChannels()),
     staleTime: 60_000,

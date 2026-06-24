@@ -57,6 +57,7 @@ export function PulseScreen() {
               currentPubkey={identityQuery.data?.pubkey}
               onClose={handleCloseProfilePanel}
               onOpenDm={handleOpenDm}
+              onOpenProfile={handleOpenProfilePanel}
               onResetWidth={threadPanelWidth.onResetWidth}
               onResizeStart={threadPanelWidth.onResizeStart}
               onViewChange={handleProfilePanelViewChange}

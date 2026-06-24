@@ -586,6 +586,15 @@ pub fn run() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
 
+            // Carry the agent's knowledge from the legacy nest (~/.sprout) into
+            // the live nest (~/.buzz) after it exists. Must run after
+            // ensure_nest() so the destination is present. Non-fatal.
+            // On a real migration, emit a one-time hint so the user can delete
+            // the now-inert ~/.sprout; the frontend dedupes the toast.
+            if migration::migrate_legacy_nest() {
+                let _ = app_handle.emit("legacy-nest-migrated", ());
+            }
+
             // Create/update the local CLI symlink pointing to the
             // bundled CLI binary. Non-fatal: agents find CLI via PATH.
             if let Ok(exe) = std::env::current_exe() {

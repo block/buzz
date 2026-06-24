@@ -21,7 +21,7 @@ type ViewLoadingFallbackProps = {
 function LoadingHeaderSkeleton() {
   return (
     <TopChromeInsetHeader data-tauri-drag-region flush>
-      <header className="flex min-h-8 min-w-0 cursor-default select-none items-center gap-2.5 px-5 py-1.5">
+      <header className="flex min-h-14 min-w-0 cursor-default select-none items-center gap-2.5 px-5 py-2">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1 overflow-hidden">
             <Skeleton className="h-4 w-4 shrink-0 rounded-sm" />

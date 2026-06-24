@@ -296,5 +296,6 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
         avatar_url: None,
         about: None,
         nip05_handle: None,
+        owner_pubkey: None,
     }
 }

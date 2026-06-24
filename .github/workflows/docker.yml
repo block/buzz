@@ -8,16 +8,42 @@ name: Docker image
 # This avoids QEMU emulation (~10× slower for Rust) at zero cost on free
 # GitHub-hosted runners.
 #
+# Versioning: the relay is versioned independently of the desktop app via
+# its own `relay-v*` tags (see `just release-relay`). Desktop `v*` tags and
+# agent `sprig-v*` tags do NOT publish this image — only `relay-v*` does, so
+# the relay image version tracks crates/buzz-relay/Cargo.toml, never desktop.
+#
 # Triggers:
-#   - push to main         → :main + :sha-<7>
-#   - push tags v*.*.*     → :latest + :{version} + :{major}.{minor} + :{major}
-#   - pull_request         → build only (no push), cache stays warm
-#   - workflow_dispatch    → manual canary
+#   - push to main           → :main + :sha-<7>
+#   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
+#                              (+ :latest for stable, NOT for prereleases)
+#   - pull_request           → build only (no push), cache stays warm
+#   - workflow_dispatch      → manual canary (no inputs), or relay-tag rescue
+#                              dispatch with version+ref inputs (see below)
+#
+# Why workflow_dispatch carries version/ref inputs:
+#   auto-tag-on-release-pr-merge.yml pushes relay-v* with the default
+#   GITHUB_TOKEN, which GitHub deliberately does NOT let fire on:push triggers
+#   (recursion guard). So the push:tags trigger above never runs for releases.
+#   auto-tag instead dispatches this workflow with the bare version + tag ref,
+#   the same rescue release.yml already uses for the desktop lane. On dispatch
+#   github.ref is `main`, so the tag ref is plumbed through explicitly: checkout
+#   pins to inputs.ref, and the semver tags take inputs.version via `value=`.
+#   On the rescue path inputs.version is already bare (e.g. 0.3.0), so the
+#   match=^relay-v(.*)$ regex simply no-ops (it warns, leaving the value
+#   intact) and the bare version flows straight to the semver parser. On a
+#   real push event value= is empty and the match strips relay-v from the ref.
+#   Inputless canary dispatch (version="", ref=main) renders no semver tag.
+#
+# The :latest tag tracks the latest STABLE relay release: metadata-action's
+# `flavor.latest=auto` (its default) emits :latest only for non-prerelease
+# semver, so relay-v0.3.0-rc.1 publishes :0.3.0-rc.1 without moving :latest,
+# and main pushes (no semver tag) never produce :latest.
 
 on:
   push:
     branches: [main]
-    tags: ["v[0-9]*"]
+    tags: ["relay-v[0-9]*"]
   pull_request:
     paths:
       - "Dockerfile"
@@ -33,6 +59,14 @@ on:
       - "pnpm-workspace.yaml"
       - "patches/**"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver version e.g. 0.3.0 (no relay-v prefix) — for relay-tag rescue dispatch"
+        required: false
+      ref:
+        description: "Tag/branch/SHA to build, e.g. relay-v0.3.0"
+        required: false
+        default: main
 
 # One image build per ref; cancel superseded PR builds, but never cancel
 # tag/main builds (publishing must not be aborted mid-flight).
@@ -77,6 +111,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
+          # On workflow_dispatch (relay-tag rescue) build the tagged commit,
+          # not main. Empty string = default ref for push/PR events.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -103,15 +140,26 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
           images: ${{ env.IMAGE_NAME }}
-          # Tag matrix — every main commit gets sha-<7>, releases get full
-          # semver family. Pull requests get nothing (push: false below).
+          # Tag matrix — every main commit gets sha-<7>, relay releases get the
+          # full semver family. The semver entries carry match=^relay-v(.*)$
+          # because metadata-action does NOT strip a `relay-v` prefix on its
+          # own — it only strips refs/tags/, then runs the raw ref through
+          # semver.valid(), which rejects "relay-v0.3.0". The match capture
+          # group feeds the bare version to the semver parser. value= supplies
+          # the version on the auto-tag rescue dispatch (github.ref is `main`
+          # there, not the tag): it is already bare, so match no-ops (warns,
+          # value intact) and the bare version validates as-is. On push value=
+          # is empty, so the ref drives it and match strips relay-v — push
+          # behavior is unchanged. Pull requests get nothing (push: false
+          # below). :latest is intentionally absent — flavor.latest defaults to
+          # `auto`, which adds :latest for stable semver tags only (not
+          # prereleases, not main pushes).
           tags: |
-            type=ref,event=branch
-            type=sha,prefix=sha-,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
           labels: |
             org.opencontainers.image.title=Buzz
             org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform
@@ -186,13 +234,17 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
           images: ${{ env.IMAGE_NAME }}
+          # Must mirror the build job's tag matrix exactly — the merge job
+          # re-derives tags to stamp them onto the multi-arch manifest. See
+          # the build job's `meta` step for why match=^relay-v(.*)$, why
+          # value=${{ inputs.version }} carries the rescue-dispatch version,
+          # and why :latest is left to flavor.latest=auto.
           tags: |
-            type=ref,event=branch
-            type=sha,prefix=sha-,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=semver,pattern={{major}},match=^relay-v(.*)$,value=${{ inputs.version }}
 
       - name: Create and push manifest list
         id: manifest

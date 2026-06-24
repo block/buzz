@@ -100,7 +100,20 @@ pub struct SearchResult {
 
 #[derive(Debug, Deserialize)]
 struct TypesenseMultiSearchResponse {
-    results: Vec<TypesenseSearchResponse>,
+    results: Vec<TypesenseSearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TypesenseSearchResult {
+    Ok(TypesenseSearchResponse),
+    Error(TypesenseSearchError),
+}
+
+#[derive(Debug, Deserialize)]
+struct TypesenseSearchError {
+    code: u16,
+    error: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,13 +188,22 @@ pub async fn search(
         return Err(SearchError::Api { status, body });
     }
 
-    // multi_search wraps results: {"results": [<search_response>]}
+    // multi_search wraps results: {"results": [<search_response>]}. Individual
+    // searches can fail inside an HTTP 200 response as `{code, error}`; surface
+    // those as API errors instead of deserializing them as JSON errors so callers
+    // and logs show the actual Typesense failure.
     let wrapper: TypesenseMultiSearchResponse = resp.json().await?;
     let ts_resp = wrapper.results.into_iter().next().ok_or(SearchError::Api {
         status: 200,
         body: "empty multi_search results".into(),
     })?;
-    parse_response(ts_resp)
+    match ts_resp {
+        TypesenseSearchResult::Ok(response) => parse_response(response),
+        TypesenseSearchResult::Error(error) => Err(SearchError::Api {
+            status: error.code,
+            body: error.error,
+        }),
+    }
 }
 
 fn parse_response(ts_resp: TypesenseSearchResponse) -> Result<SearchResult, SearchError> {
@@ -331,5 +353,59 @@ mod tests {
 
         assert_eq!(result.found, 0);
         assert!(result.hits.is_empty());
+    }
+
+    #[test]
+    fn test_multi_search_result_success_parses() {
+        let raw = json!({
+            "results": [{
+                "found": 1,
+                "page": 1,
+                "hits": [{
+                    "document": {
+                        "id": "abc123",
+                        "content": "hello buzz",
+                        "kind": 1,
+                        "pubkey": "deadbeef",
+                        "channel_id": "chan-uuid",
+                        "created_at": 1700000000i64,
+                        "tags_flat": []
+                    },
+                    "text_match": 578730123i64
+                }]
+            }]
+        });
+
+        let wrapper: TypesenseMultiSearchResponse =
+            serde_json::from_value(raw).expect("should parse multi_search success result");
+        let response = match wrapper.results.into_iter().next().expect("one result") {
+            TypesenseSearchResult::Ok(response) => response,
+            TypesenseSearchResult::Error(err) => panic!("expected success result, got {err:?}"),
+        };
+
+        let result = parse_response(response).expect("should parse response");
+        assert_eq!(result.found, 1);
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].event_id, "abc123");
+    }
+
+    #[test]
+    fn test_multi_search_result_error_parses() {
+        let raw = json!({
+            "results": [{
+                "code": 400,
+                "error": "Could not find a filter field named `channel_id` in the schema."
+            }]
+        });
+
+        let wrapper: TypesenseMultiSearchResponse =
+            serde_json::from_value(raw).expect("should parse multi_search error result");
+        let err = match wrapper.results.into_iter().next().expect("one result") {
+            TypesenseSearchResult::Ok(_) => panic!("expected error result"),
+            TypesenseSearchResult::Error(err) => err,
+        };
+
+        assert_eq!(err.code, 400);
+        assert!(err.error.contains("channel_id"));
     }
 }

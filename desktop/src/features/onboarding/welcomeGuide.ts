@@ -160,6 +160,7 @@ export async function ensureWelcomeGuideIntro(
     channelId,
     content: WELCOME_GUIDE_INTRO_MESSAGE,
     marker: WELCOME_GUIDE_INTRO_MARKER,
+    markerScope: "channel",
   });
   return agent;
 }

@@ -1,3 +1,4 @@
+import { isThreadReply } from "@/features/messages/lib/threading";
 import type { DesktopNotificationTarget } from "@/features/notifications/lib/desktop";
 import type { SearchHit } from "@/shared/api/types";
 
@@ -23,6 +24,10 @@ export function isWindowDragHandleEvent(event: MouseEvent | PointerEvent) {
     target instanceof Element &&
     target.closest(WINDOW_DRAG_INTERACTIVE_SELECTOR)
   );
+}
+
+export function shouldBounceForChannelNotification(tags: string[][]): boolean {
+  return !isThreadReply(tags);
 }
 
 export function toSearchHit(

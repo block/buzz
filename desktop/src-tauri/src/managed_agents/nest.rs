@@ -20,19 +20,22 @@ use tauri::{AppHandle, Manager};
 use crate::managed_agents::discovery::known_skill_dirs;
 
 /// Subdirectories created inside the nest.
+/// `REPOS` is intentionally absent: it is provisioned by
+/// [`super::repos::ensure_repos_symlink`], which makes it either a real directory (default)
+/// or a symlink to a user-configured `repos_dir`. Creating it here
+/// unconditionally would race a future symlink re-point.
 const NEST_DIRS: &[&str] = &[
     "GUIDES",
     "RESEARCH",
     "PLANS",
     "WORK_LOGS",
-    "REPOS",
     "OUTBOX",
     ".scratch",
 ];
 
 /// Default AGENTS.md content written on first init.
 /// Fully static — no runtime interpolation, no secrets, no user paths.
-const AGENTS_MD: &str = include_str!("nest_agents.md");
+pub(crate) const AGENTS_MD: &str = include_str!("nest_agents.md");
 
 /// Default SKILL.md content for the buzz-cli skill.
 /// Written to ~/.buzz/.agents/skills/buzz-cli/SKILL.md on first init.
@@ -109,6 +112,11 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         fs::create_dir_all(&path).map_err(|e| format!("create {}: {e}", path.display()))?;
     }
 
+    // REPOS is provisioned separately from NEST_DIRS: it may be a symlink to a
+    // user-configured repos_dir (applied later via apply_workspace), so setup
+    // must not clobber an existing configured symlink. See repos.rs.
+    super::repos::ensure_repos_setup_default(root)?;
+
     // Write AGENTS.md only if it doesn't already exist.
     // Uses create_new (O_CREAT|O_EXCL) to atomically check-and-create,
     // closing the TOCTOU gap that exists() + write() would leave open.
@@ -183,6 +191,18 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
                 fs::set_permissions(&path, perms.clone())
                     .map_err(|e| format!("set permissions on {}: {e}", path.display()))?;
             }
+        }
+        // REPOS is provisioned outside NEST_DIRS (it may be a symlink). Only
+        // chmod it when it is a real directory — chmod on a symlink would
+        // affect the user's external repos_dir target.
+        let repos_path = root.join("REPOS");
+        let repos_is_symlink = repos_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !repos_is_symlink {
+            fs::set_permissions(&repos_path, perms.clone())
+                .map_err(|e| format!("set permissions on {}: {e}", repos_path.display()))?;
         }
         // Skill directory trees inside root get 700.
         // Build the list from canonical path + all known provider skill dirs.
@@ -618,6 +638,9 @@ mod tests {
         for dir in NEST_DIRS {
             assert!(root.join(dir).is_dir(), "{dir}/ should exist");
         }
+        // REPOS is provisioned separately (may be a symlink); with no
+        // repos_dir configured it lands as a real directory.
+        assert!(root.join("REPOS").is_dir(), "REPOS/ should exist");
 
         // AGENTS.md was written with default content.
         let content = fs::read_to_string(root.join("AGENTS.md")).unwrap();
@@ -633,6 +656,12 @@ mod tests {
                 let mode = fs::metadata(root.join(dir)).unwrap().permissions().mode() & 0o777;
                 assert_eq!(mode, 0o700, "{dir}/ should be 700");
             }
+            let repos_mode = fs::metadata(root.join("REPOS"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(repos_mode, 0o700, "REPOS/ should be 700");
         }
     }
 

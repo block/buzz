@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
+import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 
 const ChannelBrowserDialog = React.lazy(async () => {
   const module = await import("@/features/channels/ui/ChannelBrowserDialog");
@@ -39,17 +40,37 @@ export function AppShellOverlays({
   onDeleteActiveChannel,
   onSelectChannel,
 }: AppShellOverlaysProps) {
+  const [visibleBrowseDialogType, setVisibleBrowseDialogType] =
+    React.useState<BrowseDialogType>(null);
+  const { cancelDeferredModalOpen, openNextFrame: openModalNextFrame } =
+    useDeferredModalOpen();
+
+  React.useEffect(() => {
+    if (browseDialogType === null) {
+      cancelDeferredModalOpen();
+      setVisibleBrowseDialogType(null);
+      return;
+    }
+
+    setVisibleBrowseDialogType(null);
+    openModalNextFrame(() => {
+      setVisibleBrowseDialogType(browseDialogType);
+    });
+  }, [browseDialogType, cancelDeferredModalOpen, openModalNextFrame]);
+
+  const renderedBrowseDialogType = visibleBrowseDialogType ?? browseDialogType;
+
   return (
     <>
       {browseDialogType !== null ? (
         <React.Suspense fallback={null}>
           <ChannelBrowserDialog
             channels={channels}
-            channelTypeFilter={browseDialogType}
+            channelTypeFilter={renderedBrowseDialogType ?? browseDialogType}
             onJoinChannel={onBrowseChannelJoin}
             onOpenChange={onBrowseDialogOpenChange}
             onSelectChannel={onSelectChannel}
-            open={true}
+            open={visibleBrowseDialogType !== null}
           />
         </React.Suspense>
       ) : null}

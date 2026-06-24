@@ -3,7 +3,29 @@ export type ObservedUnreadEvent = {
   createdAt: number;
   rootId: string | null;
   highPriority: boolean;
+  countsTowardBadge: boolean;
+  countsTowardAppBadge: boolean;
 };
+
+export function makeObservedUnreadEvent(input: {
+  id: string;
+  createdAt: number;
+  rootId: string | null;
+  highPriority: boolean;
+  channelType: string | undefined;
+  isThreadedReply: boolean;
+}): ObservedUnreadEvent {
+  const isDm = input.channelType === "dm";
+  return {
+    id: input.id,
+    createdAt: input.createdAt,
+    rootId: input.rootId,
+    highPriority: input.highPriority,
+    countsTowardBadge: isDm || input.isThreadedReply || input.highPriority,
+    countsTowardAppBadge:
+      isDm || (!input.isThreadedReply && input.highPriority),
+  };
+}
 
 export function mapsEqual(
   a: ReadonlyMap<string, number>,
@@ -48,6 +70,34 @@ export function countUnreadObservedEvents(
   if (!eventsById) return 0;
   let count = 0;
   for (const event of eventsById.values()) {
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
+  }
+  return count;
+}
+
+export function countUnreadBadgeObservedEvents(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): number {
+  if (!eventsById) return 0;
+  let count = 0;
+  for (const event of eventsById.values()) {
+    if (!event.countsTowardBadge) continue;
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
+  }
+  return count;
+}
+
+export function countUnreadAppBadgeObservedEvents(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): number {
+  if (!eventsById) return 0;
+  let count = 0;
+  for (const event of eventsById.values()) {
+    if (!event.countsTowardAppBadge) continue;
     const readAt = getReadAt(event);
     if (readAt === null || event.createdAt > readAt) count += 1;
   }

@@ -44,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         relay_url = %config.relay_url,
         health_port = config.health_port,
         metrics_port = config.metrics_port,
+        max_frame_bytes = config.max_frame_bytes,
         "Config loaded"
     );
 
@@ -493,63 +494,11 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(channel_event) => {
-                        // Nil UUID is the sentinel for channel-less global events
-                        // (see event.rs `else` branch). Convert back to None so
-                        // fan_out() uses the global subscriber index instead of
-                        // looking up subscribers under Some(Uuid::nil()), which
-                        // would find nothing and silently drop every cross-node
-                        // global event.
-                        let channel_id = if channel_event.channel_id.is_nil() {
-                            None
-                        } else {
-                            Some(channel_event.channel_id)
-                        };
-                        let stored = buzz_core::StoredEvent::new(channel_event.event, channel_id);
-
-                        // Skip events that were already fanned out in-process (local echo).
-                        // The cache has TTL-based eviction (60s) so entries are bounded
-                        // regardless of subscriber health.
-                        let event_id_bytes = stored.event.id.to_bytes();
-                        if state_for_sub.local_event_ids.get(&event_id_bytes).is_some() {
-                            state_for_sub.local_event_ids.invalidate(&event_id_bytes);
-                            continue;
-                        }
-
-                        let matches = state_for_sub.sub_registry.fan_out(&stored);
-                        let matches = buzz_relay::handlers::event::filter_fanout_by_access(
+                        buzz_relay::handlers::event::fan_out_pubsub_event(
                             &state_for_sub,
-                            &stored,
-                            matches,
+                            channel_event,
                         )
                         .await;
-                        metrics::counter!("buzz_multinode_fanout_total").increment(1);
-                        if matches.is_empty() {
-                            continue;
-                        }
-
-                        let event_json = match serde_json::to_string(&stored.event) {
-                            Ok(json) => json,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to serialize event for multi-node fan-out: {e}"
-                                );
-                                continue;
-                            }
-                        };
-                        let mut drop_count = 0u32;
-                        for (conn_id, sub_id) in &matches {
-                            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-                            if !state_for_sub.conn_manager.send_to(*conn_id, msg) {
-                                drop_count += 1;
-                            }
-                        }
-                        if drop_count > 0 {
-                            tracing::warn!(
-                                event_id = %stored.event.id.to_hex(),
-                                drop_count,
-                                "multi-node fan-out: {drop_count} connection(s) dropped"
-                            );
-                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);

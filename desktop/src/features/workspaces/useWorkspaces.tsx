@@ -32,7 +32,9 @@ export type UseWorkspacesReturn = {
   reconnectWorkspace: () => void;
   updateWorkspace: (
     id: string,
-    updates: Partial<Pick<Workspace, "name" | "relayUrl" | "token" | "pubkey">>,
+    updates: Partial<
+      Pick<Workspace, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
+    >,
   ) => void;
 };
 
@@ -154,7 +156,7 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
     (
       id: string,
       updates: Partial<
-        Pick<Workspace, "name" | "relayUrl" | "token" | "pubkey">
+        Pick<Workspace, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
       >,
     ) => {
       setWorkspacesState((prev) => {

@@ -18,6 +18,7 @@ import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { SettingsOptionGroup } from "./SettingsOptionGroup";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 function StatusIcon({
   availability,
@@ -268,32 +269,28 @@ export function DoctorSettingsPanel() {
   }
 
   return (
-    <section data-testid="settings-doctor">
-      <div className="mb-12 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <h2 className="text-2xl font-semibold tracking-tight">Doctor</h2>
-          <p className="mt-1 text-base font-normal text-muted-foreground">
-            Verify the ACP runtime commands available to the desktop app.
-          </p>
-        </div>
-
-        <Button
-          className="shrink-0"
-          disabled={isRefreshing}
-          onClick={() => {
-            setInstallResults({});
-            void runtimesQuery.refetch();
-          }}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          <RefreshCw
-            className={cn("h-4 w-4", isRefreshing && "animate-spin")}
-          />
-          Re-run
-        </Button>
-      </div>
+    <section className="min-w-0" data-testid="settings-doctor">
+      <SettingsSectionHeader
+        title="Doctor"
+        description="Verify the ACP runtime commands available to the desktop app."
+        action={
+          <Button
+            disabled={isRefreshing}
+            onClick={() => {
+              setInstallResults({});
+              void runtimesQuery.refetch();
+            }}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <RefreshCw
+              className={cn("h-4 w-4", isRefreshing && "animate-spin")}
+            />
+            Re-run
+          </Button>
+        }
+      />
 
       <div className="space-y-5">
         <SettingsOptionGroup>

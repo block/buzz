@@ -60,6 +60,7 @@ export type UserProfilePanelProps = {
   layout?: "standalone" | "split";
   onClose: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
+  onOpenProfile?: (pubkey: string) => void;
   onResetWidth?: () => void;
   onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;
   onViewChange?: (
@@ -132,6 +133,7 @@ export function buildPersonaDraftProfile(persona: AgentPersona): Profile {
     avatarUrl: persona.avatarUrl,
     about: null,
     nip05Handle: null,
+    ownerPubkey: null,
   };
 }
 

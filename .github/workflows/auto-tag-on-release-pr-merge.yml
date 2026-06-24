@@ -1,5 +1,26 @@
 name: Auto-tag on Release PR Merge
 
+# Three release lanes share this one workflow — adding a lane is one more branch
+# prefix, never a forked copy:
+#
+#   version-bump/<v>   → tag v<v>        → dispatch release.yml (desktop app)
+#   relay-release/<v>  → tag relay-v<v>  → dispatch docker.yml (relay image)
+#   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
+#
+# Both the desktop and relay lanes dispatch their build workflow rather than
+# relying on the consumer's `on.push.tags` trigger: auto-tag pushes the tag
+# with the default GITHUB_TOKEN, which GitHub's recursion guard blocks from
+# firing any `on: push` trigger. So release.yml and docker.yml both have a
+# `push.tags` trigger that is dead for auto-pushed tags — the dispatch is the
+# real path. Each dispatch passes the bare version and the tag ref so the
+# consumer builds the tagged commit (github.ref on a dispatch is `main`).
+#
+# The mobile lane is push-only by infosec necessity: OSS `block/buzz` CI must
+# not trigger CI in the private `buzz-releases` repo, so auto-dispatch across
+# that boundary is deliberately disallowed. The mobile-v* tag is consumed
+# manually instead — a human feeds it as the `sprout_ref` input to the
+# `buzz-releases` Buildkite pipeline, which builds and ships mobile.
+
 on:
   pull_request:
     types: [closed]
@@ -13,7 +34,9 @@ jobs:
   auto-tag:
     if: >
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'version-bump/') &&
+      (startsWith(github.event.pull_request.head.ref, 'version-bump/') ||
+       startsWith(github.event.pull_request.head.ref, 'relay-release/') ||
+       startsWith(github.event.pull_request.head.ref, 'mobile-release/')) &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
@@ -22,42 +45,78 @@ jobs:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
 
-      - name: Extract version from branch name
+      - name: Resolve lane and version from branch name
         env:
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          VERSION="${BRANCH#version-bump/}"
+          # Lane is decided by branch prefix: the tag prefix and whether a
+          # downstream workflow_dispatch is needed both follow from it.
+          case "$BRANCH" in
+            version-bump/*)
+              VERSION="${BRANCH#version-bump/}"
+              TAG_PREFIX="v"
+              DISPATCH="release" ;;
+            relay-release/*)
+              VERSION="${BRANCH#relay-release/}"
+              TAG_PREFIX="relay-v"
+              DISPATCH="docker" ;;
+            mobile-release/*)
+              VERSION="${BRANCH#mobile-release/}"
+              TAG_PREFIX="mobile-v"
+              DISPATCH="" ;;
+            *)
+              echo "::error::Unhandled branch prefix: '$BRANCH'"
+              exit 1 ;;
+          esac
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error::Invalid version in branch name: '$VERSION'"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_ENV"
-          echo "Tagging v${VERSION}"
+          echo "tag=${TAG_PREFIX}${VERSION}" >> "$GITHUB_ENV"
+          echo "dispatch=$DISPATCH" >> "$GITHUB_ENV"
+          echo "Tagging ${TAG_PREFIX}${VERSION}"
 
       - name: Create and push tag
         env:
-          VERSION: ${{ env.version }}
+          TAG: ${{ env.tag }}
         run: |
-          EXISTING_SHA="$(git ls-remote --tags origin "refs/tags/v$VERSION" | awk '{print $1}')"
+          EXISTING_SHA="$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')"
           if [ -n "$EXISTING_SHA" ]; then
             if [ "$EXISTING_SHA" = "$GITHUB_SHA" ]; then
-              echo "Tag v$VERSION already exists at $GITHUB_SHA — skipping tag creation"
+              echo "Tag $TAG already exists at $GITHUB_SHA — skipping tag creation"
               exit 0
             else
-              echo "::error::Tag v$VERSION already exists at $EXISTING_SHA (expected $GITHUB_SHA)"
+              echo "::error::Tag $TAG already exists at $EXISTING_SHA (expected $GITHUB_SHA)"
               exit 1
             fi
           fi
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+          git tag "$TAG"
+          git push origin "$TAG"
 
       - name: Trigger release build
+        # The desktop and relay lanes dispatch their build workflow because the
+        # consumer's on:push:tags trigger is dead for auto-pushed tags (default
+        # GITHUB_TOKEN, recursion guard — see header comment). Mobile has no
+        # consumer yet, so dispatch="" skips this step entirely.
+        if: ${{ env.dispatch != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH: ${{ env.dispatch }}
           VERSION: ${{ env.version }}
+          TAG: ${{ env.tag }}
         run: |
-          gh workflow run release.yml \
+          # Both workflows take the bare version (for the build) and the tag ref
+          # (so the dispatch builds the tagged commit, not main).
+          case "$DISPATCH" in
+            release) WORKFLOW="release.yml" ;;
+            docker)  WORKFLOW="docker.yml" ;;
+            *)
+              echo "::error::Unhandled dispatch target: '$DISPATCH'"
+              exit 1 ;;
+          esac
+          gh workflow run "$WORKFLOW" \
             -f version="$VERSION" \
-            -f ref="v$VERSION"
+            -f ref="$TAG"

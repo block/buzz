@@ -449,6 +449,10 @@ check-compile:
 get-current-version:
     @node -p "require('./desktop/package.json').version"
 
+# Read the current relay version from its crate manifest
+get-current-relay-version:
+    @grep -m1 '^version = ' crates/buzz-relay/Cargo.toml | sed -E 's/version = "(.*)"/\1/'
+
 # Compute next minor version (e.g., 0.3.0 → 0.4.0)
 get-next-minor-version:
     @python3 -c "v='$(just get-current-version)'.split('.'); print(f'{v[0]}.{int(v[1])+1}.0')"
@@ -457,15 +461,22 @@ get-next-minor-version:
 get-next-patch-version:
     @python3 -c "v='$(just get-current-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
 
-# Update version in all package manifests and regenerate lockfiles
-bump-version version:
+# Compute next relay patch version (e.g., 0.3.0 → 0.3.1)
+get-next-relay-patch-version:
+    @python3 -c "v='$(just get-current-relay-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
+
+# Read the current mobile version from pubspec.yaml (strips the +build suffix)
+get-current-mobile-version:
+    @grep -m1 '^version: ' mobile/pubspec.yaml | sed -E 's/version: ([^+]*).*/\1/'
+
+# Compute next mobile patch version (e.g., 0.3.0 → 0.3.1)
+get-next-mobile-patch-version:
+    @python3 -c "v='$(just get-current-mobile-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
+
+# Update version in desktop package manifests and regenerate lockfiles
+bump-desktop-version version:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Validate semver format
-    if ! echo "{{ version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-        echo "Error: '{{ version }}' is not valid semver (expected X.Y.Z)"
-        exit 1
-    fi
     # desktop/package.json
     cd desktop && npm pkg set "version={{ version }}" && cd ..
     # desktop/src-tauri/tauri.conf.json
@@ -486,50 +497,133 @@ bump-version version:
         t = t.replace(/^version = \".*\"/m, 'version = \"{{ version }}\"');
         fs.writeFileSync(p, t);
     "
-    # mobile/pubspec.yaml — bump version but preserve build number
-    sed -i '' "s/^version: .*/version: {{ version }}+1/" mobile/pubspec.yaml
     # Regenerate lockfiles
     pnpm install --lockfile-only
     cargo update -p buzz-desktop --manifest-path desktop/src-tauri/Cargo.toml
-    (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
-    echo "Bumped all manifests to {{ version }} and regenerated lockfiles"
+    echo "Bumped desktop manifests to {{ version }} and regenerated lockfiles"
 
-# Create or update a release PR that bumps version and generates changelog
-release *ARGS:
+# Bump the relay crate version and regenerate the lockfile
+bump-relay-version version:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Determine target version
+    # buzz-relay carries its own `version =` (not version.workspace), so the
+    # replace targets the package version line only.
+    perl -i -pe 's/^version = ".*"/version = "{{ version }}"/' crates/buzz-relay/Cargo.toml
+    cargo update -p buzz-relay
+    echo "Bumped buzz-relay to {{ version }} and regenerated Cargo.lock"
+
+# Bump the mobile pubspec version and regenerate the lockfile
+bump-mobile-version version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # pubspec carries a `version: X.Y.Z+build`; preserve the `+build` convention
+    # (a literal `+1`, matching the desktop lane's prior behavior).
+    perl -i -pe 's/^version: .*/version: {{ version }}+1/' mobile/pubspec.yaml
+    (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
+    echo "Bumped mobile to {{ version }} and regenerated pubspec.lock"
+
+# Open or update the desktop release PR (signed desktop app)
+release-desktop *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
     ARG="{{ ARGS }}"
-    if [[ -z "$ARG" ]]; then
-        VERSION=$(just get-next-patch-version)
-    elif [[ "$ARG" == "patch" ]]; then
+    if [[ -z "$ARG" || "$ARG" == "patch" ]]; then
         VERSION=$(just get-next-patch-version)
     else
         VERSION="$ARG"
     fi
-    echo "Preparing release v${VERSION}..."
-    # Ensure on main branch
+    just _release-pr desktop "$VERSION"
+
+# Open or update the relay release PR (ghcr.io/block/buzz image)
+release-relay *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ARG="{{ ARGS }}"
+    if [[ -z "$ARG" || "$ARG" == "patch" ]]; then
+        VERSION=$(just get-next-relay-patch-version)
+    else
+        VERSION="$ARG"
+    fi
+    just _release-pr relay "$VERSION"
+
+# Open or update the mobile release PR (Buzz mobile app)
+release-mobile *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ARG="{{ ARGS }}"
+    if [[ -z "$ARG" || "$ARG" == "patch" ]]; then
+        VERSION=$(just get-next-mobile-patch-version)
+    else
+        VERSION="$ARG"
+    fi
+    just _release-pr mobile "$VERSION"
+
+# Shared release-PR engine. One body, three lanes — the only lane-specific steps
+# are the version-bump command and the file/tag/changelog identifiers selected
+# in the `case` below. Everything else (git preflight, branch reset, changelog
+# generation, commit, push, PR open/edit) is identical across lanes.
+_release-pr lane version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION="{{ version }}"
+    if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+        echo "Error: '$VERSION' is not valid semver (expected X.Y.Z)"
+        exit 1
+    fi
+    # Lane-specific identifiers. The bump command runs after the branch switch.
+    case "{{ lane }}" in
+        desktop)
+            BRANCH_PREFIX="version-bump"
+            TAG_FETCH='v*'
+            TAG_MATCH='v[0-9]*'
+            TAG_EXCLUDE='*-*'
+            TAG_PREFIX="v"
+            CHANGELOG="CHANGELOG.md"
+            ADD_FILES=(desktop/package.json desktop/src-tauri/tauri.conf.json desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock pnpm-lock.yaml CHANGELOG.md)
+            ARTIFACT="Buzz Desktop" ;;
+        relay)
+            BRANCH_PREFIX="relay-release"
+            TAG_FETCH='relay-v*'
+            TAG_MATCH='relay-v[0-9]*'
+            TAG_EXCLUDE='relay-v*-*'
+            TAG_PREFIX="relay-v"
+            CHANGELOG="crates/buzz-relay/CHANGELOG.md"
+            ADD_FILES=(crates/buzz-relay/Cargo.toml Cargo.lock crates/buzz-relay/CHANGELOG.md)
+            ARTIFACT="Buzz Relay" ;;
+        mobile)
+            BRANCH_PREFIX="mobile-release"
+            TAG_FETCH='mobile-v*'
+            TAG_MATCH='mobile-v[0-9]*'
+            TAG_EXCLUDE='mobile-v*-*'
+            TAG_PREFIX="mobile-v"
+            CHANGELOG="mobile/CHANGELOG.md"
+            ADD_FILES=(mobile/pubspec.yaml mobile/pubspec.lock mobile/CHANGELOG.md)
+            ARTIFACT="Buzz Mobile" ;;
+        *)
+            echo "Error: unknown release lane '{{ lane }}'"
+            exit 1 ;;
+    esac
+    echo "Preparing ${ARTIFACT} release v${VERSION}..."
+    # Must run on main with a clean, up-to-date tree.
     CURRENT_BRANCH=$(git symbolic-ref --short HEAD)
     if [[ "$CURRENT_BRANCH" != "main" ]]; then
         echo "Error: must be on main branch (currently on '$CURRENT_BRANCH')"
         exit 1
     fi
-    # Ensure local main and release tags are up-to-date.
     git fetch origin refs/heads/main:refs/remotes/origin/main --no-tags
-    # Release tags are remote-owned state; sync only v* tags so stale local
-    # tags from older histories do not make release preflight fail.
-    git fetch origin '+refs/tags/v*:refs/tags/v*'
+    # Release tags are remote-owned state; sync only this lane's tags so stale
+    # local tags from older histories do not make release preflight fail.
+    git fetch origin "+refs/tags/${TAG_FETCH}:refs/tags/${TAG_FETCH}"
     if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
         echo "Error: local main is not up-to-date with origin/main. Run 'git pull' first."
         exit 1
     fi
-    # Ensure clean working tree
     if ! git diff --quiet || ! git diff --cached --quiet; then
         echo "Error: working tree is dirty. Commit or stash changes first."
         exit 1
     fi
-    # Switch to version-bump branch (create if needed, reset to main if it exists)
-    BRANCH="version-bump/${VERSION}"
+    # Switch to the release branch (create, or reset to main if it exists).
+    BRANCH="${BRANCH_PREFIX}/${VERSION}"
     if git rev-parse --verify "refs/heads/$BRANCH" >/dev/null 2>&1; then
         echo "Branch '$BRANCH' already exists — resetting to origin/main..."
         git switch "$BRANCH"
@@ -541,10 +635,14 @@ release *ARGS:
     else
         git switch -c "$BRANCH"
     fi
-    # Bump versions and lockfiles
-    just bump-version "$VERSION"
-    # Generate changelog
-    LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || echo "")
+    # Lane-specific bump (the one diverging step).
+    case "{{ lane }}" in
+        desktop) just bump-desktop-version "$VERSION" ;;
+        relay)   just bump-relay-version "$VERSION" ;;
+        mobile)  just bump-mobile-version "$VERSION" ;;
+    esac
+    # Generate the changelog from commits since this lane's last release tag.
+    LAST_TAG=$(git describe --tags --abbrev=0 --match "$TAG_MATCH" --exclude "$TAG_EXCLUDE" 2>/dev/null || echo "")
     REPO=$(git remote get-url origin | sed -E 's|.*github\.com[:/]||; s|\.git$||')
     format_log() {
         local range="$1"
@@ -565,7 +663,7 @@ release *ARGS:
     {
         echo "# Changelog"
         echo ""
-        echo "## v${VERSION}"
+        echo "## ${TAG_PREFIX}${VERSION}"
         echo ""
         if [[ -n "$LAST_TAG" ]]; then
             format_log "${LAST_TAG}..HEAD"
@@ -573,31 +671,23 @@ release *ARGS:
             echo "- Initial release"
         fi
         echo ""
-        if [[ -f CHANGELOG.md ]]; then
-            tail -n +2 CHANGELOG.md
+        if [[ -f "$CHANGELOG" ]]; then
+            tail -n +2 "$CHANGELOG"
         fi
     } > "$TMPFILE"
-    mv "$TMPFILE" CHANGELOG.md
-    # Commit
-    git add \
-      desktop/package.json \
-      desktop/src-tauri/tauri.conf.json \
-      desktop/src-tauri/Cargo.toml \
-      desktop/src-tauri/Cargo.lock \
-      mobile/pubspec.yaml \
-      mobile/pubspec.lock \
-      pnpm-lock.yaml \
-      CHANGELOG.md
-    RELEASE_MSG="chore(release): release version ${VERSION}"
+    mkdir -p "$(dirname "$CHANGELOG")"
+    mv "$TMPFILE" "$CHANGELOG"
+    # Commit.
+    git add "${ADD_FILES[@]}"
+    RELEASE_MSG="chore(release): release ${ARTIFACT} version ${VERSION}"
     if [[ "$(git log -1 --format='%s' 2>/dev/null)" == "$RELEASE_MSG" ]]; then
         git commit --amend --no-edit
     else
         git commit -m "$RELEASE_MSG"
     fi
-    # Push and open PR
+    # Push and open/update the PR.
     git push --force-with-lease -u origin "$BRANCH"
-    # Build PR body
-    PR_BODY="## Release v${VERSION}"$'\n\n'
+    PR_BODY="## ${ARTIFACT} release v${VERSION}"$'\n\n'
     if [[ -n "$LAST_TAG" ]]; then
         PR_BODY+="### Changes since ${LAST_TAG}:"$'\n\n'
         PR_BODY+="$(format_log "${LAST_TAG}..HEAD~1")"$'\n\n'
@@ -605,18 +695,15 @@ release *ARGS:
         PR_BODY+="Initial release."$'\n\n'
     fi
     PR_BODY+="**To release:** merge this PR. The tag and build will happen automatically."
+    PR_TITLE="chore(release): release ${ARTIFACT} version ${VERSION}"
     EXISTING_PR=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
     if [[ -n "$EXISTING_PR" ]]; then
-        gh pr edit "$BRANCH" \
-            --title "chore(release): release version ${VERSION}" \
-            --body "$PR_BODY"
+        gh pr edit "$BRANCH" --title "$PR_TITLE" --body "$PR_BODY"
         PR_URL="$EXISTING_PR"
         echo ""
         echo "Updated existing release PR: ${PR_URL}"
     else
-        PR_URL=$(gh pr create \
-            --title "chore(release): release version ${VERSION}" \
-            --body "$PR_BODY")
+        PR_URL=$(gh pr create --title "$PR_TITLE" --body "$PR_BODY")
         echo ""
         echo "Release PR opened: ${PR_URL}"
     fi
