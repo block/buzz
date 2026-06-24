@@ -41,10 +41,11 @@ const overrides = new Map([
   ["src-tauri/src/managed_agents/runtime.rs", 1953],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
-  // applyWorkspace reposDir parameter threaded through the Tauri invoke for
-  // configurable repos_dir — a 3-line overage from load-bearing parameter
-  // plumbing, not generic debt growth. Approved override; still queued to split.
-  ["src/shared/api/tauri.ts", 1198],
+  // applyWorkspace reposDir parameter plus the validateReposDir binding,
+  // threaded through Tauri invokes for configurable repos_dir — a 4-line
+  // overage from load-bearing parameter plumbing, not generic debt growth.
+  // Approved override; still queued to split.
+  ["src/shared/api/tauri.ts", 1199],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1295],
