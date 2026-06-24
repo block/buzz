@@ -4,11 +4,13 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod leader;
 mod observer;
 mod pool;
 mod queue;
 mod relay;
 
+use leader::LeaderCheck;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -680,6 +682,8 @@ fn handle_relay_observer_control_event(
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
+    leader: &std::sync::Arc<leader::FileLeaderCheck>,
+    agent_pubkey_hex: &str,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -718,36 +722,75 @@ fn handle_relay_observer_control_event(
     };
 
     let command_type = payload.get("type").and_then(|value| value.as_str());
-    if command_type != Some("cancel_turn") {
+    if command_type == Some("cancel_turn") {
+        let Some(channel_id) = payload
+            .get("channelId")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<Uuid>().ok())
+        else {
+            tracing::warn!("observer cancel_turn control frame missing valid channelId");
+            return;
+        };
+
+        let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
+        let status = if fired { "sent" } else { "no_active_turn" };
+        if let Some(observer) = observer {
+            observer.emit(
+                "control_result",
+                None,
+                &observer::ObserverContext {
+                    channel_id: Some(channel_id.to_string()),
+                    session_id: None,
+                    turn_id: None,
+                },
+                serde_json::json!({
+                    "type": "cancel_turn",
+                    "status": status,
+                }),
+            );
+        }
+    } else if command_type == Some("claim_leadership") {
+        let target_id = payload.get("targetInstanceId").and_then(|v| v.as_str());
+        let self_id = leader.instance_id();
+
+        match (target_id, self_id) {
+            (Some(target), Some(self_instance)) if target == self_instance => {
+                // We are the target — attempt to acquire.
+                let acquired = leader.acquire(agent_pubkey_hex);
+                if acquired {
+                    if let Some(obs) = observer {
+                        obs.emit(
+                            "control_result",
+                            None,
+                            &observer::ObserverContext {
+                                channel_id: None,
+                                session_id: None,
+                                turn_id: None,
+                            },
+                            serde_json::json!({
+                                "type": "claim_leadership",
+                                "status": "claimed",
+                            }),
+                        );
+                    }
+                }
+                // If !acquired: do nothing. Next 5s tick will succeed
+                // (old leader standing down). leadership_status stream
+                // is the desktop's source of truth.
+            }
+            (Some(_target), Some(_self_instance)) => {
+                // We are NOT the target — if we're leader, stand down + release.
+                if leader.is_leader(agent_pubkey_hex) {
+                    leader.stand_down();
+                    leader.release(agent_pubkey_hex);
+                }
+            }
+            _ => {
+                tracing::warn!("claim_leadership frame missing targetInstanceId or no self id");
+            }
+        }
+    } else {
         tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
-        return;
-    }
-
-    let Some(channel_id) = payload
-        .get("channelId")
-        .and_then(|value| value.as_str())
-        .and_then(|value| value.parse::<Uuid>().ok())
-    else {
-        tracing::warn!("observer cancel_turn control frame missing valid channelId");
-        return;
-    };
-
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
-    if let Some(observer) = observer {
-        observer.emit(
-            "control_result",
-            None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-            },
-            serde_json::json!({
-                "type": "cancel_turn",
-                "status": status,
-            }),
-        );
     }
 }
 
@@ -1265,6 +1308,20 @@ async fn tokio_main() -> Result<()> {
     let mut queue = EventQueue::new(dedup_mode);
 
     let base_prompt_content = config.base_prompt_content.take();
+    // Leader election: self-mint an election id and auto-claim this agent
+    // key's lock so the first instance up leads and a later instance under the
+    // same key observes. Best-effort — acquire fails safe to leader on IO error
+    // and yields observer only when a live foreign instance holds the lock.
+    // The concrete handle is kept (separately from the `Arc<dyn LeaderCheck>`
+    // stored in `ctx`) so the lifecycle can re-acquire on failover and release
+    // on shutdown.
+    let agent_pubkey_hex = config.keys.public_key().to_hex();
+    let leader = Arc::new(leader::FileLeaderCheck::from_env_or_mint());
+    if leader.acquire(&agent_pubkey_hex) {
+        tracing::info!(agent = %agent_pubkey_hex, "leader lock acquired — active responder");
+    } else {
+        tracing::info!(agent = %agent_pubkey_hex, "leader lock held by another instance — observing");
+    }
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1295,6 +1352,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        leader: leader.clone(),
     });
 
     if !config.memory_enabled {
@@ -1339,6 +1397,13 @@ async fn tokio_main() -> Result<()> {
     };
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    // ── Step 6c2: Leader-status refresh timer ────────────────────────────────
+    // Re-reads the per-key leader lock every 5s so a leadership change (another
+    // instance claiming/releasing this agent) takes effect without a restart.
+    // Faster cadence than the 30s maintenance tick because failover latency is
+    // user-visible. Cheap: one file read per known agent key.
+    let mut leader_refresh = tokio::time::interval(Duration::from_secs(5));
 
     // ── Step 6d: Maintenance (slot refill + queue compaction) ────────────────
     // Runs at the TOP of every loop iteration via Instant check — cannot be
@@ -1533,7 +1598,7 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex, &leader, &agent_pubkey_hex);
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -1828,11 +1893,15 @@ async fn tokio_main() -> Result<()> {
                                 prompt_tag,
                             });
                             // 👀 — immediate "seen" reaction, only if the event
-                            // was actually queued (not dropped by DedupMode::Drop).
+                            // was actually queued (not dropped by DedupMode::Drop)
+                            // AND this instance is the leader for this agent key.
+                            // The reaction fires at queue-push time, BEFORE
+                            // dispatch, so the dispatch gate alone would let
+                            // every sharing instance emit a redundant 👀.
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            if accepted && ctx.leader.is_leader(&pubkey_hex) {
                                 let rc = ctx.rest_client.clone();
                                 tokio::spawn(async move {
                                     pool::reaction_add(&rc, &event_id_hex, "👀").await;
@@ -1942,6 +2011,33 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
+                _ = leader_refresh.tick() => {
+                    let _ = result_rx;
+                    // Re-attempt the claim first: if the current leader died
+                    // without releasing, its lock now names a dead pid and this
+                    // acquire takes over (failover); otherwise it's a no-op
+                    // rewrite of our own lock or a no-op observe. Then re-read
+                    // so the cached status reflects any claim/release/failover
+                    // and flips this process between active and observer without
+                    // a restart.
+                    leader.acquire(&agent_pubkey_hex);
+                    ctx.leader.refresh();
+                    // Emit leadership_status so the desktop can track which
+                    // instances are alive and who currently leads.
+                    if let (Some(obs), Some(instance_id)) = (observer.as_ref(), leader.instance_id()) {
+                        obs.emit(
+                            "leadership_status",
+                            None,
+                            &observer::ObserverContext { channel_id: None, session_id: None, turn_id: None },
+                            serde_json::json!({
+                                "type": "leadership_status",
+                                "instanceId": instance_id,
+                                "isLeader": ctx.leader.is_leader(&agent_pubkey_hex),
+                            }),
+                        );
+                    }
+                    None
+                }
                 _ = shutdown_rx.changed() => {
                     tracing::info!("shutting down");
                     break;
@@ -2017,6 +2113,9 @@ async fn tokio_main() -> Result<()> {
     }
 
     // ── Shutdown sequence ─────────────────────────────────────────────────────
+    // Relinquish leadership first so a co-located sibling can take over
+    // immediately rather than waiting out the dead-pid failover window.
+    leader.release(&agent_pubkey_hex);
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
@@ -2177,6 +2276,14 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
 ) -> Vec<(Uuid, ThreadTags)> {
+    // Multi-instance leader gate: when this agent's keypair is shared across
+    // several Buzz instances, only the leader promotes queued events to
+    // prompts. Non-leaders keep the queue populated (so the UI still renders
+    // the conversation) but never dispatch. Solo dev has no lock file, so this
+    // is unconditionally `true` and behavior is unchanged.
+    if !ctx.leader.is_leader(&ctx.agent_keys.public_key().to_hex()) {
+        return Vec::new();
+    }
     let mut dispatched_channels = Vec::new();
     loop {
         let batch = match queue.flush_next() {
@@ -2587,6 +2694,14 @@ fn dispatch_heartbeat(
     heartbeat_in_flight: &mut bool,
 ) {
     if *heartbeat_in_flight {
+        return;
+    }
+    // Multi-instance leader gate: the heartbeat prompt acts autonomously on the
+    // wire (sends messages, approves workflows), so non-leaders must not fire it
+    // — otherwise N instances on a shared key would each self-prompt and act,
+    // the same duplicate-actor bug the dispatch gate prevents. Solo dev has no
+    // lock file, so this is unconditionally `true` and behavior is unchanged.
+    if !ctx.leader.is_leader(&ctx.agent_keys.public_key().to_hex()) {
         return;
     }
     let agent = match pool.try_claim(None) {
@@ -3574,6 +3689,129 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    /// Stub [`LeaderCheck`] that always reports a fixed leadership verdict —
+    /// isolates the heartbeat gate from the filesystem reader (cleared
+    /// separately in `leader::tests`).
+    struct FixedLeader(bool);
+    impl crate::leader::LeaderCheck for FixedLeader {
+        fn is_leader(&self, _agent_pubkey_hex: &str) -> bool {
+            self.0
+        }
+        fn refresh(&self) {}
+    }
+
+    fn prompt_context_with_leader(keys: nostr::Keys, is_leader: bool) -> Arc<PromptContext> {
+        Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(60),
+            max_turn_duration: Duration::from_secs(60),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: config::DedupMode::Queue,
+            system_prompt: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: "/".into(),
+            rest_client: crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: "http://localhost:3000".into(),
+                keys: keys.clone(),
+                auth_tag_json: None,
+            },
+            channel_info: std::collections::HashMap::new(),
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: config::PermissionMode::BypassPermissions,
+            agent_keys: keys,
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            leader: Arc::new(FixedLeader(is_leader)),
+        })
+    }
+
+    /// Pins the second half of the leader invariant: the autonomous heartbeat
+    /// prompt (which sends messages / approves workflows on the wire) must not
+    /// fire on a non-leader, even with an idle agent ready. Without the gate,
+    /// N instances sharing one key would each self-prompt and act — the exact
+    /// duplicate-actor bug the dispatch gate already prevents on the event path.
+    #[tokio::test]
+    async fn test_non_leader_heartbeat_claims_no_agent() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), false);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut heartbeat_in_flight = false;
+
+        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+
+        assert!(pool.any_idle(), "non-leader must not claim the idle agent");
+        assert!(!heartbeat_in_flight, "non-leader heartbeat must not fire");
+    }
+
+    /// Companion to the gate test: the same idle agent + fired heartbeat path,
+    /// but as the leader, DOES claim and fire — so the gate test proves the
+    /// gate, not a broken dispatch path.
+    #[tokio::test]
+    async fn test_leader_heartbeat_claims_idle_agent() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), true);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut heartbeat_in_flight = false;
+
+        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+
+        assert!(!pool.any_idle(), "leader must claim the idle agent");
+        assert!(heartbeat_in_flight, "leader heartbeat must fire");
+    }
+
+    /// Seed `queue` with one pending event so `dispatch_pending` has work to
+    /// promote when the leader gate allows it.
+    fn queue_one_pending(queue: &mut EventQueue) {
+        use nostr::{EventBuilder, Keys, Kind};
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "@agent hello")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        queue.push(QueuedEvent {
+            channel_id: Uuid::new_v4(),
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "@mention".into(),
+        });
+    }
+
+    /// Pins the primary suppression surface: a non-leader must never promote a
+    /// queued event to a prompt, even with an idle agent and pending work.
+    /// Without this gate, N instances sharing one key would each dispatch the
+    /// same mention — the duplicate-actor bug leader election exists to prevent.
+    #[tokio::test]
+    async fn test_non_leader_dispatch_pending_promotes_nothing() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), false);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue_one_pending(&mut queue);
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+
+        assert!(
+            dispatched.is_empty(),
+            "non-leader must not promote queued events"
+        );
+        assert!(pool.any_idle(), "non-leader must not claim the idle agent");
+    }
+
+    /// Companion to the gate test: the same idle agent + pending event, but as
+    /// the leader, DOES promote — proving the gate test catches the gate, not a
+    /// broken dispatch path.
+    #[tokio::test]
+    async fn test_leader_dispatch_pending_promotes_queued_event() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), true);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue_one_pending(&mut queue);
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+
+        assert_eq!(dispatched.len(), 1, "leader must promote the queued event");
+        assert!(!pool.any_idle(), "leader must claim the idle agent");
     }
 }
 

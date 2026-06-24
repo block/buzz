@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clipboard,
+  Crown,
   Ellipsis,
   FileText,
   Pencil,
@@ -33,13 +34,23 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { EditAgentDialog } from "./EditAgentDialog";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { ModelPicker } from "./ModelPicker";
-import { truncatePubkey } from "./agentUi";
+import { truncateInstanceId, truncatePubkey } from "./agentUi";
+import { useAgentLeadership } from "./useObserverEvents";
+import {
+  type InstanceLeadership,
+  filterStaleInstances,
+  selectFreshestLeader,
+} from "./leadershipHelpers";
+import { claimManagedAgentLeadership } from "@/shared/api/agentControl";
 
 export function ManagedAgentRow({
   agent,
@@ -115,6 +126,21 @@ export function ManagedAgentRow({
   // crash. Generic exits stay verbatim so we don't lie about other failures.
   const friendlyError = friendlyAgentLastError(agent.lastError);
 
+  // Leadership frames flow into the owner-wide observer store regardless of
+  // session-panel state, so this is enabled on row visibility (gated only on a
+  // pubkey). The 5s clock drives stale eviction without a new frame arriving —
+  // a crashed leader's last frame ages out and the badge drops within 15s.
+  const leadership = useAgentLeadership(true, agent.pubkey);
+  const leadershipNow = useNow(5000);
+  const liveInstances = React.useMemo(
+    () => filterStaleInstances(leadership, leadershipNow),
+    [leadership, leadershipNow],
+  );
+  const leaderInstanceId = React.useMemo(
+    () => selectFreshestLeader(liveInstances)?.instanceId ?? null,
+    [liveInstances],
+  );
+
   return (
     <div
       className={cn(
@@ -146,6 +172,7 @@ export function ManagedAgentRow({
               <StatusBlock
                 friendlyError={friendlyError}
                 isWorking={isWorking}
+                leaderInstanceId={leaderInstanceId}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -169,6 +196,7 @@ export function ManagedAgentRow({
               <StatusBlock
                 friendlyError={friendlyError}
                 isWorking={isWorking}
+                leaderInstanceId={leaderInstanceId}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -183,8 +211,10 @@ export function ManagedAgentRow({
           <ModelPicker agent={agent} />
           <AgentActionsMenu
             agent={agent}
+            instances={liveInstances}
             isActionPending={isActionPending}
             isActive={isActive}
+            leaderInstanceId={leaderInstanceId}
             onAddToChannel={onAddToChannel}
             onDelete={onDelete}
             onOpenLogs={(pubkey) => onSelectLogAgent(pubkey)}
@@ -335,6 +365,7 @@ function WorkingBadge({
 function StatusBlock({
   friendlyError,
   isWorking,
+  leaderInstanceId,
   presenceLoaded,
   presenceStatus,
   processDetail,
@@ -342,6 +373,7 @@ function StatusBlock({
 }: {
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
   isWorking: boolean;
+  leaderInstanceId: string | null;
   presenceLoaded: boolean;
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
@@ -352,12 +384,20 @@ function StatusBlock({
       <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Status
       </p>
-      <AgentStatusBadge
-        isWorking={isWorking}
-        presenceLoaded={presenceLoaded}
-        presenceStatus={presenceStatus}
-        status={status}
-      />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <AgentStatusBadge
+          isWorking={isWorking}
+          presenceLoaded={presenceLoaded}
+          presenceStatus={presenceStatus}
+          status={status}
+        />
+        {leaderInstanceId ? (
+          <Badge className="gap-1" variant="outline">
+            <Crown className="h-3 w-3" />
+            Leader
+          </Badge>
+        ) : null}
+      </div>
       <p className="text-xs text-muted-foreground">{processDetail}</p>
       {friendlyError ? (
         <p
@@ -403,8 +443,10 @@ function RuntimeBlock({
 
 function AgentActionsMenu({
   agent,
+  instances,
   isActionPending,
   isActive,
+  leaderInstanceId,
   onAddToChannel,
   onDelete,
   onOpenLogs,
@@ -413,8 +455,10 @@ function AgentActionsMenu({
   onToggleStartOnAppLaunch,
 }: {
   agent: ManagedAgent;
+  instances: InstanceLeadership[];
   isActionPending: boolean;
   isActive: boolean;
+  leaderInstanceId: string | null;
   onAddToChannel: (agent: ManagedAgent) => void;
   onDelete: (pubkey: string) => void;
   onOpenLogs: (pubkey: string) => void;
@@ -423,6 +467,8 @@ function AgentActionsMenu({
   onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
 }) {
   const [editOpen, setEditOpen] = React.useState(false);
+  // Nothing to steal unless at least two instances are racing.
+  const showLeadershipSubmenu = instances.length > 1;
 
   return (
     <>
@@ -520,6 +566,57 @@ function AgentActionsMenu({
                 ? "Disable auto-start"
                 : "Enable auto-start"}
             </DropdownMenuItem>
+          ) : null}
+
+          {showLeadershipSubmenu ? (
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <Crown className="h-4 w-4" />
+                Leadership
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                {instances.map((instance) => {
+                  const isLeader = instance.instanceId === leaderInstanceId;
+                  return (
+                    <DropdownMenuItem
+                      disabled={isLeader}
+                      key={instance.instanceId}
+                      onClick={async () => {
+                        try {
+                          await claimManagedAgentLeadership(
+                            agent.pubkey,
+                            instance.instanceId,
+                          );
+                          toast.success(
+                            `Leadership request sent to ${agent.name}.`,
+                          );
+                        } catch (error) {
+                          toast.error(
+                            error instanceof Error
+                              ? error.message
+                              : `Failed to send leadership request to ${agent.name}.`,
+                          );
+                        }
+                      }}
+                    >
+                      {isLeader ? (
+                        <Crown className="h-4 w-4" />
+                      ) : (
+                        <span className="h-4 w-4" />
+                      )}
+                      <span className="font-mono">
+                        {truncateInstanceId(instance.instanceId)}
+                      </span>
+                      <span className="ml-auto text-xs text-muted-foreground">
+                        {isLeader
+                          ? "Leader"
+                          : `${formatElapsed(Date.now() - instance.lastSeen)} ago`}
+                      </span>
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
           ) : null}
 
           <DropdownMenuSeparator />

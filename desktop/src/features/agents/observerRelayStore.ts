@@ -16,6 +16,11 @@ import {
   createEmptyTranscriptState,
   processTranscriptEvent,
 } from "./ui/agentSessionTranscript";
+import {
+  type InstanceLeadership,
+  LEADERSHIP_EVENT_KIND,
+  buildLeadership,
+} from "./ui/leadershipHelpers";
 
 const MAX_OBSERVER_EVENTS = 800;
 
@@ -32,11 +37,13 @@ const IDLE_SNAPSHOT: ObserverSnapshot = {
 };
 
 const EMPTY_TRANSCRIPT: TranscriptItem[] = [];
+const EMPTY_LEADERSHIP: InstanceLeadership[] = [];
 
 const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+const leadershipByAgent = new Map<string, InstanceLeadership[]>();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
@@ -107,6 +114,14 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   } else {
     // Slow path: full rebuild (out-of-order insertion or trim fired)
     transcriptByAgent.set(key, buildTranscriptState(final));
+  }
+
+  // Rebuild the cached leadership array only when a leadership frame lands, so
+  // `getAgentLeadership` stays a stable map lookup (referential stability is
+  // required by `useSyncExternalStore`). The rebuild walks the trimmed window,
+  // so instances whose latest frame aged out are pruned automatically.
+  if (event.kind === LEADERSHIP_EVENT_KIND) {
+    leadershipByAgent.set(key, buildLeadership(final));
   }
 
   // Invalidate cached snapshot for this agent
@@ -272,6 +287,20 @@ export function getAgentTranscript(
   return state?.items ?? EMPTY_TRANSCRIPT;
 }
 
+export type { InstanceLeadership };
+
+export function getAgentLeadership(
+  agentPubkey?: string | null,
+  enabled?: boolean,
+): InstanceLeadership[] {
+  if (!enabled || !agentPubkey) {
+    return EMPTY_LEADERSHIP;
+  }
+  return (
+    leadershipByAgent.get(normalizePubkey(agentPubkey)) ?? EMPTY_LEADERSHIP
+  );
+}
+
 export function useManagedAgentObserverBridge(
   agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
 ) {
@@ -299,6 +328,31 @@ export function useManagedAgentObserverBridge(
   }, [hasActiveAgent]);
 }
 
+// Test-only: inject synthetic `leadership_status` frames through the real
+// ingest path (`appendAgentEvent`), so the cached-map rebuild the consumer
+// reads is exercised — not a fake. Registers the agent as known so the row
+// renders. Production ingest (`handleRelayObserverEvent`) is untouched.
+export function seedLeadershipForTest(
+  agentPubkey: string,
+  instances: readonly { instanceId: string; isLeader: boolean }[],
+) {
+  knownAgentPubkeys.add(normalizePubkey(agentPubkey));
+  let seq = Date.now();
+  for (const { instanceId, isLeader } of instances) {
+    seq += 1;
+    appendAgentEvent(agentPubkey, {
+      seq,
+      timestamp: new Date().toISOString(),
+      kind: LEADERSHIP_EVENT_KIND,
+      agentIndex: null,
+      channelId: null,
+      sessionId: null,
+      turnId: null,
+      payload: { instanceId, isLeader },
+    });
+  }
+}
+
 export function resetAgentObserverStore() {
   generation += 1;
   const unsubscribe = unsubscribeRelay;
@@ -308,6 +362,7 @@ export function resetAgentObserverStore() {
   eventsByAgent.clear();
   transcriptByAgent.clear();
   snapshotByAgent.clear();
+  leadershipByAgent.clear();
   knownAgentPubkeys.clear();
   connectionState = "idle";
   errorMessage = null;

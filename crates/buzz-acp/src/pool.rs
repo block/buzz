@@ -33,6 +33,7 @@ use crate::acp::{
     AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
 use crate::config::{DedupMode, PermissionMode};
+use crate::leader::LeaderCheck;
 use crate::observer;
 use crate::queue::{
     ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
@@ -253,6 +254,11 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Multi-instance leader gate. When several Buzz instances share this
+    /// agent's keypair, only the leader promotes queued events to prompts and
+    /// emits the pre-dispatch `👀` reaction; non-leaders observe silently.
+    /// Defaults to "always leader" when no lock file exists (solo dev).
+    pub leader: Arc<dyn LeaderCheck>,
 }
 
 // ── AgentPool impl ────────────────────────────────────────────────────────────
