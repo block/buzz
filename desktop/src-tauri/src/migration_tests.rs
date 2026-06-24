@@ -830,6 +830,55 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
 }
 
 #[test]
+fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
+    // The frozen snapshot is buzz-agent (wants buzz-dev-mcp), but the linked
+    // persona's runtime is goose (wants no mcp). The reconcile must follow the
+    // EFFECTIVE harness (persona-wins) and clear the stale buzz-mcp-server.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "buzz-agent",
+            "mcp_command": "buzz-mcp-server"
+        }]),
+    );
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "");
+}
+
+#[test]
+fn reconcile_mcp_commands_honors_explicit_override_over_persona() {
+    // An explicit per-instance pin (agent_command_override) beats the persona
+    // runtime: persona is goose (no mcp) but the pin is buzz-agent, so the
+    // reconcile sets the buzz-agent mcp_command.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "goose",
+            "agent_command_override": "buzz-agent",
+            "mcp_command": ""
+        }]),
+    );
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
+}
+
+#[test]
 fn reconcile_mcp_commands_skips_record_without_agent_command() {
     let dir = tempfile::tempdir().unwrap();
     let json = serde_json::json!([{

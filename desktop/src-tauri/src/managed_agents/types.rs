@@ -109,6 +109,15 @@ pub struct ManagedAgentRecord {
     pub avatar_url: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
+    /// Explicit per-instance harness pin. `None` (the default) means inherit
+    /// the harness from the linked persona's `runtime`, so persona harness
+    /// edits propagate on the next spawn — mirroring the opt-in `model`
+    /// override. `Some` is set only when the user deliberately picks a harness
+    /// that diverges from the persona. Resolved via `effective_agent_command`;
+    /// `agent_command` above is the create-time snapshot kept for avatar/legacy
+    /// derivations and is not authoritative for spawn.
+    #[serde(default)]
+    pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub turn_timeout_seconds: u64,
@@ -226,6 +235,11 @@ pub struct ManagedAgentSummary {
     pub relay_url: String,
     pub acp_command: String,
     pub agent_command: String,
+    /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user
+    /// has explicitly pinned this instance's harness, `None` when it inherits
+    /// from the persona. Lets the Edit dialog seed "Inherit from persona" vs a
+    /// concrete pin (`agent_command` above is the resolved/effective command).
+    pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub turn_timeout_seconds: u64,

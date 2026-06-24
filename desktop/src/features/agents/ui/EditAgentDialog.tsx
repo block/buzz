@@ -41,6 +41,12 @@ export function EditAgentDialog({
   const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
   const [agentCommand, setAgentCommand] = React.useState(agent.agentCommand);
+  // Whether the harness inherits from the linked persona (no explicit pin).
+  // Only meaningful when a persona is linked; seeded from the override field
+  // so an unset override shows as "inherit" rather than re-pinning on save.
+  const [inheritHarness, setInheritHarness] = React.useState(
+    agent.personaId != null && agent.agentCommandOverride == null,
+  );
   const [agentArgs, setAgentArgs] = React.useState(agent.agentArgs.join(","));
   const [mcpCommand, setMcpCommand] = React.useState(agent.mcpCommand);
   const [mcpToolsets, setMcpToolsets] = React.useState(agent.mcpToolsets ?? "");
@@ -55,11 +61,14 @@ export function EditAgentDialog({
   );
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const personasQuery = usePersonasQuery();
-  const inheritedEnvVars = React.useMemo(() => {
-    if (!agent.personaId) return {};
-    const persona = personasQuery.data?.find((p) => p.id === agent.personaId);
-    return persona?.envVars ?? {};
-  }, [agent.personaId, personasQuery.data]);
+  const linkedPersona = React.useMemo(
+    () =>
+      agent.personaId
+        ? (personasQuery.data?.find((p) => p.id === agent.personaId) ?? null)
+        : null,
+    [agent.personaId, personasQuery.data],
+  );
+  const inheritedEnvVars = linkedPersona?.envVars ?? {};
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
   );
@@ -78,6 +87,9 @@ export function EditAgentDialog({
       setRelayUrl(agent.relayUrl);
       setAcpCommand(agent.acpCommand);
       setAgentCommand(agent.agentCommand);
+      setInheritHarness(
+        agent.personaId != null && agent.agentCommandOverride == null,
+      );
       setAgentArgs(agent.agentArgs.join(","));
       setMcpCommand(agent.mcpCommand);
       setMcpToolsets(agent.mcpToolsets ?? "");
@@ -127,6 +139,20 @@ export function EditAgentDialog({
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
 
+      // Harness pin resolution. The backend treats an empty string as the
+      // "inherit from persona" sentinel (clears the override) and any concrete
+      // command as an explicit pin. When inheriting, only send the sentinel if
+      // there's a pin to clear — a name-only edit must leave the record alone.
+      // When pinning, send the command only if it diverges from the resolved
+      // value the dialog opened with, so an unchanged save stays a no-op.
+      const agentCommandUpdate = inheritHarness
+        ? agent.agentCommandOverride != null
+          ? ""
+          : undefined
+        : agentCommand.trim() !== agent.agentCommand
+          ? agentCommand.trim()
+          : undefined;
+
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -136,10 +162,7 @@ export function EditAgentDialog({
           acpCommand.trim() !== agent.acpCommand
             ? acpCommand.trim()
             : undefined,
-        agentCommand:
-          agentCommand.trim() !== agent.agentCommand
-            ? agentCommand.trim()
-            : undefined,
+        agentCommand: agentCommandUpdate,
         agentArgs:
           parsedArgs.join(",") !== agent.agentArgs.join(",")
             ? parsedArgs
@@ -214,6 +237,34 @@ export function EditAgentDialog({
               onModeChange={setRespondTo}
             />
 
+            {linkedPersona ? (
+              <div className="space-y-1.5">
+                <label
+                  className="flex items-center gap-2 text-sm font-medium"
+                  htmlFor="agent-inherit-harness"
+                >
+                  <input
+                    checked={inheritHarness}
+                    id="agent-inherit-harness"
+                    onChange={(event) =>
+                      setInheritHarness(event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  Inherit harness from persona
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {inheritHarness
+                    ? `Uses the ${linkedPersona.displayName} persona's runtime${
+                        linkedPersona.runtime
+                          ? ` (${linkedPersona.runtime})`
+                          : ""
+                      }. Editing the persona and respawning propagates the new harness.`
+                    : "Pins this agent to a specific harness command, overriding the persona's runtime."}
+                </p>
+              </div>
+            ) : null}
+
             <CreateAgentRuntimeFields
               acpCommand={acpCommand}
               agentArgs={agentArgs}
@@ -231,7 +282,10 @@ export function EditAgentDialog({
               onTurnTimeoutChange={setTurnTimeoutSeconds}
               parallelism={parallelism}
               relayUrl={relayUrl}
-              selectedRuntimeId="custom"
+              // "custom" surfaces the agent-command input so a user can pin a
+              // harness; when inheriting we hide it (any non-"custom" id) since
+              // the command comes from the persona's runtime.
+              selectedRuntimeId={inheritHarness ? "inherit" : "custom"}
               systemPrompt={systemPrompt}
               turnTimeoutSeconds={turnTimeoutSeconds}
             />

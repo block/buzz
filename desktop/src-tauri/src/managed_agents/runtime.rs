@@ -1353,15 +1353,29 @@ pub fn build_managed_agent_summary(
             record.model.clone(),
         );
 
+    // Resolve the effective harness the same way, then derive args/mcp from it,
+    // so the UI reflects the persona's current harness (or an explicit pin).
+    let effective_command = crate::managed_agents::effective_agent_command(
+        record.persona_id.as_deref(),
+        personas,
+        record.agent_command_override.as_deref(),
+    );
+    let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
+    let effective_mcp_command = known_acp_runtime(&effective_command)
+        .and_then(|r| r.mcp_command)
+        .unwrap_or("")
+        .to_string();
+
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
         relay_url: record.relay_url.clone(),
         acp_command: record.acp_command.clone(),
-        agent_command: record.agent_command.clone(),
-        agent_args: record.agent_args.clone(),
-        mcp_command: record.mcp_command.clone(),
+        agent_command: effective_command,
+        agent_command_override: record.agent_command_override.clone(),
+        agent_args: effective_args,
+        mcp_command: effective_mcp_command,
         turn_timeout_seconds: record.turn_timeout_seconds,
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
@@ -1500,27 +1514,40 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let agent_args = normalize_agent_args(&record.agent_command, record.agent_args.clone());
+    // Resolve the effective harness (agent command) from the linked persona, so
+    // persona harness edits propagate on the next spawn; an explicit per-agent
+    // override wins. `agent_args` and `mcp_command` are pure derivations of the
+    // command, so we recompute them from the effective value rather than the
+    // frozen record snapshot. Mirrors the model resolution below.
+    let personas = super::load_personas(app).unwrap_or_default();
+    let effective_command = super::effective_agent_command(
+        record.persona_id.as_deref(),
+        &personas,
+        record.agent_command_override.as_deref(),
+    );
+    let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let resolved_mcp_command: Option<std::path::PathBuf> = if record.mcp_command.is_empty() {
+    let effective_mcp_command = known_acp_runtime(&effective_command)
+        .and_then(|r| r.mcp_command)
+        .unwrap_or("");
+    let resolved_mcp_command: Option<std::path::PathBuf> = if effective_mcp_command.is_empty() {
         None
     } else {
-        match resolve_command(&record.mcp_command) {
+        match resolve_command(effective_mcp_command) {
             Some(path) => Some(path),
             None => {
                 eprintln!(
-                    "buzz-desktop: mcp_command {:?} not found, skipping",
-                    record.mcp_command
+                    "buzz-desktop: mcp_command {effective_mcp_command:?} not found, skipping"
                 );
                 None
             }
         }
     };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(&record.agent_command)
+    let resolved_agent_command = resolve_command(&effective_command)
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| record.agent_command.clone());
+        .unwrap_or_else(|| effective_command.clone());
 
     // The agent's effective relay drives both the child's relay connection
     // (BUZZ_RELAY_URL) and git credential-helper URL: an explicit per-agent
@@ -1571,7 +1598,7 @@ pub fn spawn_agent_child(
     }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
-    let runtime_meta = known_acp_runtime(&record.agent_command);
+    let runtime_meta = known_acp_runtime(&effective_command);
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
@@ -1610,7 +1637,7 @@ pub fn spawn_agent_child(
     // source of truth, so persona edits reach the agent on the next spawn. Fall
     // back to the record snapshot only when no persona is linked or it was
     // deleted. Provider flows from the persona (the record has no provider).
-    let personas = super::load_personas(app).unwrap_or_default();
+    // `personas` was loaded above for the harness resolution.
     let (effective_prompt, effective_model, effective_provider) =
         resolve_effective_prompt_model_provider(
             record.persona_id.as_deref(),

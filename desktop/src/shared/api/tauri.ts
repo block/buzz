@@ -198,6 +198,7 @@ export type RawManagedAgent = {
   relay_url: string;
   acp_command: string;
   agent_command: string;
+  agent_command_override?: string | null;
   agent_args: string[];
   mcp_command: string;
   turn_timeout_seconds: number;
@@ -856,6 +857,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
+    agentCommandOverride: agent.agent_command_override ?? null,
     agentArgs: agent.agent_args,
     mcpCommand: agent.mcp_command,
     turnTimeoutSeconds: agent.turn_timeout_seconds,

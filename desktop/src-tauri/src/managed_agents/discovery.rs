@@ -243,6 +243,71 @@ pub fn default_agent_command() -> String {
         .to_string()
 }
 
+/// Resolve the agent command (harness) for a spawn/deploy/summary. Mirrors the
+/// model resolution in `resolve_effective_prompt_model_provider`: the linked
+/// persona wins so persona harness edits propagate on the next spawn. An
+/// explicit per-instance override (`agent_command_override`) takes precedence,
+/// matching the opt-in `record.model` override pattern.
+///
+/// Resolution order:
+///   1. explicit override (non-empty) — a deliberate per-instance pin;
+///   2. the linked persona's `runtime` id mapped to its primary command;
+///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
+pub fn effective_agent_command(
+    persona_id: Option<&str>,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+    agent_command_override: Option<&str>,
+) -> String {
+    if let Some(pin) = agent_command_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return pin.to_string();
+    }
+
+    persona_id
+        .and_then(|pid| personas.iter().find(|p| p.id == pid))
+        .and_then(|persona| persona.runtime.as_deref())
+        .and_then(known_acp_runtime_exact)
+        .and_then(|r| r.commands.first().copied())
+        .map(str::to_string)
+        .unwrap_or_else(default_agent_command)
+}
+
+/// Decide whether a user-picked harness command is an explicit per-instance
+/// pin or merely the persona's own runtime restated. Returns the override to
+/// persist: `Some(picked)` when it diverges from the persona, `None` when it
+/// inherits.
+///
+/// Comparison is by RUNTIME IDENTITY, not raw string: a persona on the `claude`
+/// runtime resolves to `claude-agent-acp`, but a client with only the
+/// `claude-code-acp` adapter installed sends that command instead. Both map to
+/// the same `claude` runtime, so neither is a real divergence — string equality
+/// would wrongly bake a pin. An unknown/custom command (no matching runtime)
+/// only inherits when it exactly equals the persona command.
+pub fn divergent_agent_command_override(
+    persona_id: Option<&str>,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+    picked_command: Option<&str>,
+) -> Option<String> {
+    let picked = picked_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let persona_command = effective_agent_command(persona_id, personas, None);
+    let same_runtime = match (
+        known_acp_runtime(picked),
+        known_acp_runtime(&persona_command),
+    ) {
+        (Some(a), Some(b)) => std::ptr::eq(a, b),
+        _ => picked == persona_command,
+    };
+    if same_runtime {
+        None
+    } else {
+        Some(picked.to_string())
+    }
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -577,7 +642,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        classify_runtime, default_agent_command, find_via_login_shell, managed_agent_avatar_url,
+        classify_runtime, default_agent_command, divergent_agent_command_override,
+        effective_agent_command, find_via_login_shell, managed_agent_avatar_url,
         normalize_agent_args, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
         GOOSE_AVATAR_URL,
     };
@@ -759,5 +825,126 @@ mod tests {
         assert_eq!(status, AcpAvailabilityStatus::CliMissing);
         assert_eq!(cmd.as_deref(), Some("codex-acp"));
         assert_eq!(path.as_deref(), Some("/opt/homebrew/bin/codex-acp"));
+    }
+
+    fn persona_with_runtime(
+        id: &str,
+        runtime: Option<&str>,
+    ) -> crate::managed_agents::PersonaRecord {
+        crate::managed_agents::PersonaRecord {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            avatar_url: None,
+            system_prompt: String::new(),
+            runtime: runtime.map(str::to_string),
+            model: None,
+            provider: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: std::collections::BTreeMap::new(),
+            created_at: "2026-06-09T00:00:00Z".to_string(),
+            updated_at: "2026-06-09T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn effective_agent_command_explicit_override_wins() {
+        // An explicit pin beats the persona's runtime.
+        let personas = vec![persona_with_runtime("p1", Some("claude"))];
+        assert_eq!(
+            effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
+            "codex-acp"
+        );
+    }
+
+    #[test]
+    fn effective_agent_command_inherits_persona_runtime() {
+        // No override → persona runtime id maps to its primary command.
+        let personas = vec![persona_with_runtime("p1", Some("claude"))];
+        assert_eq!(
+            effective_agent_command(Some("p1"), &personas, None),
+            "claude-agent-acp"
+        );
+    }
+
+    #[test]
+    fn effective_agent_command_empty_override_is_inherit() {
+        // A blank/whitespace override is treated as "inherit", not a pin.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        assert_eq!(
+            effective_agent_command(Some("p1"), &personas, Some("   ")),
+            "goose"
+        );
+    }
+
+    #[test]
+    fn effective_agent_command_falls_back_to_default() {
+        // No override, no persona runtime, and a deleted persona all fall back
+        // to the bundled default.
+        let personas = vec![persona_with_runtime("p1", None)];
+        assert_eq!(
+            effective_agent_command(Some("p1"), &personas, None),
+            default_agent_command()
+        );
+        assert_eq!(
+            effective_agent_command(Some("gone"), &personas, None),
+            default_agent_command()
+        );
+        assert_eq!(
+            effective_agent_command(None, &personas, None),
+            default_agent_command()
+        );
+    }
+
+    #[test]
+    fn divergent_override_none_when_picked_matches_persona_runtime() {
+        // The persona-backed create/edit flow sends the persona's resolved
+        // command. It must be treated as "inherit" (None), not a pin.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        assert_eq!(
+            divergent_agent_command_override(Some("p1"), &personas, Some("goose")),
+            None
+        );
+    }
+
+    #[test]
+    fn divergent_override_none_for_alternate_command_of_same_runtime() {
+        // A client with only `claude-code-acp` installed sends that command for
+        // a `claude` persona whose primary command is `claude-agent-acp`. Both
+        // map to the `claude` runtime, so it inherits — string equality would
+        // wrongly bake a pin (CRITICAL-3).
+        let personas = vec![persona_with_runtime("p1", Some("claude"))];
+        assert_eq!(
+            divergent_agent_command_override(Some("p1"), &personas, Some("claude-code-acp")),
+            None
+        );
+    }
+
+    #[test]
+    fn divergent_override_some_when_picked_is_different_runtime() {
+        // A deliberate pin to a different runtime is preserved.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        assert_eq!(
+            divergent_agent_command_override(Some("p1"), &personas, Some("codex-acp")),
+            Some("codex-acp".to_string())
+        );
+    }
+
+    #[test]
+    fn divergent_override_none_for_empty_or_absent_pick() {
+        // The "Inherit from persona" sentinel (empty) and a name-only edit
+        // (absent) both clear the pin.
+        let personas = vec![persona_with_runtime("p1", Some("goose"))];
+        assert_eq!(
+            divergent_agent_command_override(Some("p1"), &personas, Some("   ")),
+            None
+        );
+        assert_eq!(
+            divergent_agent_command_override(Some("p1"), &personas, None),
+            None
+        );
     }
 }
