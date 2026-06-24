@@ -1188,5 +1188,11 @@ export async function applyWorkspace(
   });
 }
 
+// Validate a candidate repos dir without mutating the filesystem. Rejects
+// with a human-readable reason; resolves for a valid or empty path.
+export async function validateReposDir(dir: string): Promise<void> {
+  await invokeTauri("validate_repos_dir", { dir });
+}
+
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });

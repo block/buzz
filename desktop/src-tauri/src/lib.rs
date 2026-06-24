@@ -865,6 +865,7 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            validate_repos_dir,
             get_active_workspace,
             set_prevent_sleep_active,
             get_agent_memory,

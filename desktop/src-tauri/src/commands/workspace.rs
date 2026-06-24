@@ -25,18 +25,36 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
     })
 }
 
+/// Validate a candidate `repos_dir` without mutating the filesystem.
+///
+/// The Add/Edit workspace dialogs call this on submit to block Save on a bad
+/// path, so a typo never reaches `apply_workspace`. Reuses the same
+/// `validate_repos_dir` the boot/apply path uses — one source of truth for
+/// "what's a valid repos dir". An empty/whitespace value clears the override
+/// and is valid. `Err` carries the human-readable reason for inline display.
+#[tauri::command]
+pub fn validate_repos_dir(dir: String) -> Result<(), String> {
+    let trimmed = dir.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
+    crate::managed_agents::validate_repos_dir(&nest, trimmed).map(|_| ())
+}
+
 /// Apply a workspace's configuration to the backend session.
 ///
 /// Called by the frontend on app init (after reload) to configure the
 /// Tauri backend with the selected workspace's relay URL, keys, and repos
 /// directory.
 ///
-/// Validation runs before any state mutation: an invalid `repos_dir` (bad
-/// path) rejects cleanly with nothing applied. The `REPOS` symlink itself is
-/// a filesystem *side-effect* — its failure (e.g. a non-empty real `REPOS`
-/// refusing a downgrade, or a renamed external target on a later launch) is
-/// non-fatal: relay/keys still apply, the command returns `Ok`, and a
-/// `repos-dir-error` event surfaces the failure to the frontend.
+/// A bad `repos_dir` is non-fatal: relay/keys always apply (the relay is the
+/// active workspace's own choice — orthogonal to the filesystem repos dir),
+/// the bad value is NOT persisted (so the next boot starts clean), the
+/// `REPOS` symlink is skipped (REPOS stays a real dir), a `repos-dir-error`
+/// event surfaces the reason, and the command returns `Ok`. The dialogs
+/// already block a bad path at Save (`validate_repos_dir`); this fallback only
+/// catches a value that went bad after save (deleted dir, unmounted volume).
 #[tauri::command]
 pub fn apply_workspace(
     relay_url: String,
@@ -54,22 +72,27 @@ pub fn apply_workspace(
     };
 
     // Normalize repos_dir to a trimmed non-empty value. `None`/empty clears
-    // the override (REPOS falls back to a real dir). A bad path is rejected
-    // here — before any mutation — so the dialog sees a clean Err.
+    // the override (REPOS falls back to a real dir). A bad path does NOT
+    // reject — it is treated as if no override were set: relay/keys still
+    // apply, the bad value is not persisted, and a `repos-dir-error` surfaces
+    // the reason. Persisting a bad path would make every later boot read it,
+    // fail to resolve the symlink, and silently skip agent restore.
     let repos_dir = repos_dir
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    if let Some(dir) = repos_dir.as_deref() {
-        let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
-        // Validate without mutating the filesystem. Keeps the command's
-        // "validate-first, nothing below can fail" contract honest. Also emit
-        // the error so it surfaces even at the init call site (which swallows
-        // the returned Err to console for the relay/keys path).
-        if let Err(error) = crate::managed_agents::validate_repos_dir(&nest, dir) {
-            let _ = app.emit("repos-dir-error", error.clone());
-            return Err(error);
+    let effective_repos_dir = match repos_dir.as_deref() {
+        Some(dir) => {
+            let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
+            match crate::managed_agents::validate_repos_dir(&nest, dir) {
+                Ok(_) => repos_dir.as_deref(),
+                Err(error) => {
+                    let _ = app.emit("repos-dir-error", error);
+                    None
+                }
+            }
         }
-    }
+        None => None,
+    };
 
     // ── Apply all state changes (nothing below can fail) ──────────────────
     {
@@ -83,17 +106,20 @@ pub fn apply_workspace(
     }
 
     // ── Filesystem side-effect (non-fatal) ────────────────────────────────
-    // Persist repos_dir for the backend to read at boot, then re-point REPOS
-    // to match. Persisting first makes the dotfile authoritative even if the
+    // Persist the *effective* repos_dir (None when the candidate failed
+    // validation) for the backend to read at boot, then re-point REPOS to
+    // match. Persisting first makes the dotfile authoritative even if the
     // symlink apply fails here (e.g. a non-empty real REPOS): the next boot
     // reads the persisted value and resolves the symlink before any agent can
-    // clone into REPOS. Failure of either must NOT fail the command — relay/
-    // keys are already applied. Surface symlink errors via `repos-dir-error`.
+    // clone into REPOS. A bad candidate persists `None`, so the next boot is
+    // clean and agent restore proceeds. Failure of either must NOT fail the
+    // command — relay/keys are already applied. Surface symlink errors via
+    // `repos-dir-error`.
     if let Some(nest) = nest_dir() {
-        if let Err(error) = write_persisted_repos_dir(&nest, repos_dir.as_deref()) {
+        if let Err(error) = write_persisted_repos_dir(&nest, effective_repos_dir) {
             eprintln!("buzz-desktop: persist repos dir failed: {error}");
         }
-        if let Err(error) = ensure_repos_symlink(&nest, repos_dir.as_deref()) {
+        if let Err(error) = ensure_repos_symlink(&nest, effective_repos_dir) {
             eprintln!("buzz-desktop: repos dir setup failed: {error}");
             let _ = app.emit("repos-dir-error", error);
         }

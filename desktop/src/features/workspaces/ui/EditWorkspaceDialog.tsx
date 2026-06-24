@@ -5,6 +5,7 @@ import {
   expandTilde,
   normalizeRelayUrl,
 } from "@/features/workspaces/workspaceStorage";
+import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -41,6 +42,7 @@ export function EditWorkspaceDialog({
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
   const [reposDir, setReposDir] = React.useState("");
+  const [reposDirError, setReposDirError] = React.useState<string | null>(null);
 
   // Sync form state when the dialog opens with a workspace
   React.useEffect(() => {
@@ -49,6 +51,7 @@ export function EditWorkspaceDialog({
       setRelayUrl(workspace.relayUrl);
       setToken(workspace.token ?? "");
       setReposDir(workspace.reposDir ?? "");
+      setReposDirError(null);
     }
   }, [workspace, open]);
 
@@ -84,10 +87,18 @@ export function EditWorkspaceDialog({
 
       // Expand `~` to an absolute path before save — the backend rejects
       // tilde paths. An empty field clears the override (REPOS reverts to a
-      // real dir). Only emit when the resolved value actually changed so a
-      // no-op edit doesn't trigger a backend re-apply.
+      // real dir). Validate the expanded value (the bytes the backend
+      // canonicalizes) before save so a bad path is caught here instead of
+      // bricking a later boot. Only emit when the resolved value actually
+      // changed so a no-op edit doesn't trigger a backend re-apply.
       const expandedReposDir = await expandTilde(reposDir);
       if (expandedReposDir !== workspace.reposDir) {
+        try {
+          await validateReposDir(expandedReposDir ?? "");
+        } catch (error) {
+          setReposDirError(String(error));
+          return;
+        }
         updates.reposDir = expandedReposDir;
       }
 
@@ -185,11 +196,17 @@ export function EditWorkspaceDialog({
             </label>
             <Input
               id="edit-ws-repos-dir"
-              onChange={(e) => setReposDir(e.target.value)}
+              onChange={(e) => {
+                setReposDir(e.target.value);
+                setReposDirError(null);
+              }}
               placeholder="~/Development"
               type="text"
               value={reposDir}
             />
+            {reposDirError ? (
+              <p className="text-xs text-destructive">{reposDirError}</p>
+            ) : null}
             <p className="text-xs text-muted-foreground">
               Point the agent's <code>REPOS</code> directory at an existing
               folder so agents work in your local checkouts. Leave blank to use

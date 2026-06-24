@@ -228,6 +228,18 @@ pub fn resolve_repos_at_boot(nest_root: &Path) -> bool {
         eprintln!("buzz-desktop: repos dir setup failed at boot: {error}");
     }
     let restore = should_restore_agents(persisted.is_some(), &symlink_result);
+    // Log the resolved outcome on success so a healthy boot is observable (the
+    // Err/skip branches already log; previously success was silent).
+    if symlink_result.is_ok() {
+        match persisted.as_deref() {
+            Some(dir) => eprintln!(
+                "buzz-desktop: repos dir resolved at boot — REPOS symlinked to configured `{dir}`"
+            ),
+            None => eprintln!(
+                "buzz-desktop: repos dir resolved at boot — no configured override, REPOS is the default real dir"
+            ),
+        }
+    }
     if !restore {
         eprintln!(
             "buzz-desktop: skipping agent restore — configured repos_dir `{}` could not be resolved at boot; will retry on next launch",
