@@ -1109,9 +1109,10 @@ function ImageBlock({
 
   const spoilerMediaStyle = hiddenSpoilerMediaSize
     ? ({
-        "--buzz-spoiler-media-height": `${hiddenSpoilerMediaSize.height}px`,
+        "--buzz-spoiler-media-aspect-ratio": `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
         "--buzz-spoiler-media-width": `${hiddenSpoilerMediaSize.width}px`,
-        height: `${hiddenSpoilerMediaSize.height}px`,
+        aspectRatio: `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
+        height: "auto",
         width: `${hiddenSpoilerMediaSize.width}px`,
       } as React.CSSProperties)
     : undefined;
