@@ -25,7 +25,6 @@ type ChatHeaderProps = {
   belowSystemChrome?: boolean;
   /** Ref to the outer chrome wrapper when `belowSystemChrome` is true. */
   chromeWrapperRef?: React.Ref<HTMLDivElement>;
-  density?: "default" | "compact";
   title: string;
   description?: string;
   channelType?: ChannelType;
@@ -87,7 +86,6 @@ export function ChatHeader({
   actions,
   belowSystemChrome = false,
   chromeWrapperRef,
-  density = "default",
   title,
   description,
   channelType,
@@ -117,13 +115,8 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-transparent px-5 transition-[margin,padding] duration-200 ease-linear",
-        density === "compact"
-          ? belowSystemChrome
-            ? "min-h-8 py-1.5"
-            : "min-h-8 py-0"
-          : "min-h-11 py-1.5",
-        overlaysContent && !belowSystemChrome && "-mb-11",
+        "pointer-events-auto relative z-30 flex min-h-14 min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-transparent px-5 py-2 transition-[margin,padding] duration-200 ease-linear",
+        overlaysContent && !belowSystemChrome && "-mb-14",
         clearCollapsedTopChromeControls && "pl-[176px]",
       )}
       data-testid="chat-header"

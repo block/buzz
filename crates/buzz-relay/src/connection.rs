@@ -20,10 +20,6 @@ use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::AppState;
 
-/// Number of buffer-full events tolerated before cancelling a slow client.
-/// Prevents transient read stalls from hard-disconnecting agents mid-inference.
-pub(crate) const SLOW_CLIENT_GRACE_LIMIT: u8 = 3;
-
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
 
@@ -62,18 +58,20 @@ pub struct ConnectionState {
     pub ctrl_tx: mpsc::Sender<WsMessage>,
     /// Token used to signal graceful shutdown of this connection's tasks.
     pub cancel: CancellationToken,
-    /// Consecutive buffer-full events. Cancel only after [`SLOW_CLIENT_GRACE_LIMIT`].
+    /// Consecutive buffer-full events. Cancel only after `grace_limit`.
     /// Shared with `ConnectionManager::ConnEntry` so both direct sends and
     /// fan-out broadcasts track the same counter.
     pub backpressure_count: Arc<AtomicU8>,
+    /// Configurable slow-client grace limit (from `Config::slow_client_grace_limit`).
+    pub grace_limit: u8,
 }
 
 impl ConnectionState {
     /// Sends a data message to this connection's outbound channel.
     ///
     /// On a full buffer, increments the backpressure counter. The first
-    /// [`SLOW_CLIENT_GRACE_LIMIT`] occurrences log a warning; sustained
-    /// backpressure cancels the connection to prevent unbounded memory growth.
+    /// `grace_limit` occurrences log a warning; sustained backpressure
+    /// cancels the connection to prevent unbounded memory growth.
     pub fn send(&self, msg: String) -> bool {
         match self.send_tx.try_send(WsMessage::Text(msg.into())) {
             Ok(_) => {
@@ -83,12 +81,12 @@ impl ConnectionState {
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 let count = self.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if count >= SLOW_CLIENT_GRACE_LIMIT {
+                if count >= self.grace_limit {
                     warn!(conn_id = %self.conn_id, count, "sustained backpressure — closing slow client");
                     metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
                     self.cancel.cancel();
                 } else {
-                    warn!(conn_id = %self.conn_id, count, grace = SLOW_CLIENT_GRACE_LIMIT, "send buffer full — grace {count}/{SLOW_CLIENT_GRACE_LIMIT}");
+                    warn!(conn_id = %self.conn_id, count, grace = self.grace_limit, "send buffer full — grace {count}/{}", self.grace_limit);
                 }
                 false
             }
@@ -136,6 +134,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
         ctrl_tx: ctrl_tx.clone(),
         cancel: cancel.clone(),
         backpressure_count: Arc::clone(&backpressure_count),
+        grace_limit: state.config.slow_client_grace_limit,
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
@@ -162,6 +161,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
         cancel.clone(),
         Arc::clone(&backpressure_count),
         subscriptions,
+        state.config.slow_client_grace_limit,
     );
 
     let (ws_send, ws_recv) = socket.split();
@@ -283,9 +283,6 @@ async fn heartbeat_loop(
     }
 }
 
-/// NIP-11 advertised max_message_length. Frames exceeding this are rejected.
-pub const MAX_FRAME_BYTES: usize = 65536;
-
 async fn recv_loop(
     mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
     conn: Arc<ConnectionState>,
@@ -298,16 +295,38 @@ async fn recv_loop(
             msg = ws_recv.next() => {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
-                        if text.len() > MAX_FRAME_BYTES {
-                            warn!(conn_id = %conn.conn_id, bytes = text.len(), "frame too large — disconnecting");
+                        let max_frame_bytes = state.config.max_frame_bytes;
+                        if text.len() > max_frame_bytes {
+                            warn!(
+                                conn_id = %conn.conn_id,
+                                bytes = text.len(),
+                                max_frame_bytes,
+                                "frame too large — disconnecting"
+                            );
+                            conn.send(format!(
+                                r#"["NOTICE","error: frame too large ({} bytes, limit {})"]"#,
+                                text.len(),
+                                max_frame_bytes
+                            ));
                             break;
                         }
                         trace!(len = text.len(), "frame received");
                         handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
-                        if bytes.len() > MAX_FRAME_BYTES {
-                            warn!(conn_id = %conn.conn_id, bytes = bytes.len(), "binary frame too large — disconnecting");
+                        let max_frame_bytes = state.config.max_frame_bytes;
+                        if bytes.len() > max_frame_bytes {
+                            warn!(
+                                conn_id = %conn.conn_id,
+                                bytes = bytes.len(),
+                                max_frame_bytes,
+                                "binary frame too large — disconnecting"
+                            );
+                            conn.send(format!(
+                                r#"["NOTICE","error: binary frame too large ({} bytes, limit {})"]"#,
+                                bytes.len(),
+                                max_frame_bytes
+                            ));
                             break;
                         }
                         // Binary frames: attempt UTF-8 decode and treat as text. Some clients

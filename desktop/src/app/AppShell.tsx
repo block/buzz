@@ -2,7 +2,11 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 
-import { deriveShellRoute, toSearchHit } from "@/app/AppShell.helpers";
+import {
+  deriveShellRoute,
+  shouldBounceForChannelNotification,
+  toSearchHit,
+} from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
   AppShellOverlays,
@@ -48,6 +52,7 @@ import {
   resolveSlotSound,
 } from "@/features/notifications/lib/sound";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
+import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -99,7 +104,6 @@ export function AppShell() {
 
   const workspacesHook = useWorkspaces();
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
-
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
@@ -140,7 +144,6 @@ export function AppShell() {
   )
     ? locationSearchSection
     : DEFAULT_SETTINGS_SECTION;
-
   const startupReady = useDeferredStartup();
 
   const identityQuery = useIdentityQuery();
@@ -177,7 +180,8 @@ export function AppShell() {
     refetchHomeFeedFromLiveSignal,
   );
   const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, _event: RelayEvent) => {
+    (_channelId: string, event: RelayEvent) => {
+      if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.settings.desktopEnabled) return;
       void requestDockBounce();
     },
@@ -412,8 +416,6 @@ export function AppShell() {
       getThreadReadAt,
     );
 
-  // Raw add to the in-app nav badge, mirroring the inbox filter badge; gated by
-  // homeBadgeEnabled to match every other badge contribution.
   const dueReminderBadge = useDueReminderBadgeCount(
     identityQuery.data?.pubkey,
     notificationSettings.settings.homeBadgeEnabled,
@@ -592,14 +594,18 @@ export function AppShell() {
   }, []);
 
   React.useEffect(() => {
-    const numericCount =
+    const count =
       unreadChannelNotificationCount + homeBadgeCountExcludingHighPriority;
-    if (numericCount > 0) {
-      void setDesktopAppBadge({ kind: "count", count: numericCount });
-    } else {
-      void setDesktopAppBadge({ kind: "none" });
-    }
-  }, [homeBadgeCountExcludingHighPriority, unreadChannelNotificationCount]);
+    void setDesktopAppBadge(
+      count
+        ? { kind: "count", count }
+        : { kind: unreadChannelIds.size ? "dot" : "none" },
+    );
+  }, [
+    homeBadgeCountExcludingHighPriority,
+    unreadChannelIds,
+    unreadChannelNotificationCount,
+  ]);
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
@@ -630,12 +636,10 @@ export function AppShell() {
   }, []);
 
   const handleOpenNewDm = React.useCallback(() => setIsNewDmOpen(true), []);
-
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
   );
-
   React.useLayoutEffect(() => {
     if (settingsOpen) {
       return;
@@ -690,13 +694,11 @@ export function AppShell() {
     goHome,
     settingsOpen,
   ]);
-
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
     open: settingsOpen,
   });
-
   useMarkAsReadShortcuts({
     activeChannelId: activeChannel?.id ?? null,
     activeChannelLastMessageAt: activeChannel?.lastMessageAt,
@@ -824,6 +826,9 @@ export function AppShell() {
                           onUpdateWorkspace={workspacesHook.updateWorkspace}
                           onRemoveWorkspace={workspacesHook.removeWorkspace}
                           onSwitchWorkspace={workspacesHook.switchWorkspace}
+                          onCreateAgent={() =>
+                            void goAgents().then(requestOpenCreateAgent)
+                          }
                           selfPresenceStatus={presenceSession.currentStatus}
                           workspaces={workspacesHook.workspaces}
                           onCreateChannel={async ({

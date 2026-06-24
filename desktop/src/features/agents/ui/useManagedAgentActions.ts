@@ -31,7 +31,8 @@ import {
 export function useManagedAgentActions() {
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
-  const channelsQuery = useChannelsQuery();
+  const [shouldLoadChannels, setShouldLoadChannels] = React.useState(false);
+  const channelsQuery = useChannelsQuery({ enabled: shouldLoadChannels });
   const startMutation = useStartManagedAgentMutation();
   const stopMutation = useStopManagedAgentMutation();
   const deleteMutation = useDeleteManagedAgentMutation();
@@ -52,6 +53,13 @@ export function useManagedAgentActions() {
   >(null);
 
   const managedAgentLogQuery = useManagedAgentLogQuery(logAgentPubkey);
+
+  React.useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setShouldLoadChannels(true);
+    }, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, []);
 
   const managedAgents = React.useMemo(
     () =>
@@ -151,14 +159,24 @@ export function useManagedAgentActions() {
     }
   }
 
+  async function getChannelsForAction() {
+    if (channelsQuery.data) {
+      return channelsQuery.data;
+    }
+
+    const result = await channelsQuery.refetch();
+    return result.data ?? [];
+  }
+
   async function handleStop(pubkey: string) {
     clearFeedback();
     try {
       const agent = managedAgents.find((a) => a.pubkey === pubkey);
       if (!agent) return;
+      const channels = await getChannelsForAction();
       const result = await stopManagedAgentWithRules({
         agent,
-        channels: channelsQuery.data ?? [],
+        channels,
         relayAgents: relayAgentsQuery.data ?? [],
         stopManagedAgent: stopMutation.mutateAsync,
       });
@@ -193,9 +211,10 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((a) => a.pubkey === pubkey);
       if (!agent) return;
+      const channels = await getChannelsForAction();
       const result = await deleteManagedAgentWithRules({
         agent,
-        channels: channelsQuery.data ?? [],
+        channels,
         deleteManagedAgent: deleteMutation.mutateAsync,
         presenceLookup: managedPresenceQuery.data,
         relayAgents: relayAgentsQuery.data ?? [],

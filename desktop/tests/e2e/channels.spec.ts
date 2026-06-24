@@ -1061,7 +1061,11 @@ test("sidebar shows unread indicator for newly active channels", async ({
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
@@ -1090,7 +1094,11 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-watercooler")).toBeVisible();
+  await expect(page.getByTestId("channel-watercooler")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
 
   await page.getByTestId("channel-watercooler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");

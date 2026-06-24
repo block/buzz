@@ -6,6 +6,10 @@ import * as AlertDialogPrimitive from "@radix-ui/react-alert-dialog";
 import { cn } from "@/shared/lib/cn";
 import { buttonVariants } from "@/shared/ui/button";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import {
+  MODAL_CONTENT_MOTION_CLASS,
+  MODAL_OVERLAY_MOTION_CLASS,
+} from "@/shared/ui/modalMotion";
 
 const AlertDialog = AlertDialogPrimitive.Root;
 const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
@@ -16,7 +20,8 @@ const AlertDialogOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Overlay
     className={cn(
-      "fixed inset-0 z-50 bg-black/60 transition-none duration-200 ease-out data-[state=closed]:duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 motion-reduce:animate-none",
+      "fixed inset-0 z-50 bg-black/60",
+      MODAL_OVERLAY_MOTION_CLASS,
       MODAL_BACKDROP_BLUR_CLASS,
       className,
     )}
@@ -35,7 +40,8 @@ const AlertDialogContent = React.forwardRef<
     <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4 pointer-events-none">
       <AlertDialogPrimitive.Content
         className={cn(
-          "pointer-events-auto grid w-[calc(100vw-2rem)] max-w-md gap-4 rounded-3xl border border-border bg-background p-6 shadow-2xl transition-none duration-200 ease-out data-[state=closed]:duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 motion-reduce:animate-none",
+          "pointer-events-auto grid w-[calc(100vw-2rem)] max-w-md gap-4 rounded-3xl bg-background p-6 shadow-2xl outline-hidden",
+          MODAL_CONTENT_MOTION_CLASS,
           className,
         )}
         ref={ref}

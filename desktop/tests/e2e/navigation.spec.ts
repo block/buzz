@@ -266,6 +266,26 @@ test("settings is a route: section survives reload, closing returns to the previ
   await expect(threadPanel).toBeVisible();
 });
 
+test("settings shortcut returns without opening search dialog", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const channelUrl = page.url();
+
+  await page.keyboard.press(
+    process.platform === "darwin" ? "Meta+Comma" : "Control+Comma",
+  );
+
+  await expect(page).toHaveURL(/#\/settings/);
+  await page.getByTestId("settings-back-to-app").click();
+
+  await expect.poll(() => page.url()).toBe(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("search-results")).not.toBeVisible();
+});
+
 test("message links to visible root messages open the thread panel", async ({
   page,
 }) => {

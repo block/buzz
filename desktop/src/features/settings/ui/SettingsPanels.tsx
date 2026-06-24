@@ -43,6 +43,7 @@ import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 export type SettingsSection =
   | "profile"
@@ -206,12 +207,10 @@ function ThemeSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-theme">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Appearance</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Choose a theme for Buzz. Light and dark mode is auto-detected.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Appearance"
+        description="Choose a theme for Buzz. Light and dark mode is auto-detected."
+      />
 
       <div className="relative mb-3">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

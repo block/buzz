@@ -71,11 +71,15 @@ function withAdditionalBadgeCount(baseline: { count: number }, count: number) {
   return { state: "count", count: baseline.count + count };
 }
 
+function withDotOnlyBadge(baseline: { state: string; count: number }) {
+  return baseline.count > 0 ? baseline : { state: "dot", count: 0 };
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
-test("numeric badge increments for regular message in inactive channel", async ({
+test("regular message bolds inactive channel without numeric badge", async ({
   page,
 }) => {
   await page.goto("/");
@@ -96,8 +100,12 @@ test("numeric badge increments for regular message in inactive channel", async (
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
-  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await waitForBadgeState(page, withDotOnlyBadge(baselineBadge));
 });
 
 test("numeric badge increments for @mention in inactive channel", async ({
@@ -145,6 +153,42 @@ test("numeric badge increments for DM message", async ({ page }) => {
   }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("channel-unread-alice-tyler")).toBeVisible();
+  await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
+});
+
+test("numeric badge increments for interested thread reply in inactive channel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "random");
+  const baselineBadge = await getSettledBadgeState(page);
+
+  const rootEventId = await page.evaluate(() => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "random",
+      content: "Conversation I started",
+      kind: 40002,
+      pubkey: "deadbeef".repeat(8),
+    });
+    return root?.id;
+  });
+
+  await page.evaluate(
+    ({ parentEventId, pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "Thread reply to a followed conversation",
+        kind: 40002,
+        parentEventId,
+        pubkey,
+      });
+    },
+    { parentEventId: rootEventId, pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
+
+  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 
@@ -202,11 +246,19 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
     { pubkey: TEST_IDENTITIES.alice.pubkey },
   );
 
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-random")).toHaveCSS(
+    "font-weight",
+    "600",
+  );
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
   await page.getByTestId("channel-random").click({ button: "right" });
   await page.getByText("Mark as read").click();
 
+  await expect(page.getByTestId("channel-random")).not.toHaveCSS(
+    "font-weight",
+    "600",
+  );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await waitForBadgeState(page, baselineBadge);
 });

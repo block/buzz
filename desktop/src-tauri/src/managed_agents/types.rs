@@ -88,6 +88,9 @@ pub struct ManagedAgentRecord {
     pub name: String,
     #[serde(default)]
     pub persona_id: Option<String>,
+    /// `#[serde(default)]` so an old build still parses a store whose inline
+    /// key was stripped after a keyring build migrated it into the Keychain.
+    #[serde(default)]
     pub private_key_nsec: String,
     /// NIP-OA auth tag JSON. Computed at agent creation time.
     ///

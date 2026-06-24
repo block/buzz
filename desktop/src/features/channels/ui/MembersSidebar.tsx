@@ -704,11 +704,9 @@ function SearchResultSectionTitle({
   children: React.ReactNode;
 }) {
   return (
-    <div className="sticky top-0 z-10 mr-3 flex min-h-9 items-center gap-2 bg-background/95 px-4 pb-1.5 pt-3 text-xs font-medium uppercase tracking-wide text-muted-foreground/75 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+    <div className="sticky top-0 z-10 mr-3 flex min-h-9 items-center gap-2 bg-background/95 px-4 pb-1.5 pt-3 text-xs font-medium text-muted-foreground/75 backdrop-blur supports-[backdrop-filter]:bg-background/80">
       <span>{children}</span>
-      {action ? (
-        <span className="normal-case tracking-normal">{action}</span>
-      ) : null}
+      {action ? <span>{action}</span> : null}
     </div>
   );
 }

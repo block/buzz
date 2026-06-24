@@ -24,7 +24,7 @@ use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
-use crate::connection::{ConnectionSubscriptions, SLOW_CLIENT_GRACE_LIMIT};
+use crate::connection::ConnectionSubscriptions;
 use crate::subscription::SubscriptionRegistry;
 
 /// Per-connection entry in the connection manager.
@@ -36,6 +36,7 @@ struct ConnEntry {
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    grace_limit: u8,
 }
 
 /// Tracks active WebSocket connections and provides message routing by connection ID.
@@ -52,7 +53,7 @@ impl ConnectionManager {
     }
 
     /// Registers a connection with its outbound sender, cancellation token,
-    /// shared backpressure counter, and mutable subscription map.
+    /// shared backpressure counter, mutable subscription map, and grace limit.
     pub fn register(
         &self,
         conn_id: Uuid,
@@ -60,6 +61,7 @@ impl ConnectionManager {
         cancel: CancellationToken,
         backpressure_count: Arc<AtomicU8>,
         subscriptions: ConnectionSubscriptions,
+        grace_limit: u8,
     ) {
         self.connections.insert(
             conn_id,
@@ -69,6 +71,7 @@ impl ConnectionManager {
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
+                grace_limit,
             },
         );
     }
@@ -131,8 +134,8 @@ impl ConnectionManager {
     /// Sends a text message to the given connection.
     ///
     /// Returns `false` if the connection is gone or the buffer is full.
-    /// On sustained backpressure (>[`SLOW_CLIENT_GRACE_LIMIT`] consecutive full
-    /// buffers), cancels the connection. Transient stalls get a warning only.
+    /// On sustained backpressure (>grace_limit consecutive full buffers),
+    /// cancels the connection. Transient stalls get a warning only.
     pub fn send_to(&self, conn_id: Uuid, msg: String) -> bool {
         if let Some(entry) = self.connections.get(&conn_id) {
             let conn = entry.value();
@@ -143,12 +146,12 @@ impl ConnectionManager {
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if count >= SLOW_CLIENT_GRACE_LIMIT {
+                    if count >= conn.grace_limit {
                         tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
                         metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
                         conn.cancel.cancel();
                     } else {
-                        tracing::warn!(conn_id = %conn_id, count, grace = SLOW_CLIENT_GRACE_LIMIT, "fan-out: send buffer full — grace {count}/{SLOW_CLIENT_GRACE_LIMIT}");
+                        tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
                     }
                     false
                 }
@@ -591,6 +594,7 @@ mod tests {
             cancel.clone(),
             Arc::clone(&bp),
             Arc::new(Mutex::new(HashMap::new())),
+            3,
         );
         (mgr, conn_id, rx, cancel, bp)
     }
@@ -633,13 +637,13 @@ mod tests {
     fn send_to_cancels_after_grace_limit() {
         let (mgr, id, _rx, cancel, _bp) = setup_conn(1);
         assert!(mgr.send_to(id, "fill".into()));
-        // Exhaust grace: 3 consecutive Full events.
-        for _ in 0..SLOW_CLIENT_GRACE_LIMIT {
+        // Exhaust grace: 3 consecutive Full events (matches grace_limit=3 from setup_conn).
+        for _ in 0..3u8 {
             mgr.send_to(id, "overflow".into());
         }
         assert!(
             cancel.is_cancelled(),
-            "should cancel after SLOW_CLIENT_GRACE_LIMIT overflows"
+            "should cancel after grace_limit overflows"
         );
     }
 
@@ -662,6 +666,7 @@ mod tests {
             ctrl_tx,
             cancel: cancel.clone(),
             backpressure_count: Arc::clone(&bp),
+            grace_limit: 3,
         };
 
         let mgr = ConnectionManager::new();
@@ -671,6 +676,7 @@ mod tests {
             cancel.clone(),
             Arc::clone(&bp),
             Arc::clone(&conn.subscriptions),
+            3,
         );
 
         // Fill the buffer via direct send.
@@ -705,7 +711,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-        mgr.register(conn_id, tx, cancel, bp, Arc::clone(&subscriptions));
+        mgr.register(conn_id, tx, cancel, bp, Arc::clone(&subscriptions), 3);
 
         let pubkey = vec![7u8; 32];
         mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
@@ -722,7 +728,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-        mgr.register(conn_id, tx, cancel, bp, subscriptions);
+        mgr.register(conn_id, tx, cancel, bp, subscriptions, 3);
 
         assert_eq!(mgr.pubkey_for_conn(conn_id), None);
         let pubkey = vec![9u8; 32];

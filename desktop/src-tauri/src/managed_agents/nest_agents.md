@@ -11,7 +11,7 @@ Your persistent workspace. Created once by the Buzz desktop app. The static cont
 | `RESEARCH/` | Findings, notes, and reference material |
 | `WORK_LOGS/` | Session logs — what was tried, learned, decided |
 | `OUTBOX/` | Shareable docs for external readers (no frontmatter) |
-| `REPOS/` | Cloned repositories (clone freely here for exploration) |
+| `REPOS/` | Source checkouts. Work in an existing local checkout when one exists; clone here only when none does |
 | `.scratch/` | Temporary working files — treat as disposable between sessions |
 
 Filenames: `ALL_CAPS_WITH_UNDERSCORES.md` (e.g., `OAUTH_FLOW_NOTES.md`).

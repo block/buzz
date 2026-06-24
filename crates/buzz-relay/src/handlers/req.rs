@@ -20,7 +20,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_HISTORICAL_LIMIT: i64 = 10_000;
+const MAX_HISTORICAL_LIMIT: i64 = 2_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
 const P_GATED_KINDS: [u32; 5] = [
     KIND_AGENT_OBSERVER_FRAME,
@@ -253,6 +253,9 @@ pub async fn handle_req(
                 return;
             }
             total_sent += 1;
+            if total_sent.is_multiple_of(100) {
+                tokio::task::yield_now().await;
+            }
         }
     }
 

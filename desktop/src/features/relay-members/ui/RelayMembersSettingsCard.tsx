@@ -36,6 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
+import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
 type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
@@ -353,13 +354,15 @@ export function RelayMembersSettingsCard({
 
   return (
     <section className="min-w-0" data-testid="settings-relay-members">
-      <div className="mb-12 space-y-1">
-        <h2 className="text-2xl font-semibold tracking-tight">Relay Access</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Manage who can connect to this relay. Owners can invite admins or
-          members; admins can invite members.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Relay Access"
+        description={
+          <>
+            Manage who can connect to this relay. Owners can invite admins or
+            members; admins can invite members.
+          </>
+        }
+      />
 
       <div className="space-y-6">
         <form className="space-y-1.5" onSubmit={handleAddMember}>

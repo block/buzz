@@ -7,6 +7,10 @@ import { X } from "lucide-react";
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import {
+  MODAL_CONTENT_MOTION_CLASS,
+  MODAL_OVERLAY_MOTION_CLASS,
+} from "@/shared/ui/modalMotion";
 
 const Dialog = DialogPrimitive.Root;
 const DialogTrigger = DialogPrimitive.Trigger;
@@ -22,7 +26,8 @@ const DialogOverlay = React.forwardRef<
   return (
     <DialogPrimitive.Overlay
       className={cn(
-        "fixed inset-0 z-50 transition-none duration-200 ease-out data-[state=closed]:duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 motion-reduce:animate-none",
+        "fixed inset-0 z-50",
+        MODAL_OVERLAY_MOTION_CLASS,
         MODAL_BACKDROP_BLUR_CLASS,
         isDark ? "bg-black/60" : "bg-black/10",
         className,
@@ -49,7 +54,8 @@ const DialogContent = React.forwardRef<
     <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4 pointer-events-none">
       <DialogPrimitive.Content
         className={cn(
-          "pointer-events-auto relative grid w-[calc(100vw-2rem)] max-w-2xl gap-4 rounded-3xl border border-border bg-background p-6 shadow-2xl transition-none duration-200 ease-out data-[state=closed]:duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 motion-reduce:animate-none",
+          "pointer-events-auto relative grid w-[calc(100vw-2rem)] max-w-2xl gap-4 rounded-3xl bg-background p-6 shadow-2xl outline-hidden",
+          MODAL_CONTENT_MOTION_CLASS,
           className,
         )}
         ref={ref}

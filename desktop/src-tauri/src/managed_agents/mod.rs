@@ -9,6 +9,7 @@ mod personas;
 mod process_lifecycle;
 #[cfg(feature = "mesh-llm")]
 mod relay_mesh;
+mod repos;
 mod restore;
 mod runtime;
 mod storage;
@@ -26,6 +27,7 @@ pub use personas::*;
 pub use process_lifecycle::*;
 #[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
+pub use repos::{ensure_repos_symlink, validate_repos_dir};
 pub use restore::*;
 pub use runtime::*;
 pub use storage::*;
