@@ -6,8 +6,6 @@ import { Outlet, useLocation } from "@tanstack/react-router";
 import {
   deriveShellRoute,
   isWindowDragHandleEvent,
-  shouldBounceForChannelNotification,
-  toSearchHit,
 } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
@@ -20,6 +18,7 @@ import { useBackForwardControls } from "@/app/navigation/useBackForwardControls"
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
+import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import {
@@ -33,25 +32,12 @@ import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { msgContextKey } from "@/features/channels/readState/readStateFormat";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
-import { getThreadReference } from "@/features/messages/lib/threading";
-import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
 } from "@/features/notifications/hooks";
-import {
-  listenForDesktopNotificationActions,
-  requestDockBounce,
-  revealDesktopAppWindow,
-  sendDesktopNotification,
-  setDesktopAppBadge,
-  type DesktopNotificationTarget,
-} from "@/features/notifications/lib/desktop";
-import {
-  playNotificationSound,
-  resolveSlotSound,
-} from "@/features/notifications/lib/sound";
+import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import {
@@ -84,7 +70,7 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
-import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
+import type { SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
@@ -177,57 +163,6 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     refetchHomeFeedFromLiveSignal,
   );
-  const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, event: RelayEvent) => {
-      if (!shouldBounceForChannelNotification(event.tags)) return;
-      if (!notificationSettings.settings.desktopEnabled) return;
-      void requestDockBounce();
-    },
-  );
-
-  const handleDmNotification = React.useEffectEvent(
-    (event: RelayEvent, channel: Channel) => {
-      if (
-        !notificationSettings.settings.desktopEnabled ||
-        !notificationSettings.settings.slotAlertsEnabled.dm
-      ) {
-        return;
-      }
-
-      const channelName = channel.name?.trim() || "Direct message";
-      const content = event.content.trim();
-      const body =
-        content.length > 0
-          ? content.length > 140
-            ? `${content.slice(0, 137).trimEnd()}...`
-            : content
-          : "New message";
-
-      const threadRootId = getThreadReference(event.tags).rootId ?? null;
-
-      void sendDesktopNotification({
-        title: channelName,
-        body,
-        target: {
-          channelId: channel.id,
-          channelName,
-          content: event.content,
-          createdAt: event.created_at,
-          eventId: event.id,
-          kind: event.kind,
-          pubkey: event.pubkey,
-          threadRootId,
-        },
-      }).then((didSend) => {
-        if (!didSend) return;
-        playNotificationSound(
-          resolveSlotSound(notificationSettings.settings, "dm"),
-        );
-        void requestDockBounce();
-      });
-    },
-  );
-
   const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
   const channels = channelsQuery.data ?? [];
@@ -251,56 +186,18 @@ export function AppShell() {
     [channels, selectedChannelId],
   );
 
-  const handleThreadReplyDesktopNotification = React.useEffectEvent(
-    (channelId: string, event: RelayEvent) => {
-      if (
-        !notificationSettings.settings.desktopEnabled ||
-        !notificationSettings.settings.slotAlertsEnabled.thread_reply
-      ) {
-        return;
-      }
-
-      // Replies that @-mention the user are owned by the home-feed mention
-      // path — skip them here so they don't notify (and sound) twice.
-      const pubkey = identityQuery.data?.pubkey?.trim().toLowerCase() ?? "";
-      if (hasMentionForEvent(event, pubkey)) {
-        return;
-      }
-
-      const channel = channels.find((entry) => entry.id === channelId);
-      const channelName = channel?.name?.trim() || "Thread";
-      const content = event.content.trim();
-      const body =
-        content.length > 0
-          ? content.length > 140
-            ? `${content.slice(0, 137).trimEnd()}...`
-            : content
-          : "New reply";
-
-      const threadRootId = getThreadReference(event.tags).rootId ?? null;
-
-      void sendDesktopNotification({
-        title: `Reply in ${channelName}`,
-        body,
-        target: {
-          channelId,
-          channelName,
-          content: event.content,
-          createdAt: event.created_at,
-          eventId: event.id,
-          kind: event.kind,
-          pubkey: event.pubkey,
-          threadRootId,
-        },
-      }).then((didSend) => {
-        if (!didSend) return;
-        playNotificationSound(
-          resolveSlotSound(notificationSettings.settings, "thread_reply"),
-        );
-        void requestDockBounce();
-      });
-    },
-  );
+  const {
+    handleChannelNotification,
+    handleDmNotification,
+    handleThreadReplyDesktopNotification,
+  } = useAppShellDesktopNotifications({
+    channels,
+    goChannel,
+    goHome,
+    notificationSettings: notificationSettings.settings,
+    openSearchHit,
+    pubkey: identityQuery.data?.pubkey,
+  });
 
   const {
     followedRootIds,
@@ -517,25 +414,6 @@ export function AppShell() {
     [openSearchHit],
   );
 
-  const handleDesktopNotificationAction = React.useEffectEvent(
-    async (target: DesktopNotificationTarget) => {
-      await revealDesktopAppWindow();
-
-      if (!target.channelId) {
-        void goHome();
-        return;
-      }
-
-      const anchor = toSearchHit(target);
-      if (!anchor) {
-        await goChannel(target.channelId);
-        return;
-      }
-
-      await openSearchHit(anchor);
-    },
-  );
-
   // Prevent webview file:/// navigation on file drop outside the composer.
   // Scoped to file drags only (text drag-and-drop into inputs still works).
   // Composer's onDrop fires first (React synthetic before window bubble).
@@ -601,31 +479,6 @@ export function AppShell() {
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
-
-  React.useEffect(() => {
-    let isCancelled = false;
-    let cleanup = () => {};
-
-    void listenForDesktopNotificationActions((target) => {
-      if (isCancelled) {
-        return;
-      }
-
-      void handleDesktopNotificationAction(target);
-    }).then((dispose) => {
-      if (isCancelled) {
-        dispose();
-        return;
-      }
-
-      cleanup = dispose;
-    });
-
-    return () => {
-      isCancelled = true;
-      cleanup();
-    };
-  }, []);
 
   const handleOpenNewDm = React.useCallback(() => setIsNewDmOpen(true), []);
   const handleOpenCreateChannel = React.useCallback(
