@@ -300,6 +300,16 @@ pub struct GitRepoParams {
 
 // ── Manifest-Driven Advertisement (Track C) ──────────────────────────────────
 
+/// Longest refname the fast path will emit. `is_safe_refname` enforces an
+/// alphabet but no length bound; `pkt_line` encodes its payload length in a
+/// 4-hex prefix that overflows past `0xffff`. Git's own refname limits sit far
+/// below this, so any refname this long is pathological — degrade to the
+/// subprocess path rather than risk a malformed length prefix. Generous bound:
+/// `<oid> <refname>\n` plus the 4-byte pkt header must stay under `0xffff`, and
+/// 4096 leaves vast headroom (git's de-facto practical ceiling is a few hundred
+/// bytes total).
+const MAX_FAST_PATH_REFNAME_LEN: usize = 4096;
+
 /// Whether the `info/refs` fast path can serve this manifest without shelling
 /// out. The manifest carries only `refname → oid`, so it cannot reproduce the
 /// `^{}` peel line an **annotated** tag advertises (the peeled commit oid is
@@ -310,13 +320,33 @@ pub struct GitRepoParams {
 /// otherwise the `symref=HEAD:<ref>` capability would point at a ref the
 /// client never sees. The dominant clone case (branches only, HEAD→a branch)
 /// takes the fast path; everything else stays exactly as it is today.
+///
+/// Eligibility is also a **safety gate**: the fast path emits manifest
+/// refnames/oids straight into pkt-line bytes, so this predicate re-runs the
+/// same `is_safe_refname`/`is_hex_oid` checks the hydrate path applies
+/// (hydrate.rs) and the write path applies (`Manifest::validate`). The manifest
+/// is already digest-verified against the pointer when loaded, so on every
+/// normally-reachable path these re-checks are redundant — but keeping the
+/// emit path symmetric with hydrate means an out-of-band-written manifest
+/// (migration, manual S3 put, a future writer that skips `validate`) degrades
+/// to the subprocess path instead of advertising unchecked bytes. Any failure
+/// here → `false` → subprocess fallback, which surfaces the error correctly.
 fn fast_path_eligible(manifest: &super::manifest::Manifest) -> bool {
+    use super::manifest::{is_hex_oid, is_safe_refname};
+
     if manifest.refs.keys().any(|r| r.starts_with("refs/tags/")) {
         return false;
     }
     // HEAD must resolve to an advertised ref. (Detached HEAD — head not in
     // refs — can't be expressed as a symref; fall back.)
-    manifest.refs.contains_key(&manifest.head)
+    if !manifest.refs.contains_key(&manifest.head) {
+        return false;
+    }
+    // Safety re-check: every refname/oid we'd emit must be well-formed and
+    // bounded. HEAD is a key in `refs` (checked above), so the loop covers it.
+    manifest.refs.iter().all(|(refname, oid)| {
+        is_safe_refname(refname) && refname.len() <= MAX_FAST_PATH_REFNAME_LEN && is_hex_oid(oid)
+    })
 }
 
 /// Encode one pkt-line: 4-char lowercase-hex length prefix (counting itself)
@@ -1187,6 +1217,34 @@ mod track_c_tests {
         let mut m = branches_only_manifest();
         m.head = "refs/heads/nonexistent".to_string();
         // HEAD must resolve to an advertised ref to emit symref=HEAD:<ref>.
+        assert!(!fast_path_eligible(&m));
+    }
+
+    #[test]
+    fn fast_path_rejects_unsafe_refname() {
+        let mut m = branches_only_manifest();
+        // A pkt-line-injecting refname (newline) must never reach the emit path;
+        // eligibility is the safety gate → subprocess fallback re-validates.
+        m.refs.insert("refs/heads/evil\nx".to_string(), oid_sha1());
+        assert!(!fast_path_eligible(&m));
+    }
+
+    #[test]
+    fn fast_path_rejects_malformed_oid() {
+        let mut m = branches_only_manifest();
+        // A non-hex / wrong-length oid must degrade to subprocess, not be emitted.
+        m.refs
+            .insert("refs/heads/bad".to_string(), "not-a-valid-oid".to_string());
+        assert!(!fast_path_eligible(&m));
+    }
+
+    #[test]
+    fn fast_path_rejects_overlong_refname() {
+        let mut m = branches_only_manifest();
+        // A refname past MAX_FAST_PATH_REFNAME_LEN would overflow the 4-hex
+        // pkt-line length prefix; degrade to subprocess instead.
+        let long = format!("refs/heads/{}", "a".repeat(MAX_FAST_PATH_REFNAME_LEN));
+        m.refs.insert(long, oid_sha1());
         assert!(!fast_path_eligible(&m));
     }
 
