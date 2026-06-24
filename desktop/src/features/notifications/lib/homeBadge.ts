@@ -1,7 +1,9 @@
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { maxReadAt } from "@/features/channels/readState/readStateFormat";
 import {
   getThreadReference,
   isBroadcastReply,
+  isThreadReply,
 } from "@/features/messages/lib/threading";
 
 function dedupeFeedItemsById(items: readonly FeedItem[]): FeedItem[] {
@@ -55,4 +57,61 @@ export function shouldCountTowardHomeBadgeSubtotal(
   const isThreadedReply =
     threadRef.parentId !== null && !isBroadcastReply(item.tags);
   return isThreadedReply && item.channelType !== "dm";
+}
+
+type FeedItemReadState = Pick<
+  FeedItem,
+  "channelId" | "createdAt" | "id" | "tags"
+>;
+
+export function feedItemThreadRootId(item: Pick<FeedItem, "tags">) {
+  return isThreadReply(item.tags) ? getThreadReference(item.tags).rootId : null;
+}
+
+export function isHomeBadgeFeedItemUnread(
+  item: FeedItemReadState,
+  options: {
+    getChannelReadAt: (channelId: string) => number | null;
+    getMessageReadAt?: (messageId: string) => number | null;
+    getThreadReadAt: (
+      rootId: string,
+      channelId?: string | null,
+    ) => number | null;
+    isLocallyUnread?: boolean;
+    seenFeedIdSet: ReadonlySet<string>;
+  },
+): boolean {
+  if (options.isLocallyUnread) {
+    return true;
+  }
+
+  const readAt = resolveHomeBadgeFeedItemReadAt(item, options);
+  return readAt !== null
+    ? item.createdAt > readAt
+    : !options.seenFeedIdSet.has(item.id);
+}
+
+export function resolveHomeBadgeFeedItemReadAt(
+  item: FeedItemReadState,
+  options: {
+    getChannelReadAt: (channelId: string) => number | null;
+    getMessageReadAt?: (messageId: string) => number | null;
+    getThreadReadAt: (
+      rootId: string,
+      channelId?: string | null,
+    ) => number | null;
+  },
+): number | null {
+  const threadRootId = feedItemThreadRootId(item);
+  const markers: Array<number | null> = [];
+
+  if (item.channelId && !threadRootId) {
+    markers.push(options.getChannelReadAt(item.channelId));
+  }
+  if (threadRootId) {
+    markers.push(options.getThreadReadAt(threadRootId, item.channelId));
+    markers.push(options.getMessageReadAt?.(item.id) ?? null);
+  }
+
+  return maxReadAt(...markers);
 }

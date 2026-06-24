@@ -414,6 +414,7 @@ export function AppShell() {
       feedItemState.unreadSet,
       threadActivityFeedItems,
       getThreadReadAt,
+      getMessageReadAt,
     );
 
   const dueReminderBadge = useDueReminderBadgeCount(
@@ -751,7 +752,7 @@ export function AppShell() {
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
-                  <SidebarProvider className="min-h-0 flex-1 overflow-hidden">
+                  <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
                     {!settingsOpen ? (
                       <AppTopChrome
                         canGoBack={canGoBack}
@@ -761,45 +762,49 @@ export function AppShell() {
                       />
                     ) : null}
                     {settingsOpen ? (
-                      <React.Suspense fallback={null}>
-                        <LazySettingsScreen
-                          currentPubkey={identityQuery.data?.pubkey}
-                          fallbackDisplayName={identityQuery.data?.displayName}
-                          isUpdatingDesktopNotifications={
-                            notificationSettings.isUpdatingDesktopEnabled
-                          }
-                          notificationErrorMessage={
-                            notificationSettings.errorMessage
-                          }
-                          notificationPermission={
-                            notificationSettings.permission
-                          }
-                          notificationSettings={notificationSettings.settings}
-                          onClose={handleCloseSettings}
-                          onSectionChange={handleSettingsSectionChange}
-                          onSetDesktopNotificationsEnabled={
-                            notificationSettings.setDesktopEnabled
-                          }
-                          onSetHomeBadgeEnabled={
-                            notificationSettings.setHomeBadgeEnabled
-                          }
-                          onSetSlotAlertsEnabled={
-                            notificationSettings.setSlotAlertsEnabled
-                          }
-                          onSetNotifyWhileViewing={
-                            notificationSettings.setNotifyWhileViewing
-                          }
-                          onSetAllSlotAlertsEnabled={
-                            notificationSettings.setAllSlotAlertsEnabled
-                          }
-                          onSetSoundForSlot={
-                            notificationSettings.setSoundForSlot
-                          }
-                          section={settingsSection}
-                        />
-                      </React.Suspense>
+                      <div className="flex min-h-0 flex-1 overflow-hidden">
+                        <React.Suspense fallback={null}>
+                          <LazySettingsScreen
+                            currentPubkey={identityQuery.data?.pubkey}
+                            fallbackDisplayName={
+                              identityQuery.data?.displayName
+                            }
+                            isUpdatingDesktopNotifications={
+                              notificationSettings.isUpdatingDesktopEnabled
+                            }
+                            notificationErrorMessage={
+                              notificationSettings.errorMessage
+                            }
+                            notificationPermission={
+                              notificationSettings.permission
+                            }
+                            notificationSettings={notificationSettings.settings}
+                            onClose={handleCloseSettings}
+                            onSectionChange={handleSettingsSectionChange}
+                            onSetDesktopNotificationsEnabled={
+                              notificationSettings.setDesktopEnabled
+                            }
+                            onSetHomeBadgeEnabled={
+                              notificationSettings.setHomeBadgeEnabled
+                            }
+                            onSetSlotAlertsEnabled={
+                              notificationSettings.setSlotAlertsEnabled
+                            }
+                            onSetNotifyWhileViewing={
+                              notificationSettings.setNotifyWhileViewing
+                            }
+                            onSetAllSlotAlertsEnabled={
+                              notificationSettings.setAllSlotAlertsEnabled
+                            }
+                            onSetSoundForSlot={
+                              notificationSettings.setSoundForSlot
+                            }
+                            section={settingsSection}
+                          />
+                        </React.Suspense>
+                      </div>
                     ) : (
-                      <>
+                      <div className="flex min-h-0 flex-1 overflow-hidden">
                         <AppSidebar
                           activeWorkspace={workspacesHook.activeWorkspace}
                           channels={sidebarChannels}
@@ -934,22 +939,22 @@ export function AppShell() {
                           onStarChannel={starChannel}
                           onUnstarChannel={unstarChannel}
                         />
-
                         <MainInsetProvider mainInsetRef={mainInsetRef}>
                           <SidebarInset
                             ref={mainInsetRef}
-                            className="min-h-0 min-w-0 overflow-hidden"
+                            className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
                             style={chromeCssVarDefaults}
                           >
-                            <ConnectionBanner
-                              errorMessage={channelsErrorMessage}
-                            />
-                            <Outlet />
+                            <div className="relative z-10 ml-px mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
+                              <ConnectionBanner
+                                errorMessage={channelsErrorMessage}
+                              />
+                              <Outlet />
+                            </div>
                           </SidebarInset>
                         </MainInsetProvider>
-                      </>
+                      </div>
                     )}
-
                     <AppShellOverlays
                       activeChannel={managedChannel}
                       browseDialogType={browseDialogType}

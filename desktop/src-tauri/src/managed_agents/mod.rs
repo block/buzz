@@ -27,7 +27,10 @@ pub use personas::*;
 pub use process_lifecycle::*;
 #[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
-pub use repos::{ensure_repos_symlink, validate_repos_dir};
+pub use repos::{
+    effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,
+    write_persisted_repos_dir,
+};
 pub use restore::*;
 pub use runtime::*;
 pub use storage::*;

@@ -1,6 +1,5 @@
-use std::{collections::BTreeMap, path::PathBuf, process::Child};
-
 use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -80,17 +79,25 @@ pub struct RelayAgentInfo {
     pub status: String,
     #[serde(default)]
     pub respond_to: Option<RespondTo>,
+    #[serde(default)]
+    pub respond_to_allowlist: Vec<String>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
     pub name: String,
     #[serde(default)]
     pub persona_id: Option<String>,
-    /// `#[serde(default)]` so an old build still parses a store whose inline
-    /// key was stripped after a keyring build migrated it into the Keychain.
-    #[serde(default)]
+    /// nsec private key. Held in memory but persisted to the OS keyring (keyed
+    /// by `pubkey`) rather than serialized to `managed-agents.json`. The
+    /// storage layer blanks this before writing JSON once the key is safely in
+    /// the keyring, and re-hydrates it from the keyring on load.
+    ///
+    /// It is only serialized inline (the `0o600` JSON fallback) when the
+    /// keyring is unreachable — `skip_serializing_if` keeps it out of JSON in
+    /// the normal keyring-backed case. `default` also lets an old build parse a
+    /// store whose inline key was already migrated out and blanked.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub private_key_nsec: String,
     /// NIP-OA auth tag JSON. Computed at agent creation time.
     ///
@@ -109,6 +116,15 @@ pub struct ManagedAgentRecord {
     pub avatar_url: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
+    /// Explicit per-instance harness pin. `None` (the default) means inherit
+    /// the harness from the linked persona's `runtime`, so persona harness
+    /// edits propagate on the next spawn — mirroring the opt-in `model`
+    /// override. `Some` is set only when the user deliberately picks a harness
+    /// that diverges from the persona. Resolved via `effective_agent_command`;
+    /// `agent_command` above is the create-time snapshot kept for avatar/legacy
+    /// derivations and is not authoritative for spawn.
+    #[serde(default)]
+    pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub turn_timeout_seconds: u64,
@@ -226,6 +242,11 @@ pub struct ManagedAgentSummary {
     pub relay_url: String,
     pub acp_command: String,
     pub agent_command: String,
+    /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user
+    /// has explicitly pinned this instance's harness, `None` when it inherits
+    /// from the persona. Lets the Edit dialog seed "Inherit from persona" vs a
+    /// concrete pin (`agent_command` above is the resolved/effective command).
+    pub agent_command_override: Option<String>,
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub turn_timeout_seconds: u64,
@@ -262,6 +283,13 @@ pub struct CreateManagedAgentRequest {
     pub relay_url: Option<String>,
     pub acp_command: Option<String>,
     pub agent_command: Option<String>,
+    /// True when `agent_command` is a runtime the user deliberately picked to
+    /// override the linked persona (a deploy-dialog runtime selector). Distinguishes
+    /// a real pin from a missing-runtime fallback so a persona-backed create only
+    /// stores an `agent_command_override` for the former. Defaults `false`: callers
+    /// that don't set it (persona-less creates, fallback divergence) inherit.
+    #[serde(default)]
+    pub harness_override: bool,
     #[serde(default)]
     pub agent_args: Vec<String>,
     pub mcp_command: Option<String>,
@@ -635,354 +663,4 @@ pub fn validate_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, St
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{ManagedAgentRecord, PersonaRecord};
-    use std::path::PathBuf;
-
-    #[test]
-    fn persona_record_defaults_active_when_field_is_missing() {
-        let record: PersonaRecord = serde_json::from_str(
-            r#"{
-                "id": "builtin:fizz",
-                "display_name": "Fizz",
-                "avatar_url": null,
-                "system_prompt": "Prompt",
-                "created_at": "2026-03-19T00:00:00Z",
-                "updated_at": "2026-03-19T00:00:00Z"
-            }"#,
-        )
-        .expect("legacy persona payload should deserialize");
-
-        assert!(record.is_active);
-        assert!(!record.is_builtin);
-        assert_eq!(record.runtime, None);
-        assert_eq!(record.model, None);
-        assert!(record.name_pool.is_empty());
-    }
-
-    /// Legacy agent records (created before NIP-OA) lack the `auth_tag` field.
-    /// `#[serde(default)]` must ensure they deserialize with `auth_tag: None`.
-    #[test]
-    fn managed_agent_record_without_auth_tag_deserializes() {
-        let record: ManagedAgentRecord = serde_json::from_str(
-            r#"{
-                "pubkey": "abcd1234",
-                "name": "test-agent",
-                "private_key_nsec": "nsec1fake",
-                "relay_url": "wss://localhost:3000",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": null,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-                "last_started_at": null,
-                "last_stopped_at": null,
-                "last_exit_code": null,
-                "last_error": null
-            }"#,
-        )
-        .expect("legacy agent record without auth_tag should deserialize");
-
-        assert_eq!(record.auth_tag, None);
-        assert_eq!(record.avatar_url, None);
-        assert_eq!(record.pubkey, "abcd1234");
-    }
-
-    /// Agent records WITH an auth_tag round-trip correctly through serde.
-    #[test]
-    fn managed_agent_record_with_auth_tag_round_trips() {
-        let json = r#"{
-            "pubkey": "abcd1234",
-            "name": "test-agent",
-            "private_key_nsec": "nsec1fake",
-            "auth_tag": "[\"auth\",\"deadbeef\",\"\",\"cafebabe\"]",
-            "relay_url": "wss://localhost:3000",
-            "acp_command": "buzz-acp",
-            "agent_command": "goose",
-            "agent_args": [],
-            "mcp_command": "",
-            "turn_timeout_seconds": 320,
-            "system_prompt": null,
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "last_started_at": null,
-            "last_stopped_at": null,
-            "last_exit_code": null,
-            "last_error": null
-        }"#;
-
-        let record: ManagedAgentRecord =
-            serde_json::from_str(json).expect("record with auth_tag should deserialize");
-
-        assert_eq!(
-            record.auth_tag.as_deref(),
-            Some(r#"["auth","deadbeef","","cafebabe"]"#)
-        );
-
-        // Round-trip: serialize and deserialize again.
-        let serialized = serde_json::to_string(&record).expect("should serialize");
-        let record2: ManagedAgentRecord =
-            serde_json::from_str(&serialized).expect("round-trip should deserialize");
-        assert_eq!(record.auth_tag, record2.auth_tag);
-    }
-
-    // ── Inbound author gate tests ────────────────────────────────────────
-
-    use super::{validate_respond_to_allowlist, RespondTo};
-
-    #[test]
-    fn respond_to_default_is_owner_only() {
-        assert_eq!(RespondTo::default(), RespondTo::OwnerOnly);
-    }
-
-    #[test]
-    fn respond_to_serde_is_kebab_case() {
-        assert_eq!(
-            serde_json::to_string(&RespondTo::OwnerOnly).unwrap(),
-            "\"owner-only\""
-        );
-        assert_eq!(
-            serde_json::to_string(&RespondTo::Allowlist).unwrap(),
-            "\"allowlist\""
-        );
-        assert_eq!(
-            serde_json::to_string(&RespondTo::Anyone).unwrap(),
-            "\"anyone\""
-        );
-        let parsed: RespondTo = serde_json::from_str("\"owner-only\"").unwrap();
-        assert_eq!(parsed, RespondTo::OwnerOnly);
-        let parsed: RespondTo = serde_json::from_str("\"allowlist\"").unwrap();
-        assert_eq!(parsed, RespondTo::Allowlist);
-        let parsed: RespondTo = serde_json::from_str("\"anyone\"").unwrap();
-        assert_eq!(parsed, RespondTo::Anyone);
-    }
-
-    #[test]
-    fn respond_to_rejects_unknown_modes() {
-        // `nobody` is a valid harness mode but intentionally not exposed
-        // through the desktop request types.
-        assert!(serde_json::from_str::<RespondTo>("\"nobody\"").is_err());
-        assert!(serde_json::from_str::<RespondTo>("\"OwnerOnly\"").is_err());
-    }
-
-    /// Records persisted before this feature must continue to load,
-    /// defaulting to OwnerOnly (the safe, matches-harness-default value).
-    #[test]
-    fn managed_agent_record_without_respond_to_fields_defaults_to_owner_only() {
-        let record: ManagedAgentRecord = serde_json::from_str(
-            r#"{
-                "pubkey": "abcd1234",
-                "name": "legacy-agent",
-                "private_key_nsec": "nsec1fake",
-                "relay_url": "wss://localhost:3000",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": null,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-                "last_started_at": null,
-                "last_stopped_at": null,
-                "last_exit_code": null,
-                "last_error": null
-            }"#,
-        )
-        .expect("legacy record without respond_to fields should deserialize");
-        assert_eq!(record.respond_to, RespondTo::OwnerOnly);
-        assert!(record.respond_to_allowlist.is_empty());
-    }
-
-    #[test]
-    fn validate_respond_to_allowlist_accepts_valid_hex_and_lowercases() {
-        let upper = "A".repeat(64);
-        let lower = "a".repeat(64);
-        let result = validate_respond_to_allowlist(std::slice::from_ref(&upper)).unwrap();
-        assert_eq!(result, vec![lower.clone()]);
-    }
-
-    #[test]
-    fn validate_respond_to_allowlist_dedups_preserving_order() {
-        let a = "a".repeat(64);
-        let b = "b".repeat(64);
-        let a_upper = "A".repeat(64);
-        let input = vec![a.clone(), b.clone(), a_upper];
-        let result = validate_respond_to_allowlist(&input).unwrap();
-        assert_eq!(result, vec![a, b]);
-    }
-
-    #[test]
-    fn validate_respond_to_allowlist_rejects_wrong_length() {
-        let too_short = "a".repeat(63);
-        assert!(validate_respond_to_allowlist(&[too_short]).is_err());
-        let too_long = "a".repeat(65);
-        assert!(validate_respond_to_allowlist(&[too_long]).is_err());
-    }
-
-    #[test]
-    fn validate_respond_to_allowlist_rejects_non_hex() {
-        let bad = "z".repeat(64);
-        assert!(validate_respond_to_allowlist(&[bad]).is_err());
-        // npub-style strings should not slip through.
-        let npub = format!("npub1{}", "a".repeat(59));
-        assert!(validate_respond_to_allowlist(&[npub]).is_err());
-    }
-
-    #[test]
-    fn validate_respond_to_allowlist_trims_whitespace() {
-        let padded = format!("  {}  ", "a".repeat(64));
-        let result = validate_respond_to_allowlist(&[padded]).unwrap();
-        assert_eq!(result, vec!["a".repeat(64)]);
-    }
-
-    #[test]
-    fn validate_respond_to_allowlist_accepts_empty() {
-        // Empty is allowed at this layer; the boundary check
-        // (Allowlist mode requires ≥1 entry) is the caller's job.
-        let result = validate_respond_to_allowlist(&[]).unwrap();
-        assert!(result.is_empty());
-    }
-
-    use super::{CreateManagedAgentRequest, RelayMeshConfig};
-
-    /// Wire-shape test: the create request arrives from TS as camelCase
-    /// (`relayMesh: { modelRef }`). `rename_all = "camelCase"` on
-    /// `CreateManagedAgentRequest` does NOT recurse into nested structs, so
-    /// `RelayMeshConfig` needs its own `alias = "modelRef"`. This test pins
-    /// the exact JSON the frontend sends; if the alias is dropped, creating
-    /// a relay-mesh agent fails to deserialize at the Tauri boundary.
-    #[test]
-    fn create_request_deserializes_camel_case_relay_mesh() {
-        let request: CreateManagedAgentRequest = serde_json::from_str(
-            r#"{
-                "name": "mesh-agent",
-                "relayMesh": { "modelRef": "Qwen3" }
-            }"#,
-        )
-        .expect("camelCase relayMesh payload from TS should deserialize");
-        assert_eq!(
-            request.relay_mesh,
-            Some(RelayMeshConfig {
-                model_ref: "Qwen3".to_string()
-            })
-        );
-    }
-
-    /// Persisted records use snake_case; the camelCase alias must not break
-    /// the stored-record round trip.
-    #[test]
-    fn relay_mesh_config_round_trips_snake_case() {
-        let config = RelayMeshConfig {
-            model_ref: "Qwen3".to_string(),
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        assert_eq!(json, r#"{"model_ref":"Qwen3"}"#);
-        let back: RelayMeshConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, config);
-    }
-
-    // ── Packs → Teams serde alias backward compatibility ────────────────
-
-    #[test]
-    fn persona_record_deserializes_old_source_pack_fields_via_alias() {
-        let record: PersonaRecord = serde_json::from_str(
-            r#"{
-                "id": "persona-1",
-                "display_name": "Test",
-                "avatar_url": null,
-                "system_prompt": "Prompt",
-                "source_pack": "com.example.my-pack",
-                "source_pack_persona_slug": "agent-one",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }"#,
-        )
-        .expect("old-format persona with source_pack should deserialize via alias");
-
-        assert_eq!(record.source_team.as_deref(), Some("com.example.my-pack"));
-        assert_eq!(
-            record.source_team_persona_slug.as_deref(),
-            Some("agent-one")
-        );
-    }
-
-    #[test]
-    fn persona_record_serializes_new_field_names() {
-        let record: PersonaRecord = serde_json::from_str(
-            r#"{
-                "id": "persona-1",
-                "display_name": "Test",
-                "avatar_url": null,
-                "system_prompt": "Prompt",
-                "source_team": "com.example.my-team",
-                "source_team_persona_slug": "agent-one",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }"#,
-        )
-        .unwrap();
-
-        let json = serde_json::to_string(&record).unwrap();
-        assert!(json.contains("source_team"));
-        assert!(json.contains("source_team_persona_slug"));
-        assert!(!json.contains("source_pack"));
-    }
-
-    #[test]
-    fn managed_agent_record_deserializes_old_pack_path_fields_via_alias() {
-        let record: ManagedAgentRecord = serde_json::from_str(
-            r#"{
-                "pubkey": "abcd1234",
-                "name": "test-agent",
-                "private_key_nsec": "nsec1fake",
-                "relay_url": "wss://localhost:3000",
-                "acp_command": "buzz-acp",
-                "agent_command": "goose",
-                "agent_args": [],
-                "mcp_command": "",
-                "turn_timeout_seconds": 320,
-                "system_prompt": null,
-                "persona_pack_path": "/path/to/agents/packs/my-pack",
-                "persona_name_in_pack": "agent-one",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z",
-                "last_started_at": null,
-                "last_stopped_at": null,
-                "last_exit_code": null,
-                "last_error": null
-            }"#,
-        )
-        .expect("old-format agent with persona_pack_path should deserialize via alias");
-
-        assert_eq!(
-            record.persona_team_dir,
-            Some(PathBuf::from("/path/to/agents/packs/my-pack"))
-        );
-        assert_eq!(record.persona_name_in_team.as_deref(), Some("agent-one"));
-    }
-
-    #[test]
-    fn team_record_deserializes_without_new_fields() {
-        let record: super::TeamRecord = serde_json::from_str(
-            r#"{
-                "id": "team-1",
-                "name": "My Team",
-                "description": null,
-                "persona_ids": ["p1", "p2"],
-                "is_builtin": false,
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": "2026-01-01T00:00:00Z"
-            }"#,
-        )
-        .expect("team record without new fields should deserialize with defaults");
-
-        assert_eq!(record.source_dir, None);
-        assert!(!record.is_symlink);
-        assert_eq!(record.symlink_target, None);
-        assert_eq!(record.version, None);
-    }
-}
+mod tests;

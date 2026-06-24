@@ -265,6 +265,7 @@ export type RelayAgent = {
   capabilities: string[];
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
+  respondToAllowlist: string[];
 };
 
 export type ManagedAgentBackend =
@@ -277,7 +278,14 @@ export type ManagedAgent = {
   personaId: string | null;
   relayUrl: string;
   acpCommand: string;
+  /** Resolved/effective harness command (persona-wins, override-honored). */
   agentCommand: string;
+  /**
+   * Explicit per-instance harness pin. `null` means the agent inherits its
+   * harness from the linked persona's runtime. Lets the Edit dialog show
+   * "Inherit from persona" vs a concrete pin.
+   */
+  agentCommandOverride: string | null;
   agentArgs: string[];
   mcpCommand: string;
   turnTimeoutSeconds: number;
@@ -340,6 +348,13 @@ export type CreateManagedAgentInput = {
   relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
+  /**
+   * True when `agentCommand` is a runtime the user deliberately picked to
+   * override the linked persona (a deploy-dialog runtime selector). Lets the
+   * backend distinguish a real pin from a missing-runtime fallback. Omit/false
+   * for persona-less creates and fallback divergence — both inherit.
+   */
+  harnessOverride?: boolean;
   agentArgs?: string[];
   mcpCommand?: string;
   turnTimeoutSeconds?: number;

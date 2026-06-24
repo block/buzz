@@ -13,8 +13,6 @@ import {
   getChannelWorkflows,
   triggerWorkflow,
 } from "@/shared/api/tauriWorkflows";
-import { topChromeInset } from "@/shared/layout/chromeLayout";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -168,10 +166,7 @@ export function WorkflowsView({
       data-testid="workflows-view"
     >
       <div
-        className={cn(
-          "flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-4",
-          topChromeInset.padding,
-        )}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4"
         data-scroll-restoration-id="workflows-list"
       >
         <div className="mb-4 flex items-center justify-between">

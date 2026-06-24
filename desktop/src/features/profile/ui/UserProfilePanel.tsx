@@ -338,7 +338,7 @@ export function UserProfilePanel({
       className={cn(
         "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
+        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
     >
       {view === "summary" ? (
@@ -459,7 +459,7 @@ export function UserProfilePanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[4.75rem] bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[3.25rem] bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
           />
         ) : null}
 
@@ -467,10 +467,10 @@ export function UserProfilePanel({
           className={cn(
             "flex cursor-default select-none items-center",
             isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[4.75rem] min-h-[4.75rem] shrink-0 gap-2.5 bg-transparent pb-1 pl-4 pr-2 pt-[2.625rem] sm:pl-6 sm:pr-3`
+              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-transparent px-4 py-2 sm:pl-6 sm:pr-3`
               : isOverlay
-                ? "relative z-50 min-h-14 shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : "absolute inset-x-0 top-[2.625rem] z-50 min-h-8 gap-3 bg-transparent px-3 py-1 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
+                ? "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+                : "absolute inset-x-0 top-0 z-50 min-h-[3.25rem] gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
           )}
           data-tauri-drag-region
         >

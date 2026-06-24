@@ -7,12 +7,13 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
-  getThreadReplyAvatarCenterPx,
-  getThreadReplyAvatarCenterYPx,
-  getThreadReplyDescendantRailStartYPx,
+  getThreadReplyAvatarCenterRem,
+  getThreadReplyAvatarCenterYRem,
+  getThreadReplyDescendantRailStartYRem,
   getThreadReplyConnectorLayout,
-  getThreadReplyIndentPx,
-  THREAD_REPLY_LINE_WIDTH_PX,
+  getThreadReplyIndentRem,
+  threadReplyLength,
+  THREAD_REPLY_LINE_WIDTH_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { KIND_STREAM_MESSAGE_DIFF } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
@@ -186,9 +187,9 @@ export const MessageRow = React.memo(
       [channels],
     );
 
-    const indentPx = getThreadReplyIndentPx(message.depth);
-    const descendantGuideOffsetPx = connectDescendants
-      ? getThreadReplyAvatarCenterPx(message.depth)
+    const indentRem = getThreadReplyIndentRem(message.depth);
+    const descendantGuideOffsetRem = connectDescendants
+      ? getThreadReplyAvatarCenterRem(message.depth)
       : null;
     const replyConnector = React.useMemo(() => {
       return getThreadReplyConnectorLayout(message.depth);
@@ -200,7 +201,7 @@ export const MessageRow = React.memo(
 
       return depths.map((depth) => ({
         depth,
-        offset: getThreadReplyAvatarCenterPx(depth),
+        offset: getThreadReplyAvatarCenterRem(depth),
       }));
     }, [depthGuideDepths, message.depth]);
     const handleCollapseDescendants = React.useCallback(
@@ -293,8 +294,7 @@ export const MessageRow = React.memo(
     };
 
     const isThreadReplyLayout = layoutVariant === "thread-reply";
-    const guideBleedPx = isThreadReplyLayout ? 4 : 0;
-    const avatarSizeClass = "!h-10 !w-10";
+    const guideBleedRem = isThreadReplyLayout ? 0.25 : 0;
     const avatarButtonRadiusClass = "rounded-full";
 
     const respondToDotColor =
@@ -309,7 +309,7 @@ export const MessageRow = React.memo(
         <UserAvatar
           accent={message.accent}
           avatarUrl={message.avatarUrl ?? null}
-          className={cn("shrink-0", avatarSizeClass)}
+          className="shrink-0"
           displayName={message.author}
           testId="message-avatar"
         />
@@ -442,7 +442,11 @@ export const MessageRow = React.memo(
     return (
       <div
         className="relative"
-        style={indentPx > 0 ? { paddingLeft: `${indentPx}px` } : undefined}
+        style={
+          indentRem > 0
+            ? { paddingLeft: threadReplyLength(indentRem) }
+            : undefined
+        }
       >
         {showDepthGuides && depthGuideItems.length > 0 ? (
           <div
@@ -455,8 +459,8 @@ export const MessageRow = React.memo(
                 "pointer-events-none",
             )}
             style={{
-              bottom: `${-guideBleedPx}px`,
-              top: `${-guideBleedPx}px`,
+              bottom: threadReplyLength(-guideBleedRem),
+              top: threadReplyLength(-guideBleedRem),
             }}
           >
             {depthGuideItems.map(({ depth, offset }) => {
@@ -472,11 +476,13 @@ export const MessageRow = React.memo(
                       aria-hidden
                       className={cn(
                         "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
-                        isHighlighted ? "border-primary" : "border-border",
+                        isHighlighted ? "border-primary" : "border-border/45",
                       )}
                       style={{
-                        borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-                        left: `${offset}px`,
+                        borderLeftWidth: threadReplyLength(
+                          THREAD_REPLY_LINE_WIDTH_REM,
+                        ),
+                        left: threadReplyLength(offset),
                       }}
                     />
                     <button
@@ -511,7 +517,7 @@ export const MessageRow = React.memo(
                           false,
                         )
                       }
-                      style={{ left: `${offset}px` }}
+                      style={{ left: threadReplyLength(offset) }}
                       type="button"
                     />
                   </React.Fragment>
@@ -523,31 +529,33 @@ export const MessageRow = React.memo(
                   aria-hidden
                   className={cn(
                     "pointer-events-none absolute bottom-0 top-0 border-l transition-[border-color]",
-                    isHighlighted ? "border-primary" : "border-border",
+                    isHighlighted ? "border-primary" : "border-border/45",
                   )}
                   key={`${message.id}-depth-guide-${offset}`}
                   style={{
-                    borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-                    left: `${offset}px`,
+                    borderLeftWidth: threadReplyLength(
+                      THREAD_REPLY_LINE_WIDTH_REM,
+                    ),
+                    left: threadReplyLength(offset),
                   }}
                 />
               );
             })}
           </div>
         ) : null}
-        {showDepthGuides && descendantGuideOffsetPx !== null ? (
+        {showDepthGuides && descendantGuideOffsetRem !== null ? (
           <>
             <div
               aria-hidden
               className={cn(
                 "pointer-events-none absolute bottom-0 z-0 border-l transition-[border-color]",
-                highlightDescendantRail ? "border-primary" : "border-border",
+                highlightDescendantRail ? "border-primary" : "border-border/45",
               )}
               style={{
-                bottom: `${-guideBleedPx}px`,
-                borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-                left: `${descendantGuideOffsetPx}px`,
-                top: `${getThreadReplyDescendantRailStartYPx()}px`,
+                bottom: threadReplyLength(-guideBleedRem),
+                borderLeftWidth: threadReplyLength(THREAD_REPLY_LINE_WIDTH_REM),
+                left: threadReplyLength(descendantGuideOffsetRem),
+                top: threadReplyLength(getThreadReplyDescendantRailStartYRem()),
               }}
             />
             {onCollapseDescendants ? (
@@ -564,8 +572,8 @@ export const MessageRow = React.memo(
                 onMouseEnter={() => handleCollapseDescendantsHoverChange(true)}
                 onMouseLeave={() => handleCollapseDescendantsHoverChange(false)}
                 style={{
-                  left: `${descendantGuideOffsetPx}px`,
-                  top: `${getThreadReplyAvatarCenterYPx()}px`,
+                  left: threadReplyLength(descendantGuideOffsetRem),
+                  top: threadReplyLength(getThreadReplyAvatarCenterYRem()),
                 }}
                 type="button"
               />
@@ -577,15 +585,17 @@ export const MessageRow = React.memo(
             aria-hidden
             className={cn(
               "pointer-events-none absolute left-0 top-0 rounded-bl-2xl border-b border-l transition-[border-color]",
-              highlightReplyConnector ? "border-primary" : "border-border",
+              highlightReplyConnector ? "border-primary" : "border-border/45",
             )}
             style={{
-              borderBottomWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-              borderLeftWidth: `${THREAD_REPLY_LINE_WIDTH_PX}px`,
-              height: `${replyConnector.heightPx + guideBleedPx}px`,
-              left: `${replyConnector.parentOffsetPx}px`,
-              top: `${-guideBleedPx}px`,
-              width: `${replyConnector.widthPx}px`,
+              borderBottomWidth: threadReplyLength(THREAD_REPLY_LINE_WIDTH_REM),
+              borderLeftWidth: threadReplyLength(THREAD_REPLY_LINE_WIDTH_REM),
+              height: threadReplyLength(
+                replyConnector.heightRem + guideBleedRem,
+              ),
+              left: threadReplyLength(replyConnector.parentOffsetRem),
+              top: threadReplyLength(-guideBleedRem),
+              width: threadReplyLength(replyConnector.widthRem),
             }}
           />
         ) : null}

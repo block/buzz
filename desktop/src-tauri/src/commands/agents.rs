@@ -8,11 +8,12 @@ use crate::{
         find_managed_agent_mut, invoke_provider, load_managed_agents, load_personas,
         managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
         normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
-        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        save_managed_agents, spawn_key_refusal, start_managed_agent_process,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, BackendProviderInfo, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentLogResponse, ManagedAgentRecord,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -148,6 +149,13 @@ fn build_deploy_payload(
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
+    // Fail closed when the private key is unavailable (keyring outage leaves it
+    // empty after hydration). Without this, a provider deploy would serialize
+    // `"private_key_nsec": ""` and launch the agent with no identity — the same
+    // hazard the local spawn path already refuses via this guard.
+    if let Some(error) = spawn_key_refusal(record) {
+        return Err(error);
+    }
     // Merge persona env_vars + agent env_vars for provider deploy. Same
     // precedence as local spawn: persona first, agent overrides last. Without
     // this, provider-backed agents wouldn't receive credentials saved on the
@@ -158,10 +166,9 @@ fn build_deploy_payload(
 
     // Resolve effective model/provider from the persona's structured fields.
     // Agent record's model takes precedence (user override via UI).
+    let personas = load_personas(app)
+        .map_err(|e| format!("failed to load personas for deploy payload resolution: {e}"))?;
     let (effective_model, effective_provider) = if let Some(ref pid) = record.persona_id {
-        let personas = load_personas(app).map_err(|e| {
-            format!("failed to load personas for deploy payload model resolution: {e}")
-        })?;
         let persona = personas.iter().find(|p| p.id == *pid);
         let model = record
             .model
@@ -172,6 +179,17 @@ fn build_deploy_payload(
     } else {
         (record.model.clone(), None)
     };
+
+    // Resolve the effective harness (persona-wins, override-honored) so the
+    // remote provider runs the same harness a local spawn would — derive args
+    // from it rather than the frozen record snapshot.
+    let effective_command = crate::managed_agents::effective_agent_command(
+        record.persona_id.as_deref(),
+        &personas,
+        record.agent_command_override.as_deref(),
+    );
+    let effective_args =
+        crate::managed_agents::normalize_agent_args(&effective_command, record.agent_args.clone());
 
     Ok(serde_json::json!({
         "name": &record.name,
@@ -186,8 +204,8 @@ fn build_deploy_payload(
         ),
         "private_key_nsec": &record.private_key_nsec,
         "auth_tag": &record.auth_tag,
-        "agent_command": &record.agent_command,
-        "agent_args": &record.agent_args,
+        "agent_command": &effective_command,
+        "agent_args": &effective_args,
         "system_prompt": &record.system_prompt,
         "model": effective_model,
         "provider": effective_provider,
@@ -461,13 +479,31 @@ pub async fn create_managed_agent(
             None
         };
 
-        let agent_command = input
-            .agent_command
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(crate::managed_agents::default_agent_command);
+        // Load personas once for harness/pack/avatar resolution below.
+        let personas = load_personas(&app).unwrap_or_default();
+
+        // Harness resolution: the persona's runtime is authoritative. A
+        // persona-backed create stores an `agent_command_override` ONLY when the
+        // user deliberately picked a divergent runtime (`harness_override`) —
+        // e.g. AddChannelBotDialog's runtime selector. A divergence WITHOUT that
+        // flag is a missing-runtime fallback from `resolvePersonaRuntime`, not a
+        // pin, and must inherit so it doesn't freeze on the fallback harness once
+        // the persona's runtime is installed. A persona-less create always
+        // preserves the picked command as a real pin.
+        let agent_command_override = crate::managed_agents::create_time_agent_command_override(
+            requested_persona_id.as_deref(),
+            &personas,
+            input.agent_command.as_deref(),
+            input.harness_override,
+        );
+        // The create-time snapshot used for arg/mcp/avatar derivations and
+        // legacy reconcile. Authoritative spawn resolution re-derives this via
+        // `effective_agent_command` at use-time.
+        let agent_command = crate::managed_agents::effective_agent_command(
+            requested_persona_id.as_deref(),
+            &personas,
+            agent_command_override.as_deref(),
+        );
         let agent_args = normalize_agent_args(
             &agent_command,
             input
@@ -496,7 +532,6 @@ pub async fn create_managed_agent(
         // matches on this internal name, NOT display_name.
         let pack_metadata: Option<(std::path::PathBuf, String)> =
             requested_persona_id.as_deref().and_then(|pid| {
-                let personas = load_personas(&app).ok()?;
                 let persona = personas.iter().find(|p| p.id == pid)?;
                 let team_id = persona.source_team.as_deref()?;
                 let slug = persona.source_team_persona_slug.as_deref()?;
@@ -512,11 +547,11 @@ pub async fn create_managed_agent(
         // fallback. Storing it lets reconciliation compare against what was
         // actually published instead of re-deriving it.
         let persona_avatar_url = requested_persona_id.as_ref().and_then(|persona_id| {
-            load_personas(&app)
-                .ok()?
-                .into_iter()
+            personas
+                .iter()
                 .find(|persona| persona.id == *persona_id)?
                 .avatar_url
+                .clone()
         });
         let resolved_avatar_url = resolve_created_avatar_url(
             input.avatar_url.as_deref(),
@@ -540,6 +575,7 @@ pub async fn create_managed_agent(
                 .unwrap_or(DEFAULT_ACP_COMMAND)
                 .to_string(),
             agent_command,
+            agent_command_override,
             agent_args,
             mcp_command,
             turn_timeout_seconds: input
@@ -797,6 +833,16 @@ pub async fn start_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
 
+        // Resolve the effective harness for the avatar-fallback derivation in
+        // profile reconcile (the create-time snapshot may be empty or stale for
+        // a persona-inherited harness).
+        let reconcile_personas = load_personas(&app).unwrap_or_default();
+        let reconcile_effective_command = crate::managed_agents::effective_agent_command(
+            record.persona_id.as_deref(),
+            &reconcile_personas,
+            record.agent_command_override.as_deref(),
+        );
+
         let reconcile = ProfileReconcileData {
             private_key_nsec: record.private_key_nsec.clone(),
             name: record.name.clone(),
@@ -804,7 +850,7 @@ pub async fn start_managed_agent(
             avatar_url: record.avatar_url.clone(),
             auth_tag: record.auth_tag.clone(),
             pubkey: record.pubkey.clone(),
-            agent_command: record.agent_command.clone(),
+            agent_command: reconcile_effective_command,
             persona_id: record.persona_id.clone(),
         };
 
@@ -1111,6 +1157,8 @@ pub fn delete_managed_agent(
             return Err(format!("agent {pubkey} not found"));
         }
         save_managed_agents(&app, &records)?;
+        // Remove the agent's nsec from the keyring after the record is gone.
+        crate::managed_agents::delete_agent_key(&pubkey);
     }
     try_regenerate_nest(&app);
     Ok(())

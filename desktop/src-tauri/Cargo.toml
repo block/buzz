@@ -17,8 +17,11 @@ name = "buzz_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["system-keyring"]
 mesh-llm = ["dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime"]
+# OS keyring backing for desktop secret storage (nsec private keys). When
+# disabled, secrets fall back to 0o600 files. On by default for real builds.
+system-keyring = ["dep:keyring"]
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -31,9 +34,14 @@ ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
 
 [dependencies]
 atomic-write-file = "0.3"

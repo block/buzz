@@ -581,7 +581,7 @@ const SidebarRail = React.forwardRef<
         className={cn(
           "absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 sm:flex",
           "cursor-col-resize",
-          "after:absolute after:inset-y-0 after:left-1/2 after:z-10 after:w-px after:-translate-x-1/2 after:bg-border/50 after:transition-colors after:content-[''] hover:after:bg-sidebar-border focus-visible:after:bg-sidebar-border group-data-[resizing=true]:after:bg-sidebar-border",
+          "after:absolute after:bottom-0 after:left-1/2 after:top-6 after:z-10 after:w-px after:-translate-x-1/2 after:bg-transparent after:content-['']",
           "[[data-state=collapsed]_&]:cursor-pointer",
           "group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:hover:bg-sidebar",
           "[[data-side=left][data-collapsible=offcanvas]_&]:-right-2",

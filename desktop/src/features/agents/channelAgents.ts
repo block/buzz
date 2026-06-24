@@ -60,6 +60,13 @@ export type CreateChannelManagedAgentInput = {
   systemPrompt?: string;
   avatarUrl?: string;
   personaId?: string | null;
+  /**
+   * True when `runtime` is a runtime the user deliberately picked to override
+   * the persona (a deploy-dialog runtime selector), as opposed to a
+   * missing-runtime fallback. Forwarded to the backend so a persona-backed
+   * create only pins the harness for a deliberate override.
+   */
+  harnessOverride?: boolean;
   /** Preferred model ID from the persona. Passed to createManagedAgent. */
   model?: string;
   role?: Exclude<ChannelRole, "owner">;
@@ -368,6 +375,7 @@ export async function createChannelManagedAgent(
     name: trimmedName,
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
+    harnessOverride: input.harnessOverride ?? false,
     agentArgs: input.runtime.defaultArgs,
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,

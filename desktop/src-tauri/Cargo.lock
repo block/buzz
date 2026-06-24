@@ -865,6 +865,7 @@ dependencies = [
  "futures-util",
  "hex",
  "infer",
+ "keyring",
  "libc",
  "mesh-llm-host-runtime",
  "mesh-llm-sdk",

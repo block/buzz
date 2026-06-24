@@ -139,12 +139,15 @@ export function useWorkspaceInit(
           activeWorkspace.reposDir,
         );
       } catch (error) {
-        // apply_workspace validates repos_dir before touching relay/keys, so a
-        // hard reject (bad path) leaves the backend on the previous/default
-        // relay with nothing applied. Marking the workspace ready here would
-        // render workspace-scoped UI against the wrong relay — a silent
-        // split-brain. Park on the loading gate (isReady:false, no appliedKey)
-        // instead; the backend already toasts a `repos-dir-error`.
+        // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
+        // it as non-fatal (relay/keys apply, bad value not persisted, REPOS
+        // falls back to a real dir, a `repos-dir-error` toast surfaces it) and
+        // returns Ok, so the app boots into a working state where the user can
+        // fix the value in workspace settings. This catch now only fires on a
+        // genuine relay/key apply failure (e.g. an invalid nsec or a poisoned
+        // lock). For those, marking the workspace ready would render
+        // workspace-scoped UI against a backend that never applied — park on
+        // the loading gate (isReady:false, no appliedKey) instead.
         console.error("Failed to apply workspace to backend:", error);
         if (!cancelled) {
           setResult({ isReady: false, needsSetup: false, appliedKey: null });

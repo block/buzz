@@ -25,8 +25,8 @@
         "hiddenTitle": true,
         "dragDropEnabled": false,
         "trafficLightPosition": {
-          "x": 12,
-          "y": 22
+          "x": 16,
+          "y": 24
         },
         "backgroundThrottling": "disabled",
         "minWidth": 800,

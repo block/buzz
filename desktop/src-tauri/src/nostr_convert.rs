@@ -941,6 +941,26 @@ mod tests {
     }
 
     #[test]
+    fn agents_preserves_allowlist_metadata_for_directory_parse() {
+        let e = ev(
+            10100,
+            r#"{"name":"Scout","respond_to":"allowlist","respond_to_allowlist":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
+            vec![],
+        );
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].respond_to,
+            Some(crate::managed_agents::RespondTo::Allowlist)
+        );
+        assert_eq!(parsed[0].respond_to_allowlist, vec!["a".repeat(64)]);
+    }
+
+    #[test]
     fn relay_members_dedupes_and_defaults_role() {
         let pk1 = "a".repeat(64);
         let pk2 = "b".repeat(64);

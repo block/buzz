@@ -654,6 +654,36 @@ fn migrate_packs_to_teams_rewrites_agents_json() {
     assert!(records[0].get("persona_name_in_pack").is_none());
 }
 
+/// `patch_json_records` rewrites `managed-agents.json`, which carries plaintext
+/// agent nsecs on a keyringless host — the writeback must land `0o600` from the
+/// write itself (no post-write `chmod`), or a launch-time reconcile reopens the
+/// umask window SECURITY.md:90 closes (Thufir, migration.rs:288).
+#[cfg(unix)]
+#[test]
+fn patch_json_records_rewrites_secret_store_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{ "private_key_nsec": "nsec1secret", "provider": "goose" }]),
+    );
+    let path = dir.path().join("agents/managed-agents.json");
+
+    // Mutate so the write actually fires (it only writes back on `changed`).
+    patch_json_records(&path, |obj| {
+        let provider = obj.remove("provider").unwrap();
+        obj.insert("runtime".to_string(), provider);
+        true
+    });
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "secret-bearing rewrite must be owner-only");
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["private_key_nsec"], "nsec1secret");
+    assert_eq!(records[0]["runtime"], "goose");
+}
+
 #[test]
 fn rename_provider_to_runtime_migrates_field() {
     let dir = tempfile::tempdir().unwrap();
@@ -827,6 +857,55 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
     assert_eq!(records[1]["mcp_command"], "");
     assert_eq!(records[2]["mcp_command"], "my-custom-mcp");
     assert_eq!(records[3]["mcp_command"], "buzz-dev-mcp");
+}
+
+#[test]
+fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
+    // The frozen snapshot is buzz-agent (wants buzz-dev-mcp), but the linked
+    // persona's runtime is goose (wants no mcp). The reconcile must follow the
+    // EFFECTIVE harness (persona-wins) and clear the stale buzz-mcp-server.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "buzz-agent",
+            "mcp_command": "buzz-mcp-server"
+        }]),
+    );
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "");
+}
+
+#[test]
+fn reconcile_mcp_commands_honors_explicit_override_over_persona() {
+    // An explicit per-instance pin (agent_command_override) beats the persona
+    // runtime: persona is goose (no mcp) but the pin is buzz-agent, so the
+    // reconcile sets the buzz-agent mcp_command.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "goose",
+            "agent_command_override": "buzz-agent",
+            "mcp_command": ""
+        }]),
+    );
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
 }
 
 #[test]

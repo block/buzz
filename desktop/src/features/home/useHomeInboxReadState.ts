@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { InboxItem } from "@/features/home/lib/inbox";
+import { maxReadAt } from "@/features/channels/readState/readStateFormat";
 import {
   getThreadReference,
   isThreadReply,
@@ -13,6 +14,8 @@ type UseHomeInboxReadStateOptions = {
   getChannelReadAt: (channelId: string) => number | null;
   /** NIP-RS read marker resolver for thread-backed items (unix seconds, or null when unknown). */
   getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
+  /** NIP-RS read marker resolver for per-message items (unix seconds, or null when unknown). */
+  getMessageReadAt?: (messageId: string) => number | null;
   /** Invalidation signal for the channel-marker projection. */
   readStateVersion: number;
   /** Local fallback "done" set (used only for items with no channelId). */
@@ -78,6 +81,29 @@ export function hasGroupedUnreadOverride(
   return getGroupedInboxItemIds(item).some((id) => localUnreadSet.has(id));
 }
 
+export function resolveInboxItemReadAt(
+  item: InboxItem,
+  options: {
+    getChannelReadAt: (channelId: string) => number | null;
+    getMessageReadAt?: (messageId: string) => number | null;
+    getThreadReadAt: (
+      rootId: string,
+      channelId?: string | null,
+    ) => number | null;
+  },
+): number | null {
+  const channelId = item.item.channelId;
+  const threadRootId = getInboxThreadRootId(item);
+  if (threadRootId) {
+    return maxReadAt(
+      options.getThreadReadAt(threadRootId, channelId),
+      options.getMessageReadAt?.(item.item.id) ?? null,
+    );
+  }
+
+  return channelId ? options.getChannelReadAt(channelId) : null;
+}
+
 /**
  * Projects Home inbox read-state from the shared NIP-RS read marker, with
  * the local `useFeedItemState` done-set as a fallback for items that don't
@@ -92,6 +118,7 @@ export function useHomeInboxReadState({
   items,
   getChannelReadAt,
   getThreadReadAt,
+  getMessageReadAt,
   readStateVersion,
   localDoneSet,
   localUnreadSet = EMPTY_ITEM_SET,
@@ -115,23 +142,23 @@ export function useHomeInboxReadState({
         continue;
       }
 
-      const channelId = item.item.channelId;
       const threadRootId = getInboxThreadRootId(item);
-      if (threadRootId) {
-        const readAt = getThreadReadAt(threadRootId, channelId);
-        if (readAt !== null && item.latestActivityAt <= readAt) {
+      const readAt = resolveInboxItemReadAt(item, {
+        getChannelReadAt,
+        getMessageReadAt,
+        getThreadReadAt,
+      });
+      if (readAt !== null) {
+        if (item.latestActivityAt <= readAt) {
           result.add(item.id);
         }
         continue;
       }
 
-      if (channelId) {
-        const readAt = getChannelReadAt(channelId);
-        if (readAt !== null && item.latestActivityAt <= readAt) {
-          result.add(item.id);
-        }
+      if (threadRootId !== null || item.item.channelId) {
         continue;
       }
+
       if (localDoneSet.has(item.id)) {
         result.add(item.id);
       }
@@ -140,6 +167,7 @@ export function useHomeInboxReadState({
   }, [
     getChannelReadAt,
     getThreadReadAt,
+    getMessageReadAt,
     items,
     localDoneSet,
     localUnreadSet,

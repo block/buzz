@@ -11,6 +11,7 @@ mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
 mod relay;
+mod secret_store;
 mod templates;
 mod util;
 
@@ -586,6 +587,21 @@ pub fn run() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
 
+            // Resolve the REPOS symlink from the persisted repos_dir BEFORE
+            // agents are restored below, and decide whether restore is safe.
+            // The frontend's apply_workspace runs only after React mounts —
+            // later than the async agent restore — so without this an agent
+            // could clone into the empty real REPOS dir, and once REPOS is
+            // non-empty ensure_repos_symlink refuses forever. resolve_repos_at_boot
+            // fails closed: if a repos_dir was configured but its symlink could
+            // not be resolved (transiently unavailable external volume), it
+            // returns false so we skip restore this launch rather than let an
+            // agent clone into the wrong REPOS. See managed_agents::repos.
+            let restore_agents = match managed_agents::nest_dir() {
+                Some(nest) => managed_agents::resolve_repos_at_boot(&nest),
+                None => true,
+            };
+
             // Carry the agent's knowledge from the legacy nest (~/.sprout) into
             // the live nest (~/.buzz) after it exists. Must run after
             // ensure_nest() so the destination is present. Non-fatal.
@@ -637,14 +653,20 @@ pub fn run() {
             }
 
             // Keep launch-time agent restoration off the synchronous setup path
-            // so the frontend can mount and reveal the window promptly.
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref()).await
-                {
-                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
-                }
-            });
+            // so the frontend can mount and reveal the window promptly. Gated on
+            // the boot-time repos symlink result (see restore_agents above):
+            // skip when a configured repos_dir could not be resolved, so no
+            // agent clones into a REPOS that isn't the user's target.
+            if restore_agents {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
+                            .await
+                    {
+                        eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+                    }
+                });
+            }
 
             // Periodic sweep: reap orphaned agents from dead instances every 60s.
             // Catches agents that escaped both the Justfile trap and boot-time
@@ -844,6 +866,7 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            validate_repos_dir,
             get_active_workspace,
             set_prevent_sleep_active,
             get_agent_memory,

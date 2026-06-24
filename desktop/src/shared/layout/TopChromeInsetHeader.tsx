@@ -4,14 +4,13 @@ import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 
 type TopChromeInsetHeaderProps = React.ComponentProps<"div"> & {
-  /** Drop the top-chrome inset so the header sits flush at y=0. */
+  /** Keep the header flush with its parent content row. */
   flush?: boolean;
 };
 
 /**
- * Flowed header row that clears the global search/drag chrome and draws the
- * horizontal separator at the bottom edge of that inset. Pass `flush` to drop
- * the inset and sit the header at the top (e.g. channel/thread panes).
+ * Flowed header row with the standard chrome backdrop and separators. The
+ * global top chrome now sits above this content in normal layout flow.
  */
 export function TopChromeInsetHeader({
   className,

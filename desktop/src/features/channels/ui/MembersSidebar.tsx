@@ -4,8 +4,14 @@ import { Bot, UserRoundPlus, X } from "lucide-react";
 import {
   useAddChannelMembersMutation,
   useChannelMembersQuery,
+  useChannelsQuery,
 } from "@/features/channels/hooks";
 import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
+import {
+  coalesceAgentAutocompleteCandidates,
+  getMentionableAgentPubkeys,
+  getSharedChannelIds,
+} from "@/features/agents/lib/agentAutocompleteEligibility";
 import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
@@ -19,6 +25,7 @@ import {
 } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { changeChannelMemberRole } from "@/shared/api/tauri";
 import type {
   AddChannelMembersResult,
@@ -59,6 +66,60 @@ function formatAddCandidateName(user: UserSearchResult) {
     user.nip05Handle?.trim() ||
     formatPubkey(user.pubkey)
   );
+}
+
+function formatOwnerName(
+  user: UserSearchResult,
+  ownerProfiles?: Record<
+    string,
+    { displayName: string | null; nip05Handle: string | null }
+  >,
+) {
+  if (!user.ownerPubkey) {
+    return null;
+  }
+
+  const owner = ownerProfiles?.[normalizePubkey(user.ownerPubkey)];
+  return (
+    owner?.displayName?.trim() ||
+    owner?.nip05Handle?.trim() ||
+    formatPubkey(user.ownerPubkey)
+  );
+}
+
+type AddMemberSearchCandidate = UserSearchResult & {
+  isManagedAgent?: boolean;
+  isMember?: boolean;
+  personaId?: string | null;
+};
+
+function addMemberCandidatePersonaId(
+  candidate: UserSearchResult,
+  managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
+) {
+  return managedAgentsByPubkey.get(normalizePubkey(candidate.pubkey))
+    ?.personaId;
+}
+
+function addMemberCandidateIsManagedAgent(
+  candidate: UserSearchResult,
+  managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
+) {
+  return managedAgentsByPubkey.has(normalizePubkey(candidate.pubkey));
+}
+
+function addMemberCandidateWithAgentMetadata(
+  candidate: UserSearchResult,
+  managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
+): AddMemberSearchCandidate {
+  return {
+    ...candidate,
+    isManagedAgent: addMemberCandidateIsManagedAgent(
+      candidate,
+      managedAgentsByPubkey,
+    ),
+    personaId: addMemberCandidatePersonaId(candidate, managedAgentsByPubkey),
+  };
 }
 
 function memberModalRoleRank(member: ChannelMember) {
@@ -108,8 +169,10 @@ export function MembersSidebar({
   const [addingMemberPubkeys, setAddingMemberPubkeys] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
+  const identityQuery = useIdentityQuery();
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
+  const channelsQuery = useChannelsQuery({ enabled: open });
   const changeRoleMutation = useMutation({
     mutationFn: async ({ pubkey, role }: { pubkey: string; role: string }) => {
       if (!channelId) throw new Error("No channel selected.");
@@ -208,19 +271,36 @@ export function MembersSidebar({
       return [];
     }
 
-    const candidatesByPubkey = new Map<string, UserSearchResult>();
-    const eligibleAgentPubkeys = new Set([
-      ...(managedAgentsQuery.data ?? []).map((agent) =>
+    const candidatesByPubkey = new Map<string, AddMemberSearchCandidate>();
+    const managedAgentsByPubkey = new Map(
+      (managedAgentsQuery.data ?? []).map((agent) => [
         normalizePubkey(agent.pubkey),
+        agent,
+      ]),
+    );
+    const memberAgentLabels = new Set(
+      rawMembers
+        .filter((member) => member.isAgent === true || member.role === "bot")
+        .map((member) => member.displayName?.trim().toLowerCase())
+        .filter((label): label is string => Boolean(label)),
+    );
+    const sharedChannelIds = getSharedChannelIds(channelsQuery.data);
+    const eligibleAgentPubkeys = getMentionableAgentPubkeys({
+      currentPubkey,
+      managedAgentPubkeys: (managedAgentsQuery.data ?? []).map(
+        (agent) => agent.pubkey,
       ),
-      ...(relayAgentsQuery.data ?? [])
-        .filter((agent) => agent.respondTo === "anyone")
-        .map((agent) => normalizePubkey(agent.pubkey)),
-    ]);
+      relayAgents: relayAgentsQuery.data,
+      sharedChannelIds,
+    });
 
-    const addCandidate = (candidate: UserSearchResult) => {
+    const addCandidate = (candidate: AddMemberSearchCandidate) => {
       const pubkey = normalizePubkey(candidate.pubkey);
       if (
+        (candidate.isAgent &&
+          memberAgentLabels.has(
+            formatAddCandidateName(candidate).toLowerCase(),
+          )) ||
         memberPubkeys.has(pubkey) ||
         isArchivedDiscovery(pubkey) ||
         (candidate.isAgent && !eligibleAgentPubkeys.has(pubkey))
@@ -249,15 +329,20 @@ export function MembersSidebar({
         nip05Handle: current.nip05Handle ?? candidate.nip05Handle ?? null,
         ownerPubkey: current.ownerPubkey ?? candidate.ownerPubkey ?? null,
         isAgent: current.isAgent || candidate.isAgent,
+        isManagedAgent: current.isManagedAgent || candidate.isManagedAgent,
+        isMember: current.isMember || candidate.isMember,
+        personaId: current.personaId ?? candidate.personaId,
       });
     };
 
     for (const user of userSearchQuery.data ?? []) {
-      addCandidate(user);
+      addCandidate(
+        addMemberCandidateWithAgentMetadata(user, managedAgentsByPubkey),
+      );
     }
 
     for (const agent of relayAgentsQuery.data ?? []) {
-      if (agent.respondTo !== "anyone") {
+      if (!eligibleAgentPubkeys.has(normalizePubkey(agent.pubkey))) {
         continue;
       }
 
@@ -277,13 +362,24 @@ export function MembersSidebar({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
-        ownerPubkey: null,
+        ownerPubkey: currentPubkey ?? null,
         isAgent: true,
+        isManagedAgent: true,
+        personaId: agent.personaId,
       });
     }
 
+    const coalescedCandidates = coalesceAgentAutocompleteCandidates(
+      [...candidatesByPubkey.values()],
+      {
+        currentPubkey,
+        getLabel: formatAddCandidateName,
+        preferredPubkeys: memberPubkeys,
+      },
+    );
+
     return rankUserCandidatesBySearch({
-      candidates: [...candidatesByPubkey.values()],
+      candidates: coalescedCandidates,
       getLabel: formatAddCandidateName,
       limit: MEMBER_ADD_RESULT_LIMIT,
       query: normalizedDeferredSearchQuery,
@@ -291,16 +387,43 @@ export function MembersSidebar({
   }, [
     canAddMembers,
     isArchivedDiscovery,
+    channelsQuery.data,
+    currentPubkey,
     managedAgentsQuery.data,
     memberPubkeys,
     normalizedDeferredSearchQuery,
     relayAgentsQuery.data,
     userSearchQuery.data,
+    rawMembers,
   ]);
   const isAddSearchLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
-    relayAgentsQuery.isLoading;
+    relayAgentsQuery.isLoading ||
+    channelsQuery.isLoading;
+  const addSearchOwnerPubkeys = React.useMemo(
+    () => [
+      ...new Set(
+        addSearchResults
+          .map((user) => user.ownerPubkey)
+          .filter((pubkey): pubkey is string =>
+            Boolean(
+              pubkey &&
+                pubkey.toLowerCase() !==
+                  identityQuery.data?.pubkey?.toLowerCase(),
+            ),
+          ),
+      ),
+    ],
+    [addSearchResults, identityQuery.data?.pubkey],
+  );
+  const addSearchOwnerProfilesQuery = useUsersBatchQuery(
+    addSearchOwnerPubkeys,
+    {
+      enabled: open && addSearchOwnerPubkeys.length > 0,
+    },
+  );
+
   const filteredArchivedMembers = React.useMemo(() => {
     if (!normalizedSearchQuery) {
       return archived;
@@ -584,6 +707,10 @@ export function MembersSidebar({
                             onSelect={(selectedUser) => {
                               void handleAddSearchResult(selectedUser);
                             }}
+                            ownerLabel={formatOwnerName(
+                              user,
+                              addSearchOwnerProfilesQuery.data?.profiles,
+                            )}
                             user={user}
                           />
                         ))}
@@ -714,10 +841,12 @@ function SearchResultSectionTitle({
 function AddMemberSearchResultRow({
   disabled,
   onSelect,
+  ownerLabel,
   user,
 }: {
   disabled: boolean;
   onSelect: (user: UserSearchResult) => void;
+  ownerLabel?: string | null;
   user: UserSearchResult;
 }) {
   return (
@@ -743,14 +872,21 @@ function AddMemberSearchResultRow({
       />
       <div className="pointer-events-none relative z-10 min-w-0 flex-1">
         {user.isAgent ? (
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-medium tracking-tight">
-              {formatAddCandidateName(user)}
-            </span>
-            <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-              <Bot aria-hidden="true" className="h-4 w-4" />
-              agent
-            </span>
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm font-medium tracking-tight">
+                {formatAddCandidateName(user)}
+              </span>
+              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                <Bot aria-hidden="true" className="h-4 w-4" />
+                agent
+              </span>
+            </div>
+            {ownerLabel ? (
+              <span className="block truncate text-xs text-muted-foreground">
+                owned by {ownerLabel}
+              </span>
+            ) : null}
           </div>
         ) : (
           <span className="block truncate text-sm font-medium tracking-tight">

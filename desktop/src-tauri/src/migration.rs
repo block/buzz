@@ -263,6 +263,11 @@ fn copy_file_over_generated_default(src: &Path, dst: &Path) -> std::io::Result<(
 
 /// Read a JSON array of objects from `path`, apply `f` to each object,
 /// and write back if any mutation returned `true`.
+///
+/// Writes back via [`crate::managed_agents::atomic_write_json_restricted`]
+/// (owner-only `0o600`): the store files this rewrites can carry plaintext
+/// agent nsecs on a keyringless host, so the write must not reopen the umask
+/// window SECURITY.md:90 closes.
 fn patch_json_records(
     path: &Path,
     mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> bool,
@@ -285,7 +290,7 @@ fn patch_json_records(
     }
     if changed {
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            if let Err(e) = crate::managed_agents::atomic_write_json(path, &bytes) {
+            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
                 eprintln!("buzz-desktop: patch-json-records: {e}");
             }
         }
@@ -819,12 +824,31 @@ pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
 }
 
 fn reconcile_mcp_commands_in_file(path: &Path) {
+    // Resolve each record's EFFECTIVE harness (persona-wins, override-honored)
+    // before deriving its mcp_command, so a persona-inherited harness switch
+    // doesn't leave a stale persisted mcp_command. The persona runtime is read
+    // from the sibling personas.json; missing entries fall back to the record's
+    // own agent_command (the create-time snapshot).
+    let persona_runtimes = load_persona_runtimes(path);
     patch_json_records(path, |obj| {
-        let agent_command = match obj.get("agent_command").and_then(|v| v.as_str()) {
+        let override_cmd = obj
+            .get("agent_command_override")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let snapshot = obj.get("agent_command").and_then(|v| v.as_str());
+        let persona_cmd = obj
+            .get("persona_id")
+            .and_then(|v| v.as_str())
+            .and_then(|pid| persona_runtimes.get(pid))
+            .map(String::as_str)
+            .and_then(crate::managed_agents::known_acp_runtime_exact)
+            .and_then(|r| r.commands.first().copied());
+        let effective_command = match override_cmd.or(persona_cmd).or(snapshot) {
             Some(cmd) => cmd.to_string(),
             None => return false,
         };
-        let Some(runtime) = crate::managed_agents::known_acp_runtime(&agent_command) else {
+        let Some(runtime) = crate::managed_agents::known_acp_runtime(&effective_command) else {
             return false;
         };
         let expected = runtime.mcp_command.unwrap_or("");
@@ -843,7 +867,7 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
         eprintln!(
             "buzz-desktop: runtime-reconcile: {:?} ({:?}): mcp_command {:?} → {:?}",
             obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-            agent_command,
+            effective_command,
             current,
             expected,
         );
@@ -853,6 +877,31 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
         );
         true
     });
+}
+
+/// Build a `persona_id → runtime` map from the personas.json sibling of the
+/// given managed-agents.json path. Returns an empty map when personas can't be
+/// read or parsed — callers then fall back to the record's own snapshot.
+fn load_persona_runtimes(agents_path: &Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(personas_path) = agents_path.parent().map(|dir| dir.join("personas.json")) else {
+        return map;
+    };
+    let Ok(content) = std::fs::read_to_string(&personas_path) else {
+        return map;
+    };
+    let Ok(records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
+        return map;
+    };
+    for record in records {
+        if let (Some(id), Some(runtime)) = (
+            record.get("id").and_then(|v| v.as_str()),
+            record.get("runtime").and_then(|v| v.as_str()),
+        ) {
+            map.insert(id.to_string(), runtime.to_string());
+        }
+    }
+    map
 }
 
 fn replace_command_field(
