@@ -660,7 +660,7 @@ const KIND_REACTION = 7; // NIP-25 reaction
 const KIND_DELETION = 5; // NIP-09 deletion
 
 // Fake media-proxy port the mock answers for `get_media_proxy_port`, so
-// `rewriteRelayUrl()` produces a real `http://localhost:<port>/media/...` src
+// `rewriteRelayUrl()` produces a real `http://127.0.0.1:<port>/media/...` src
 // in e2e (instead of the `buzz-media://` fallback). The reaction guard
 // asserts against this exact port.
 const MOCK_MEDIA_PROXY_PORT = 54321;

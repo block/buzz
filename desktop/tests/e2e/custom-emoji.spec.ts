@@ -141,14 +141,14 @@ test("native emoji-only messages leave space below the author metadata", async (
 //
 // This drives the real interactive react flow (hover -> Open reactions ->
 // emoji-mart custom category) so it exercises the add_reaction Tauri command,
-// then asserts the rendered reaction <img> src points at the localhost media
+// then asserts the rendered reaction <img> src points at the loopback media
 // proxy. On the pre-fix code the src would be the raw relay URL, so this test
 // fails there — exactly the assertion that would have caught the bug.
 //
 // `:react:` is a relay-hosted fixture emoji (URL on the relay origin matching
 // rewriteRelayUrl()'s /media/{64-hex}.{ext} pattern), and the mock bridge
 // answers get_media_proxy_port with port 54321 so the rewrite resolves to a
-// real localhost URL rather than the buzz-media:// fallback.
+// real 127.0.0.1 URL rather than the buzz-media:// fallback.
 
 const REACTION_SHORTCODE = "react";
 const MOCK_MEDIA_PROXY_PORT = 54321;
@@ -214,7 +214,7 @@ test("message quick reaction tray stays neutral after selecting a tray emoji", a
   );
 });
 
-test("reacting with a custom emoji renders via the localhost media proxy", async ({
+test("reacting with a custom emoji renders via the loopback media proxy", async ({
   page,
 }) => {
   await openGeneral(page);
@@ -236,7 +236,7 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
     .click();
 
   // The reaction pill renders the custom emoji as an <img alt=":react:">. Its
-  // src must be the localhost proxy URL — proving rewriteRelayUrl() ran. A raw
+  // src must be the loopback proxy URL — proving rewriteRelayUrl() ran. A raw
   // relay URL here is the bug.
   const reactionPill = row.getByLabel(
     `Toggle :${REACTION_SHORTCODE}: reaction`,
@@ -248,7 +248,7 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
   await expect(reactionImg).toHaveAttribute(
     "src",
     new RegExp(
-      `^http://localhost:${MOCK_MEDIA_PROXY_PORT}/media/[\\da-f]{64}\\.png$`,
+      `^http://127\\.0\\.0\\.1:${MOCK_MEDIA_PROXY_PORT}/media/[\\da-f]{64}\\.png$`,
     ),
   );
 
