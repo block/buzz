@@ -14,6 +14,7 @@ export function relayAgentIsSharedWithUser(
   sharedChannelIds: ReadonlySet<string>,
 ) {
   return (
+    // RelayAgent does not expose respondTo allowlists yet, so only shared "anyone" agents are safely mentionable.
     agent.respondTo === "anyone" &&
     agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
   );
