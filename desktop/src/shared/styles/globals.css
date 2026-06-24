@@ -929,6 +929,21 @@
   color: hsl(var(--muted-foreground) / 0.82);
 }
 
+.message-markdown .mention-chip.search-channel-chip {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground) / 0.82);
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.search-result-row[aria-selected="true"]
+  .message-markdown
+  .mention-chip.search-channel-chip {
+  background: hsl(var(--muted) / 0.82);
+  color: hsl(var(--muted-foreground) / 0.95);
+}
+
 .message-markdown.inbox-preview-markdown {
   --inline-chip-padding-block-start: 0.125rem;
   --inline-chip-padding-block-end: 0.0625rem;

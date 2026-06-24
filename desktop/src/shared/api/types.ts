@@ -114,12 +114,14 @@ export type Profile = {
   avatarUrl: string | null;
   about: string | null;
   nip05Handle: string | null;
+  ownerPubkey: string | null;
 };
 
 export type UserProfileSummary = {
   displayName: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
+  ownerPubkey: string | null;
   isAgent?: boolean;
 };
 
@@ -133,6 +135,7 @@ export type UserSearchResult = {
   displayName: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
+  ownerPubkey: string | null;
   isAgent: boolean;
 };
 

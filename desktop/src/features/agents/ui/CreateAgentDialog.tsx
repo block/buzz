@@ -52,16 +52,18 @@ export function CreateAgentDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const createMutation = useCreateManagedAgentMutation();
-  const providersQuery = useAvailableAcpRuntimes();
-  const allProvidersQuery = useAcpRuntimesQuery();
-  const backendProvidersQuery = useBackendProvidersQuery();
+  const providersQuery = useAvailableAcpRuntimes({ enabled: open });
+  const allProvidersQuery = useAcpRuntimesQuery({ enabled: open });
+  const backendProvidersQuery = useBackendProvidersQuery({ enabled: open });
   const { lastRuntimeId, setLastRuntime } = useLastRuntime();
   const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
   const [agentCommand, setAgentCommand] = React.useState("buzz-agent");
   const [agentArgs, setAgentArgs] = React.useState("acp");
   const [mcpCommand, setMcpCommand] = React.useState("");
   const [mcpToolsets, setMcpToolsets] = React.useState("");
-  const prereqsQuery = useManagedAgentPrereqsQuery(acpCommand, mcpCommand);
+  const prereqsQuery = useManagedAgentPrereqsQuery(acpCommand, mcpCommand, {
+    enabled: open,
+  });
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [spawnAfterCreate, setSpawnAfterCreate] = React.useState(true);

@@ -1,6 +1,8 @@
 [package]
 name = "sprig"
-version.workspace = true
+# Independent version: sprig ships as a pinnable artifact (sprig-v* tags),
+# released on its own cadence. It does NOT inherit the workspace version.
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

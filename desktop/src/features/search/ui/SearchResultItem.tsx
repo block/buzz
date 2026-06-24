@@ -1,30 +1,64 @@
 import type * as React from "react";
-import { ArrowRight, FileText, Hash, type LucideIcon } from "lucide-react";
+import {
+  ArrowRight,
+  Bot,
+  FileText,
+  Hash,
+  MessageCircle,
+  Plus,
+  User,
+  type LucideIcon,
+} from "lucide-react";
 
 import {
   resolveUserLabel,
   resolveUserSecondaryLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import type { Channel, SearchHit } from "@/shared/api/types";
+import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { Badge } from "@/shared/ui/badge";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type SearchResult =
+  | {
+      kind: "action";
+      action: {
+        description?: string;
+        id: "create-agent" | "create-channel";
+        title: string;
+      };
+    }
   | { kind: "channel"; channel: Channel }
+  | { kind: "user"; user: UserSearchResult }
   | { kind: "message"; hit: SearchHit };
 
 export function resultKey(result: SearchResult) {
+  if (result.kind === "action") {
+    return `action-${result.action.id}`;
+  }
+
   if (result.kind === "channel") {
     return `channel-${result.channel.id}`;
+  }
+
+  if (result.kind === "user") {
+    return `user-${result.user.pubkey}`;
   }
 
   return `message-${result.hit.eventId}`;
 }
 
 export function resultTestId(result: SearchResult) {
+  if (result.kind === "action") {
+    return `search-result-action-${result.action.id}`;
+  }
+
   if (result.kind === "channel") {
     return `search-result-channel-${result.channel.id}`;
+  }
+
+  if (result.kind === "user") {
+    return `search-result-user-${result.user.pubkey}`;
   }
 
   return `search-result-${result.hit.eventId}`;
@@ -34,6 +68,14 @@ export function resultIcon(
   result: SearchResult,
   channelLookup: ReadonlyMap<string, Channel>,
 ) {
+  if (result.kind === "action") {
+    return result.action.id === "create-agent" ? Bot : Plus;
+  }
+
+  if (result.kind === "user") {
+    return result.user.isAgent ? Bot : User;
+  }
+
   const channelType =
     result.kind === "channel"
       ? result.channel.channelType
@@ -41,7 +83,15 @@ export function resultIcon(
         ? channelLookup.get(result.hit.channelId)?.channelType
         : undefined;
 
-  return channelType === "forum" ? FileText : Hash;
+  if (channelType === "forum") {
+    return FileText;
+  }
+
+  if (channelType === "dm") {
+    return MessageCircle;
+  }
+
+  return Hash;
 }
 
 export function SearchResultShell({

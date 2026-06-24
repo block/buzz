@@ -85,7 +85,6 @@ test("personaManagedAgentUpdate syncs edited persona identity to linked agent", 
   assert.deepEqual(personaManagedAgentUpdate(agent(), persona()), {
     pubkey: "deadbeef".repeat(8),
     name: "Fizz Prime",
-    avatarUrl: null,
     systemPrompt: "New prompt",
     model: "new-model",
     envVars: { NEW_KEY: "2" },
@@ -121,7 +120,6 @@ test("personaManagedAgentUpdate maps changed persona runtime to linked agent com
     {
       pubkey: "deadbeef".repeat(8),
       name: "Fizz Prime",
-      avatarUrl: null,
       systemPrompt: "New prompt",
       model: "new-model",
       envVars: { NEW_KEY: "2" },

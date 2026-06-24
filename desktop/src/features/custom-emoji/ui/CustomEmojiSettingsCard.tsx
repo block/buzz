@@ -17,6 +17,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
+import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 
 /**
  * Custom emoji management (NIP-30, kind:30030). Each member owns their own set:
@@ -124,13 +125,15 @@ export function CustomEmojiSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-custom-emoji">
-      <div className="mb-12 space-y-1">
-        <h2 className="text-2xl font-semibold tracking-tight">Custom Emoji</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Add your own custom emoji for everyone on this relay to use. Type{" "}
-          <code>:name:</code> in messages and reactions.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Custom Emoji"
+        description={
+          <>
+            Add your own custom emoji for everyone on this relay to use. Type{" "}
+            <code>:name:</code> in messages and reactions.
+          </>
+        }
+      />
 
       <div className="space-y-6">
         <form

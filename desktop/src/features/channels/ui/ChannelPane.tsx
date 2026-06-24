@@ -50,7 +50,11 @@ import {
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
-import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import {
+  buildMainTimelineEntries,
+  type MainTimelineEntry,
+} from "@/features/messages/lib/threadPanel";
+import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
@@ -563,6 +567,16 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
   }, [activeChannel, messages]);
+  const mainTimelineEntries = React.useMemo(
+    () => buildMainTimelineEntries(visibleMessages),
+    [visibleMessages],
+  );
+  useRenderScopedReactionHydration({
+    activeChannel,
+    mainTimelineEntries,
+    threadHeadMessage,
+    threadMessages,
+  });
   const videoReviewCommentsByRootId = React.useMemo(
     () => buildVideoReviewCommentsByRootId(messages),
     [messages],
@@ -677,6 +691,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 : "No channel selected"
             }
             isLoading={isTimelineLoading}
+            mainEntries={mainTimelineEntries}
             messages={visibleMessages}
             firstUnreadMessageId={firstUnreadMessageId}
             unreadCount={unreadCount}
@@ -948,6 +963,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                       onClose={onCloseProfilePanel}
                       onOpenDm={onOpenDm}
+                      onOpenProfile={onOpenProfilePanel}
                       onViewChange={onProfilePanelViewChange}
                       pubkey={profilePanelPubkey}
                       splitPaneClamp

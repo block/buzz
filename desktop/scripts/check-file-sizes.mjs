@@ -31,11 +31,20 @@ const rules = [
 // file is broken up. Tracked as a follow-up.
 const overrides = new Map([
   ["src-tauri/src/commands/agents.rs", 1294],
-  ["src-tauri/src/managed_agents/nest.rs", 1420],
+  // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
+  // outside NEST_DIRS (it may be a symlink), so it needs its own create +
+  // chmod-only-when-real-dir handling plus integration test coverage. The
+  // self-contained repos_dir functions and their unit tests live in repos.rs;
+  // this is the seam that must stay in nest.rs. Approved override; still queued
+  // to split with the rest of this list.
+  ["src-tauri/src/managed_agents/nest.rs", 1447],
   ["src-tauri/src/managed_agents/runtime.rs", 1953],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
-  ["src/shared/api/tauri.ts", 1196],
+  // applyWorkspace reposDir parameter threaded through the Tauri invoke for
+  // configurable repos_dir — a 3-line overage from load-bearing parameter
+  // plumbing, not generic debt growth. Approved override; still queued to split.
+  ["src/shared/api/tauri.ts", 1198],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1295],

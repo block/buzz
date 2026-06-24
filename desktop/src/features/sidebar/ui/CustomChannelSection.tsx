@@ -11,7 +11,6 @@ import {
   GripVertical,
   Pencil,
   Plus,
-  Search,
   Star,
   StarOff,
   Trash2,
@@ -48,6 +47,7 @@ import {
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { HashSearch } from "@/shared/ui/icons";
 
 // ---------------------------------------------------------------------------
 // Shared styles
@@ -56,7 +56,7 @@ import { cn } from "@/shared/lib/cn";
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
-  "relative size-2.5 shrink-0 opacity-0 text-sidebar-foreground/45 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/sidebar-section:text-sidebar-foreground group-hover/section-label:opacity-100 group-hover/section-label:text-sidebar-foreground group-focus-within/sidebar-section:opacity-100 group-focus-within/sidebar-section:text-sidebar-foreground group-focus-visible/section-label:opacity-100 group-focus-visible/section-label:text-sidebar-foreground";
+  "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100";
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
@@ -261,18 +261,24 @@ function SectionHeaderActions({
       {onBrowseClick ? (
         <button
           aria-label={browseAriaLabel}
-          className={SECTION_ICON_BUTTON_CLASS}
+          className={cn(
+            SECTION_ICON_BUTTON_CLASS,
+            SECTION_ACTION_VISIBILITY_CLASS,
+          )}
           onClick={onBrowseClick}
           title={browseAriaLabel}
           type="button"
         >
-          <Search className="h-4 w-4" />
+          <HashSearch className="h-4 w-4" />
         </button>
       ) : null}
       {onCreateClick ? (
         <button
           aria-label={createAriaLabel}
-          className={SECTION_ICON_BUTTON_CLASS}
+          className={cn(
+            SECTION_ICON_BUTTON_CLASS,
+            SECTION_ACTION_VISIBILITY_CLASS,
+          )}
           onClick={onCreateClick}
           type="button"
         >
@@ -416,8 +422,8 @@ export function ChannelGroupSection({
     ) : null;
 
   const sectionContent = (
-    <SidebarGroup className={groupClassName}>
-      <div className="group/sidebar-section relative">
+    <SidebarGroup className={cn("group/sidebar-section", groupClassName)}>
+      <div className="relative">
         <SidebarGroupLabel asChild>
           <button
             aria-controls={contentId}
@@ -535,13 +541,12 @@ export function CustomChannelSection({
     <SortableSectionShell sectionId={section.id}>
       {({ dragHandleProps, isDragging }) => (
         <DroppableSectionBody sectionId={section.id}>
-          <SidebarGroup className={cn(isDragging && "opacity-30")}>
+          <SidebarGroup
+            className={cn("group/sidebar-section", isDragging && "opacity-30")}
+          >
             <ContextMenu>
               <ContextMenuTrigger asChild>
-                <div
-                  className="group/sidebar-section relative"
-                  {...dragHandleProps}
-                >
+                <div className="relative" {...dragHandleProps}>
                   <SidebarGroupLabel asChild>
                     <button
                       aria-controls={contentId}

@@ -47,6 +47,7 @@ export default defineConfig({
         "**/relay-connectivity-screenshots.spec.ts",
         "**/unread-pill-screenshots.spec.ts",
         "**/sidebar-more-unread-overlap.spec.ts",
+        "**/home-collapsed-top-chrome-screenshots.spec.ts",
         "**/thread-unread-screenshots.spec.ts",
         "**/animated-avatar-screenshots.spec.ts",
         "**/reminders-screenshots.spec.ts",

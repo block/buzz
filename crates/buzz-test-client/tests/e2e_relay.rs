@@ -39,7 +39,7 @@ fn relay_http_url() -> String {
         .to_string()
 }
 
-/// Create a real channel via a signed kind:9007 event submitted to POST /api/events.
+/// Create a real channel via a signed kind:9007 event submitted to POST /events.
 async fn create_test_channel(keys: &Keys) -> String {
     let client = reqwest::Client::new();
     let pubkey_hex = keys.public_key().to_hex();
@@ -57,7 +57,7 @@ async fn create_test_channel(keys: &Keys) -> String {
         .unwrap();
 
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&event).unwrap())
@@ -149,6 +149,56 @@ async fn test_send_event_and_receive_via_subscription() {
 
     client_a.disconnect().await.expect("disconnect A");
     client_b.disconnect().await.expect("disconnect B");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_large_event_frame_below_configured_limit_is_accepted() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let h_tag = Tag::parse(["h", channel.as_str()]).expect("h tag");
+    let content = "x".repeat(70_000);
+    let event = EventBuilder::new(Kind::Custom(kind), content)
+        .tags([h_tag])
+        .sign_with_keys(&keys)
+        .expect("sign large event");
+
+    let frame = serde_json::to_string(&serde_json::json!(["EVENT", &event])).expect("frame JSON");
+    assert!(
+        frame.len() > 65_536,
+        "test frame must exceed the old 64 KiB cap; got {} bytes",
+        frame.len()
+    );
+    assert!(
+        frame.len() < 512 * 1024,
+        "test frame should fit under the new default cap; got {} bytes",
+        frame.len()
+    );
+
+    let ok = client.send_event(event).await.expect("send large event");
+    assert!(ok.accepted, "large event rejected: {}", ok.message);
+
+    let ok_after = client
+        .send_text_message(
+            &keys,
+            &channel,
+            "socket still usable after large frame",
+            kind,
+        )
+        .await
+        .expect("send follow-up event");
+    assert!(
+        ok_after.accepted,
+        "follow-up event rejected: {}",
+        ok_after.message
+    );
+
+    client.disconnect().await.expect("disconnect");
 }
 
 #[tokio::test]
@@ -1347,7 +1397,7 @@ async fn test_membership_notification_emitted_on_add() {
         .sign_with_keys(&owner_keys)
         .unwrap();
     let resp = http_client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &owner_keys.public_key().to_hex())
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&add_event).unwrap())
@@ -1619,7 +1669,7 @@ async fn test_membership_notification_emitted_on_remove() {
         .sign_with_keys(&owner_keys)
         .unwrap();
     let resp = http_client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &owner_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&add_event).unwrap())
@@ -1658,7 +1708,7 @@ async fn test_membership_notification_emitted_on_remove() {
         .sign_with_keys(&owner_keys)
         .unwrap();
     let resp = http_client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &owner_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&remove_event).unwrap())

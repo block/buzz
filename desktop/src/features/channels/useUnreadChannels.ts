@@ -1,19 +1,22 @@
 import * as React from "react";
 import {
   EMPTY_SET,
-  shouldRouteChannelUnreadEvent,
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
 import {
+  countUnreadAppBadgeObservedEvents,
+  countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
+  makeObservedUnreadEvent,
   mapsEqual,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
   type ObservedUnreadEvent,
 } from "@/features/channels/unreadChannelCounts";
 import { useReadState } from "@/features/channels/readState/useReadState";
+import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import {
   getThreadReference,
   isBroadcastReply,
@@ -39,41 +42,6 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
 // filter to find one external trigger message. 1000 matches the live sub's
 // per-channel limit elsewhere in the app.
 const CATCH_UP_LIMIT = 1000;
-
-// All four thread root-id sets (participation, authored, mentioned, muted)
-// share the same localStorage shape: a per-pubkey JSON array of ids, capped to
-// the newest N entries on write and tolerant of malformed/absent data on read.
-// One factory yields the read/write pair for each so the only difference is the
-// key prefix. The closures capture the prefix lexically (no `this`), so a
-// caller can alias one store's `write` into a variable and call it bare.
-function makeRootIdStore(prefix: string, maxEntries = 1000) {
-  const storageKey = (pubkey: string) => `${prefix}:${pubkey}`;
-  return {
-    read(pubkey: string): Set<string> {
-      try {
-        const raw = window.localStorage.getItem(storageKey(pubkey));
-        if (!raw) return new Set();
-        const parsed = JSON.parse(raw);
-        if (!Array.isArray(parsed)) return new Set();
-        return new Set(
-          parsed.filter((id): id is string => typeof id === "string"),
-        );
-      } catch {
-        return new Set();
-      }
-    },
-    write(pubkey: string, rootIds: Set<string>): void {
-      try {
-        const arr = [...rootIds];
-        const capped =
-          arr.length > maxEntries ? arr.slice(arr.length - maxEntries) : arr;
-        window.localStorage.setItem(storageKey(pubkey), JSON.stringify(capped));
-      } catch {
-        // Ignore storage errors (private browsing, quota exceeded).
-      }
-    },
-  };
-}
 
 const participationStore = makeRootIdStore("buzz-thread-participation.v1");
 const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
@@ -436,12 +404,20 @@ export function useUnreadChannels(
         channel?.channelType === "dm" ||
         (normalizedPubkey !== null &&
           isHighPriorityEventForUser(event, normalizedPubkey));
-      const didRecordUnreadEvent = recordUnreadEvent(channelId, {
-        id: event.id,
-        createdAt: event.created_at,
-        rootId: resolveObservedUnreadRootId(event.tags),
-        highPriority: isHighPriority,
-      });
+      const isThreadedReply =
+        getThreadReference(event.tags).parentId !== null &&
+        !isBroadcastReply(event.tags);
+      const didRecordUnreadEvent = recordUnreadEvent(
+        channelId,
+        makeObservedUnreadEvent({
+          id: event.id,
+          createdAt: event.created_at,
+          rootId: resolveObservedUnreadRootId(event.tags),
+          highPriority: isHighPriority,
+          channelType: channel?.channelType,
+          isThreadedReply,
+        }),
+      );
       const current = latestByChannelRef.current.get(channelId) ?? 0;
       if (event.created_at > current) {
         latestByChannelRef.current.set(channelId, event.created_at);
@@ -694,21 +670,23 @@ export function useUnreadChannels(
             const evtRef = getThreadReference(event.tags);
             const isThreadedReply =
               evtRef.parentId !== null && !isBroadcastReply(event.tags);
-            if (shouldRouteChannelUnreadEvent(ch, isThreadedReply)) {
-              if (event.created_at > maxExternal) {
-                maxExternal = event.created_at;
-              }
-              const isHighPriority =
-                chType === "dm" ||
-                (normalizedPubkey !== null &&
-                  isHighPriorityEventForUser(event, normalizedPubkey));
-              unreadEvents.push({
+            if (event.created_at > maxExternal) {
+              maxExternal = event.created_at;
+            }
+            const isHighPriority =
+              chType === "dm" ||
+              (normalizedPubkey !== null &&
+                isHighPriorityEventForUser(event, normalizedPubkey));
+            unreadEvents.push(
+              makeObservedUnreadEvent({
                 id: event.id,
                 createdAt: event.created_at,
                 rootId: resolveObservedUnreadRootId(event.tags),
                 highPriority: isHighPriority,
-              });
-            }
+                channelType: chType,
+                isThreadedReply,
+              }),
+            );
             if (isThreadedReply) {
               threadReplies.push({
                 id: event.id,
@@ -821,12 +799,14 @@ export function useUnreadChannels(
           unreadChannelIds: new Set<string>(),
           highPriorityUnreadChannelIds: new Set<string>(),
           unreadChannelCounts: new Map<string, number>(),
+          unreadChannelNotificationCount: 0,
         };
       }
 
       const unread = new Set<string>();
       const highPriority = new Set<string>();
       const counts = new Map<string, number>();
+      let unreadChannelNotificationCount = 0;
 
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
@@ -835,6 +815,7 @@ export function useUnreadChannels(
           // Forced-unread is dot tier only — not high-priority.
           unread.add(channel.id);
           counts.set(channel.id, 1);
+          unreadChannelNotificationCount += 1;
           continue;
         }
 
@@ -856,7 +837,15 @@ export function useUnreadChannels(
         if (unreadCount === 0) continue;
 
         unread.add(channel.id);
-        counts.set(channel.id, unreadCount);
+        const badgeCount = countUnreadBadgeObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
+        );
+        counts.set(channel.id, badgeCount);
+        unreadChannelNotificationCount += countUnreadAppBadgeObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
+        );
 
         // DM channels: any unread DM is high-priority.
         if (channel.channelType === "dm") {
@@ -877,6 +866,7 @@ export function useUnreadChannels(
         unreadChannelIds: unread,
         highPriorityUnreadChannelIds: highPriority,
         unreadChannelCounts: counts,
+        unreadChannelNotificationCount,
       };
     }, [
       activeChannelId,
@@ -919,9 +909,8 @@ export function useUnreadChannels(
     ? prevUnreadCountsRef.current
     : rawUnread.unreadChannelCounts;
   prevUnreadCountsRef.current = unreadChannelCounts;
-  const unreadChannelNotificationCount = [
-    ...unreadChannelCounts.values(),
-  ].reduce((total, count) => total + count, 0);
+  const unreadChannelNotificationCount =
+    rawUnread.unreadChannelNotificationCount;
 
   const unreadChannelIdsRef = React.useRef(unreadChannelIds);
   unreadChannelIdsRef.current = unreadChannelIds;

@@ -64,30 +64,38 @@ pub fn get_media_proxy_port(state: State<'_, AppState>) -> u16 {
 }
 
 #[tauri::command]
-pub fn sign_event(
+pub async fn sign_event(
     kind: u16,
     content: String,
     created_at: Option<u64>,
     tags: Vec<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
+    let keys = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
 
-    let nostr_tags = tags
-        .into_iter()
-        .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
-        .collect::<Result<Vec<_>, _>>()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let nostr_tags = tags
+            .into_iter()
+            .map(|tag| Tag::parse(tag).map_err(|error| format!("invalid tag: {error}")))
+            .collect::<Result<Vec<_>, _>>()?;
 
-    let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
-    if let Some(created_at) = created_at {
-        builder = builder.custom_created_at(Timestamp::from(created_at));
-    }
+        let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+        if let Some(created_at) = created_at {
+            builder = builder.custom_created_at(Timestamp::from(created_at));
+        }
 
-    let event = builder
-        .sign_with_keys(&keys)
-        .map_err(|error| format!("sign failed: {error}"))?;
+        let event = builder
+            .sign_with_keys(&keys)
+            .map_err(|error| format!("sign failed: {error}"))?;
 
-    Ok(event.as_json())
+        Ok(event.as_json())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
@@ -197,49 +205,67 @@ pub fn import_identity(
 }
 
 #[tauri::command]
-pub fn create_auth_event(
+pub async fn create_auth_event(
     challenge: String,
     relay_url: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|error| error.to_string())?;
+    let keys = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
 
-    let tags = vec![
-        Tag::parse(vec!["relay", &relay_url])
-            .map_err(|error| format!("relay tag failed: {error}"))?,
-        Tag::parse(vec!["challenge", &challenge])
-            .map_err(|error| format!("challenge tag failed: {error}"))?,
-    ];
+    tauri::async_runtime::spawn_blocking(move || {
+        let tags = vec![
+            Tag::parse(vec!["relay", &relay_url])
+                .map_err(|error| format!("relay tag failed: {error}"))?,
+            Tag::parse(vec!["challenge", &challenge])
+                .map_err(|error| format!("challenge tag failed: {error}"))?,
+        ];
 
-    let event = EventBuilder::new(Kind::Custom(22242), "")
-        .tags(tags)
-        .sign_with_keys(&keys)
-        .map_err(|error| format!("sign failed: {error}"))?;
+        let event = EventBuilder::new(Kind::Custom(22242), "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .map_err(|error| format!("sign failed: {error}"))?;
 
-    Ok(event.as_json())
+        Ok(event.as_json())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn nip44_encrypt_to_self(
+pub async fn nip44_encrypt_to_self(
     plaintext: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    nip44::encrypt(
-        keys.secret_key(),
-        &keys.public_key(),
-        &plaintext,
-        nip44::Version::V2,
-    )
-    .map_err(|e| format!("nip44 encrypt failed: {e}"))
+    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        nip44::encrypt(
+            keys.secret_key(),
+            &keys.public_key(),
+            &plaintext,
+            nip44::Version::V2,
+        )
+        .map_err(|e| format!("nip44 encrypt failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn nip44_decrypt_from_self(
+pub async fn nip44_decrypt_from_self(
     ciphertext: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let keys = state.keys.lock().map_err(|e| e.to_string())?;
-    nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
-        .map_err(|e| format!("nip44 decrypt failed: {e}"))
+    let keys = state.keys.lock().map_err(|e| e.to_string())?.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
+            .map_err(|e| format!("nip44 decrypt failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }

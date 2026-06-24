@@ -156,7 +156,11 @@ async fn nip11_or_ws_handler(
     let (relay_self, advertise_nip43) = nip11_facts(&state);
 
     if accept.contains("application/nostr+json") {
-        let info = RelayInfo::build(relay_self.as_deref(), advertise_nip43);
+        let info = RelayInfo::build(
+            relay_self.as_deref(),
+            advertise_nip43,
+            state.config.max_frame_bytes,
+        );
         return Json(info).into_response();
     }
 
@@ -175,7 +179,11 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
-            let info = RelayInfo::build(relay_self.as_deref(), advertise_nip43);
+            let info = RelayInfo::build(
+                relay_self.as_deref(),
+                advertise_nip43,
+                state.config.max_frame_bytes,
+            );
             Json(info).into_response()
         }
     }

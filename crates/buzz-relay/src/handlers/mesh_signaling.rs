@@ -550,6 +550,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
             std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            3,
         );
         state.sub_registry.register(
             conn_id,

@@ -9,6 +9,7 @@ import {
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
+import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
@@ -29,6 +30,7 @@ function resetWorkspaceState(): void {
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetVideoPlayerState();
+  resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearAllDrafts();
 }
@@ -65,7 +67,7 @@ export function useWorkspaceInit(
   // On the initial mount we skip resetting singletons (they're fresh).
   const hasInitializedRef = useRef(false);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token) — depending on the whole object would trigger resets on name-only changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
     let cancelled = false;
 
@@ -134,9 +136,20 @@ export function useWorkspaceInit(
           activeWorkspace.relayUrl,
           undefined,
           activeWorkspace.token,
+          activeWorkspace.reposDir,
         );
       } catch (error) {
+        // apply_workspace validates repos_dir before touching relay/keys, so a
+        // hard reject (bad path) leaves the backend on the previous/default
+        // relay with nothing applied. Marking the workspace ready here would
+        // render workspace-scoped UI against the wrong relay — a silent
+        // split-brain. Park on the loading gate (isReady:false, no appliedKey)
+        // instead; the backend already toasts a `repos-dir-error`.
         console.error("Failed to apply workspace to backend:", error);
+        if (!cancelled) {
+          setResult({ isReady: false, needsSetup: false, appliedKey: null });
+        }
+        return;
       }
 
       if (!cancelled) {
@@ -157,6 +170,7 @@ export function useWorkspaceInit(
     activeWorkspace?.id,
     activeWorkspace?.relayUrl,
     activeWorkspace?.token,
+    activeWorkspace?.reposDir,
     isSharedIdentity,
     workspaceKey,
   ]);

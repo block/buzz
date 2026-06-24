@@ -21,6 +21,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 type ProfileSettingsCardProps = {
   currentPubkey?: string;
@@ -458,12 +459,10 @@ export function ProfileSettingsCard({
   return (
     <section className="min-w-0" data-testid="settings-profile">
       <div>
-        <div className="mb-12 space-y-1">
-          <h2 className="text-2xl font-semibold tracking-tight">Profile</h2>
-          <p className="text-base font-normal text-muted-foreground">
-            Update how your name, avatar, and bio appear across Buzz.
-          </p>
-        </div>
+        <SettingsSectionHeader
+          title="Profile"
+          description="Update how your name, avatar, and bio appear across Buzz."
+        />
 
         <div className="space-y-3">
           {profileQuery.error instanceof Error ? (

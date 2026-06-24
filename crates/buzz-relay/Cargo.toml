@@ -1,7 +1,10 @@
 [package]
 name = "buzz-relay"
 default-run = "buzz-relay"
-version.workspace = true
+# Independent version: buzz-relay ships as a pinnable artifact
+# (ghcr.io/block/buzz), released on its own cadence via `just release-relay`.
+# It does NOT inherit the workspace version.
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -28,12 +28,11 @@ export type UseLiveChannelUpdatesOptions = {
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
   onLiveMention?: () => void;
   /**
-   * Fired for live main-channel "new content" events in a member channel
-   * authored by someone other than the current user. Non-DM thread replies
-   * are routed through onThreadReplyNotification instead; DM thread replies
-   * also fire this callback so the DM unread dot/count stays channel-level.
-   * Used to drive the in-session "latest message at" map that powers sidebar
-   * unread badges. See `UNREAD_TRIGGER_KINDS` for the exact kind set.
+   * Fired for live "new content" events in a member channel authored by
+   * someone other than the current user. Thread replies also fire
+   * onThreadReplyNotification so Home inbox activity stays in sync. Used to
+   * drive the observed unread-event map that powers sidebar unread state.
+   * See `UNREAD_TRIGGER_KINDS` for the exact kind set.
    */
   onChannelMessage?: (channelId: string, event: RelayEvent) => void;
   /**
@@ -72,13 +71,6 @@ const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
 
 export const EMPTY_SET: ReadonlySet<string> = new Set();
-
-export function shouldRouteChannelUnreadEvent(
-  channel: Pick<Channel, "channelType"> | undefined,
-  isThreadedReply: boolean,
-): boolean {
-  return !isThreadedReply || channel?.channelType === "dm";
-}
 
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (
@@ -237,18 +229,11 @@ export function useLiveChannelUpdates(
         if (isThreadedReply) {
           options.onThreadReplyCandidate?.(channelId, event);
         }
-      } else if (
-        shouldRouteChannelUnreadEvent(
-          dmChannelMap.get(channelId),
-          isThreadedReply,
-        )
-      ) {
+      } else {
         options.onChannelMessage?.(channelId, event);
         if (isThreadedReply) {
           options.onThreadReplyNotification?.(channelId, event);
         }
-      } else {
-        options.onThreadReplyNotification?.(channelId, event);
       }
 
       if (shouldNotify && isThreadedReply) {

@@ -440,7 +440,7 @@ async fn create_session_and_apply_model(
     // header from `engram_fetch::build_core_section`, so we just append it.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
         with_core(
-            framed_system_prompt(ctx.base_prompt, ctx.system_prompt.as_deref()),
+            framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
             agent_core,
         )
     } else {
@@ -670,8 +670,20 @@ pub(crate) fn prepend_base_for_legacy(
 /// split the combined value into labeled sub-sections. Each prompt is wrapped
 /// only when present, so a persona-only agent yields `[System]\n{persona}`
 /// rather than an unlabeled blob that would be mislabeled as `[Base]`.
-fn framed_system_prompt(base_prompt: Option<&str>, system_prompt: Option<&str>) -> Option<String> {
-    match (base_prompt, system_prompt) {
+///
+/// Prepends a `[Workspace]` section naming the agent's absolute working
+/// directory. The base prompt describes the workspace layout but never its
+/// absolute root, so without this anchor a model fills the gap by searching
+/// `$HOME` (triggering macOS TCC prompts) or by inventing its own workspace
+/// directory. The line is emitted only when a real base prompt is present and
+/// `cwd` is an absolute path other than the `/` fallback — naming `/` as the
+/// workspace would itself invite a `$HOME`-wide scan.
+fn framed_system_prompt(
+    cwd: &str,
+    base_prompt: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Option<String> {
+    let body = match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
             "{}\n\n[System]\n{sp}",
             crate::queue::base_section(bp)
@@ -679,6 +691,32 @@ fn framed_system_prompt(base_prompt: Option<&str>, system_prompt: Option<&str>) 
         (Some(bp), None) => Some(crate::queue::base_section(bp)),
         (None, Some(sp)) => Some(format!("[System]\n{sp}")),
         (None, None) => None,
+    }?;
+    // Anchor the workspace only when a base prompt is present — the workspace
+    // section grounds the base prompt's layout description, so it is meaningless
+    // for a persona-only (`[System]`-only) agent that never received that layout.
+    match (base_prompt, workspace_section(cwd)) {
+        (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
+        _ => Some(body),
+    }
+}
+
+/// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
+///
+/// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
+/// to `/` on failure): a `/`-rooted workspace line would actively encourage the
+/// `$HOME`-wide scan this section exists to prevent.
+fn workspace_section(cwd: &str) -> Option<String> {
+    if cwd != "/" && cwd.starts_with('/') {
+        Some(format!(
+            "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
+             files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
+             `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
+             here. This is where you already are; do not search `$HOME` or other \
+             directories for them."
+        ))
+    } else {
+        None
     }
 }
 
@@ -2393,14 +2431,14 @@ mod tests {
 
     #[test]
     fn test_framed_system_prompt_both_present_carries_both_headers() {
-        let framed = framed_system_prompt(Some("base text"), Some("persona text"))
+        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
             .expect("both present yields Some");
         assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
-        let framed = framed_system_prompt(Some("base text"), None).expect("base yields Some");
+        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
         assert_eq!(framed, "[Base]\nbase text");
     }
 
@@ -2408,13 +2446,51 @@ mod tests {
     fn test_framed_system_prompt_persona_only_labels_system() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
         // its own [System] header even when no base prompt exists.
-        let framed = framed_system_prompt(None, Some("persona text")).expect("persona yields Some");
+        let framed =
+            framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
         assert_eq!(framed, "[System]\npersona text");
     }
 
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt(None, None).is_none());
+        assert!(framed_system_prompt("/", None, None).is_none());
+    }
+
+    #[test]
+    fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
+        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
+            .expect("base yields Some");
+        assert!(
+            framed.starts_with("[Workspace]\n"),
+            "workspace section must lead: {framed}"
+        );
+        assert!(framed.contains("`/Users/me/.buzz`"));
+        assert!(
+            framed.contains("\n\n[Base]\nbase text"),
+            "base must follow the workspace section: {framed}"
+        );
+    }
+
+    #[test]
+    fn test_framed_system_prompt_persona_only_omits_workspace() {
+        // The workspace section grounds the base prompt's layout; a persona-only
+        // agent never received that layout, so no [Workspace] anchor is emitted.
+        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
+            .expect("persona yields Some");
+        assert_eq!(framed, "[System]\npersona text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_root_cwd_omits_workspace() {
+        // The "/" fallback must never be named — it would invite a $HOME scan.
+        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
+        assert_eq!(framed, "[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_workspace_section_relative_cwd_is_none() {
+        assert!(workspace_section("relative/path").is_none());
+        assert!(workspace_section("").is_none());
     }
 
     // ── with_core tests ──────────────────────────────────────────────────────
