@@ -50,6 +50,7 @@ export type ProfileField = {
 const AGENT_INFO_LABELS = new Set([
   "Public key",
   "Owned by",
+  "Owned by & responds to",
   "NIP-05",
   "Agent type",
   "Capabilities",
@@ -251,6 +252,15 @@ export function buildOwnerFields({
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
+  const combinesOwnerRespondTo =
+    managedAgent?.respondTo === "owner-only" && Boolean(ownerDisplayName);
+  const respondToOwner =
+    managedAgent?.respondTo === "owner-only" && ownerDisplayName;
+  const respondToDisplayValue = managedAgent
+    ? respondToOwner
+      ? ownerDisplayName
+      : managedAgent.respondTo.replace(/-/g, " ")
+    : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerPubkey);
 
@@ -283,12 +293,20 @@ export function buildOwnerFields({
         </button>
       ) : undefined,
       icon: UserRound,
-      label: "Owned by",
+      label: combinesOwnerRespondTo ? "Owned by & responds to" : "Owned by",
       testId: "user-profile-owned-by",
     });
   }
 
   if (!includeOperationalFields) {
+    if (managedAgent && !respondToOwner && respondToDisplayValue) {
+      fields.push({
+        displayValue: respondToDisplayValue,
+        icon: Ear,
+        label: "Respond to",
+        testId: "user-profile-respond-to",
+      });
+    }
     return fields;
   }
 
@@ -386,36 +404,20 @@ export function buildOwnerFields({
   }
 
   if (managedAgent) {
-    const respondToOwner =
-      managedAgent.respondTo === "owner-only" && ownerDisplayName;
-    const respondToDisplayValue = respondToOwner
-      ? ownerDisplayName
-      : managedAgent.respondTo.replace(/-/g, " ");
-
     fields.push({
       displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
       icon: Server,
       label: "Start on launch",
       testId: "user-profile-start-on-launch",
     });
-    fields.push({
-      displayNode: respondToOwner ? (
-        <span className="inline-flex max-w-full items-center gap-2">
-          <UserAvatar
-            avatarUrl={ownerAvatarUrl}
-            className="shrink-0"
-            displayName={ownerHandle ?? respondToDisplayValue}
-            size="xs"
-            testId="user-profile-respond-to-owner-avatar"
-          />
-          <span className="truncate">{respondToDisplayValue}</span>
-        </span>
-      ) : undefined,
-      displayValue: respondToDisplayValue,
-      icon: Ear,
-      label: "Respond to",
-      testId: "user-profile-respond-to",
-    });
+    if (!respondToOwner && respondToDisplayValue) {
+      fields.push({
+        displayValue: respondToDisplayValue,
+        icon: Ear,
+        label: "Respond to",
+        testId: "user-profile-respond-to",
+      });
+    }
   }
 
   if (managedAgent?.lastError) {
@@ -434,14 +436,19 @@ export function buildOwnerFields({
 function orderProfileFields(fields: ProfileField[]) {
   const publicKeyLabel = "Public key";
   const ownedByLabel = "Owned by";
+  const ownedByRespondsToLabel = "Owned by & responds to";
   const statusLabel = "Status";
   return [
     ...fields.filter((field) => field.label === publicKeyLabel),
-    ...fields.filter((field) => field.label === ownedByLabel),
+    ...fields.filter(
+      (field) =>
+        field.label === ownedByLabel || field.label === ownedByRespondsToLabel,
+    ),
     ...fields.filter(
       (field) =>
         field.label !== publicKeyLabel &&
         field.label !== ownedByLabel &&
+        field.label !== ownedByRespondsToLabel &&
         field.copyValue,
     ),
     ...fields.filter((field) => field.label === statusLabel),
@@ -449,6 +456,7 @@ function orderProfileFields(fields: ProfileField[]) {
       if (
         field.label === publicKeyLabel ||
         field.label === ownedByLabel ||
+        field.label === ownedByRespondsToLabel ||
         field.label === statusLabel
       ) {
         return false;

@@ -176,8 +176,7 @@ export function ProfileSummaryView({
     (showInstructionIngress ||
       showModelIngress ||
       runtimeConfigurationFields.length > 0);
-  const showAgentSettingsRows =
-    isOwner === true && summaryAgentDetailFields.length > 0;
+  const showAgentSettingsRows = summaryAgentDetailFields.length > 0;
   const showAgentConfigurationRows = showAgentSettingsRows;
   const showDiagnosticsIngress =
     diagnosticsFields.length > 0 || canOpenAgentLogs;
@@ -197,7 +196,10 @@ export function ProfileSummaryView({
       (diagnosticsStatusField?.displayNode ?? diagnosticsSummary ?? "View")
     );
   const topLevelAgentInfoFields = agentInfoFields.filter(
-    (field) => field.label === "Public key" || field.label === "Owned by",
+    (field) =>
+      field.label === "Public key" ||
+      field.label === "Owned by" ||
+      field.label === "Owned by & responds to",
   );
   const showTopLevelAgentInfo = topLevelAgentInfoFields.length > 0;
   const personaActionKey = persona?.id;
