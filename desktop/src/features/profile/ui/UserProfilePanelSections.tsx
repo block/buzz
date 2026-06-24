@@ -835,6 +835,8 @@ export function ModelFocusedView({
   modelLabel: string;
   onModelChanged: () => void;
 }) {
+  const canPickModel = managedAgent?.backend.type === "local";
+
   return (
     <div className="space-y-3 pt-4">
       <div className="flex items-center gap-3 rounded-2xl bg-muted/20 px-4 py-3">
@@ -849,8 +851,12 @@ export function ModelFocusedView({
             {modelLabel}
           </span>
         </span>
-        {managedAgent ? (
+        {canPickModel && managedAgent ? (
           <ModelPicker agent={managedAgent} onModelChanged={onModelChanged} />
+        ) : managedAgent ? (
+          <span className="rounded-full bg-muted/45 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+            managed remotely
+          </span>
         ) : null}
       </div>
     </div>

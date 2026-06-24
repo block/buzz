@@ -109,6 +109,9 @@ export function ModelPicker({
           ) : error ? (
             <div className="space-y-2 px-3 py-2 text-sm">
               <p className="text-destructive">Failed to load models.</p>
+              <p className="max-w-72 wrap-break-word text-xs text-muted-foreground">
+                {error}
+              </p>
               <button
                 className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
                 onClick={() => {
@@ -123,6 +126,25 @@ export function ModelPicker({
           ) : !modelsData ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">
               Open to load available models.
+            </div>
+          ) : modelsData.configurationError ? (
+            <div className="space-y-2 px-3 py-2 text-sm">
+              <p className="font-medium text-foreground">
+                Model provider not configured
+              </p>
+              <p className="max-w-72 wrap-break-word text-xs text-muted-foreground">
+                {modelsData.configurationError}
+              </p>
+              <button
+                className="text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                onClick={() => {
+                  setHasRequestedModels(true);
+                  void fetchModels();
+                }}
+                type="button"
+              >
+                Retry
+              </button>
             </div>
           ) : !modelsData.supportsSwitching ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">
