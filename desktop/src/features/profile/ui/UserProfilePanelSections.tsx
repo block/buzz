@@ -248,11 +248,13 @@ export function ProfileSummaryView({
           footer={
             isBot && isOwner === true && managedAgent !== undefined ? (
               <div className="border-t border-border/50 px-4 py-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <Settings className="h-3.5 w-3.5 text-muted-foreground" />
-                  <h4 className="text-xs font-medium text-muted-foreground">
+                <div className="mb-2 flex items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+                    <Settings className="h-4 w-4 text-muted-foreground" />
+                  </span>
+                  <span className="text-xs font-medium text-foreground">
                     Configuration
-                  </h4>
+                  </span>
                 </div>
                 <AgentConfigPanel
                   pubkey={managedAgent.pubkey}

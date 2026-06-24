@@ -77,7 +77,10 @@ function NormalizedRow({
   return (
     <div className="py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-0.5 truncate text-sm font-medium">
+      <div
+        className="mt-0.5 truncate text-sm font-medium"
+        title={field.value ?? undefined}
+      >
         {isPreSpawn && isAcpOnly ? (
           <span className="font-normal text-muted-foreground text-xs">
             Available after agent starts
@@ -122,7 +125,10 @@ function AdvancedRow({
   return (
     <div className="py-2">
       <div className="text-xs text-muted-foreground">{field.label}</div>
-      <div className="mt-0.5 truncate text-sm font-medium font-mono">
+      <div
+        className="mt-0.5 truncate text-sm font-medium font-mono"
+        title={field.value ?? undefined}
+      >
         {field.value ?? (
           <span className="font-sans text-muted-foreground">—</span>
         )}

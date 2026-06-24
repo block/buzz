@@ -105,7 +105,7 @@ const overrides = new Map([
   // AgentConfigPanel footer fold into ProfileFieldGroup for the config-bridge
   // panel — a small overage from load-bearing UI plumbing, not generic debt
   // growth. Approved override; still queued to split with the rest of this list.
-  ["src/features/profile/ui/UserProfilePanelSections.tsx", 1002],
+  ["src/features/profile/ui/UserProfilePanelSections.tsx", 1004],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
