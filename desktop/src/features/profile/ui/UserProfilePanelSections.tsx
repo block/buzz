@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  CircleAlert,
   Cpu,
   Hash,
   MessageSquare,
@@ -50,6 +51,7 @@ import type {
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
+import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
@@ -177,8 +179,17 @@ export function ProfileSummaryView({
   const diagnosticsStatusField = diagnosticsFields.find(
     (field) => field.label === "Status",
   );
+  const diagnosticsErrorField = diagnosticsFields.find(
+    (field) => field.label === "Last error",
+  );
   const diagnosticsTrailing =
-    diagnosticsStatusField?.displayNode ?? diagnosticsSummary ?? "View";
+    diagnosticsErrorField !== undefined ? (
+      <Badge title={diagnosticsErrorField.displayValue} variant="destructive">
+        Error
+      </Badge>
+    ) : (
+      (diagnosticsStatusField?.displayNode ?? diagnosticsSummary ?? "View")
+    );
   const topLevelAgentInfoFields = agentInfoFields.filter(
     (field) => field.label === "Public key" || field.label === "Owned by",
   );
@@ -1016,6 +1027,8 @@ export function DiagnosticsFocusedView({
   managedAgent: ManagedAgent | undefined;
 }) {
   const hasLog = canOpenAgentLogs && managedAgent !== undefined;
+  const lastErrorField = fields.find((field) => field.label === "Last error");
+  const detailFields = fields.filter((field) => field.label !== "Last error");
 
   if (fields.length === 0 && !hasLog) {
     return null;
@@ -1023,7 +1036,24 @@ export function DiagnosticsFocusedView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 pt-4">
-      {fields.length > 0 ? <ProfileFieldGroup fields={fields} /> : null}
+      {lastErrorField ? (
+        <Alert
+          className="flex gap-3"
+          data-testid={lastErrorField.testId}
+          variant="destructive"
+        >
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          <div className="min-w-0">
+            <AlertTitle>Last error</AlertTitle>
+            <AlertDescription className="wrap-break-word">
+              {lastErrorField.displayValue}
+            </AlertDescription>
+          </div>
+        </Alert>
+      ) : null}
+      {detailFields.length > 0 ? (
+        <ProfileFieldGroup fields={detailFields} />
+      ) : null}
       {hasLog ? (
         <div className="min-h-0 flex-1">
           <ManagedAgentLogPanel

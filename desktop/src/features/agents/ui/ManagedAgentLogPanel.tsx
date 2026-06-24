@@ -71,7 +71,11 @@ export function ManagedAgentLogPanel({
             isInline ? "flex min-h-0 flex-1 flex-col" : "mt-4",
           )}
         >
-          <HarnessLogHeader logContent={logContent ?? ""} />
+          <HarnessLogHeader
+            logContent={logContent ?? ""}
+            logFileLabel={logFileLabel ?? ""}
+            selectedAgent={selectedAgent}
+          />
           <div className="p-4">
             <Skeleton className="h-4 w-48 bg-white/10" />
             <Skeleton className="mt-3 h-4 w-full bg-white/10" />
@@ -87,7 +91,11 @@ export function ManagedAgentLogPanel({
             !isInline && "mt-4",
           )}
         >
-          <HarnessLogHeader logContent={logContent ?? ""} />
+          <HarnessLogHeader
+            logContent={logContent ?? ""}
+            logFileLabel={logFileLabel ?? ""}
+            selectedAgent={selectedAgent}
+          />
           <pre
             className={cn(
               "overflow-auto whitespace-pre-wrap px-4 py-4",
@@ -97,10 +105,6 @@ export function ManagedAgentLogPanel({
           >
             {logContent?.trim() ? logContent : "No log output yet."}
           </pre>
-          <HarnessLogFooter
-            logFileLabel={logFileLabel ?? ""}
-            selectedAgent={selectedAgent}
-          />
         </div>
       )}
 
@@ -114,12 +118,30 @@ export function ManagedAgentLogPanel({
   );
 }
 
-function HarnessLogHeader({ logContent }: { logContent: string }) {
+function HarnessLogHeader({
+  logContent,
+  logFileLabel,
+  selectedAgent,
+}: {
+  logContent: string;
+  logFileLabel: string;
+  selectedAgent: ManagedAgent;
+}) {
+  const fileTitle = `${selectedAgent.name} · ${logFileLabel}`;
+
   return (
-    <div className="flex min-h-9 items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
-      <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-[0.18em] text-zinc-300">
-        Harness log
-      </span>
+    <div className="flex min-h-12 items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-[0.18em] text-zinc-300">
+          Harness log
+        </span>
+        <span
+          className="min-w-0 truncate font-mono text-2xs text-zinc-500"
+          title={fileTitle}
+        >
+          {selectedAgent.name} · {logFileLabel}
+        </span>
+      </div>
       <CopyButton
         className="h-6 rounded-md bg-black/40 px-2 text-zinc-300 hover:bg-black/70 hover:text-white"
         label="Copy log"
@@ -127,27 +149,6 @@ function HarnessLogHeader({ logContent }: { logContent: string }) {
         value={logContent}
         variant="ghost"
       />
-    </div>
-  );
-}
-
-function HarnessLogFooter({
-  logFileLabel,
-  selectedAgent,
-}: {
-  logFileLabel: string;
-  selectedAgent: ManagedAgent;
-}) {
-  const fileTitle = `${selectedAgent.name} · ${logFileLabel}`;
-
-  return (
-    <div className="flex min-h-8 items-center border-t border-white/10 px-3 py-2">
-      <span
-        className="min-w-0 truncate font-mono text-2xs text-zinc-500"
-        title={fileTitle}
-      >
-        {selectedAgent.name} · {logFileLabel}
-      </span>
     </div>
   );
 }
