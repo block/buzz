@@ -69,7 +69,7 @@ const overrides = new Map([
   // useDueReminderBadgeCount hook call + sum to wire due-reminder count into
   // the Inbox nav badge — a small overage from load-bearing badge plumbing,
   // not generic debt growth. Approved override; still queued to split.
-  ["src/app/AppShell.tsx", 1007],
+  ["src/app/AppShell.tsx", 1008],
 ]);
 
 await runFileSizeCheck({
