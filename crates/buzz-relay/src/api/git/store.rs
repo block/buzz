@@ -189,6 +189,22 @@ impl GitStore {
         format!("{prefix}/{}", hex::encode(h.finalize()))
     }
 
+    /// Derive the idx sidecar key for a content-addressed pack digest.
+    ///
+    /// The idx is a pure cache derived from `packs/<pack_digest>`, so it is
+    /// keyed by the pack digest rather than by the idx bytes. This keeps the
+    /// manifest schema unchanged: readers can derive `idx/<pack_digest>` from
+    /// each manifest pack key.
+    pub fn idx_key_for_pack_digest(pack_digest: &str) -> Result<String, StoreError> {
+        if pack_digest.len() != 64 || !pack_digest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                400,
+                format!("invalid pack digest for idx sidecar: {pack_digest:?}"),
+            )));
+        }
+        Ok(format!("idx/{pack_digest}"))
+    }
+
     /// Create-only write of a content-addressed object (pack or manifest).
     ///
     /// **The caller does not choose the key.** It is derived as
@@ -231,6 +247,51 @@ impl GitStore {
     pub async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError> {
         self.put_immutable("packs", bytes, "application/x-git-pack")
             .await
+    }
+
+    /// Best-effort create-only write of an idx sidecar for `packs/<pack_digest>`.
+    ///
+    /// Unlike packs/manifests, the key is not the SHA-256 of `idx_bytes`; it is
+    /// `idx/<pack_digest>` so hydrates can derive it without changing manifest
+    /// bytes. A 412 is idempotent success for the cache layer: the first writer
+    /// already produced the sidecar for this pack, and hydrate validates before
+    /// trusting it.
+    pub async fn put_idx(&self, pack_digest: &str, idx_bytes: &[u8]) -> Result<String, StoreError> {
+        let key = Self::idx_key_for_pack_digest(pack_digest)?;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+        match self
+            .bucket
+            .put_object_with_content_type_and_headers(
+                &key,
+                idx_bytes,
+                "application/x-git-index",
+                Some(headers),
+            )
+            .await
+        {
+            Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
+            Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
+            Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                resp.status_code(),
+                "unexpected status".into(),
+            ))),
+            Err(e) => Err(StoreError::Backend(e)),
+        }
+    }
+
+    /// Read an idx sidecar for `packs/<pack_digest>`.
+    ///
+    /// A missing idx is a cache miss, not a hydrate failure; callers should
+    /// regenerate with `git index-pack`. Other backend failures are surfaced so
+    /// callers can decide whether to fall back or fail.
+    pub async fn get_idx(&self, pack_digest: &str) -> Result<Option<Bytes>, StoreError> {
+        let key = Self::idx_key_for_pack_digest(pack_digest)?;
+        match self.get(&key).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(StoreError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Write a manifest object. Returns the content-addressed key (`manifests/<hex>`).
@@ -746,6 +807,22 @@ impl GitStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idx_key_uses_pack_digest_namespace() {
+        let digest = "a".repeat(64);
+        assert_eq!(
+            GitStore::idx_key_for_pack_digest(&digest).unwrap(),
+            format!("idx/{digest}")
+        );
+    }
+
+    #[test]
+    fn idx_key_rejects_non_digest_input() {
+        for bad in ["packs/abc", "abc", "../escape", &"g".repeat(64)] {
+            assert!(GitStore::idx_key_for_pack_digest(bad).is_err());
+        }
+    }
 
     #[test]
     fn classify_cas_412_is_lost_race() {
