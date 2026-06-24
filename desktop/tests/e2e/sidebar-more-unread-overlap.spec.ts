@@ -16,6 +16,7 @@
  */
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/sidebar-more-unread-overlap";
@@ -81,6 +82,7 @@ test.describe("sidebar MoreUnreadButton top chrome overlap", () => {
     // in-flow chrome strip.
     expect(box?.y ?? Number.NaN).toBeGreaterThanOrEqual(40);
 
+    await waitForAnimations(page);
     await page.screenshot({
       path: `${SHOTS}/top-pill-below-in-flow-chrome.png`,
       clip: { x: 0, y: 0, width: 320, height: 120 },
