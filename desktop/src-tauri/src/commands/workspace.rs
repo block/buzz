@@ -4,7 +4,8 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::app_state::AppState;
 use crate::managed_agents::{
-    ensure_repos_symlink, nest_dir, try_regenerate_nest, write_persisted_repos_dir,
+    effective_repos_dir, ensure_repos_symlink, nest_dir, try_regenerate_nest,
+    write_persisted_repos_dir,
 };
 use crate::relay;
 
@@ -71,26 +72,23 @@ pub fn apply_workspace(
         None => None,
     };
 
-    // Normalize repos_dir to a trimmed non-empty value. `None`/empty clears
-    // the override (REPOS falls back to a real dir). A bad path does NOT
+    // Decide the effective repos_dir from the candidate. A bad path does NOT
     // reject — it is treated as if no override were set: relay/keys still
     // apply, the bad value is not persisted, and a `repos-dir-error` surfaces
     // the reason. Persisting a bad path would make every later boot read it,
-    // fail to resolve the symlink, and silently skip agent restore.
-    let repos_dir = repos_dir
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let effective_repos_dir = match repos_dir.as_deref() {
-        Some(dir) => {
-            let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
-            match crate::managed_agents::validate_repos_dir(&nest, dir) {
-                Ok(_) => repos_dir.as_deref(),
-                Err(error) => {
-                    let _ = app.emit("repos-dir-error", error);
-                    None
-                }
+    // fail to resolve the symlink, and silently skip agent restore. One
+    // validate (inside `effective_repos_dir`) drives both the emit and the
+    // persisted value. `nest` is resolved softly: when absent there is nothing
+    // to persist or symlink, and relay/keys must still apply unconditionally.
+    let nest = nest_dir();
+    let effective_repos_dir = match nest.as_deref() {
+        Some(nest) => match effective_repos_dir(nest, repos_dir.as_deref()) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = app.emit("repos-dir-error", error);
+                None
             }
-        }
+        },
         None => None,
     };
 
@@ -115,11 +113,11 @@ pub fn apply_workspace(
     // clean and agent restore proceeds. Failure of either must NOT fail the
     // command — relay/keys are already applied. Surface symlink errors via
     // `repos-dir-error`.
-    if let Some(nest) = nest_dir() {
-        if let Err(error) = write_persisted_repos_dir(&nest, effective_repos_dir) {
+    if let Some(nest) = nest.as_deref() {
+        if let Err(error) = write_persisted_repos_dir(nest, effective_repos_dir.as_deref()) {
             eprintln!("buzz-desktop: persist repos dir failed: {error}");
         }
-        if let Err(error) = ensure_repos_symlink(&nest, effective_repos_dir) {
+        if let Err(error) = ensure_repos_symlink(nest, effective_repos_dir.as_deref()) {
             eprintln!("buzz-desktop: repos dir setup failed: {error}");
             let _ = app.emit("repos-dir-error", error);
         }

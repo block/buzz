@@ -164,6 +164,32 @@ pub fn ensure_repos_setup_default(nest_root: &Path) -> Result<(), String> {
     ensure_repos_symlink(nest_root, None)
 }
 
+/// Decide what `repos_dir` `apply_workspace` should persist and symlink for a
+/// candidate value, running the single source-of-truth [`validate_repos_dir`].
+///
+/// - **`None`/empty candidate** → `Ok(None)`: no override; `REPOS` reverts to a
+///   real in-nest directory.
+/// - **valid candidate** → `Ok(Some(raw_trimmed))`: persist the *raw* trimmed
+///   string (not the canonical path — persisting canonical would drift the
+///   symlink target on `..`/symlinked-ancestor paths).
+/// - **invalid candidate** → `Err(reason)`: the caller must persist `None`
+///   (clearing the override so the next boot resolves clean and agent restore
+///   proceeds) and surface `reason` to the user. Returning `Err` rather than
+///   silently `Ok(None)` lets the caller emit the human-readable cause.
+///
+/// One validate call drives both the persisted value and the error: a bad path
+/// is never persisted, so it can never silently skip agent restore on a later
+/// boot. Pure (no FS mutation, no emit) so the persist decision is unit-tested.
+pub fn effective_repos_dir(
+    nest_root: &Path,
+    candidate: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(trimmed) = candidate.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    validate_repos_dir(nest_root, trimmed).map(|_| Some(trimmed.to_string()))
+}
+
 /// Filename of the dotfile persisting the active workspace's `repos_dir`.
 const REPOS_DIR_FILE: &str = ".repos-dir";
 
@@ -586,6 +612,67 @@ mod tests {
         assert!(
             external.join("KEEP.md").exists(),
             "reverting must not touch the external target's contents"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effective_repos_dir_drives_persisted_dotfile_for_all_three_cases() {
+        // Pins the CRITICAL persist decision on `.repos-dir` CONTENTS, not just
+        // a return value: a bad path must clear the dotfile so the next boot's
+        // `should_restore_agents(false, _)` restores agents (the regression
+        // this hardening fixes). Drives each case through the same
+        // effective→persist path `apply_workspace` uses.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".buzz");
+        fs::create_dir_all(&root).unwrap();
+        let good = tmp.path().join("Development");
+        fs::create_dir_all(&good).unwrap();
+        let good_str = good.to_str().unwrap();
+
+        // Pre-seed a value so each case proves it overwrites/clears, not just
+        // that an absent dotfile stays absent.
+        let seed = |root: &Path| write_persisted_repos_dir(root, Some(good_str)).unwrap();
+        let persist = |root: &Path, candidate: Option<&str>| {
+            let effective = effective_repos_dir(root, candidate);
+            // Mirror apply_workspace: Err clears the override (persist None).
+            let to_persist = effective.unwrap_or(None);
+            write_persisted_repos_dir(root, to_persist.as_deref()).unwrap();
+        };
+
+        // Bad path → Err → dotfile cleared (the CRITICAL).
+        seed(&root);
+        persist(&root, Some("/no/such/dir/here"));
+        assert_eq!(
+            read_persisted_repos_dir(&root),
+            None,
+            "a bad repos_dir must clear `.repos-dir` so the next boot restores agents"
+        );
+
+        // Good path → Ok(Some(raw)) → dotfile holds the raw trimmed value.
+        persist(&root, Some(&format!("  {good_str}  ")));
+        assert_eq!(
+            read_persisted_repos_dir(&root).as_deref(),
+            Some(good_str),
+            "a valid repos_dir must persist the raw trimmed path (not the canonical path)"
+        );
+
+        // Empty/whitespace → Ok(None) → dotfile cleared.
+        seed(&root);
+        persist(&root, Some("   "));
+        assert_eq!(
+            read_persisted_repos_dir(&root),
+            None,
+            "an empty repos_dir clears the override"
+        );
+
+        // None candidate → Ok(None) → dotfile cleared.
+        seed(&root);
+        persist(&root, None);
+        assert_eq!(
+            read_persisted_repos_dir(&root),
+            None,
+            "no repos_dir clears the override"
         );
     }
 
