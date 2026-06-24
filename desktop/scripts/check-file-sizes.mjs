@@ -37,15 +37,27 @@ const overrides = new Map([
   // self-contained repos_dir functions and their unit tests live in repos.rs;
   // this is the seam that must stay in nest.rs. Approved override; still queued
   // to split with the rest of this list.
-  ["src-tauri/src/managed_agents/nest.rs", 1447],
-  ["src-tauri/src/managed_agents/runtime.rs", 1953],
+  ["src-tauri/src/managed_agents/nest.rs", 1448],
+  // harness-persona-sync: persona-runtime resolution threaded into the spawn
+  // path here. Load-bearing feature growth; queued to split in the resolver
+  // unify refactor followup.
+  ["src-tauri/src/managed_agents/runtime.rs", 1966],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
-  // threaded through Tauri invokes for configurable repos_dir — a 4-line
-  // overage from load-bearing parameter plumbing, not generic debt growth.
-  // Approved override; still queued to split.
-  ["src/shared/api/tauri.ts", 1199],
+  // threaded through Tauri invokes for configurable repos_dir, plus the
+  // harness-persona-sync `harnessOverride` create-input bit — load-bearing
+  // parameter plumbing, not generic debt growth. Approved override; still
+  // queued to split.
+  ["src/shared/api/tauri.ts", 1202],
+  // harness-persona-sync feature growth, queued to split in the resolver-unify
+  // refactor followup. discovery.rs is dominated by the new test module
+  // (the effective_agent_command / divergent / create-time override matrix);
+  // types.rs adds the persona/instance harness fields; migration_tests.rs adds
+  // the harness-sync migration coverage. Load-bearing, not generic debt.
+  ["src-tauri/src/managed_agents/discovery.rs", 1043],
+  ["src-tauri/src/managed_agents/types.rs", 1010],
+  ["src-tauri/src/migration_tests.rs", 1033],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1295],
