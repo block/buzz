@@ -91,7 +91,7 @@ pub async fn restore_managed_agents_on_launch(
     let state = app.state::<AppState>();
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
-    let agents_to_start: Vec<super::ManagedAgentRecord>;
+    let mut agents_to_start: Vec<super::ManagedAgentRecord>;
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -150,6 +150,38 @@ pub async fn restore_managed_agents_on_launch(
             }
         }
         agents_to_start = to_start;
+
+        // Re-snapshot persona config for agents about to be restored, matching
+        // the interactive spawn path so auto-start agents also pick up the
+        // current persona on app launch.
+        let personas_for_snapshot = super::load_personas(app).unwrap_or_default();
+        for record in records.iter_mut() {
+            if !agents_to_start.iter().any(|r| r.pubkey == record.pubkey) {
+                continue;
+            }
+            let Some(persona_id) = record.persona_id.clone() else {
+                continue;
+            };
+            let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
+                continue;
+            };
+            let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+            if let Some(prompt) = snapshot.system_prompt {
+                record.system_prompt = Some(prompt);
+            }
+            record.model = snapshot.model;
+            record.provider = snapshot.provider;
+            record.env_vars = snapshot.env_vars;
+            record.persona_source_version = Some(snapshot.source_version);
+            record.updated_at = util::now_iso();
+            changed = true;
+        }
+        // Re-collect to_start from the updated records so Phase B spawns the refreshed config.
+        agents_to_start = records
+            .iter()
+            .filter(|r| agents_to_start.iter().any(|s| s.pubkey == r.pubkey))
+            .cloned()
+            .collect();
 
         if changed {
             save_managed_agents(app, &records)?;

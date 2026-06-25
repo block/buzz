@@ -54,17 +54,14 @@ export function pickBotName(
     return available[Math.floor(Math.random() * available.length)];
   };
 
-  // Try persona pool first
   if (namePool.length > 0) {
     const name = pick(namePool);
     if (name) return name;
   }
 
-  // Fallback to universal pool
   const fallback = pick(UNIVERSAL_POOL);
   if (fallback) return fallback;
 
-  // Both pools exhausted — pick a random base name and add a suffix
   const allNames = namePool.length > 0 ? namePool : UNIVERSAL_POOL;
   const base = allNames[Math.floor(Math.random() * allNames.length)];
   for (let i = 2; i < 100; i++) {
@@ -74,6 +71,5 @@ export function pickBotName(
     }
   }
 
-  // Extremely unlikely fallback
   return `${base}-${Date.now() % 1000}`;
 }

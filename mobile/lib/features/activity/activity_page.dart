@@ -146,10 +146,6 @@ class ActivityPage extends HookConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Feed item tile
-// ---------------------------------------------------------------------------
-
 class _FeedItemTile extends ConsumerWidget {
   final FeedItem item;
   final VoidCallback onTap;
@@ -268,10 +264,6 @@ class _FeedItemTile extends ConsumerWidget {
     return '${date.month}/${date.day}';
   }
 }
-
-// ---------------------------------------------------------------------------
-// States: loading, empty, error
-// ---------------------------------------------------------------------------
 
 class _LoadingSkeleton extends StatelessWidget {
   const _LoadingSkeleton();

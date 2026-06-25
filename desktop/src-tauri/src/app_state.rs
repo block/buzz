@@ -217,8 +217,8 @@ fn load_or_create_identity(data_dir: &std::path::Path) -> Result<Keys, String> {
         return load_file_or_generate(&legacy_path, data_dir);
     }
 
-    let store = crate::secret_store::SecretStore::keyring(KEYRING_SERVICE);
-    resolve_identity_with_store(&store, &legacy_path, data_dir)
+    let store = crate::secret_store::SecretStore::shared(KEYRING_SERVICE);
+    resolve_identity_with_store(store, &legacy_path, data_dir)
 }
 
 /// Identity resolution over an [`IdentityKeyStore`] seam. Split from

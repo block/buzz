@@ -133,10 +133,6 @@ void main() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 NostrEvent _presence(String pubkey, String status) => NostrEvent(
   id: 'evt-$pubkey-$status',
   pubkey: pubkey,

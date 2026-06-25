@@ -88,8 +88,6 @@ use nostr::secp256k1::{Keypair, Message};
 use nostr::{FromBech32, PublicKey, SecretKey, SECP256K1};
 use zeroize::Zeroize;
 
-// ── Keypair Guard ────────────────────────────────────────────────────────────
-
 /// RAII guard that calls `non_secure_erase()` on drop, ensuring the keypair's
 /// secret material is overwritten even on early-return error paths.
 struct KeypairGuard(Keypair);
@@ -110,8 +108,6 @@ impl Drop for KeypairGuard {
         self.0.non_secure_erase();
     }
 }
-
-// ── Constants ────────────────────────────────────────────────────────────────
 
 const DOMAIN_SEPARATOR: &str = "nostr:git:v1:";
 const ARMOR_BEGIN: &str = "-----BEGIN SIGNED MESSAGE-----";
@@ -140,8 +136,6 @@ const GNUPG_PREFIX: &str = "[GNUPG:] ";
 /// we read payload from it.
 const MIN_STATUS_FD: i32 = 1;
 
-// ── Error Type ───────────────────────────────────────────────────────────────
-
 /// Top-level error type. All failures flow through here so `main()` can
 /// handle cleanup (zeroization, status-fd reporting) before exiting.
 #[derive(Debug)]
@@ -162,8 +156,6 @@ impl std::fmt::Display for Error {
         }
     }
 }
-
-// ── OA Verification Result ───────────────────────────────────────────────────
 
 /// Result of NIP-OA verification during signature verification.
 enum OaVerifyResult {
@@ -188,8 +180,6 @@ impl OaVerifyResult {
         }
     }
 }
-
-// ── CLI Parsing ──────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 enum Mode {
@@ -303,8 +293,6 @@ fn parse_status_fd(val: &str) -> Result<i32, Error> {
     Ok(fd)
 }
 
-// ── Status FD Writer ─────────────────────────────────────────────────────────
-
 struct StatusWriter {
     /// Wrapped in ManuallyDrop because git owns this fd — we must not close it.
     /// Git opens the fd before invoking us and reads from it after we exit.
@@ -400,8 +388,6 @@ macro_rules! status_or_fail {
         $writer.write_line_critical(&format!($fmt, $($arg)*))?
     };
 }
-
-// ── Key Loading ──────────────────────────────────────────────────────────────
 
 /// Load the private key from env vars or git config keyfile.
 ///
@@ -897,8 +883,6 @@ fn read_keyfile_secure(path: &str) -> Result<zeroize::Zeroizing<String>, Error> 
     Ok(trimmed)
 }
 
-// ── Signing Hash ─────────────────────────────────────────────────────────────
-
 /// Compute the NIP-GS signing hash.
 ///
 /// ```text
@@ -931,8 +915,6 @@ fn compute_signing_hash(
     Sha256Hash::from_engine(engine).to_byte_array()
 }
 
-// ── JSON Envelope ────────────────────────────────────────────────────────────
-
 /// Build the canonical JSON envelope (compact, deterministic field order).
 ///
 /// NIP-GS requires byte-exact canonical form for verification: field order
@@ -957,8 +939,6 @@ fn armor(json_bytes: &[u8]) -> String {
     let b64 = base64::engine::general_purpose::STANDARD.encode(json_bytes);
     format!("{ARMOR_BEGIN}\n{b64}\n{ARMOR_END}\n")
 }
-
-// ── Signing Mode ─────────────────────────────────────────────────────────────
 
 fn do_sign(key_id: &str, status: &mut StatusWriter) -> Result<(), Error> {
     // Load key (zeroized on drop)
@@ -1098,8 +1078,6 @@ fn do_sign(key_id: &str, status: &mut StatusWriter) -> Result<(), Error> {
 
     Ok(())
 }
-
-// ── Verification Mode ────────────────────────────────────────────────────────
 
 /// Best-effort extraction of the pk field from raw JSON, for ERRSIG reporting
 /// when full envelope parsing fails. Returns the pk hex string if it looks valid.
@@ -1356,8 +1334,6 @@ fn do_verify(sig_file: &str, status: &mut StatusWriter) -> Result<(), Error> {
     Ok(())
 }
 
-// ── Envelope Parsing ─────────────────────────────────────────────────────────
-
 #[derive(Debug)]
 struct Envelope {
     pk: String,
@@ -1485,8 +1461,6 @@ fn validate_hex_field(val: &str, expected_len: usize, name: &str) -> Result<(), 
     Ok(())
 }
 
-// ── Armor Parsing ────────────────────────────────────────────────────────────
-
 fn parse_armor(content: &str) -> Result<&str, String> {
     // NIP-GS spec requires armor to end with a newline after the END marker.
     let content = content
@@ -1517,8 +1491,6 @@ fn parse_armor(content: &str) -> Result<&str, String> {
 
     Ok(lines[1])
 }
-
-// ── NIP-OA Verification ─────────────────────────────────────────────────────
 
 /// Verify the owner attestation signature.
 ///
@@ -1572,8 +1544,6 @@ fn verify_oa(agent_pk_hex: &str, oa: &(String, String, String)) -> bool {
 
     true
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Read payload from stdin with a bounded allocation.
 ///
@@ -1751,8 +1721,6 @@ fn has_non_string_whitespace(s: &str) -> bool {
     false
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
-
 /// Entry point — returns an exit code. This ensures all locals are
 /// dropped (and zeroized) before `process::exit` is called.
 pub fn run() -> i32 {
@@ -1819,8 +1787,6 @@ pub fn run() -> i32 {
         }
     }
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -2043,8 +2009,6 @@ Initial commit"
         );
     }
 
-    // ── Round-trip and verification tests ────────────────────────────────
-
     /// Helper: sign a payload and return the armored signature
     fn sign_payload(secret_hex: &str, payload: &[u8], t: u64) -> String {
         let keypair = Keypair::from_seckey_str(SECP256K1, secret_hex).unwrap();
@@ -2247,8 +2211,6 @@ Initial commit"
         assert!(enforce_conditions("kind=9&created_at<2000", 2001).is_err());
     }
 
-    // ── PR-ported helpers ─────────────────────────────────────────────────
-
     /// Wrapper for PR-ported tests: matches PR's is_lower_hex API
     fn is_lower_hex(s: &str, len: usize) -> bool {
         s.len() == len
@@ -2310,8 +2272,6 @@ Initial commit"
         Ok((owner, cond, sig))
     }
 
-    // ── PR-ported: is_lower_hex ───────────────────────────────────────────
-
     #[test]
     fn test_lower_hex_valid() {
         assert!(is_lower_hex("deadbeef", 8));
@@ -2337,8 +2297,6 @@ Initial commit"
         assert!(!is_lower_hex("deadbeeg", 8));
         assert!(!is_lower_hex("dead beef", 9));
     }
-
-    // ── PR-ported: parse_armor edge cases ─────────────────────────────────
 
     #[test]
     fn test_armor_roundtrip() {
@@ -2394,8 +2352,6 @@ Initial commit"
         // The returned slice must equal the oversized string
         assert_eq!(result.unwrap().len(), MAX_BASE64_LINE + 1);
     }
-
-    // ── PR-ported: parse_envelope edge cases ──────────────────────────────
 
     #[test]
     fn test_envelope_valid_minimal() {
@@ -2474,8 +2430,6 @@ Initial commit"
         assert!(parse_envelope(&json).is_err());
     }
 
-    // ── PR-ported: canonical JSON roundtrip ───────────────────────────────
-
     #[test]
     fn test_canonical_json_roundtrip() {
         let json = valid_envelope_json();
@@ -2483,8 +2437,6 @@ Initial commit"
         let rebuilt = build_envelope(&env.pk, &env.sig, env.t, env.oa.as_ref());
         assert_eq!(rebuilt.as_bytes(), json.as_bytes());
     }
-
-    // ── PR-ported: timestamp_to_date (was format_date) ────────────────────
 
     #[test]
     fn test_format_date_epoch() {
@@ -2500,8 +2452,6 @@ Initial commit"
     fn test_format_date_leap_day() {
         assert_eq!(timestamp_to_date(1709164800), "2024-02-29");
     }
-
-    // ── PR-ported: parse_oa_tag ───────────────────────────────────────────
 
     #[test]
     fn test_oa_tag_rejects_invalid_owner_hex() {
@@ -2530,8 +2480,6 @@ Initial commit"
         let json = format!(r#"["bad","{}","read","{}"]"#, valid_pk(), valid_sig());
         assert!(parse_oa_tag(&json).is_err());
     }
-
-    // ── PR-ported: compute_signing_hash (was signing_message) ─────────────
 
     #[test]
     fn test_signing_hash_deterministic() {

@@ -165,10 +165,6 @@ class MessageContent extends HookConsumerWidget {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Link builder (URL scheme validation)
-  // ---------------------------------------------------------------------------
-
   Widget _buildLink(
     BuildContext context,
     InlineSpan linkText,

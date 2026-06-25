@@ -290,10 +290,6 @@ pub async fn cmd_set_presence(client: &BuzzClient, status: &str) -> Result<(), C
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
-
 pub async fn dispatch(
     cmd: crate::UsersCmd,
     client: &BuzzClient,

@@ -3,8 +3,6 @@ import test from "node:test";
 
 import { isRelayUnreachableError } from "./relayError.ts";
 
-// ── isRelayUnreachableError ───────────────────────────────────────────────────
-
 test("isRelayUnreachableError: Error with prefix returns true", () => {
   assert.equal(
     isRelayUnreachableError(new Error("relay unreachable: connection refused")),

@@ -146,7 +146,6 @@ export async function readFileContent(
 ): Promise<FileContent> {
   const { blob } = await readBlob({ fs, dir, oid, filepath });
 
-  // Check first 512 bytes for NUL to detect binary
   const checkLength = Math.min(blob.length, 512);
   for (let i = 0; i < checkLength; i++) {
     if (blob[i] === 0) {

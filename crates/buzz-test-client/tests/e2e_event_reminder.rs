@@ -25,8 +25,6 @@ use serde_json::Value;
 
 const KIND_EVENT_REMINDER: u16 = 30300;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3001".to_string())
 }
@@ -159,8 +157,6 @@ async fn count_events_http(
         Err((status, msg))
     }
 }
-
-// ── Write-path validation tests ──────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -373,8 +369,6 @@ async fn test_reminder_accepted_with_malformed_expiration() {
     );
 }
 
-// ── d-tag validation tests ──────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore]
 async fn test_reminder_rejected_missing_d_tag() {
@@ -459,8 +453,6 @@ async fn test_reminder_accepted_expiration_without_not_before() {
         "expiration without not_before should be accepted: {msg}"
     );
 }
-
-// ── Read-path filtering tests (HTTP bridge) ──────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -591,8 +583,6 @@ async fn test_other_user_cannot_count_reminders_http() {
     let (status, _) = result.unwrap_err();
     assert_eq!(status, 403);
 }
-
-// ── Read-path filtering tests (WebSocket) ────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -887,8 +877,6 @@ async fn test_reminder_replacement_semantics() {
     );
 }
 
-// ── Fan-out isolation, WS search isolation, WS COUNT tests ───────────────────
-
 #[tokio::test]
 #[ignore]
 async fn test_fanout_isolation_other_user_does_not_receive_reminder() {
@@ -1094,8 +1082,6 @@ async fn test_reminder_rejected_not_before_too_far_in_future() {
         "unexpected message: {msg}"
     );
 }
-
-// ── Scheduler delivery test ──────────────────────────────────────────────────
 
 /// True if the event carries a `d` tag equal to `d_tag`.
 fn has_d_tag(event: &nostr::Event, d_tag: &str) -> bool {

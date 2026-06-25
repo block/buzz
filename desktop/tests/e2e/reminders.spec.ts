@@ -3,7 +3,6 @@ import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/reminders";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 
 // The inbox filter dropdown lives in the home pane, not the chat view. Land on
@@ -60,7 +59,7 @@ function mockReminderEvent(opts: {
   };
 }
 
-test.describe("reminders screenshots", () => {
+test.describe("reminders", () => {
   test.beforeEach(async ({ page }) => {
     await installMockBridge(page);
   });
@@ -76,11 +75,6 @@ test.describe("reminders screenshots", () => {
     });
     await expect(remindersOption).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/01-inbox-filter-reminders-option.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
-    });
   });
 
   test("02 — message action menu shows Remind me later", async ({ page }) => {
@@ -102,10 +96,6 @@ test.describe("reminders screenshots", () => {
     });
     await expect(remindItem).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/02-message-action-remind-later.png`,
-    });
   });
 
   test("03 — Remind me later dialog with time presets", async ({ page }) => {
@@ -134,11 +124,6 @@ test.describe("reminders screenshots", () => {
     await expect(dialog.getByText("In 30 minutes")).toBeVisible();
     await expect(dialog.getByText("Custom date & time")).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/03-remind-me-later-dialog.png`,
-      clip: { x: 300, y: 50, width: 680, height: 620 },
-    });
   });
 
   test("04 — Reminders panel empty state", async ({ page }) => {
@@ -147,11 +132,6 @@ test.describe("reminders screenshots", () => {
     await openRemindersFilter(page);
     await expect(page.getByText("No reminders")).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/04-reminders-panel-empty.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
-    });
   });
 
   test("05 — Reminders panel with active pending reminder", async ({
@@ -184,11 +164,6 @@ test.describe("reminders screenshots", () => {
     await openRemindersFilter(page);
     await expect(page.getByText("Follow up on this message")).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/05-reminders-panel-active.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
-    });
   });
 
   test("06 — Reminders panel with fired/overdue reminder", async ({ page }) => {
@@ -239,11 +214,6 @@ test.describe("reminders screenshots", () => {
     await expect(page.getByText("Reply to Alice")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Overdue" })).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/06-reminders-panel-fired.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
-    });
   });
 });
 
@@ -252,7 +222,6 @@ test.describe("reminders screenshots", () => {
 // `mock-general-alice`, channel `9a1657ac-…`), so the author resolves to
 // "alice" and the channel label to "general" from the live profile/channel
 // queries — no "Unknown channel" fallback.
-const PHASE2_SHOTS = "test-results/reminders-phase2";
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const ALICE_PUBKEY =
   "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
@@ -274,7 +243,6 @@ function aliceReminderContent() {
 // Inbox nav item's `(1)` count. The count is gated behind `homeBadgeEnabled`,
 // so seed that setting on before installMockBridge (addInitScript runs at
 // document start, ahead of the app reading localStorage).
-const NAVBADGE_SHOTS = "test-results/reminders-navbadge";
 const NOTIFICATION_SETTINGS_KEY = `buzz-notification-settings.v2:${MOCK_PUBKEY}`;
 
 test.describe("reminders nav badge", () => {
@@ -306,11 +274,6 @@ test.describe("reminders nav badge", () => {
 
     await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${NAVBADGE_SHOTS}/01-inbox-nav-badge-due-reminder.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
-    });
   });
 });
 
@@ -347,11 +310,6 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
     ).toBeVisible();
     await expect(remindersPanel.getByText("Reply to Alice")).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${PHASE2_SHOTS}/01-reminder-row-author-channel.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
-    });
   });
 
   test("08 — clicking a reminder navigates to the message in context", async ({
@@ -378,9 +336,5 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await expect(page.getByText("Hey team — checking in.")).toBeVisible();
     await waitForAnimations(page);
-
-    await page.screenshot({
-      path: `${PHASE2_SHOTS}/02-click-navigates-to-message.png`,
-    });
   });
 });

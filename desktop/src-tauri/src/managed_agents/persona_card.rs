@@ -4,10 +4,6 @@ use serde::Serialize;
 use serde_json::Value;
 use std::io::{Cursor, Read};
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ParsedPersonaPreview {
     pub display_name: String,
@@ -33,16 +29,8 @@ pub struct SkippedFile {
     pub reason: String,
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const MAX_ZIP_ENTRIES: usize = 50;
 const MAX_ZIP_DECOMPRESSED: usize = 100 * 1024 * 1024;
-
-// ---------------------------------------------------------------------------
-// PNG persona parsing
-// ---------------------------------------------------------------------------
 
 pub fn parse_png_persona(png_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
     let decoder = Decoder::new(Cursor::new(png_bytes));
@@ -228,10 +216,6 @@ fn parse_chara_payload(b64: &str) -> Result<BuzzPersonaFields, String> {
     })
 }
 
-// ---------------------------------------------------------------------------
-// JSON persona parsing / encoding
-// ---------------------------------------------------------------------------
-
 pub fn parse_json_persona(json_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
     let v: Value = serde_json::from_slice(json_bytes).map_err(|e| format!("Invalid JSON: {e}"))?;
     let fields = extract_buzz_fields(&v)?;
@@ -279,10 +263,6 @@ pub fn encode_persona_json(
 
     serde_json::to_vec_pretty(&map).map_err(|e| format!("Failed to serialize JSON: {e}"))
 }
-
-// ---------------------------------------------------------------------------
-// .persona.md parsing
-// ---------------------------------------------------------------------------
 
 /// Parse a `.persona.md` file into a `ParsedPersonaPreview`.
 pub fn parse_md_persona(md_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
@@ -419,10 +399,6 @@ pub fn parse_zip_pack(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, Strin
     })
 }
 
-// ---------------------------------------------------------------------------
-// ZIP parsing
-// ---------------------------------------------------------------------------
-
 pub fn parse_zip_personas(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, String> {
     let cursor = Cursor::new(zip_bytes);
     let mut archive =
@@ -545,10 +521,6 @@ pub fn parse_zip_personas(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, S
 
     Ok(ParsePersonaFilesResult { personas, skipped })
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

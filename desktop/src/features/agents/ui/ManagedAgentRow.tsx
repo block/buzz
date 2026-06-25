@@ -239,8 +239,8 @@ function AgentSummary({
           </div>
           {agent.personaOutOfDate ? (
             <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-              Persona updated since this agent was created. Delete and respawn
-              to apply the new configuration.
+              Persona updated since this agent was created. Respawn to apply the
+              new configuration.
             </p>
           ) : null}
           {channelNames.length > 0 ? (

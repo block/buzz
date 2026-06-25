@@ -1,12 +1,8 @@
 import * as React from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 
-import {
-  deriveShellRoute,
-  isWindowDragHandleEvent,
-} from "@/app/AppShell.helpers";
+import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
   AppShellOverlays,
@@ -20,6 +16,7 @@ import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
+import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import {
   channelsQueryKey,
@@ -88,10 +85,15 @@ const LazySettingsScreen = React.lazy(async () => {
 
 export function AppShell() {
   useWebviewZoomShortcuts();
+  useTauriWindowDrag();
+
   const workspacesHook = useWorkspaces();
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
+  const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
+    null,
+  );
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
@@ -118,9 +120,7 @@ export function AppShell() {
     () => deriveShellRoute(location.pathname),
     [location.pathname],
   );
-  // Settings lives in the history stack: /settings?section=… opens it, back
-  // (or "Back to app") returns to the previous entry — panels and all — and
-  // reloads restore the open section from the URL.
+  // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
   const locationSearchSection = (location.search as { section?: unknown })
     .section;
@@ -154,9 +154,12 @@ export function AppShell() {
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data ?? [];
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
+    channels,
   );
   const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
@@ -165,9 +168,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     refetchHomeFeedFromLiveSignal,
   );
-  const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
-  const channels = channelsQuery.data ?? [];
   const channelsErrorMessage =
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message
@@ -187,6 +188,12 @@ export function AppShell() {
         : null,
     [channels, selectedChannelId],
   );
+  const managedChannel = React.useMemo(() => {
+    const targetChannelId = managedChannelId ?? selectedChannelId;
+    return targetChannelId
+      ? (channels.find((channel) => channel.id === targetChannelId) ?? null)
+      : null;
+  }, [channels, managedChannelId, selectedChannelId]);
 
   const {
     handleChannelNotification,
@@ -289,6 +296,7 @@ export function AppShell() {
     channels,
   );
 
+  // Badge count consumes the shared NIP-RS read-state from useUnreadChannels.
   const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
     useHomeFeedNotificationState(
       homeFeedQuery.data,
@@ -554,36 +562,6 @@ export function AppShell() {
     selectedView,
   });
 
-  React.useEffect(() => {
-    function handlePointerDown(event: PointerEvent) {
-      if (event.button !== 0 || event.detail > 1) {
-        return;
-      }
-
-      if (!isWindowDragHandleEvent(event)) {
-        return;
-      }
-
-      void getCurrentWindow().startDragging();
-    }
-
-    function handleDoubleClick(event: MouseEvent) {
-      if (event.button !== 0 || !isWindowDragHandleEvent(event)) {
-        return;
-      }
-
-      event.preventDefault();
-      void getCurrentWindow().toggleMaximize();
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown, true);
-    window.addEventListener("dblclick", handleDoubleClick, true);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown, true);
-      window.removeEventListener("dblclick", handleDoubleClick, true);
-    };
-  }, []);
-
   return (
     <PreventSleepProvider>
       <ChannelNavigationProvider channels={channels}>
@@ -593,7 +571,12 @@ export function AppShell() {
             markChannelRead,
             markChannelUnread,
             openCreateChannel: handleOpenCreateChannel,
-            openChannelManagement: () => setIsChannelManagementOpen(true),
+            openChannelManagement: (channelId?: string) => {
+              setManagedChannelId(
+                typeof channelId === "string" ? channelId : null,
+              );
+              setIsChannelManagementOpen(true);
+            },
             getChannelReadAt,
             getThreadReadAt,
             markThreadRead,
@@ -827,16 +810,22 @@ export function AppShell() {
                       </div>
                     )}
                     <AppShellOverlays
-                      activeChannel={activeChannel}
+                      activeChannel={managedChannel}
                       browseDialogType={browseDialogType}
                       channels={channels}
                       currentPubkey={identityQuery.data?.pubkey}
                       isChannelManagementOpen={isChannelManagementOpen}
                       onBrowseChannelJoin={handleBrowseChannelJoin}
                       onBrowseDialogOpenChange={handleBrowseDialogOpenChange}
-                      onChannelManagementOpenChange={setIsChannelManagementOpen}
+                      onChannelManagementOpenChange={(open) => {
+                        setIsChannelManagementOpen(open);
+                        if (!open) {
+                          setManagedChannelId(null);
+                        }
+                      }}
                       onDeleteActiveChannel={() => {
                         setIsChannelManagementOpen(false);
+                        setManagedChannelId(null);
                         void goHome({ replace: true });
                       }}
                       onSelectChannel={(channelId) => {

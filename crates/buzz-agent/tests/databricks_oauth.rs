@@ -345,7 +345,6 @@ async fn refresh_now_without_refresh_token_is_terminal() {
     );
 }
 
-// ────────────────────────────────────────────────────────────────────────────
 // ACP-level envelope regression test.
 //
 // Boots the real buzz-agent binary with `DATABRICKS_TOKEN` set (so the
@@ -355,7 +354,6 @@ async fn refresh_now_without_refresh_token_is_terminal() {
 // is `Bearer <token>`, and the JSON body has *no* top-level `"model"`. This
 // locks in the DRY envelope behavior so a refactor of `post_openai` can't
 // silently break Databricks.
-// ────────────────────────────────────────────────────────────────────────────
 
 use std::collections::VecDeque;
 use std::process::Stdio;

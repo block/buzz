@@ -20,8 +20,6 @@ use uuid::Uuid;
 
 use crate::config::DedupMode;
 
-// ── Reliability constants ─────────────────────────────────────────────────────
-
 /// Maximum events queued per channel before oldest events are dropped.
 const MAX_PENDING_PER_CHANNEL: usize = 500;
 
@@ -39,8 +37,6 @@ const MAX_RETRY_DELAY_SECS: u64 = 300;
 
 /// In-flight deadline: max_turn (3600s) + 100s buffer.
 const IN_FLIGHT_DEADLINE_SECS: u64 = 3700;
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 /// An event waiting in the queue.
 #[derive(Debug, Clone)]
@@ -70,8 +66,6 @@ pub struct FlushBatch {
     /// produces a merged prompt with annotated sections.
     pub cancelled_events: Vec<BatchEvent>,
 }
-
-// ── EventQueue ────────────────────────────────────────────────────────────────
 
 /// Per-channel event queue with per-channel in-flight enforcement.
 ///
@@ -564,8 +558,6 @@ impl Default for EventQueue {
     }
 }
 
-// ── NIP-10 tag parsing ────────────────────────────────────────────────────────
-
 /// Parsed thread relationship from NIP-10 `e` tags.
 #[derive(Debug, Clone, Default)]
 pub struct ThreadTags {
@@ -627,8 +619,6 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
         mentioned_pubkeys: mentions,
     }
 }
-
-// ── Slash command detection ───────────────────────────────────────────────────
 
 /// Extract a leading slash command from message content.
 ///
@@ -709,8 +699,6 @@ pub fn slash_command_for_batch(batch: &FlushBatch, known_names: &[&str]) -> Opti
     extract_slash_command(&batch.events[0].event.content, known_names)
 }
 
-// ── Prompt formatting ─────────────────────────────────────────────────────────
-
 /// Conversation context fetched by the harness before prompting.
 #[derive(Debug, Clone)]
 pub enum ConversationContext {
@@ -748,6 +736,10 @@ pub struct PromptChannelInfo {
 pub struct PromptProfile {
     pub display_name: Option<String>,
     pub nip05_handle: Option<String>,
+    /// True when this pubkey's kind:0 profile carries a NIP-OA `auth` tag,
+    /// i.e. it is an owned agent rather than a human. Used to gate reply-anchor
+    /// flattening (UX routing heuristic, not a security boundary).
+    pub is_agent: bool,
 }
 
 /// Pubkey-keyed profile lookup used while formatting ACP prompts.
@@ -893,14 +885,87 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
     ));
 }
 
+/// Append a new-thread reply instruction for a human-facing top-level mention.
+///
+/// The triggering mention has no thread tags, so the agent's reply becomes the
+/// thread root. Anchoring to the triggering event (rather than leaving the
+/// choice open) prevents replying into a stale/unrelated prior thread.
+fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
+    s.push_str(&format!(
+        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
+         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
+         triggering message is the thread root. Do NOT reply into any other \
+         (older) thread. If the human explicitly asks for a channel-root, \
+         top-level, or broadcast post, send that message without `--reply-to`."
+    ));
+}
+
+/// Decide whether a turn is human-facing for reply-anchor purposes.
+///
+/// A turn is human-facing when the triggering sender is a human, OR a human
+/// (other than this agent) is tagged in the triggering event. Identity comes
+/// from `PromptProfile::is_agent` (NIP-OA auth tag), not raw `p`-tag presence:
+/// agent-only mentions must not force flattening. When a participant cannot be
+/// classified (no profile fetched), it is treated as human — humans must not
+/// lose thread visibility to a misclassification.
+fn turn_is_human_facing(
+    sender_pubkey: &str,
+    thread_tags: &ThreadTags,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> bool {
+    let is_agent = |pubkey: &str| -> bool {
+        profile_lookup
+            .and_then(|m| m.get(&normalize_lookup_key(pubkey)))
+            .map(|p| p.is_agent)
+            // Unknown identity → treat as human (fail open for visibility).
+            .unwrap_or(false)
+    };
+
+    if !is_agent(sender_pubkey) {
+        return true;
+    }
+    thread_tags.mentioned_pubkeys.iter().any(|pk| !is_agent(pk))
+}
+
+/// Resolve the `--reply-to` anchor for a non-DM turn.
+///
+/// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
+///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
+///   - top-level   → the triggering event id, which becomes the new thread root
+///
+/// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
+/// (intentional for agent coordination).
+fn resolve_reply_anchor(
+    sender_pubkey: &str,
+    thread_tags: &ThreadTags,
+    triggering_event_id: &str,
+    profile_lookup: Option<&PromptProfileLookup>,
+) -> Option<String> {
+    if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
+        return None;
+    }
+    Some(
+        thread_tags
+            .root_event_id
+            .clone()
+            .unwrap_or_else(|| triggering_event_id.to_string()),
+    )
+}
+
 /// Format a `[Context]` hints section based on event scope.
+///
+/// `reply_anchor` is the pre-resolved `--reply-to` target for this turn (see
+/// [`resolve_reply_anchor`]). In the thread/DM branches it threads ordinary
+/// replies; in the channel branch a `Some` anchor means a human-facing
+/// top-level mention whose reply should open a new thread rooted at the
+/// triggering event.
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
     thread_tags: &ThreadTags,
     is_dm: bool,
     has_conversation_context: bool,
-    triggering_event_id: Option<&str>,
+    reply_anchor: Option<&str>,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
@@ -936,7 +1001,7 @@ fn format_context_hints(
                     s.push_str(&format!("\nParent: {parent}"));
                 }
             }
-            if let Some(event_id) = triggering_event_id {
+            if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
         }
@@ -959,17 +1024,21 @@ fn format_context_hints(
             }
         }
         s.push_str(&format!("\n{ctx_hint}"));
-        if let Some(event_id) = triggering_event_id {
+        if let Some(event_id) = reply_anchor {
             append_reply_instruction(&mut s, event_id);
         }
         s
     } else {
-        format!(
+        let mut s = format!(
             "[Context]\n\
              Scope: channel\n\
              Channel: {channel_display}\n\
              Hint: Use `buzz messages get --channel <UUID>` for recent messages if needed."
-        )
+        );
+        if let Some(event_id) = reply_anchor {
+            append_new_thread_reply_instruction(&mut s, event_id);
+        }
+        s
     }
 }
 
@@ -1097,11 +1166,26 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
     }
 
-    // 2. Context hints (with reply instruction for thread replies).
-    let triggering_event_id = if thread_tags.root_event_id.is_some() {
-        Some(last_event.event.id.to_hex())
+    // 2. Context hints (with a human-aware reply anchor).
+    //
+    // Human-facing turns are anchored so replies stay readable at layer 1:
+    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
+    //   - top-level     → anchor to the triggering event (it becomes the root)
+    // Agent↔agent turns get no forced anchor — deep nesting is intentional
+    // there. DMs are always 1:1 with a human, so they always anchor.
+    let sender_pubkey = last_event.event.pubkey.to_hex();
+    let reply_anchor = if is_dm {
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| last_event.event.id.to_hex())
     } else {
-        None
+        resolve_reply_anchor(
+            &sender_pubkey,
+            &thread_tags,
+            &last_event.event.id.to_hex(),
+            args.profile_lookup,
+        )
     };
     sections.push(format_context_hints(
         batch.channel_id,
@@ -1109,7 +1193,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         &thread_tags,
         is_dm,
         args.conversation_context.is_some(),
-        triggering_event_id.as_deref(),
+        reply_anchor.as_deref(),
     ));
 
     // 3. Conversation context (thread or DM).
@@ -1183,8 +1267,6 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     sections
 }
 
-// ─── Unit Tests ──────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1238,8 +1320,6 @@ mod tests {
         assert_eq!(base_section("  line1\nline2 "), "[Base]\n  line1\nline2");
     }
 
-    // ── Test 1: push + flush_next basic ──────────────────────────────────────
-
     #[test]
     fn test_push_flush_basic() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -1257,8 +1337,6 @@ mod tests {
         assert_eq!(q.queues.len(), 0);
     }
 
-    // ── Test 2: same channel cannot be flushed twice ─────────────────────────
-
     #[test]
     fn test_in_flight_blocks_same_channel() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -1275,8 +1353,6 @@ mod tests {
         // No other channels exist, so result is None.
         assert!(q.flush_next().is_none());
     }
-
-    // ── Test 3: mark_complete enables flush ──────────────────────────────────
 
     #[test]
     fn test_mark_complete_enables_flush() {
@@ -1301,8 +1377,6 @@ mod tests {
         assert_eq!(batch.events[0].event.content, "second");
     }
 
-    // ── Test 4: batch drain ───────────────────────────────────────────────────
-
     #[test]
     fn test_batch_drain_all_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -1326,8 +1400,6 @@ mod tests {
         assert_eq!(q.queues.len(), 0);
     }
 
-    // ── Test 5: FIFO fairness ─────────────────────────────────────────────────
-
     #[test]
     fn test_fifo_fairness_picks_oldest_channel() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -1343,8 +1415,6 @@ mod tests {
         assert_eq!(batch.channel_id, ch_a);
         assert_eq!(batch.events[0].event.content, "from A");
     }
-
-    // ── Test 6: multi-channel interleave ─────────────────────────────────────
 
     #[test]
     fn test_multi_channel_interleave() {
@@ -1375,15 +1445,11 @@ mod tests {
         assert_eq!(pending_count(&q), 0);
     }
 
-    // ── Test 7: empty queue returns None ─────────────────────────────────────
-
     #[test]
     fn test_empty_queue_returns_none() {
         let mut q = EventQueue::new(DedupMode::Queue);
         assert!(q.flush_next().is_none());
     }
-
-    // ── Test 9: format_prompt single event ───────────────────────────────────
 
     #[test]
     fn test_format_prompt_single() {
@@ -1418,8 +1484,6 @@ mod tests {
         // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
         assert!(!prompt.contains("--- Event 1 ---"));
     }
-
-    // ── Test 9b: requeue preserves events ────────────────────────────────────
 
     #[test]
     fn test_requeue_preserves_events() {
@@ -1469,8 +1533,6 @@ mod tests {
         assert_eq!(next_batch.channel_id, ch_b);
     }
 
-    // ── Test 10: format_prompt batch ─────────────────────────────────────────
-
     #[test]
     fn test_format_prompt_batch() {
         let ch = Uuid::new_v4();
@@ -1512,8 +1574,6 @@ mod tests {
         assert!(prompt.contains("Content: third message"));
     }
 
-    // ── Test 11: system prompt NOT in user message (delivered via system role) ──
-
     #[test]
     fn test_format_prompt_no_system_prompt_in_user_message() {
         let ch = Uuid::new_v4();
@@ -1536,8 +1596,6 @@ mod tests {
         assert!(!prompt.contains("[Base]"));
         assert!(prompt.starts_with("[Context]"));
     }
-
-    // ── Test 11b: agent_core section is first in user message ──────────────
 
     #[test]
     fn test_format_prompt_with_agent_core() {
@@ -1624,8 +1682,6 @@ mod tests {
         assert!(prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"));
     }
 
-    // ── Test 11c: base_prompt and system_prompt NOT in user message ────────────
-
     #[test]
     fn test_format_prompt_no_base_or_system_sections() {
         let ch = Uuid::new_v4();
@@ -1648,8 +1704,6 @@ mod tests {
         assert!(!prompt.contains("[System]"));
         assert!(prompt.starts_with("[Context]"));
     }
-
-    // ── Test 11d: legacy agents receive [Base]/[System] in user message ───────
 
     #[test]
     fn test_format_prompt_legacy_agent_emits_base_and_system() {
@@ -1705,8 +1759,6 @@ mod tests {
             "[Agent Memory] should come before [Context]"
         );
     }
-
-    // ── Test 11e: modern agents suppress [Base]/[System] from user message ────
 
     #[test]
     fn test_format_prompt_modern_agent_suppresses_base_and_system() {
@@ -1803,8 +1855,6 @@ mod tests {
         assert!(!prompt.contains("[System]"));
     }
 
-    // ── Test 12: drop mode discards in-flight channel events ─────────────────
-
     #[test]
     fn test_drop_mode_discards_in_flight_events() {
         let mut q = EventQueue::new(DedupMode::Drop);
@@ -1822,8 +1872,6 @@ mod tests {
         // Nothing to flush.
         assert!(q.flush_next().is_none());
     }
-
-    // ── Test 13: drop mode still queues other channels ────────────────────────
 
     #[test]
     fn test_drop_mode_queues_other_channels() {
@@ -1843,8 +1891,6 @@ mod tests {
         let batch_b = q.flush_next().expect("flush B");
         assert_eq!(batch_b.channel_id, ch_b);
     }
-
-    // ── Test 14: multiple channels can be in-flight simultaneously ────────────
 
     #[test]
     fn test_multiple_channels_in_flight_simultaneously() {
@@ -1876,8 +1922,6 @@ mod tests {
         assert!(!any_in_flight(&q));
     }
 
-    // ── Test 15: same channel cannot be flushed twice ─────────────────────────
-
     #[test]
     fn test_same_channel_not_flushed_twice() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -1900,8 +1944,6 @@ mod tests {
         assert!(q.flush_next().is_none());
     }
 
-    // ── Test 16: drop mode drops events for any in-flight channel ─────────────
-
     #[test]
     fn test_drop_mode_drops_for_any_in_flight_channel() {
         let mut q = EventQueue::new(DedupMode::Drop);
@@ -1923,8 +1965,6 @@ mod tests {
         q.mark_complete(ch_a);
         q.mark_complete(ch_b);
     }
-
-    // ── Test 17: flush_next picks oldest non-in-flight, non-throttled channel ─
 
     #[test]
     fn test_flush_next_picks_oldest_non_throttled() {
@@ -1958,8 +1998,6 @@ mod tests {
         q.mark_complete(ch_c);
     }
 
-    // ── Test 18: mark_complete(channel_id) clears only that channel ───────────
-
     #[test]
     fn test_mark_complete_clears_only_specified_channel() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -1987,8 +2025,6 @@ mod tests {
         assert!(!any_in_flight(&q));
     }
 
-    // ── Test 19: requeue_preserve_timestamps preserves received_at ───────────
-
     #[test]
     fn test_requeue_preserve_timestamps() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2014,8 +2050,6 @@ mod tests {
         assert_eq!(batch2.events[0].received_at, original_received_at);
     }
 
-    // ── Test 20: requeue_preserve_timestamps does not set retry_after ─────────
-
     #[test]
     fn test_requeue_preserve_timestamps_no_retry_after() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2031,8 +2065,6 @@ mod tests {
         assert!(!q.retry_after.contains_key(&ch));
         assert!(q.flush_next().is_some());
     }
-
-    // ── Test 20b: requeue_preserve_timestamps enforces per-channel cap ────────
 
     #[test]
     fn test_requeue_preserve_timestamps_enforces_cap() {
@@ -2070,8 +2102,6 @@ mod tests {
         );
     }
 
-    // ── Test 20c: requeue_preserve overflow trims newest, keeps requeued ─────
-
     #[test]
     fn test_requeue_preserve_timestamps_overflow_keeps_requeued_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2106,8 +2136,6 @@ mod tests {
             "requeued events should be at the front (oldest), not trimmed"
         );
     }
-
-    // ── Test 21: has_flushable_work returns correct results ───────────────────
 
     #[test]
     fn test_has_flushable_work() {
@@ -2147,8 +2175,6 @@ mod tests {
         );
     }
 
-    // ── Test 22: retry throttle blocks re-flush for 5 seconds ─────────────────
-
     #[test]
     fn test_retry_throttle_blocks_requeue_channel() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2179,8 +2205,6 @@ mod tests {
             .expect("ch should be flushable after throttle expires");
         assert_eq!(batch3.channel_id, ch);
     }
-
-    // ── NIP-10 tag parsing tests ─────────────────────────────────────────────
 
     /// Build an event with specific tags for thread testing.
     fn make_event_with_tags(content: &str, tags: Vec<Vec<String>>) -> Event {
@@ -2259,8 +2283,6 @@ mod tests {
         assert_eq!(tags.root_event_id.as_deref(), Some("root123"));
         assert_eq!(tags.parent_event_id.as_deref(), Some("root123"));
     }
-
-    // ── Context formatting tests ─────────────────────────────────────────────
 
     #[test]
     fn test_format_prompt_with_channel_info() {
@@ -2475,6 +2497,7 @@ mod tests {
                 PromptProfile {
                     display_name: Some("Wes".into()),
                     nip05_handle: None,
+                    ..Default::default()
                 },
             ),
             (
@@ -2482,6 +2505,7 @@ mod tests {
                 PromptProfile {
                     display_name: Some("Rick".into()),
                     nip05_handle: None,
+                    ..Default::default()
                 },
             ),
         ]);
@@ -2511,6 +2535,7 @@ mod tests {
             PromptProfile {
                 display_name: None,
                 nip05_handle: Some("wes@example.com".into()),
+                ..Default::default()
             },
         )]);
         assert_eq!(
@@ -2527,12 +2552,101 @@ mod tests {
             PromptProfile {
                 display_name: Some("   ".into()),
                 nip05_handle: Some("wes@example.com".into()),
+                ..Default::default()
             },
         )]);
         assert_eq!(
             resolve_prompt_label(pubkey, Some(&profiles)),
             Some("wes@example.com".into()),
         );
+    }
+
+    // ── Human-aware reply anchoring ──────────────────────────────────────────
+
+    const HUMAN_PK: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const AGENT_A_PK: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const AGENT_B_PK: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const ROOT_ID: &str = "abc0000000000000000000000000000000000000000000000000000000000000";
+    const TRIGGER_ID: &str = "def0000000000000000000000000000000000000000000000000000000000000";
+
+    fn profile(is_agent: bool) -> PromptProfile {
+        PromptProfile {
+            is_agent,
+            ..Default::default()
+        }
+    }
+
+    /// Lookup with HUMAN as a human and AGENT_A / AGENT_B as agents.
+    fn id_lookup() -> PromptProfileLookup {
+        HashMap::from([
+            (HUMAN_PK.to_string(), profile(false)),
+            (AGENT_A_PK.to_string(), profile(true)),
+            (AGENT_B_PK.to_string(), profile(true)),
+        ])
+    }
+
+    fn thread_tags(root: Option<&str>, mentions: &[&str]) -> ThreadTags {
+        ThreadTags {
+            root_event_id: root.map(str::to_string),
+            parent_event_id: root.map(str::to_string),
+            mentioned_pubkeys: mentions.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn test_anchor_human_in_thread_uses_root() {
+        // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_anchor_human_top_level_uses_triggering_event() {
+        // Human top-level mention (no thread tags) → triggering event is root.
+        let tags = thread_tags(None, &[AGENT_A_PK]);
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
+    }
+
+    #[test]
+    fn test_anchor_agent_to_agent_in_thread_is_none() {
+        // Agent pings agent inside a thread → no forced anchor (deep nesting ok).
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_anchor_agent_to_agent_top_level_is_none() {
+        let tags = thread_tags(None, &[AGENT_B_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn test_anchor_agent_sender_but_human_tagged_flattens() {
+        // Agent-authored, but a human is tagged → human-facing → anchor to root.
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_anchor_unknown_identity_treated_as_human() {
+        // No profile lookup → fail open (treat as human so visibility is kept).
+        let tags = thread_tags(Some(ROOT_ID), &[]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
+        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+    }
+
+    #[test]
+    fn test_anchor_agent_only_p_tags_do_not_flatten() {
+        // Raw p-tag presence must NOT flatten when every tagged pubkey is an
+        // agent — this is the regression Pinky flagged.
+        let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        assert_eq!(anchor, None);
     }
 
     #[test]
@@ -2722,8 +2836,6 @@ mod tests {
         );
     }
 
-    // ── drain_channel tests ──────────────────────────────────────────────────
-
     #[test]
     fn test_drain_channel_removes_pending_events() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2793,8 +2905,6 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert!(any_in_flight(&q)); // in-flight unaffected
     }
-
-    // ── compact_expired_state ─────────────────────────────────────────────
 
     #[test]
     fn test_compact_cleans_orphaned_retry_counts() {
@@ -2874,8 +2984,6 @@ mod tests {
         );
     }
 
-    // ── Test: requeue_as_cancelled merges into flush_next ────────────────────
-
     #[test]
     fn test_requeue_as_cancelled_merges_in_flush_next() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2904,8 +3012,6 @@ mod tests {
         );
     }
 
-    // ── Test: requeue_as_cancelled fallback (no new events) ──────────────────
-
     #[test]
     fn test_requeue_as_cancelled_no_new_events_fallback() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2932,8 +3038,6 @@ mod tests {
         );
     }
 
-    // ── Test: has_flushable_work accounts for cancelled_batches ──────────────
-
     #[test]
     fn test_has_flushable_work_with_cancelled_only() {
         let mut q = EventQueue::new(DedupMode::Queue);
@@ -2951,8 +3055,6 @@ mod tests {
             "cancelled-only channel should be flushable"
         );
     }
-
-    // ── Test: drain_channel clears cancelled_batches ──────────────────────────
 
     #[test]
     fn test_drain_channel_clears_cancelled_batches() {
@@ -2974,8 +3076,6 @@ mod tests {
             "flush_next should return None after drain"
         );
     }
-
-    // ── Test: double-cancel accumulates all events ────────────────────────────
 
     #[test]
     fn test_double_cancel_preserves_all_events() {
@@ -3018,17 +3118,14 @@ mod tests {
         );
     }
 
-    // ── reply instruction tests ──────────────────────────────────────────
-
     #[test]
     fn test_reply_instruction_present_for_channel_thread_reply() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);
         let event = make_event_with_tags(
             "@bot help",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3039,10 +3136,13 @@ mod tests {
             cancelled_events: vec![],
         };
 
+        // No profile lookup → sender treated as human → human-facing thread
+        // reply anchors to the thread ROOT (flat at layer 1), not the
+        // triggering event id.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "channel thread reply should include reply instruction with triggering event ID"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "human-facing thread reply should anchor to the thread root"
         );
         assert!(
             prompt.contains("For ordinary replies in this turn"),
@@ -3096,9 +3196,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_top_level_channel_message() {
+    fn test_reply_instruction_present_for_top_level_human_message() {
         let ch = Uuid::new_v4();
         let event = make_event("hello world");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3109,10 +3210,17 @@ mod tests {
             cancelled_events: vec![],
         };
 
+        // Top-level human message (no lookup → human): the reply opens a new
+        // thread anchored to the triggering event, preventing replies into a
+        // stale older thread.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "top-level message should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level human message should anchor a new thread at the triggering event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "top-level human message should use the new-thread instruction"
         );
     }
 
@@ -3149,7 +3257,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_uses_triggering_event_id_not_root_or_parent() {
+    fn test_human_thread_reply_anchors_to_root_not_triggering_or_parent() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);
         let parent_id = "b".repeat(64);
@@ -3171,19 +3279,20 @@ mod tests {
             cancelled_events: vec![],
         };
 
+        // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
+        // keep the conversation flat — NOT the triggering event or parent.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
-        // The instruction should use the triggering event's own ID — not root or parent.
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "nested reply instruction should use the triggering event ID"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "human-facing nested reply should anchor to the thread root"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {root_id}")),
-            "instruction should NOT use root_event_id"
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "instruction should NOT anchor to the triggering event id"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {parent_id}")),
-            "instruction should NOT use parent_event_id from tags"
+            "instruction should NOT anchor to the parent event id"
         );
     }
 
@@ -3193,9 +3302,8 @@ mod tests {
         let root_id = "e".repeat(64);
         let event = make_event_with_tags(
             "@bot post your summary in the channel root",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3208,8 +3316,8 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "thread reply should still provide the default reply target"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "human-facing thread reply should anchor to the thread root"
         );
         assert!(
             prompt.contains("channel-root, top-level"),
@@ -3228,9 +3336,8 @@ mod tests {
         let root_id = "c".repeat(64);
         let threaded = make_event_with_tags(
             "@bot help",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let threaded_id = threaded.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![
@@ -3248,10 +3355,12 @@ mod tests {
             cancelled_events: vec![],
         };
 
+        // Scope derives from the last (threaded) event; human-facing → anchor
+        // to that thread's root.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {threaded_id}")),
-            "batched prompt should use last (threaded) event's ID"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "batched prompt should anchor to the last (threaded) event's root"
         );
     }
 
@@ -3264,6 +3373,7 @@ mod tests {
             vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
         );
         let plain = make_event("latest top-level");
+        let plain_id = plain.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![
@@ -3281,14 +3391,18 @@ mod tests {
             cancelled_events: vec![],
         };
 
+        // Last event is top-level and human-facing → opens a new thread
+        // anchored to that top-level event (NOT the earlier thread's root).
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "batched prompt where last event is top-level should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {plain_id}")),
+            "batched top-level-last prompt should anchor to the last (top-level) event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "batched top-level-last prompt should use the new-thread instruction"
         );
     }
-
-    // ── Slash command extraction ──────────────────────────────────────────────
 
     /// Build a single-event FlushBatch with the given content.
     fn make_single_batch(content: &str) -> FlushBatch {

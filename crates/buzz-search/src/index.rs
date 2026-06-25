@@ -329,8 +329,6 @@ mod tests {
         assert_eq!(doc["channel_id"].as_str().unwrap(), "__global__");
     }
 
-    // ── kind:0 flattening for searchability ─────────────────────────────────
-
     #[test]
     fn kind0_appends_display_name_for_tokenization() {
         let stored = make_stored_event(

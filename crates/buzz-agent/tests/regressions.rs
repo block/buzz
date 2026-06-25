@@ -15,8 +15,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-// ─── Fake LLM that captures requests so we can inspect history ──────────────
-
 struct CapturingLlm {
     url: String,
     captured: Arc<Mutex<Vec<Value>>>,
@@ -85,8 +83,6 @@ async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
     });
     CapturingLlm { url, captured }
 }
-
-// ─── Harness (minimal copy — keeping per-test independence) ─────────────────
 
 struct Harness {
     child: tokio::process::Child,
@@ -236,8 +232,6 @@ async fn init_session(h: &mut Harness, mcp_servers: Value) -> String {
         .expect("sessionId")
         .to_owned()
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 /// After a text-only assistant response, the next prompt's request must
 /// include that assistant text in `messages` history. Round 4 fix.
@@ -524,8 +518,6 @@ fn openai_n_tool_calls(n: usize) -> Value {
     })
 }
 
-// ─── New round-8 regression tests ──────────────────────────────────────────
-
 /// History budget evicts old turns: after many prompts, the LLM request
 /// body stays below a sane bound. Round 7 fix; round 8 test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -697,8 +689,13 @@ async fn description_clamping_enforced() {
 
     let captured = llm.captured.lock().await;
     let tools = captured[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 1);
-    let desc = tools[0]["function"]["description"].as_str().unwrap_or("");
+    // The MCP tool is "big__tool_0"; load_skill may also be present when
+    // global skills are discovered from HOME. Find the MCP tool by name.
+    let mcp_tool = tools
+        .iter()
+        .find(|t| t["function"]["name"].as_str() == Some("big__tool_0"))
+        .expect("big__tool_0 not found in tool list");
+    let desc = mcp_tool["function"]["description"].as_str().unwrap_or("");
     assert!(
         desc.len() <= 1024,
         "description not clamped: {} bytes (expected ≤ 1024)",
@@ -712,8 +709,6 @@ async fn description_clamping_enforced() {
     );
     h.shutdown().await;
 }
-
-// ─── Hook system regression tests ──────────────────────────────────────────
 
 /// Helper: spawn a session with a fake MCP server exposing one regular tool
 /// plus an optional `_Stop` hook controlled by env vars.

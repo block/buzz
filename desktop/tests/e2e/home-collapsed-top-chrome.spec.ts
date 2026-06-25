@@ -3,8 +3,6 @@ import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/home-collapsed-top-chrome";
-
 test.describe("home inbox header collapsed-sidebar chrome clearance", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
@@ -28,9 +26,5 @@ test.describe("home inbox header collapsed-sidebar chrome clearance", () => {
       .toBeGreaterThanOrEqual(168);
 
     await waitForAnimations(page);
-    await page.screenshot({
-      path: `${SHOTS}/01-collapsed-inbox-header-clears-traffic-lights.png`,
-      clip: { x: 0, y: 0, width: 420, height: 120 },
-    });
   });
 });

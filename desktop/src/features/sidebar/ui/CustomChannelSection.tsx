@@ -50,20 +50,12 @@ import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { HashSearch } from "@/shared/ui/icons";
 
-// ---------------------------------------------------------------------------
-// Shared styles
-// ---------------------------------------------------------------------------
-
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
   "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100";
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
-
-// ---------------------------------------------------------------------------
-// MoveToSectionSubmenu — internal helper
-// ---------------------------------------------------------------------------
 
 function MoveToSectionSubmenu({
   channelId,
@@ -113,10 +105,6 @@ function MoveToSectionSubmenu({
     </ContextMenuSub>
   );
 }
-
-// ---------------------------------------------------------------------------
-// ChannelContextMenuItems — shared context menu items for channel rows
-// ---------------------------------------------------------------------------
 
 export function ChannelContextMenuItems({
   channel,
@@ -224,10 +212,6 @@ export function ChannelContextMenuItems({
   );
 }
 
-// ---------------------------------------------------------------------------
-// SectionHeaderActions — create and read-state icon buttons for section headers
-// ---------------------------------------------------------------------------
-
 function SectionHeaderActions({
   browseAriaLabel,
   createAriaLabel,
@@ -289,10 +273,6 @@ function SectionHeaderActions({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// ChannelGroupSection — unified Channels / Forums section (no inline form)
-// ---------------------------------------------------------------------------
 
 export function ChannelGroupSection({
   browseAriaLabel,
@@ -469,10 +449,6 @@ export function ChannelGroupSection({
     sectionContent
   );
 }
-
-// ---------------------------------------------------------------------------
-// CustomChannelSection — user-defined channel section with management actions
-// ---------------------------------------------------------------------------
 
 export function CustomChannelSection({
   section,

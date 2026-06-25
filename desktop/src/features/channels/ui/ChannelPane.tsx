@@ -1,6 +1,5 @@
 import * as React from "react";
 import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
-
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
@@ -28,6 +27,7 @@ import {
 } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
+import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import {
   BotActivityComposerAction,
@@ -65,7 +65,6 @@ import type { Channel } from "@/shared/api/types";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-
 type ChannelPaneProps = {
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];
@@ -73,6 +72,7 @@ type ChannelPaneProps = {
   agentSessionAgents: ChannelAgentSessionAgent[];
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
+  channelManagementOpen?: boolean;
   currentPubkey?: string;
   editTarget?: {
     author: string;
@@ -89,14 +89,14 @@ type ChannelPaneProps = {
   isSending: boolean;
   isTimelineLoading: boolean;
   messages: TimelineMessage[];
-  /** Event id of the oldest unread top-level message at channel open, or null. */
   firstUnreadMessageId?: string | null;
-  /** Count of unread top-level messages at channel open. */
   unreadCount?: number;
   canResetThreadPanelWidth: boolean;
   onCancelEdit?: () => void;
   onCancelThreadReply: () => void;
   onCloseAgentSession: () => void;
+  onCloseChannelManagement?: () => void;
+  onChannelManagementDeleted?: () => void;
   onCloseProfilePanel: () => void;
   onAddAgent?: () => void;
   onCreateChannel?: () => void;
@@ -142,7 +142,6 @@ type ChannelPaneProps = {
   onThreadPanelResizeStart: (
     event: React.PointerEvent<HTMLButtonElement>,
   ) => void;
-  /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
   openThreadHeadId: string | null;
@@ -165,11 +164,8 @@ type ChannelPaneProps = {
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
   threadScrollTargetId: string | null;
-  /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
-  /** Subtree unread counts for in-panel summary rows, keyed by reply id. */
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
-  /** Event id of the first unread reply in the open thread panel. */
   threadFirstUnreadReplyId?: string | null;
   targetMessageId: string | null;
   typingPubkeys: string[];
@@ -181,7 +177,6 @@ type ChannelPaneProps = {
   isFollowingThreadById?: (rootId: string) => boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
 };
-
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -189,6 +184,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   activityAgents = agentSessionAgents,
   botTypingEntries,
   channelFind,
+  channelManagementOpen = false,
   currentPubkey,
   editTarget = null,
   fetchOlder,
@@ -210,6 +206,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   onCancelEdit,
   onCancelThreadReply,
   onCloseAgentSession,
+  onCloseChannelManagement,
+  onChannelManagementDeleted,
   onCloseProfilePanel,
   onAddAgent,
   onCreateChannel,
@@ -283,13 +281,11 @@ export const ChannelPane = React.memo(function ChannelPane({
     composerWrapperRef,
     `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
   );
-
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
       window.clearTimeout(welcomeComposerDismissTimerRef.current);
       welcomeComposerDismissTimerRef.current = null;
     }
-
     if (welcomeComposerHideTimerRef.current !== null) {
       window.clearTimeout(welcomeComposerHideTimerRef.current);
       welcomeComposerHideTimerRef.current = null;
@@ -617,6 +613,20 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
+  const wrapAux = (panel: React.ReactNode, testId: string) =>
+    useSplitAuxiliaryPane ? (
+      <RightAuxiliaryPane
+        canResetWidth={canResetThreadPanelWidth}
+        onResetWidth={onResetThreadPanelWidth}
+        onResizeStart={onThreadPanelResizeStart}
+        testId={testId}
+        widthPx={threadPanelWidthPx}
+      >
+        {panel}
+      </RightAuxiliaryPane>
+    ) : (
+      panel
+    );
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
       {!isSinglePanelView ? (
@@ -668,6 +678,9 @@ export const ChannelPane = React.memo(function ChannelPane({
             hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
             isFetchingOlder={isFetchingOlder}
+            layoutShiftKey={
+              useSplitAuxiliaryPane ? (openThreadHeadId ?? "closed") : "overlay"
+            }
             isFollowingThreadById={isFollowingThreadById}
             isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
@@ -807,189 +820,150 @@ export const ChannelPane = React.memo(function ChannelPane({
         </section>
       ) : null}
 
-      {threadHeadMessage
-        ? (() => {
-            const panel = (
-              <MessageThreadPanel
-                agentPubkeys={agentPubkeys}
-                channel={activeChannel}
-                channelId={activeChannel?.id ?? null}
-                channelName={activeChannel?.name ?? "channel"}
-                currentPubkey={currentPubkey}
-                disabled={isComposerDisabled}
-                editTarget={threadEditTarget}
-                firstUnreadReplyId={threadFirstUnreadReplyId}
-                isFollowingThread={isFollowingThread}
-                isMessageUnreadById={isMessageUnreadById}
-                isSending={isSending}
-                isSinglePanelView={
-                  useSplitAuxiliaryPane ? false : isSinglePanelView
-                }
-                layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                onCancelEdit={onCancelEdit}
-                onCancelReply={onCancelThreadReply}
-                onClose={onCloseThread}
-                onDelete={onDelete}
-                onEdit={onEdit}
-                onEditLastOwnMessage={handleEditLastOwnThreadMessage}
-                onEditSave={onEditSave}
-                onFollowThread={onFollowThread}
-                onMarkUnread={onMarkUnread}
-                onMarkRead={onMarkRead}
-                onExpandReplies={onExpandThreadReplies}
-                onSelectReplyTarget={onSelectThreadReplyTarget}
-                onSend={onSendThreadReply}
-                onScrollTargetResolved={onThreadScrollTargetResolved}
-                onToggleReaction={onToggleReaction}
-                onUnfollowThread={onUnfollowThread}
-                profiles={profiles}
-                replyTargetMessage={threadReplyTargetMessage}
-                scrollTargetId={threadScrollTargetId}
-                threadHead={threadHeadMessage}
-                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
-                widthPx={threadPanelWidthPx}
-                threadReplies={threadMessages}
-                threadUnreadCount={threadUnreadCounts?.get(
-                  threadHeadMessage.id,
-                )}
-                threadReplyUnreadCounts={threadReplyUnreadCounts}
-                threadTypingPubkeys={threadTypingPubkeys}
-                toolbarExtraActions={
-                  hasThreadComposerBotActivity ? (
-                    <BotActivityComposerAction
-                      agents={activityAgents}
-                      channelId={activeChannel?.id ?? null}
-                      onOpenAgentSession={onOpenAgentSession}
-                      openAgentSessionPubkey={openAgentSessionPubkey}
-                      profiles={profiles}
-                      typingBotPubkeys={threadComposerBotTypingPubkeys}
-                      variant="inline"
-                    />
-                  ) : null
-                }
-              />
-            );
-            return useSplitAuxiliaryPane ? (
-              <RightAuxiliaryPane
-                canResetWidth={canResetThreadPanelWidth}
-                onResetWidth={onResetThreadPanelWidth}
-                onResizeStart={onThreadPanelResizeStart}
-                testId="message-thread-panel"
-                widthPx={threadPanelWidthPx}
-              >
-                {panel}
-              </RightAuxiliaryPane>
-            ) : (
-              panel
-            );
-          })()
-        : shouldShowThreadSkeleton
-          ? (() => {
-              const panel = (
-                <MessageThreadPanelSkeleton
-                  isSinglePanelView={
-                    useSplitAuxiliaryPane ? false : isSinglePanelView
-                  }
-                  layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                  onClose={onCloseThread}
-                  widthPx={threadPanelWidthPx}
-                />
-              );
-              return useSplitAuxiliaryPane ? (
-                <RightAuxiliaryPane
-                  canResetWidth={canResetThreadPanelWidth}
-                  onResetWidth={onResetThreadPanelWidth}
-                  onResizeStart={onThreadPanelResizeStart}
-                  testId="message-thread-panel"
-                  widthPx={threadPanelWidthPx}
-                >
-                  {panel}
-                </RightAuxiliaryPane>
-              ) : (
-                panel
-              );
-            })()
-          : selectedAgent
-            ? (() => {
-                const panel = (
-                  <AgentSessionThreadPanel
-                    agent={selectedAgent}
-                    canInterruptTurn={selectedAgent.canInterruptTurn}
-                    channel={
-                      agentSessionSelection.isAgentInActivityList({
-                        activityAgents,
-                        selectedAgent,
-                      })
-                        ? activeChannel
-                        : null
-                    }
-                    isWorking={botTypingEntries.some(
-                      (entry) =>
-                        entry.pubkey.toLowerCase() ===
-                        selectedAgent.pubkey.toLowerCase(),
-                    )}
-                    isSinglePanelView={
-                      useSplitAuxiliaryPane ? false : isSinglePanelView
-                    }
-                    layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+      {channelManagementOpen && activeChannel ? (
+        <ChannelManagementAuxiliaryPanel
+          activeChannel={activeChannel}
+          canResetThreadPanelWidth={canResetThreadPanelWidth}
+          currentPubkey={currentPubkey}
+          isSinglePanelView={isSinglePanelView}
+          onChannelManagementDeleted={onChannelManagementDeleted}
+          onCloseChannelManagement={onCloseChannelManagement}
+          onResetThreadPanelWidth={onResetThreadPanelWidth}
+          onThreadPanelResizeStart={onThreadPanelResizeStart}
+          threadPanelWidthPx={threadPanelWidthPx}
+          useSplitAuxiliaryPane={useSplitAuxiliaryPane}
+        />
+      ) : threadHeadMessage ? (
+        (() => {
+          const panel = (
+            <MessageThreadPanel
+              agentPubkeys={agentPubkeys}
+              channel={activeChannel}
+              channelId={activeChannel?.id ?? null}
+              channelName={activeChannel?.name ?? "channel"}
+              currentPubkey={currentPubkey}
+              disabled={isComposerDisabled}
+              editTarget={threadEditTarget}
+              firstUnreadReplyId={threadFirstUnreadReplyId}
+              isFollowingThread={isFollowingThread}
+              isMessageUnreadById={isMessageUnreadById}
+              isSending={isSending}
+              isSinglePanelView={
+                useSplitAuxiliaryPane ? false : isSinglePanelView
+              }
+              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              onCancelEdit={onCancelEdit}
+              onCancelReply={onCancelThreadReply}
+              onClose={onCloseThread}
+              onDelete={onDelete}
+              onEdit={onEdit}
+              onEditLastOwnMessage={handleEditLastOwnThreadMessage}
+              onEditSave={onEditSave}
+              onFollowThread={onFollowThread}
+              onMarkUnread={onMarkUnread}
+              onMarkRead={onMarkRead}
+              onExpandReplies={onExpandThreadReplies}
+              onSelectReplyTarget={onSelectThreadReplyTarget}
+              onSend={onSendThreadReply}
+              onScrollTargetResolved={onThreadScrollTargetResolved}
+              onToggleReaction={onToggleReaction}
+              onUnfollowThread={onUnfollowThread}
+              profiles={profiles}
+              replyTargetMessage={threadReplyTargetMessage}
+              scrollTargetId={threadScrollTargetId}
+              threadHead={threadHeadMessage}
+              threadHeadVideoReviewContext={threadHeadVideoReviewContext}
+              widthPx={threadPanelWidthPx}
+              threadReplies={threadMessages}
+              threadUnreadCount={threadUnreadCounts?.get(threadHeadMessage.id)}
+              threadReplyUnreadCounts={threadReplyUnreadCounts}
+              threadTypingPubkeys={threadTypingPubkeys}
+              toolbarExtraActions={
+                hasThreadComposerBotActivity ? (
+                  <BotActivityComposerAction
+                    agents={activityAgents}
+                    channelId={activeChannel?.id ?? null}
+                    onOpenAgentSession={onOpenAgentSession}
+                    openAgentSessionPubkey={openAgentSessionPubkey}
                     profiles={profiles}
-                    onBackToProfile={() =>
-                      onOpenProfilePanel(selectedAgent.pubkey)
-                    }
-                    onClose={onCloseAgentSession}
-                    widthPx={threadPanelWidthPx}
+                    typingBotPubkeys={threadComposerBotTypingPubkeys}
+                    variant="inline"
                   />
-                );
-                return useSplitAuxiliaryPane ? (
-                  <RightAuxiliaryPane
-                    canResetWidth={canResetThreadPanelWidth}
-                    onResetWidth={onResetThreadPanelWidth}
-                    onResizeStart={onThreadPanelResizeStart}
-                    testId="agent-session-thread-panel"
-                    widthPx={threadPanelWidthPx}
-                  >
-                    {panel}
-                  </RightAuxiliaryPane>
-                ) : (
-                  panel
-                );
-              })()
-            : profilePanelPubkey
-              ? (() => {
-                  const panel = (
-                    <UserProfilePanel
-                      currentPubkey={currentPubkey}
-                      isSinglePanelView={
-                        useSplitAuxiliaryPane ? false : isSinglePanelView
-                      }
-                      layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                      onClose={onCloseProfilePanel}
-                      onOpenDm={onOpenDm}
-                      onOpenProfile={onOpenProfilePanel}
-                      onTabChange={onProfilePanelTabChange}
-                      onViewChange={onProfilePanelViewChange}
-                      pubkey={profilePanelPubkey}
-                      splitPaneClamp
-                      tab={profilePanelTab}
-                      view={profilePanelView}
-                      widthPx={threadPanelWidthPx}
-                    />
-                  );
-                  return useSplitAuxiliaryPane ? (
-                    <RightAuxiliaryPane
-                      canResetWidth={canResetThreadPanelWidth}
-                      onResetWidth={onResetThreadPanelWidth}
-                      onResizeStart={onThreadPanelResizeStart}
-                      testId="user-profile-panel"
-                      widthPx={threadPanelWidthPx}
-                    >
-                      {panel}
-                    </RightAuxiliaryPane>
-                  ) : (
-                    panel
-                  );
-                })()
-              : null}
+                ) : null
+              }
+            />
+          );
+          return wrapAux(panel, "message-thread-panel");
+        })()
+      ) : shouldShowThreadSkeleton ? (
+        (() => {
+          const panel = (
+            <MessageThreadPanelSkeleton
+              isSinglePanelView={
+                useSplitAuxiliaryPane ? false : isSinglePanelView
+              }
+              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              onClose={onCloseThread}
+              widthPx={threadPanelWidthPx}
+            />
+          );
+          return wrapAux(panel, "message-thread-panel");
+        })()
+      ) : activeChannel && selectedAgent ? (
+        (() => {
+          const panel = (
+            <AgentSessionThreadPanel
+              agent={selectedAgent}
+              canInterruptTurn={selectedAgent.canInterruptTurn}
+              channel={
+                agentSessionSelection.isAgentInActivityList({
+                  activityAgents,
+                  selectedAgent,
+                })
+                  ? activeChannel
+                  : null
+              }
+              isWorking={botTypingEntries.some(
+                (entry) =>
+                  entry.pubkey.toLowerCase() ===
+                  selectedAgent.pubkey.toLowerCase(),
+              )}
+              isSinglePanelView={
+                useSplitAuxiliaryPane ? false : isSinglePanelView
+              }
+              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              profiles={profiles}
+              onBackToProfile={() => onOpenProfilePanel(selectedAgent.pubkey)}
+              onClose={onCloseAgentSession}
+              widthPx={threadPanelWidthPx}
+            />
+          );
+          return wrapAux(panel, "agent-session-thread-panel");
+        })()
+      ) : profilePanelPubkey ? (
+        (() => {
+          const panel = (
+            <UserProfilePanel
+              currentPubkey={currentPubkey}
+              isSinglePanelView={
+                useSplitAuxiliaryPane ? false : isSinglePanelView
+              }
+              layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              onClose={onCloseProfilePanel}
+              onOpenDm={onOpenDm}
+              onOpenProfile={onOpenProfilePanel}
+              onTabChange={onProfilePanelTabChange}
+              onViewChange={onProfilePanelViewChange}
+              pubkey={profilePanelPubkey}
+              splitPaneClamp
+              tab={profilePanelTab}
+              view={profilePanelView}
+              widthPx={threadPanelWidthPx}
+            />
+          );
+          return wrapAux(panel, "user-profile-panel");
+        })()
+      ) : null}
     </div>
   );
 });

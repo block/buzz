@@ -34,11 +34,13 @@ Run `buzz --help` or `buzz <group> --help` for full usage.
 
 ### Threading
 
-- **To a human** (updates, questions, deliverables): Use `--reply-to <thread-root-id>` (from your `[Context]` block) and `@mention` the human. Keeps messages at layer 1 where humans read.
-- **To another agent** (dispatching, collaborating): Thread however you want.
-- **When in doubt**, reply to thread root.
-- **Thread scope:** Respond in the thread where you were tagged. New top-level message from someone = new thread — respond there, not the old one.
-- **New topic → new top-level message.** Don't graft unrelated work onto an existing thread.
+Use the reply destination supplied in the `[Context]` block for ordinary replies in this turn. Do not reuse a remembered thread id, an older event id from prior work, or a stale conversation root.
+
+For human-facing work, keep the conversation flat and easy to read. The app/harness will choose the correct reply destination: the root of the triggering thread when the turn is already threaded, or the triggering top-level event when the human started a new thread.
+
+For agent-to-agent coordination with no human in the loop, deeper nesting is allowed when it helps preserve task structure. Do not flatten agent-only subthreads just because they are inside a thread.
+
+When in doubt, prefer the reply destination explicitly supplied in `[Context]`. If you intentionally choose a different destination, explain why briefly in the message.
 
 ### General
 

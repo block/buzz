@@ -12,8 +12,6 @@ use std::fs;
 
 use buzz_persona::resolve::resolve_pack;
 
-// ── Import filter (replicates desktop crate logic) ───────────────────────────
-
 const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
     "GOOSE_MODEL",
     "GOOSE_PROVIDER",
@@ -31,8 +29,6 @@ fn filter_derived(env_vars: Vec<(String, String)>) -> BTreeMap<String, String> {
         })
         .collect()
 }
-
-// ── Test 1: Goose persona emits correct runtime env vars ─────────────────────
 
 #[test]
 fn resolve_pack_goose_persona_emits_correct_runtime_env_vars() {
@@ -93,8 +89,6 @@ You are a test bot.
         "should emit GOOSE_TEMPERATURE=0.7"
     );
 }
-
-// ── Test 2: Buzz-agent persona emits BUZZ_AGENT_* vars ───────────────────
 
 #[test]
 fn resolve_pack_buzz_agent_persona_emits_buzz_agent_vars() {
@@ -161,8 +155,6 @@ You are a test bot.
     );
 }
 
-// ── Test 3: Import filter strips derived keys, preserves knobs ───────────────
-
 #[test]
 fn import_filter_strips_derived_preserves_knobs() {
     let tmp = tempfile::tempdir().unwrap();
@@ -220,8 +212,6 @@ You are a test bot.
         "GOOSE_TEMPERATURE must survive the import filter"
     );
 }
-
-// ── Test 4: Two runtimes in one pack get different env var prefixes ───────────
 
 #[test]
 fn full_pipeline_two_runtimes_different_env_vars() {
@@ -326,8 +316,6 @@ You are a buzz bot.
         "buzz-agent persona must not emit GOOSE_PROVIDER"
     );
 }
-
-// ── Test 5: Model without provider prefix emits model only ───────────────────
 
 #[test]
 fn model_without_provider_prefix_emits_model_only() {

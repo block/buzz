@@ -9,10 +9,6 @@ import 'nostr_models.dart';
 import 'relay_provider.dart';
 import 'relay_socket.dart';
 
-// ---------------------------------------------------------------------------
-// Session state
-// ---------------------------------------------------------------------------
-
 enum SessionStatus { disconnected, connecting, connected, reconnecting }
 
 @immutable
@@ -22,10 +18,6 @@ class SessionState {
 
   const SessionState({required this.status, this.reconnectAttempt = 0});
 }
-
-// ---------------------------------------------------------------------------
-// Internal subscription types
-// ---------------------------------------------------------------------------
 
 class _HistorySubscription {
   final List<NostrEvent> events = [];
@@ -63,10 +55,6 @@ class _BufferedEvent {
 
   _BufferedEvent(this.subId, this.event);
 }
-
-// ---------------------------------------------------------------------------
-// RelaySession — the core session manager
-// ---------------------------------------------------------------------------
 
 /// Manages websocket subscriptions, event batching, reconnection with replay,
 /// and pending event tracking. Equivalent to the desktop's RelayClientSession.
@@ -110,10 +98,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     return const SessionState(status: SessionStatus.disconnected);
   }
-
-  // -------------------------------------------------------------------------
-  // Public API
-  // -------------------------------------------------------------------------
 
   /// Fetch historical events matching [filter]. Sends REQ, collects events
   /// until EOSE, then resolves. One-shot subscription.
@@ -254,10 +238,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _connect(config);
   }
 
-  // -------------------------------------------------------------------------
-  // Connection management
-  // -------------------------------------------------------------------------
-
   Future<void> _connect(RelayConfig config) async {
     if (_disposed) return;
     if (_socket?.state == SocketState.connecting ||
@@ -334,10 +314,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       _sendReq(entry.key, filter);
     }
   }
-
-  // -------------------------------------------------------------------------
-  // Message dispatch
-  // -------------------------------------------------------------------------
 
   void _handleMessage(List<dynamic> data) {
     if (data.isEmpty) return;
@@ -473,10 +449,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Event batching (16ms flush interval)
-  // -------------------------------------------------------------------------
-
   void _scheduleFlush() {
     _flushTimer ??= Timer(
       const Duration(milliseconds: _eventBatchMs),
@@ -510,10 +482,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       sub.onEvent(buffered.event);
     }
   }
-
-  // -------------------------------------------------------------------------
-  // Helpers
-  // -------------------------------------------------------------------------
 
   String _nextSubId(String prefix) {
     _subIdCounter++;

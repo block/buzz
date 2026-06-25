@@ -17,10 +17,13 @@ fn agent_keyring_name(pubkey: &str) -> String {
 }
 
 /// The agent secret store. `None` when the build has no keyring backend, in
-/// which case agent keys stay inline in the `0o600` JSON file.
-fn agent_secret_store() -> Option<SecretStore> {
+/// which case agent keys stay inline in the `0o600` JSON file. Uses
+/// `SecretStore::shared` so identity and agent callers share one instance —
+/// and therefore one in-memory cache and one mutex — preventing last-writer-wins
+/// races on concurrent blob writes.
+fn agent_secret_store() -> Option<&'static SecretStore> {
     if cfg!(feature = "system-keyring") {
-        Some(SecretStore::keyring(KEYRING_SERVICE))
+        Some(SecretStore::shared(KEYRING_SERVICE))
     } else {
         None
     }
@@ -173,7 +176,7 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };
-    hydrate_keys_with(&store, records);
+    hydrate_keys_with(store, records);
 }
 
 /// Testable core of [`hydrate_keys`], generic over the [`KeyStore`] seam.
@@ -257,7 +260,7 @@ fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
         // unreachable) so it is not lost, and `Nothing` (empty key) because
         // there is no verified entry to claim. This is a save-local clone, so
         // callers keep their keys regardless.
-        if migrate_inline_key(&store, record) == KeyMigration::Persisted {
+        if migrate_inline_key(store, record) == KeyMigration::Persisted {
             record.private_key_nsec.clear();
         }
     }

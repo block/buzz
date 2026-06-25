@@ -13,10 +13,6 @@ use buzz_sdk::mentions::{
     MENTION_CAP,
 };
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Parses `"e"` tags with NIP-10 markers:
@@ -243,10 +239,6 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Read commands — POST /query
-// ---------------------------------------------------------------------------
-
 fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     match format {
         crate::OutputFormat::Compact => {
@@ -363,10 +355,6 @@ pub async fn cmd_search(
     println!("{}", format_events(&normalized, format));
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Write commands — signed events via POST /events
-// ---------------------------------------------------------------------------
 
 pub struct SendMessageParams {
     pub channel_id: String,
@@ -634,10 +622,6 @@ pub async fn cmd_vote_on_post(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
-
 pub async fn dispatch(
     cmd: crate::MessagesCmd,
     client: &BuzzClient,
@@ -816,7 +800,6 @@ mod tests {
         assert!(find_root_from_tags(&json!(null)).is_none());
     }
 
-    // ── @mention resolution pipeline ────────────────────────────────────
     //
     // These tests don't hit the network — they prove that *given* the
     // events the relay returns, the CLI's parse + match wiring produces

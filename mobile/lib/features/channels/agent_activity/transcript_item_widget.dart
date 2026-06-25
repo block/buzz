@@ -26,10 +26,6 @@ class TranscriptItemWidget extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Message
-// ---------------------------------------------------------------------------
-
 class _MessageItemWidget extends StatelessWidget {
   final MessageItem item;
 
@@ -82,10 +78,6 @@ class _MessageItemWidget extends StatelessWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Thought
-// ---------------------------------------------------------------------------
 
 class _ThoughtItemWidget extends HookWidget {
   final ThoughtItem item;
@@ -161,10 +153,6 @@ class _ThoughtItemWidget extends HookWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Lifecycle
-// ---------------------------------------------------------------------------
-
 class _LifecycleItemWidget extends StatelessWidget {
   final LifecycleItem item;
 
@@ -186,10 +174,6 @@ class _LifecycleItemWidget extends StatelessWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Metadata
-// ---------------------------------------------------------------------------
 
 class _MetadataItemWidget extends HookWidget {
   final MetadataItem item;
@@ -277,10 +261,6 @@ class _MetadataItemWidget extends HookWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Tool
-// ---------------------------------------------------------------------------
 
 class _ToolItemWidget extends HookWidget {
   final ToolItem item;
@@ -434,10 +414,6 @@ class _ToolItemWidget extends HookWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 (Color, String, IconData) _toolStatusDisplay(
   ToolStatus status,

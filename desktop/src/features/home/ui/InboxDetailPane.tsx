@@ -12,7 +12,6 @@ import {
   type InboxDisplayMessage,
   InboxMessageRow,
 } from "@/features/home/ui/InboxMessageRow";
-import { getThreadReference } from "@/features/messages/lib/threading";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
@@ -32,11 +31,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
-
-const ChannelManagementSheet = React.lazy(async () => {
-  const module = await import("@/features/channels/ui/ChannelManagementSheet");
-  return { default: module.ChannelManagementSheet };
-});
 
 const MembersSidebar = React.lazy(async () => {
   const module = await import("@/features/channels/ui/MembersSidebar");
@@ -60,11 +54,7 @@ type InboxDetailPaneProps = {
   currentPubkey?: string;
   onBack?: () => void;
   onDelete: () => void;
-  onOpenContext?: (
-    channelId: string,
-    messageId: string,
-    threadRootId?: string | null,
-  ) => void;
+  onOpenChannel: (channelId: string) => void;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
@@ -95,7 +85,7 @@ export function InboxDetailPane({
   currentPubkey,
   onBack,
   onDelete,
-  onOpenContext,
+  onOpenChannel,
   onSendReply,
   onToggleReaction,
 }: InboxDetailPaneProps) {
@@ -104,8 +94,6 @@ export function InboxDetailPane({
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
-  const [isChannelManagementOpen, setIsChannelManagementOpen] =
-    React.useState(false);
   const selectedItemId = item?.id ?? null;
   const selectedChannelId = item?.item.channelId ?? null;
   const selectedMessageScrollKey = React.useMemo(() => {
@@ -137,7 +125,6 @@ export function InboxDetailPane({
   React.useEffect(() => {
     void selectedChannelId;
     setIsMembersSidebarOpen(false);
-    setIsChannelManagementOpen(false);
   }, [selectedChannelId]);
 
   React.useEffect(() => {
@@ -229,7 +216,6 @@ export function InboxDetailPane({
   const contextLabel = channelContextName ?? formatInboxTypeLabel(item);
   const hasChannelContext = Boolean(channelContextName);
   const contextChannelId = item.item.channelId;
-  const contextThreadRootId = getThreadReference(item.item.tags).rootId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
     setReplyTargetId((currentReplyTargetId) =>
@@ -267,16 +253,10 @@ export function InboxDetailPane({
                   </Button>
                 ) : null}
                 <div className="min-w-0">
-                  {canOpenChannel && contextChannelId && onOpenContext ? (
+                  {canOpenChannel && contextChannelId ? (
                     <button
                       className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      onClick={() =>
-                        onOpenContext(
-                          contextChannelId,
-                          item.id,
-                          contextThreadRootId,
-                        )
-                      }
+                      onClick={() => onOpenChannel(contextChannelId)}
                       title={item.fullTimestampLabel}
                       type="button"
                     >
@@ -310,7 +290,11 @@ export function InboxDetailPane({
                     <ChannelMembersBar
                       channel={channel}
                       currentPubkey={currentPubkey}
-                      onManageChannel={() => setIsChannelManagementOpen(true)}
+                      onManageChannel={() => {
+                        if (contextChannelId) {
+                          onOpenChannel(contextChannelId);
+                        }
+                      }}
                       onToggleMembers={() =>
                         setIsMembersSidebarOpen((open) => !open)
                       }
@@ -391,13 +375,6 @@ export function InboxDetailPane({
             currentPubkey={currentPubkey}
             onOpenChange={setIsMembersSidebarOpen}
             open={isMembersSidebarOpen}
-          />
-          <ChannelManagementSheet
-            channel={channel}
-            currentPubkey={currentPubkey}
-            onDeleted={() => setIsChannelManagementOpen(false)}
-            onOpenChange={setIsChannelManagementOpen}
-            open={isChannelManagementOpen}
           />
         </React.Suspense>
       ) : null}

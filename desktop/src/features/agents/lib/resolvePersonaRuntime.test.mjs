@@ -6,10 +6,6 @@ import {
   resolvePersonaRuntime,
 } from "./resolvePersonaRuntime.ts";
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
-
 function makeRuntime(id, label = `${id} label`) {
   return { id, label, command: id, avatarUrl: "" };
 }
@@ -17,10 +13,6 @@ function makeRuntime(id, label = `${id} label`) {
 const goose = makeRuntime("goose", "Goose");
 const claude = makeRuntime("claude", "Claude");
 const runtimes = [goose, claude];
-
-// ---------------------------------------------------------------------------
-// resolvePersonaRuntime — Case 1: no personaRuntimeId
-// ---------------------------------------------------------------------------
 
 test("resolvePersonaRuntime — no personaRuntimeId returns defaultRuntime with no warnings", () => {
   const result = resolvePersonaRuntime(null, runtimes, goose);
@@ -47,10 +39,6 @@ test("resolvePersonaRuntime — no personaRuntimeId and no defaultRuntime return
   assert.match(result.warnings[0], /No agent runtimes are available/);
   assert.equal(result.isOverridden, false);
 });
-
-// ---------------------------------------------------------------------------
-// resolvePersonaRuntime — Case 2: matching runtime found
-// ---------------------------------------------------------------------------
 
 test("resolvePersonaRuntime — matching runtime found returns matched runtime, no warnings", () => {
   const result = resolvePersonaRuntime("goose", runtimes, claude);
@@ -98,10 +86,6 @@ test("resolvePersonaRuntime — override=true but no defaultRuntime returns matc
   });
 });
 
-// ---------------------------------------------------------------------------
-// resolvePersonaRuntime — Case 3: personaRuntimeId not in runtimes, has default
-// ---------------------------------------------------------------------------
-
 test("resolvePersonaRuntime — unrecognised runtimeId falls back to defaultRuntime with warning", () => {
   const result = resolvePersonaRuntime("unknown-rt", runtimes, goose);
   assert.equal(result.runtime, goose);
@@ -112,10 +96,6 @@ test("resolvePersonaRuntime — unrecognised runtimeId falls back to defaultRunt
   assert.equal(result.isOverridden, true);
 });
 
-// ---------------------------------------------------------------------------
-// resolvePersonaRuntime — Case 4: personaRuntimeId not in runtimes, no default
-// ---------------------------------------------------------------------------
-
 test("resolvePersonaRuntime — unrecognised runtimeId and no defaultRuntime returns null with error warning", () => {
   const result = resolvePersonaRuntime("unknown-rt", [], null);
   assert.equal(result.runtime, null);
@@ -124,10 +104,6 @@ test("resolvePersonaRuntime — unrecognised runtimeId and no defaultRuntime ret
   assert.match(result.warnings[0], /no other runtimes were found/);
   assert.equal(result.isOverridden, false);
 });
-
-// ---------------------------------------------------------------------------
-// resolvePersonaRuntime — isOverridden field
-// ---------------------------------------------------------------------------
 
 test("resolvePersonaRuntime — isOverridden is true when override redirects to different runtime", () => {
   const result = resolvePersonaRuntime("goose", runtimes, claude, true);
@@ -148,10 +124,6 @@ test("resolvePersonaRuntime — isOverridden is false when override selects same
   const result = resolvePersonaRuntime("goose", runtimes, goose, true);
   assert.equal(result.isOverridden, false);
 });
-
-// ---------------------------------------------------------------------------
-// collectRuntimeWarnings
-// ---------------------------------------------------------------------------
 
 test("collectRuntimeWarnings — no fallbackRuntime returns empty array regardless of personas", () => {
   const personas = [{ runtime: "goose" }, { runtime: "unknown-rt" }];

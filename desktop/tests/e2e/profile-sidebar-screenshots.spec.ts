@@ -21,11 +21,38 @@ const LONG_INSTRUCTION = [
   "When uncertainty remains, say exactly what evidence would resolve it.",
 ].join("\n\n");
 
+// Real avatar imagery for PR-ready shots (tho's directive): seed avatars from
+// picsum.photos with a distinct seed string per user so the shots show actual
+// portraits instead of initials, and so multiple users are visibly different.
+const avatarUrlForSeed = (seed: string) =>
+  `https://picsum.photos/seed/${seed}/200`;
+
+// Owner pubkey is the mock viewer ("npub1mock... (you)"); Alice is the seeded
+// human/read-only fixture. The managed agent's avatar is seeded at create time
+// (see addGenericAgent) since its pubkey is generated at runtime.
+const MOCK_OWNER_PUBKEY = "deadbeef".repeat(8);
+const ALICE_PUBKEY =
+  "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
+
+const AVATAR_PROFILES = [
+  {
+    pubkey: MOCK_OWNER_PUBKEY,
+    displayName: "npub1mock...",
+    avatarUrl: avatarUrlForSeed("boom-owner"),
+  },
+  {
+    pubkey: ALICE_PUBKEY,
+    displayName: "alice",
+    avatarUrl: avatarUrlForSeed("boom-alice"),
+  },
+];
+
 async function addGenericAgent(
   page: Page,
   channelName: string,
   agentName: string,
   systemPrompt: string,
+  avatarUrl?: string,
 ): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -45,7 +72,7 @@ async function addGenericAgent(
     );
   });
   return page.evaluate(
-    async ({ agentName, channelId, systemPrompt }) => {
+    async ({ agentName, avatarUrl, channelId, systemPrompt }) => {
       const invoke = (
         window as Window & {
           __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
@@ -58,7 +85,12 @@ async function addGenericAgent(
         throw new Error("Mock bridge is not installed.");
       }
       const created = await invoke("create_managed_agent", {
-        input: { name: agentName, spawnAfterCreate: true, systemPrompt },
+        input: {
+          name: agentName,
+          spawnAfterCreate: true,
+          systemPrompt,
+          avatarUrl,
+        },
       });
       const pubkey = created.agent?.pubkey;
       if (!pubkey) {
@@ -81,7 +113,7 @@ async function addGenericAgent(
 
       return pubkey;
     },
-    { agentName, channelId, systemPrompt },
+    { agentName, avatarUrl, channelId, systemPrompt },
   );
 }
 
@@ -130,6 +162,7 @@ test.describe("profile sidebar — PR #1200 screenshots", () => {
   test("agent (owner) profile — every subview", async ({ page }) => {
     await installMockBridge(page, {
       agentMemory: createMockAgentMemoryListing(),
+      searchProfiles: AVATAR_PROFILES,
     });
     await page.goto("/");
 
@@ -138,6 +171,7 @@ test.describe("profile sidebar — PR #1200 screenshots", () => {
       "general",
       "Memory Bot",
       LONG_INSTRUCTION,
+      avatarUrlForSeed("boom"),
     );
 
     await page.getByTestId("channel-general").click();
@@ -153,6 +187,11 @@ test.describe("profile sidebar — PR #1200 screenshots", () => {
 
     const panel = page.getByTestId("user-profile-panel");
     await expect(panel).toBeVisible();
+
+    // Wait for the seeded picsum avatar to actually load before the summary
+    // shots — Radix only mounts the <img> once it resolves, so this guards
+    // against capturing the initials fallback mid-load.
+    await expect(page.getByTestId("user-profile-avatar-image")).toBeVisible();
 
     // 01 — Summary view (default "Profile"). The Info tab is the default; the
     // owner row, public key, and activity-log ingress all live here inline.
@@ -249,7 +288,7 @@ test.describe("profile sidebar — PR #1200 screenshots", () => {
   });
 
   test("human (read-only, non-owner) profile", async ({ page }) => {
-    await installMockBridge(page);
+    await installMockBridge(page, { searchProfiles: AVATAR_PROFILES });
     await page.goto("/");
 
     await page.getByTestId("channel-general").click();
@@ -264,6 +303,8 @@ test.describe("profile sidebar — PR #1200 screenshots", () => {
 
     const panel = page.getByTestId("user-profile-panel");
     await expect(panel).toBeVisible();
+    // Wait for Alice's seeded picsum avatar to load before capturing.
+    await expect(page.getByTestId("user-profile-avatar-image")).toBeVisible();
     await panel.screenshot({ path: `${SHOTS}/09-human-readonly-summary.png` });
   });
 });

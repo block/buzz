@@ -4,17 +4,23 @@ use std::path::{Path, PathBuf};
 use crate::mcp::truncate_at_boundary;
 
 const MAX_HINTS_BYTES: usize = 128 * 1024;
-const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
+pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
+#[derive(Clone)]
 pub struct SkillEntry {
     pub name: String,
     pub description: String,
-    pub body: String,
+    /// Absolute path to the SKILL.md file; used by `load_skill` to read on demand.
+    pub path: PathBuf,
+    /// Absolute paths to every non-SKILL.md file in the skill directory tree.
+    /// Pre-enumerated at discovery time so `load_skill` can match by relative path
+    /// without doing arbitrary filesystem lookups at call time.
+    pub supporting_files: Vec<PathBuf>,
 }
 
 /// Handles both normal repos (`.git/` dir) and worktrees (`.git` file).
@@ -77,15 +83,12 @@ fn load_hint_files_impl(cwd: &Path, home: Option<&Path>) -> String {
     result
 }
 
-fn parse_skill_frontmatter(content: &str) -> Option<(String, String, String)> {
+fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
     // Must start with `---`
     let rest = content.strip_prefix("---\n")?;
     // Find the closing `---`
     let close_pos = rest.find("\n---")?;
     let yaml_block = &rest[..close_pos];
-    // Everything after the closing `---\n` (or `---` at end) is the body.
-    let after_close = &rest[close_pos + 4..]; // skip "\n---"
-    let body = after_close.strip_prefix('\n').unwrap_or(after_close);
 
     let map: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_block).ok()?;
     let name = map
@@ -101,13 +104,7 @@ fn parse_skill_frontmatter(content: &str) -> Option<(String, String, String)> {
         .unwrap_or("")
         .to_string();
 
-    let body = if body.len() > MAX_SKILL_BODY_BYTES {
-        truncate_at_boundary(body, MAX_SKILL_BODY_BYTES).to_string()
-    } else {
-        body.to_string()
-    };
-
-    Some((name, description, body))
+    Some((name, description))
 }
 
 fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<SkillEntry>) {
@@ -126,18 +123,60 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
         let Ok(content) = std::fs::read_to_string(&skill_md) else {
             continue;
         };
-        let Some((name, description, body)) = parse_skill_frontmatter(&content) else {
+        let Some((name, description)) = parse_skill_frontmatter(&content) else {
             continue;
         };
         if seen.contains(&name) {
             continue;
         }
         seen.insert(name.clone());
+
+        // Collect supporting files: every non-SKILL.md file in the skill dir tree.
+        // Don't descend into subdirs that themselves have a SKILL.md — those are
+        // separate skills with their own entries.
+        let supporting_files = collect_supporting_files(&subdir);
+
         skills.push(SkillEntry {
             name,
             description,
-            body,
+            path: skill_md,
+            supporting_files,
         });
+    }
+}
+
+/// Walk `skill_dir` recursively and return the absolute path of every file
+/// that is not `SKILL.md`. Subdirectories that contain their own `SKILL.md`
+/// are treated as separate skills and are not descended into.
+fn collect_supporting_files(skill_dir: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    collect_supporting_files_impl(skill_dir, &mut result);
+    result.sort();
+    result
+}
+
+fn collect_supporting_files_impl(current: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+    let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    items.sort_by_key(|e| e.path());
+
+    for entry in items {
+        let path = entry.path();
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            // Don't descend into subdirs that are themselves skills.
+            if path.join("SKILL.md").is_file() {
+                continue;
+            }
+            collect_supporting_files_impl(&path, out);
+        } else if ft.is_file() && path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+            out.push(path);
+        }
     }
 }
 
@@ -156,16 +195,16 @@ fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
     skills
 }
 
-pub fn build_hints_section(cwd: &Path) -> String {
+pub fn build_hints_section(cwd: &Path) -> (String, Vec<SkillEntry>) {
     build_hints_section_impl(cwd, home_dir().as_deref())
 }
 
-fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
+fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> (String, Vec<SkillEntry>) {
     let hints_text = load_hint_files_impl(cwd, home);
     let skills = discover_skills_impl(cwd, home);
 
     if hints_text.is_empty() && skills.is_empty() {
-        return String::new();
+        return (String::new(), skills);
     }
 
     let mut out = String::from("# Additional Instructions\n");
@@ -181,16 +220,25 @@ fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
         for skill in &skills {
             out.push_str(&format!("- {}: {}\n", skill.name, skill.description));
         }
-        for skill in &skills {
-            out.push_str(&format!("\n### {}\n", skill.name));
-            out.push_str(&skill.body);
-            if !skill.body.ends_with('\n') {
-                out.push('\n');
-            }
-        }
+        out.push_str(
+            "\nUse the `load_skill` tool to read the full content of a skill before using it.\n",
+        );
     }
 
-    out
+    (out, skills)
+}
+
+/// Strip the YAML frontmatter block from a skill file's content and return
+/// the body. If no valid frontmatter is found, returns the content unchanged.
+pub(crate) fn strip_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content;
+    };
+    let Some(close_pos) = rest.find("\n---") else {
+        return content;
+    };
+    let after = &rest[close_pos + 4..]; // skip "\n---"
+    after.strip_prefix('\n').unwrap_or(after)
 }
 
 #[cfg(test)]
@@ -304,6 +352,11 @@ mod tests {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"my-skill"), "missing my-skill");
         assert!(names.contains(&"other-skill"), "missing other-skill");
+        // Paths should point to the SKILL.md files.
+        for skill in &skills {
+            assert!(skill.path.exists(), "path does not exist: {:?}", skill.path);
+            assert!(skill.path.ends_with("SKILL.md"));
+        }
     }
 
     #[test]
@@ -334,7 +387,12 @@ mod tests {
             skills[0].description, "from agents",
             "first wins (.agents/)"
         );
-        assert_eq!(skills[0].body.trim(), "Agents body.");
+        // Path should point to the .agents/ version (first wins).
+        assert!(skills[0]
+            .path
+            .to_str()
+            .unwrap()
+            .contains(".agents/skills/shared"));
     }
 
     #[test]
@@ -357,8 +415,9 @@ mod tests {
     #[test]
     fn build_hints_section_empty() {
         let tmp = TempDir::new().unwrap();
-        let result = build_hints_section_impl(tmp.path(), None);
+        let (result, skills) = build_hints_section_impl(tmp.path(), None);
         assert_eq!(result, "");
+        assert!(skills.is_empty());
     }
 
     #[test]
@@ -376,7 +435,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = build_hints_section_impl(cwd, None);
+        let (result, skills) = build_hints_section_impl(cwd, None);
 
         assert!(
             result.contains("# Additional Instructions"),
@@ -395,11 +454,24 @@ mod tests {
             result.contains("buzz-cli: CLI reference for Buzz managed agents"),
             "missing skill bullet"
         );
-        assert!(result.contains("### buzz-cli"), "missing skill header");
+        // Body must NOT be inlined — lazy loading only.
         assert!(
-            result.contains("Use `buzz` to manage agents."),
-            "missing skill body"
+            !result.contains("Use `buzz` to manage agents."),
+            "skill body must not be inlined in system prompt"
         );
+        // The load_skill instruction must be present.
+        assert!(
+            result.contains("load_skill"),
+            "missing load_skill instruction"
+        );
+        // The old ### heading format must not appear.
+        assert!(
+            !result.contains("### buzz-cli"),
+            "skill body heading must not be inlined"
+        );
+        // The returned skills list should contain the discovered skill.
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "buzz-cli");
     }
 
     #[test]
@@ -521,5 +593,96 @@ mod tests {
         let skills = discover_skills_impl(cwd.path(), None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "local");
+    }
+
+    #[test]
+    fn collect_supporting_files_finds_non_skill_md_files() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        // SKILL.md should be excluded.
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        // A references subdir with files.
+        let refs = skill_dir.join("references");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("foo.md"), "foo").unwrap();
+        std::fs::write(refs.join("bar.md"), "bar").unwrap();
+        // A script at the top level.
+        std::fs::write(skill_dir.join("setup.sh"), "#!/bin/sh").unwrap();
+
+        let files = collect_supporting_files(skill_dir);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"foo.md".to_owned()),
+            "missing foo.md: {names:?}"
+        );
+        assert!(
+            names.contains(&"bar.md".to_owned()),
+            "missing bar.md: {names:?}"
+        );
+        assert!(
+            names.contains(&"setup.sh".to_owned()),
+            "missing setup.sh: {names:?}"
+        );
+        assert!(
+            !names.contains(&"SKILL.md".to_owned()),
+            "SKILL.md should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn collect_supporting_files_does_not_descend_into_nested_skills() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        std::fs::write(skill_dir.join("helper.sh"), "#!/bin/sh").unwrap();
+
+        // A nested subdir that is itself a skill — should not be descended into.
+        let nested = skill_dir.join("nested-skill");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), "---\nname: nested\n---\n").unwrap();
+        std::fs::write(nested.join("secret.md"), "should not appear").unwrap();
+
+        let files = collect_supporting_files(skill_dir);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"helper.sh".to_owned()),
+            "missing helper.sh: {names:?}"
+        );
+        assert!(
+            !names.contains(&"secret.md".to_owned()),
+            "nested skill's files should not appear: {names:?}"
+        );
+    }
+
+    #[test]
+    fn discover_skills_populates_supporting_files() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let skill_dir = cwd.join(".agents/skills/with-refs");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: with-refs\ndescription: Has refs\n---\nBody.\n",
+        )
+        .unwrap();
+        let refs = skill_dir.join("references");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("guide.md"), "guide content").unwrap();
+
+        let skills = discover_skills_impl(cwd, None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "with-refs");
+        assert_eq!(skills[0].supporting_files.len(), 1);
+        assert!(
+            skills[0].supporting_files[0].ends_with("references/guide.md"),
+            "unexpected path: {:?}",
+            skills[0].supporting_files[0]
+        );
     }
 }

@@ -869,7 +869,6 @@ pub async fn insert_event_with_thread_metadata(
     let not_before = extract_not_before(event);
     let mut tx = pool.begin().await?;
 
-    // ── Insert event ──────────────────────────────────────────────────────────
     let result = sqlx::query(
         r#"
         INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
@@ -893,7 +892,6 @@ pub async fn insert_event_with_thread_metadata(
 
     let was_inserted = result.rows_affected() > 0;
 
-    // ── Insert thread metadata (if provided and event was actually inserted) ──
     if was_inserted {
         if let Some(ref meta) = thread_meta {
             let broadcast_val: bool = meta.broadcast;

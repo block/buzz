@@ -360,7 +360,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     debug!(event_id = %event_id_hex, kind = kind_u32, "EVENT");
     metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
 
-    // ── Extract auth from WS connection state ────────────────────────────
     let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
@@ -383,7 +382,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         }
     };
 
-    // ── Pubkey / auth identity match (all events) ─────────────────────
     // Must run before both ephemeral and persistent branches. Persistent
     // events get a second check inside ingest_event() (step 3), but
     // ephemeral events bypass the pipeline entirely.
@@ -399,7 +397,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
-    // ── Blocked kinds (both ephemeral and persistent) ─────────────────
     if kind_u32 == buzz_core::kind::KIND_AUTH {
         reject("invalid");
         conn.send(RelayMessage::ok(
@@ -410,7 +407,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
-    // ── Agent observer frames are owner-scoped, encrypted, and never stored ──
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
         if !scopes.is_empty()
             && !scopes.contains(&buzz_auth::Scope::MessagesWrite)
@@ -428,7 +424,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
-    // ── Ephemeral events are WS-only (never stored) ──────────────────────
     // Scope enforcement for ephemeral kinds: require MessagesWrite or
     // ProxySubmit. Persistent events skip this gate and rely on
     // ingest_event()'s per-kind scope allowlist instead, so a token with
@@ -475,7 +470,6 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
-    // ── Persistent events → ingest pipeline ──────────────────────────────
     let ingest_auth = IngestAuth::Nip42 {
         pubkey: auth_pubkey,
         scopes,

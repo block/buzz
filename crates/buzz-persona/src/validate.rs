@@ -14,8 +14,6 @@ use std::path::Path;
 
 use crate::pack;
 
-// ── Diagnostics ──────────────────────────────────────────────────────────────
-
 /// A single validation finding.
 #[derive(Debug, Clone)]
 pub enum ValidationDiagnostic {
@@ -97,8 +95,6 @@ impl std::fmt::Display for ValidationReport {
     }
 }
 
-// ── Known field sets ─────────────────────────────────────────────────────────
-
 /// Known top-level keys in `plugin.json`.
 const KNOWN_MANIFEST_KEYS: &[&str] = &[
     // OPS standard fields
@@ -136,8 +132,6 @@ const KNOWN_BEHAVIORAL_KEYS: &[&str] = &[
 /// Valid sub-keys in `respond_to`.
 const KNOWN_RESPOND_TO_KEYS: &[&str] = &["mentions", "keywords", "all_messages"];
 
-// ── Pack validation ──────────────────────────────────────────────────────────
-
 /// Validate a persona pack directory.
 ///
 /// Step 1: delegate all structural validation to `load_pack()`. If loading
@@ -168,8 +162,6 @@ pub fn validate_pack(pack_dir: &Path) -> ValidationReport {
 
     report
 }
-
-// ── Semantic: persona-level checks ───────────────────────────────────────────
 
 /// Validate a persona `name` field: `[a-zA-Z0-9_-]+`, max 64 chars.
 fn validate_persona_name(name: &str, report: &mut ValidationReport) {
@@ -209,8 +201,6 @@ fn semantic_check_personas(loaded: &pack::LoadedPack, report: &mut ValidationRep
         validate_persona_name(&persona.name, report);
     }
 }
-
-// ── Advisory: respond_to type validation ────────────────────────────────────
 
 /// Check `defaults.respond_to` sub-key types in the raw `plugin.json`.
 ///
@@ -307,8 +297,6 @@ fn value_type_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
-// ── Advisory: unknown manifest keys ─────────────────────────────────────────
-
 /// Check `plugin.json` for unknown top-level keys and unknown keys in
 /// `defaults` / `defaults.respond_to`. Emits warnings (likely typos).
 fn advisory_check_manifest_keys(pack_dir: &Path, report: &mut ValidationReport) {
@@ -360,8 +348,6 @@ fn advisory_check_manifest_keys(pack_dir: &Path, report: &mut ValidationReport) 
         }
     }
 }
-
-// ── Advisory: skill naming conventions ──────────────────────────────────────
 
 /// For each skill directory referenced by a loaded persona, check that the
 /// SKILL.md `name:` field matches the directory name. Emits warnings.
@@ -447,13 +433,9 @@ fn advisory_check_skill_names(
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── ValidationReport unit tests ──────────────────────────────────────────
 
     #[test]
     fn exit_code_clean() {
@@ -474,8 +456,6 @@ mod tests {
         report.warn("meh");
         assert_eq!(report.exit_code(), 2);
     }
-
-    // ── Filesystem integration tests ─────────────────────────────────────────
 
     /// Minimal valid pack: load succeeds, no advisory issues.
     #[test]
@@ -805,8 +785,6 @@ mod tests {
         assert!(msg.contains("code_review"), "got: {msg}");
     }
 
-    // ── Semantic: zero-persona and duplicate-name checks ─────────────────────
-
     /// Zero personas in manifest → hard error.
     #[test]
     fn validate_zero_personas_error() {
@@ -909,8 +887,6 @@ mod tests {
         );
     }
 
-    // ── Semantic: name character and length validation ────────────────────────
-
     /// Persona name with spaces or slashes → hard error.
     #[test]
     fn validate_name_invalid_chars() {
@@ -967,8 +943,6 @@ mod tests {
             "error should mention 64-char limit, got: {msg}"
         );
     }
-
-    // ── Advisory: respond_to type validation ─────────────────────────────────
 
     /// respond_to with wrong types in defaults → caught by typed parser.
     /// The manifest's BehavioralDefaults uses typed RespondTo, so serde_json

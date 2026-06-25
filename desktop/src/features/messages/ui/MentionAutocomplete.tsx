@@ -96,44 +96,58 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 avatarUrl={suggestion.avatarUrl ?? null}
                 displayName={suggestion.displayName}
                 size="xs"
+                testId="mention-suggestion-avatar"
               />
-              <span className="flex min-w-0 flex-1 items-center gap-2">
-                <span className="flex min-w-0 flex-1 items-baseline gap-1">
-                  <span className="truncate font-medium">
-                    {suggestion.displayName}
-                  </span>
-                  {suggestion.isAgent ? (
-                    <span
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-1 text-xs",
-                        index === selectedIndex
-                          ? "text-accent-foreground/70"
-                          : "text-muted-foreground",
-                      )}
-                    >
-                      <Bot
-                        aria-hidden="true"
-                        className="h-4 w-4"
-                        data-testid="mention-agent-icon"
-                      />
-                      {agentLabel}
-                    </span>
-                  ) : suggestion.role ? (
-                    <Badge variant="secondary">{suggestion.role}</Badge>
-                  ) : null}
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span
+                  className="min-w-0 break-words font-medium leading-snug"
+                  title={suggestion.displayName}
+                >
+                  {suggestion.displayName}
                 </span>
-                {suggestion.ownerLabel || suggestion.notInChannel ? (
+                {suggestion.isAgent ||
+                suggestion.role ||
+                suggestion.ownerLabel ||
+                suggestion.notInChannel ? (
                   <span
                     className={cn(
-                      "ml-auto min-w-0 shrink truncate text-xs",
+                      "flex min-w-0 items-center gap-1.5 text-2xs leading-none",
                       index === selectedIndex
-                        ? "text-accent-foreground/65"
+                        ? "text-accent-foreground/60"
                         : "text-muted-foreground",
                     )}
                   >
-                    {suggestion.ownerLabel
-                      ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
-                      : "not in channel"}
+                    {suggestion.isAgent ? (
+                      <span className="inline-flex shrink-0 items-center gap-1">
+                        <Bot
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5"
+                          data-testid="mention-agent-icon"
+                        />
+                        {agentLabel}
+                      </span>
+                    ) : suggestion.role ? (
+                      <Badge
+                        className="max-w-24 shrink-0 truncate"
+                        variant="secondary"
+                      >
+                        {suggestion.role}
+                      </Badge>
+                    ) : null}
+                    {suggestion.ownerLabel || suggestion.notInChannel ? (
+                      <span
+                        className="min-w-0 truncate"
+                        title={
+                          suggestion.ownerLabel
+                            ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
+                            : "not in channel"
+                        }
+                      >
+                        {suggestion.ownerLabel
+                          ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
+                          : "not in channel"}
+                      </span>
+                    ) : null}
                   </span>
                 ) : null}
               </span>

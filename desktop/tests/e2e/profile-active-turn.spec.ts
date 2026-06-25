@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/profile-active-turns";
-
 // Charlie is a `bot` member of #agents and authors the seeded "Indexing the
 // channel catalog now." message (see e2eBridge.ts). Seeding a managed agent
 // with this same pubkey makes the message avatar open a managed-agent profile
@@ -77,7 +75,7 @@ function agentAvatar(page: import("@playwright/test").Page) {
   return page.getByTestId("message-row").last().getByRole("button").first();
 }
 
-test.describe("profile active turn indicator screenshots", () => {
+test.describe("profile active turn indicator", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
   test("01 — profile panel: agent working in one channel", async ({ page }) => {
@@ -93,10 +91,6 @@ test.describe("profile active turn indicator screenshots", () => {
     await expect(panel).toBeVisible();
     await expect(panel).toContainText("Working in #general", {
       timeout: 5_000,
-    });
-
-    await panel.screenshot({
-      path: `${SHOTS}/01-profile-panel-single-channel.png`,
     });
   });
 
@@ -118,10 +112,6 @@ test.describe("profile active turn indicator screenshots", () => {
       timeout: 5_000,
     });
     await expect(panel).toContainText("Working in #engineering");
-
-    await panel.screenshot({
-      path: `${SHOTS}/02-profile-panel-multi-channel.png`,
-    });
   });
 
   test("03 — hover popover: agent working", async ({ page }) => {
@@ -136,9 +126,5 @@ test.describe("profile active turn indicator screenshots", () => {
     const popover = page.getByTestId("user-profile-popover");
     await expect(popover).toBeVisible({ timeout: 5_000 });
     await expect(popover).toContainText("Working in #general");
-
-    await popover.screenshot({
-      path: `${SHOTS}/03-popover-working.png`,
-    });
   });
 });

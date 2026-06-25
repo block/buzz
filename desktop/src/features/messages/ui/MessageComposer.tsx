@@ -811,7 +811,6 @@ export function MessageComposer({
     [media.pendingImetaRef],
   );
 
-  // ── Render ──────────────────────────────────────────────────────────
   return (
     <>
       <footer

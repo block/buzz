@@ -157,7 +157,6 @@ class ThemePickerPage extends HookConsumerWidget {
                         ref.read(schemeProvider.notifier).setScheme(theme.name),
                   ),
 
-                // Empty state
                 if (!showDefault && filtered.isEmpty)
                   Padding(
                     padding: const EdgeInsets.all(Grid.sm),

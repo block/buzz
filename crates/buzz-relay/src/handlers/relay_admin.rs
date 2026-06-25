@@ -24,8 +24,6 @@ use crate::handlers::side_effects::{
 };
 use crate::state::AppState;
 
-// ── Tag extraction helpers ────────────────────────────────────────────────────
-
 /// Extract the hex pubkey from the first `p` tag, returning it as a `String`.
 fn extract_p_tag_hex(event: &Event) -> Option<String> {
     for tag in event.tags.iter() {
@@ -53,8 +51,6 @@ fn extract_tag_value(event: &Event, name: &str) -> Option<String> {
     None
 }
 
-// ── Public handler ────────────────────────────────────────────────────────────
-
 /// Validate and execute a relay admin command (kinds 9030–9032).
 ///
 /// The handler:
@@ -70,7 +66,6 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
     let kind = event.kind.as_u16() as u32;
     let sender_hex = event.pubkey.to_hex();
 
-    // ── Replay protection: reject events outside ±120s of now ────────────
     // This mirrors the NIP-42 auth event freshness check and prevents replay
     // of captured admin commands. The window is intentionally tight — admin
     // events should be freshly signed.
@@ -88,12 +83,10 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
         }
     }
 
-    // ── Extract target pubkey ─────────────────────────────────────────────
     let target_hex = extract_p_tag_hex(event)
         .ok_or_else(|| "missing or invalid p tag".to_string())?
         .to_ascii_lowercase();
 
-    // ── Look up sender's relay role ───────────────────────────────────────
     let sender_member = state
         .db
         .get_relay_member(&sender_hex)
@@ -105,7 +98,6 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
         .map(|m| m.role.as_str())
         .unwrap_or("");
 
-    // ── Dispatch by kind ──────────────────────────────────────────────────
     match kind {
         // kind:9030 — Add relay member
         k if k == RELAY_ADMIN_ADD_MEMBER => {
@@ -300,8 +292,6 @@ mod tests {
             .expect("signing failed")
     }
 
-    // ── extract_p_tag_hex ─────────────────────────────────────────────────
-
     #[test]
     fn extract_p_tag_valid_hex() {
         let hex = "a".repeat(64);
@@ -342,8 +332,6 @@ mod tests {
         let event = make_test_event(9030, vec![vec!["role", "admin"]]);
         assert_eq!(extract_p_tag_hex(&event), None);
     }
-
-    // ── extract_tag_value ─────────────────────────────────────────────────
 
     #[test]
     fn extract_tag_value_found() {

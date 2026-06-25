@@ -59,8 +59,6 @@ async fn upload(client: &Client, keys: &Keys, body: &[u8]) -> reqwest::Response 
         .expect("upload request")
 }
 
-// ── Minimal test images ─────────────────────────────────────────────────────
-
 fn tiny_jpeg() -> Vec<u8> {
     vec![
         0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
@@ -125,8 +123,6 @@ fn tiny_webp() -> Vec<u8> {
     ]
 }
 
-// ── Auth edge case helpers ──────────────────────────────────────────────────
-
 fn sign_custom_auth(keys: &Keys, kind: u16, content: &str, tags: Vec<Tag>) -> nostr::Event {
     EventBuilder::new(Kind::from(kind), content)
         .tags(tags)
@@ -149,10 +145,6 @@ async fn upload_with_auth(
         .await
         .expect("upload request")
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// MULTI-FORMAT UPLOAD TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]
@@ -217,10 +209,6 @@ async fn test_upload_webp_roundtrip() {
     assert!(desc["url"].as_str().unwrap().ends_with(".webp"));
     println!("✅ WebP upload: {}", desc["url"]);
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// AUTH EDGE CASE TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]
@@ -382,10 +370,6 @@ async fn test_auth_server_tag_correct() {
     println!("✅ Correct server tag → 200");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CONTENT VALIDATION TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
-
 #[tokio::test]
 #[ignore]
 async fn test_upload_svg_accepted_as_text_xml() {
@@ -462,10 +446,6 @@ async fn test_upload_random_bytes_accepted() {
     println!("✅ Random bytes → 200 as octet-stream");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CONCURRENT UPLOAD TEST
-// ═══════════════════════════════════════════════════════════════════════════════
-
 #[tokio::test]
 #[ignore]
 async fn test_concurrent_upload_same_file() {
@@ -492,10 +472,6 @@ async fn test_concurrent_upload_same_file() {
     assert_eq!(d1["url"], d2["url"], "same content = same URL");
     println!("✅ Concurrent upload: both succeeded, same sha256/url");
 }
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// WEBSOCKET IMETA VALIDATION
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]

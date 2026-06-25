@@ -22,18 +22,10 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 
-// ---------------------------------------------------------------------------
-// Data attribute shapes used on draggable / droppable items
-// ---------------------------------------------------------------------------
-
 export type DndChannelData = { type: "channel"; channelId: string };
 export type DndSectionData = { type: "section"; sectionId: string };
 export type DndSectionDropData = { type: "section-drop"; sectionId: string };
 export type DndUngroupedData = { type: "ungrouped" };
-
-// ---------------------------------------------------------------------------
-// DraggableChannelRow — wraps a channel list item with useDraggable
-// ---------------------------------------------------------------------------
 
 export function DraggableChannelRow({
   channelId,
@@ -58,10 +50,6 @@ export function DraggableChannelRow({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// DroppableSectionBody — makes a section body accept channel drops
-// ---------------------------------------------------------------------------
 
 export function DroppableSectionBody({
   sectionId,
@@ -92,10 +80,6 @@ export function DroppableSectionBody({
   );
 }
 
-// ---------------------------------------------------------------------------
-// DroppableUngroupedBody — makes the ungrouped Channels section a drop target
-// ---------------------------------------------------------------------------
-
 export function DroppableUngroupedBody({
   children,
   className,
@@ -121,10 +105,6 @@ export function DroppableUngroupedBody({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// SortableSectionShell — wraps a CustomChannelSection header area
-// ---------------------------------------------------------------------------
 
 export function SortableSectionShell({
   sectionId,
@@ -165,10 +145,6 @@ export function SortableSectionShell({
   );
 }
 
-// ---------------------------------------------------------------------------
-// DragOverlayChannel — ghost preview for a channel being dragged
-// ---------------------------------------------------------------------------
-
 export function DragOverlayChannel({ name }: { name: string }) {
   return (
     <div className="flex cursor-grabbing items-center gap-2 rounded-md bg-sidebar px-2 py-1.5 text-sm text-sidebar-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border">
@@ -178,10 +154,6 @@ export function DragOverlayChannel({ name }: { name: string }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// DragOverlaySection — ghost preview for a section header being dragged
-// ---------------------------------------------------------------------------
-
 export function DragOverlaySection({ name }: { name: string }) {
   return (
     <div className="flex cursor-grabbing items-center gap-1 rounded-md bg-sidebar px-2 py-1 text-xs font-medium uppercase tracking-wider text-sidebar-foreground/60 opacity-90 shadow-lg ring-1 ring-sidebar-border">
@@ -189,10 +161,6 @@ export function DragOverlaySection({ name }: { name: string }) {
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// SidebarDndContext — DndContext + SortableContext + DragOverlay wrapper
-// ---------------------------------------------------------------------------
 
 type SidebarDragItem =
   | { type: "channel"; channelId: string; channelName: string }

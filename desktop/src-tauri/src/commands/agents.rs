@@ -255,8 +255,31 @@ async fn start_local_agent_with_preflight(
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
     }
+    // Re-snapshot the persona onto the record at every spawn so the agent always
+    // starts with the current persona config (system_prompt, model, provider,
+    // env_vars). This clears the "out of date" drift badge without requiring a
+    // delete+recreate. Agent-level env_vars overrides still win (persona_snapshot
+    // layers persona env under agent overrides).
+    if let Some(persona_id) = record.persona_id.clone() {
+        let personas = load_personas(app).unwrap_or_default();
+        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
+            let snapshot =
+                crate::managed_agents::persona_events::persona_snapshot(persona, &record.env_vars);
+            if let Some(prompt) = snapshot.system_prompt {
+                record.system_prompt = Some(prompt);
+            }
+            record.model = snapshot.model;
+            record.provider = snapshot.provider;
+            record.env_vars = snapshot.env_vars;
+            record.persona_source_version = Some(snapshot.source_version);
+            record.updated_at = crate::util::now_iso();
+        }
+    }
     start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))?;
     save_managed_agents(app, &records)?;
+    if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
+        retain_managed_agent_pending(app, state, saved_record);
+    }
     let record = records
         .iter()
         .find(|record| record.pubkey == pubkey)

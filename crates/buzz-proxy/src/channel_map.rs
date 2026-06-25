@@ -11,8 +11,6 @@ use serde::Deserialize;
 use tracing::info;
 use uuid::Uuid;
 
-// ─── DTOs ────────────────────────────────────────────────────────────────────
-
 /// Minimal DTO for deserializing `GET /api/channels` response.
 #[derive(Debug, Deserialize)]
 pub struct ChannelDto {
@@ -32,8 +30,6 @@ pub struct ChannelDto {
     pub created_by: String,
 }
 
-// ─── ChannelInfo ─────────────────────────────────────────────────────────────
-
 /// All relevant information about a mapped channel.
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
@@ -51,8 +47,6 @@ pub struct ChannelInfo {
     pub created_at_unix: u64,
 }
 
-// ─── ChannelMap ──────────────────────────────────────────────────────────────
-
 /// Bidirectional UUID ↔ kind:40 event ID map.
 ///
 /// Thread-safe via [`DashMap`]; clone-friendly via `Arc` wrapping at the call
@@ -62,8 +56,6 @@ pub struct ChannelMap {
     by_event_id: DashMap<String, Uuid>,
     server_keys: Keys,
 }
-
-// ─── Synthesis helpers ───────────────────────────────────────────────────────
 
 impl ChannelMap {
     /// Synthesize a deterministic NIP-28 kind:40 channel creation event.
@@ -118,8 +110,6 @@ impl ChannelMap {
     }
 }
 
-// ─── Core impl ───────────────────────────────────────────────────────────────
-
 impl ChannelMap {
     /// Create an empty [`ChannelMap`] with the given server signing keys.
     pub fn new(server_keys: Keys) -> Self {
@@ -167,8 +157,6 @@ impl ChannelMap {
         Ok(map)
     }
 
-    // ─── Lookups ─────────────────────────────────────────────────────────────
-
     /// Look up channel info by Buzz UUID.
     pub fn lookup_by_uuid(&self, uuid: &Uuid) -> Option<ChannelInfo> {
         self.by_uuid.get(uuid).map(|r| r.clone())
@@ -185,8 +173,6 @@ impl ChannelMap {
     pub fn all_channels(&self) -> Vec<ChannelInfo> {
         self.by_uuid.iter().map(|r| r.value().clone()).collect()
     }
-
-    // ─── Mutation ────────────────────────────────────────────────────────────
 
     /// Register a new channel (e.g. from a kind:40099 system message) and
     /// return its [`ChannelInfo`].
@@ -225,8 +211,6 @@ impl ChannelMap {
         Ok(info)
     }
 
-    // ─── Accessors ───────────────────────────────────────────────────────────
-
     /// Number of channels in the map.
     pub fn len(&self) -> usize {
         self.by_uuid.len()
@@ -242,8 +226,6 @@ impl ChannelMap {
         &self.server_keys
     }
 }
-
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

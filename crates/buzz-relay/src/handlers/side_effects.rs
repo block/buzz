@@ -689,7 +689,6 @@ pub async fn emit_group_discovery_events(
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
 
-    // ── kind:39000 group metadata ────────────────────────────────────────────
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
         tags.push(Tag::parse(["name", &channel.name])?);
@@ -752,7 +751,6 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    // ── kind:39001 group admins ──────────────────────────────────────────────
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
         for m in members
@@ -772,7 +770,6 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    // ── kind:39002 group members ─────────────────────────────────────────────
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
         for m in &members {
@@ -794,8 +791,6 @@ pub async fn emit_group_discovery_events(
     Ok(())
 }
 
-// ── Kind:10100 Agent Profile Handler ─────────────────────────────────────────
-
 async fn handle_agent_profile(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
     let content: serde_json::Value = serde_json::from_str(&event.content)
         .map_err(|e| anyhow::anyhow!("kind:10100 content parse error: {e}"))?;
@@ -815,8 +810,6 @@ async fn handle_agent_profile(event: &Event, state: &Arc<AppState>) -> anyhow::R
     info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
     Ok(())
 }
-
-// ── NIP-01 Kind:0 Handler ────────────────────────────────────────────────────
 
 /// Kind:0 (NIP-01 profile metadata) side effect — sync profile fields to users table.
 async fn handle_kind0_profile(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
@@ -891,8 +884,6 @@ async fn handle_kind0_profile(event: &Event, state: &Arc<AppState>) -> anyhow::R
     info!(pubkey = %hex::encode(&pubkey_bytes), "kind:0 profile synced to users table");
     Ok(())
 }
-
-// ── NIP-29 Handlers ──────────────────────────────────────────────────────────
 
 async fn handle_put_user(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
     let channel_id =
@@ -1765,8 +1756,6 @@ async fn handle_standard_deletion_event(
     Ok(())
 }
 
-// ── Tag Helpers ──────────────────────────────────────────────────────────────
-
 /// Extract channel UUID from `h` tag (NIP-29 group ID).
 fn extract_h_tag_channel(event: &Event) -> Option<Uuid> {
     for tag in event.tags.iter() {
@@ -1864,8 +1853,6 @@ fn extract_tag_value(event: &Event, tag_name: &str) -> Option<String> {
     }
     None
 }
-
-// ── NIP-34: Git repository side effects ──────────────────────────────────────
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
 ///
@@ -2147,8 +2134,6 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
-// ── NIP-43 relay-level membership announcement events ────────────────────────
-
 /// Publish a kind:13534 relay membership list event (NIP-43).
 ///
 /// Queries all current relay members and emits a relay-signed, NIP-70-protected
@@ -2313,8 +2298,6 @@ pub async fn reconcile_channel_events(state: &Arc<AppState>) -> anyhow::Result<(
     }
     Ok(())
 }
-
-// ── NIP-IA relay-level identity archive announcement events ──────────────────
 
 /// Publish a kind:13535 archived identities list event (NIP-IA).
 ///

@@ -37,10 +37,6 @@ type CreateChannelDialogProps = {
   }) => Promise<void>;
 };
 
-// ---------------------------------------------------------------------------
-// CreateChannelDialog
-// ---------------------------------------------------------------------------
-
 export function CreateChannelDialog({
   channelKind,
   isCreating,
@@ -66,7 +62,6 @@ export function CreateChannelDialog({
   const durationLabel = ephemeral ? "Temporary" : "Ongoing";
   const DurationIcon = ephemeral ? ClockFading : Hash;
 
-  // Reset form state when dialog opens/closes or kind changes
   React.useEffect(() => {
     if (!open) return;
 
@@ -108,7 +103,6 @@ export function CreateChannelDialog({
 
     setSelectedTemplateId(templateId);
 
-    // Pre-fill fields from template (always overwrite to avoid stale values)
     setDescription(template.description ?? "");
     setVisibility(template.visibility);
 
@@ -230,7 +224,6 @@ export function CreateChannelDialog({
             void handleSubmit(event);
           }}
         >
-          {/* Name */}
           <div className="space-y-1.5">
             <label
               className="text-sm font-medium text-foreground"
@@ -271,7 +264,6 @@ export function CreateChannelDialog({
             </div>
           </div>
 
-          {/* Description */}
           <div className="space-y-1.5">
             <label
               className="text-sm font-medium text-foreground"
@@ -334,7 +326,6 @@ export function CreateChannelDialog({
             />
           </div>
 
-          {/* Template Selector */}
           {templates.length > 0 ? (
             <div className="space-y-1.5">
               <label
@@ -362,7 +353,6 @@ export function CreateChannelDialog({
             </div>
           ) : null}
 
-          {/* Error */}
           {errorMessage ? (
             <p className="text-sm text-destructive">{errorMessage}</p>
           ) : null}

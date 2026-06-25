@@ -1,10 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/forum/forum_models.dart';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 Map<String, dynamic> _postJson({
   String eventId = 'evt1',
   String pubkey = 'alice',
@@ -65,10 +61,6 @@ Map<String, dynamic> _summaryJson({
   'last_reply_at': lastReplyAt,
   'participants': participants,
 };
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 void main() {
   group('ForumPost.fromJson', () {

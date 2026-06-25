@@ -148,7 +148,6 @@ export function ForumView({
 
   return (
     <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
-      {/* New post area */}
       <div className="border-b border-border/60 p-4">
         {isComposerOpen ? (
           <ForumComposer
@@ -183,7 +182,6 @@ export function ForumView({
         )}
       </div>
 
-      {/* Post list */}
       <div
         className="flex-1 overflow-y-auto"
         data-scroll-restoration-id={`forum-list:${channel.id}`}
