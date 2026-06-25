@@ -20,7 +20,7 @@
 //! divergent-behavior trap.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Result of probing the keyring before a migration: distinguishes "reachable
 /// but holds no entry" (safe to migrate into) from "unreachable this boot"
@@ -46,7 +46,7 @@ const BLOB_KEY: &str = "secrets";
 pub struct SecretStore {
     service: String,
     /// In-memory cache of the deserialized blob. `None` means "not yet loaded".
-    cache: Arc<Mutex<Option<HashMap<String, String>>>>,
+    cache: Mutex<Option<HashMap<String, String>>>,
 }
 
 impl SecretStore {
@@ -56,7 +56,7 @@ impl SecretStore {
     pub fn keyring(service: impl Into<String>) -> Self {
         SecretStore {
             service: service.into(),
-            cache: Arc::new(Mutex::new(None)),
+            cache: Mutex::new(None),
         }
     }
 }
@@ -125,7 +125,7 @@ impl SecretStore {
     #[cfg(feature = "system-keyring")]
     fn load_blob(&self) -> Result<Option<HashMap<String, String>>, String> {
         {
-            let guard = self.cache.lock().unwrap();
+            let guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(ref map) = *guard {
                 return Ok(Some(map.clone()));
             }
@@ -141,7 +141,7 @@ impl SecretStore {
             }
         };
 
-        *self.cache.lock().unwrap() = Some(map.clone());
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(map.clone());
         Ok(Some(map))
     }
 
@@ -181,13 +181,11 @@ impl SecretStore {
     }
 
     /// Serialize `map` to JSON and write it as the single blob keychain entry.
-    /// Invalidates the cache so the next `load_blob` re-reads from the store.
     #[cfg(feature = "system-keyring")]
     fn save_blob(&self, map: &HashMap<String, String>) -> Result<(), String> {
         let json = serde_json::to_string(map).map_err(|e| format!("blob serialize: {e}"))?;
         self.write_blob_raw(json.as_bytes())?;
-        // Invalidate cache — next load_blob will re-read from keychain.
-        *self.cache.lock().unwrap() = None;
+        *self.cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(map.clone());
         Ok(())
     }
 
@@ -227,16 +225,53 @@ impl SecretStore {
                         KeyringProbe::ReachableButEmpty
                     }
                 }
-                // No blob yet — backend is reachable, key is absent.
-                Ok(None) => KeyringProbe::ReachableButEmpty,
+                // No blob yet — check old per-key entries so callers that
+                // gate `load()` on `Present` still trigger migration.
+                Ok(None) => self.probe_legacy_key(key),
                 Err(e) if is_keyring_availability_error(&e) => KeyringProbe::Unreachable,
-                Err(_) => KeyringProbe::Unreachable,
+                Err(_) => KeyringProbe::ReachableButEmpty,
             }
         }
         #[cfg(not(feature = "system-keyring"))]
         {
             let _ = key;
             KeyringProbe::Unreachable
+        }
+    }
+
+    /// Check old per-key DPK/keyring entries for `key`. Used by `probe()` when
+    /// the blob doesn't exist yet (first launch after upgrade).
+    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    fn probe_legacy_key(&self, key: &str) -> KeyringProbe {
+        match generic_password(dpk_opts(&self.service, key)) {
+            Ok(_) => KeyringProbe::Present,
+            Err(ref e) if is_not_found(e) => self.probe_legacy_key_keyring(key),
+            Err(ref e) if is_dpk_unavailable(e) => self.probe_legacy_key_keyring(key),
+            Err(ref e) if is_keyring_availability_error(&e.to_string()) => {
+                KeyringProbe::Unreachable
+            }
+            Err(_) => KeyringProbe::ReachableButEmpty,
+        }
+    }
+
+    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+    fn probe_legacy_key(&self, key: &str) -> KeyringProbe {
+        self.probe_legacy_key_keyring(key)
+    }
+
+    #[cfg(feature = "system-keyring")]
+    fn probe_legacy_key_keyring(&self, key: &str) -> KeyringProbe {
+        match keyring_entry(&self.service, key) {
+            Ok(entry) => match entry.get_password() {
+                Ok(_) => KeyringProbe::Present,
+                Err(keyring::Error::NoEntry) => KeyringProbe::ReachableButEmpty,
+                Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                    KeyringProbe::Unreachable
+                }
+                Err(_) => KeyringProbe::ReachableButEmpty,
+            },
+            Err(e) if is_keyring_availability_error(&e.to_string()) => KeyringProbe::Unreachable,
+            Err(_) => KeyringProbe::Unreachable,
         }
     }
 
@@ -430,5 +465,41 @@ mod tests {
         assert_eq!(store.load("remove").unwrap(), None);
         // Cleanup.
         let _ = store.delete("keep");
+    }
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn blob_migration_from_per_key_entry() {
+        let svc = "buzz-test-blob-migration";
+        let key = "identity";
+        let value = "nsec1migrationtest";
+
+        // Seed a per-key entry (old format) — no blob exists.
+        let entry = keyring_entry(svc, key).unwrap();
+        entry.set_password(value).unwrap();
+
+        // Fresh store — no blob in the keychain yet.
+        let store = SecretStore::keyring(svc);
+
+        // probe should find the legacy key.
+        assert_eq!(store.probe(key), KeyringProbe::Present);
+
+        // load should migrate it into the blob and return the value.
+        assert_eq!(store.load(key).unwrap(), Some(value.to_string()));
+
+        // Old per-key entry should be cleaned up.
+        let entry = keyring_entry(svc, key).unwrap();
+        assert!(matches!(
+            entry.get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+
+        // Key is now in the blob — probe confirms.
+        let store2 = SecretStore::keyring(svc);
+        assert_eq!(store2.probe(key), KeyringProbe::Present);
+        assert_eq!(store2.load(key).unwrap(), Some(value.to_string()));
+
+        // Cleanup.
+        let _ = store2.delete(key);
     }
 }

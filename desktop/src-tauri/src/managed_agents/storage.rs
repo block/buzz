@@ -17,13 +17,20 @@ fn agent_keyring_name(pubkey: &str) -> String {
 }
 
 /// The agent secret store. `None` when the build has no keyring backend, in
-/// which case agent keys stay inline in the `0o600` JSON file.
-fn agent_secret_store() -> Option<SecretStore> {
-    if cfg!(feature = "system-keyring") {
-        Some(SecretStore::keyring(KEYRING_SERVICE))
-    } else {
-        None
-    }
+/// which case agent keys stay inline in the `0o600` JSON file. Cached via
+/// `OnceLock` so the in-memory blob cache survives across call sites.
+fn agent_secret_store() -> Option<&'static SecretStore> {
+    use std::sync::OnceLock;
+    static STORE: OnceLock<Option<SecretStore>> = OnceLock::new();
+    STORE
+        .get_or_init(|| {
+            if cfg!(feature = "system-keyring") {
+                Some(SecretStore::keyring(KEYRING_SERVICE))
+            } else {
+                None
+            }
+        })
+        .as_ref()
 }
 
 pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -173,7 +180,7 @@ fn hydrate_keys(records: &mut [ManagedAgentRecord]) {
     let Some(store) = agent_secret_store() else {
         return;
     };
-    hydrate_keys_with(&store, records);
+    hydrate_keys_with(store, records);
 }
 
 /// Testable core of [`hydrate_keys`], generic over the [`KeyStore`] seam.
@@ -257,7 +264,7 @@ fn persist_agent_keys(records: &mut [ManagedAgentRecord]) {
         // unreachable) so it is not lost, and `Nothing` (empty key) because
         // there is no verified entry to claim. This is a save-local clone, so
         // callers keep their keys regardless.
-        if migrate_inline_key(&store, record) == KeyMigration::Persisted {
+        if migrate_inline_key(store, record) == KeyMigration::Persisted {
             record.private_key_nsec.clear();
         }
     }
