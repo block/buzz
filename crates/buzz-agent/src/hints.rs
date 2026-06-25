@@ -113,7 +113,10 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
     };
     let mut subdirs: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        // Use std::fs::metadata (follows symlinks) rather than DirEntry::file_type
+        // (which returns FileType::Symlink for symlinks, causing is_dir() to return
+        // false even when the symlink target is a directory).
+        .filter(|e| std::fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false))
         .map(|e| e.path())
         .collect();
     subdirs.sort();
@@ -164,8 +167,10 @@ fn collect_supporting_files_impl(current: &Path, out: &mut Vec<PathBuf>) {
 
     for entry in items {
         let path = entry.path();
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
+        // Use std::fs::metadata (follows symlinks) so symlinked subdirs and files
+        // inside a skill directory are handled correctly.
+        let ft = match std::fs::metadata(&path) {
+            Ok(m) => m,
             Err(_) => continue,
         };
         if ft.is_dir() {

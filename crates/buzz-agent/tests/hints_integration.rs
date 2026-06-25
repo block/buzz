@@ -460,6 +460,57 @@ async fn global_skills_loaded_and_project_wins() {
     h.shutdown().await;
 }
 
+/// Skill directories that are symlinks (e.g. managed by ai-rules) are discovered
+/// correctly — `DirEntry::file_type()` returns `FileType::Symlink` for symlinks,
+/// so the old `is_dir()` check silently dropped them. We now use
+/// `std::fs::metadata()` which follows the symlink.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symlinked_skill_dir_is_discovered() {
+    let real_skill_root = tempfile::TempDir::new().unwrap();
+    let real_skill_dir = real_skill_root.path().join("symlinked-skill");
+    std::fs::create_dir_all(&real_skill_dir).unwrap();
+    std::fs::write(
+        real_skill_dir.join("SKILL.md"),
+        "---\nname: symlinked-skill\ndescription: A symlinked skill\n---\nSYMLINK_SKILL_BODY_42\n",
+    )
+    .unwrap();
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let skills_dir = cwd.join(".agents/skills");
+    std::fs::create_dir_all(&skills_dir).unwrap();
+
+    // Create a symlink: .agents/skills/symlinked-skill -> real_skill_dir
+    std::os::unix::fs::symlink(&real_skill_dir, skills_dir.join("symlinked-skill")).unwrap();
+
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[]).await;
+    let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+
+    let captured = llm.captured.lock().await;
+    assert!(!captured.is_empty(), "no LLM request captured");
+    let system = captured[0]["messages"][0]["content"].as_str().unwrap_or("");
+    // The symlinked skill name must appear in the metadata listing.
+    assert!(
+        system.contains("symlinked-skill"),
+        "system prompt missing symlinked skill name: {system}"
+    );
+    // Body must NOT be inlined.
+    assert!(
+        !system.contains("SYMLINK_SKILL_BODY_42"),
+        "symlinked skill body must not be inlined in system prompt: {system}"
+    );
+    h.shutdown().await;
+}
+
 /// `load_skill` tool is advertised when skills exist, and returns the skill body.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn load_skill_tool_returns_body() {
