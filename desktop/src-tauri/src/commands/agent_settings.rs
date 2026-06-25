@@ -3,8 +3,9 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, find_managed_agent_mut, load_managed_agents, load_personas,
-        save_managed_agents, sync_managed_agent_processes, ManagedAgentSummary,
+        build_managed_agent_summary, current_instance_id, find_managed_agent_mut,
+        load_managed_agents, load_personas, save_managed_agents, sync_managed_agent_processes,
+        ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -26,7 +27,7 @@ pub fn set_managed_agent_start_on_app_launch(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes) {
+    if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
         save_managed_agents(&app, &records)?;
     }
 

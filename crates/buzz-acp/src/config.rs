@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use nostr::Keys;
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
@@ -517,6 +518,57 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Build `-c` flag pairs that allowlist the relay hostname in Codex's network sandbox.
+///
+/// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a local proxy with
+/// a domain allowlist. Without this, `buzz-cli` requests to the relay are blocked before
+/// they reach WARP or any other outbound network path.
+///
+/// Returns `["-c", "network_proxy.mode=\"full\"", "-c", "network_proxy.domains.\"<host>\"=\"allow\""]`
+/// for Codex agents, or an empty vec for non-Codex agents or when the hostname cannot
+/// be parsed from the relay URL.
+///
+/// The `network_proxy` keys map to `NetworkProxyConfigToml` in codex-acp's config schema:
+/// - `network_proxy.mode="full"` enables the managed proxy for all outbound traffic
+/// - `network_proxy.domains."<host>"="allow"` adds the relay hostname to the allowlist
+///
+/// Handles `ws://`, `wss://`, `http://`, and `https://` schemes. Port is stripped —
+/// Codex's domain allowlist matches on hostname only.
+pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
+    match normalize_agent_command_identity(agent_command).as_str() {
+        "codex" | "codex-acp" => {}
+        _ => return vec![],
+    }
+
+    // Use the `url` crate so ws://, wss://, http://, https:// are all handled
+    // correctly. On parse failure, skip injection rather than panicking.
+    let host = match Url::parse(relay_url) {
+        Ok(u) => match u.host_str() {
+            Some(h) => h.to_owned(),
+            None => {
+                tracing::warn!(
+                    relay_url,
+                    "codex network allowlist: no host in relay URL — skipping injection"
+                );
+                return vec![];
+            }
+        },
+        Err(e) => {
+            tracing::warn!(relay_url, error = %e, "codex network allowlist: failed to parse relay URL — skipping injection");
+            return vec![];
+        }
+    };
+
+    tracing::debug!(host, "injecting codex network allowlist for host");
+
+    vec![
+        "-c".into(),
+        "network_proxy.mode=\"full\"".into(),
+        "-c".into(),
+        format!("network_proxy.domains.\"{host}\"=\"allow\""),
+    ]
+}
+
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     let normalized = agent_args
         .into_iter()
@@ -645,7 +697,16 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let mut agent_args = normalize_agent_args(&agent_command, args.agent_args);
+
+        // Prepend Codex network allowlist flags so buzz-cli (an MCP subprocess)
+        // can reach the relay through Codex's sandbox proxy. No-op for non-Codex agents.
+        let network_args = codex_network_args(&agent_command, &args.relay_url);
+        if !network_args.is_empty() {
+            let mut merged = network_args;
+            merged.extend(agent_args);
+            agent_args = merged;
+        }
 
         // Finding #49b — warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
@@ -1359,6 +1420,113 @@ mod tests {
             normalize_agent_args("codex-acp", vec!["ACP".into()]),
             Vec::<String>::new()
         );
+    }
+
+    // --- codex_network_args tests ---
+
+    #[test]
+    fn codex_network_args_wss_url() {
+        let args = codex_network_args("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network_proxy.mode=\"full\"",
+                "-c",
+                "network_proxy.domains.\"sprout-oss.stage.blox.sqprod.co\"=\"allow\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_ws_url() {
+        let args = codex_network_args("codex-acp", "ws://localhost:3000");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network_proxy.mode=\"full\"",
+                "-c",
+                "network_proxy.domains.\"localhost\"=\"allow\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_https_url() {
+        let args = codex_network_args("codex-acp", "https://relay.example.com/path");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network_proxy.mode=\"full\"",
+                "-c",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_http_url_with_port() {
+        let args = codex_network_args("codex-acp", "http://relay.example.com:8080/query");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network_proxy.mode=\"full\"",
+                "-c",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_bare_codex_command() {
+        // "codex" (not "codex-acp") should also get the args.
+        let args = codex_network_args("codex", "wss://relay.example.com");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network_proxy.mode=\"full\"",
+                "-c",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_full_path_codex_command() {
+        // Full path like /usr/local/bin/codex-acp should be normalized.
+        let args = codex_network_args("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network_proxy.mode=\"full\"",
+                "-c",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_non_codex_agent_returns_empty() {
+        assert!(codex_network_args("goose", "wss://relay.example.com").is_empty());
+        assert!(codex_network_args("claude-agent-acp", "wss://relay.example.com").is_empty());
+        assert!(codex_network_args("buzz-agent", "wss://relay.example.com").is_empty());
+    }
+
+    #[test]
+    fn codex_network_args_empty_relay_url_returns_empty() {
+        // Empty string fails Url::parse — graceful empty return.
+        assert!(codex_network_args("codex-acp", "").is_empty());
+    }
+
+    #[test]
+    fn codex_network_args_schemeless_string_returns_empty() {
+        // A bare string with no scheme fails Url::parse — graceful empty return.
+        assert!(codex_network_args("codex-acp", "not-a-url").is_empty());
     }
 
     #[test]

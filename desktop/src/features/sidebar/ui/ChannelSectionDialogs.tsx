@@ -20,6 +20,8 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import type { Channel } from "@/shared/api/types";
+import { useLeaveChannelMutation } from "@/features/channels/hooks";
 
 type SectionNameDialogProps = {
   open: boolean;
@@ -191,4 +193,71 @@ export function DeleteSectionAlertDialog({
       </AlertDialogContent>
     </AlertDialog>
   );
+}
+
+// ---------------------------------------------------------------------------
+// LeaveChannelAlertDialog
+// ---------------------------------------------------------------------------
+
+export type LeaveChannelAlertDialogProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  channelName: string;
+  onConfirm: () => void;
+};
+
+export function LeaveChannelAlertDialog({
+  open,
+  onOpenChange,
+  channelName,
+  onConfirm,
+}: LeaveChannelAlertDialogProps) {
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Leave channel</AlertDialogTitle>
+          <AlertDialogDescription>
+            {`Leave "${channelName}"? You'll stop receiving its messages and can rejoin later.`}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            onClick={onConfirm}
+          >
+            Leave
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// useLeaveChannelDialog — owns leave-channel state, mutation, and dialog
+// ---------------------------------------------------------------------------
+
+export function useLeaveChannelDialog() {
+  const [target, setTarget] = React.useState<Channel | null>(null);
+  const leaveChannel = useLeaveChannelMutation(target?.id ?? null);
+
+  const dialog = (
+    <LeaveChannelAlertDialog
+      open={target !== null}
+      onOpenChange={(open) => {
+        if (!open) setTarget(null);
+      }}
+      channelName={target?.name ?? ""}
+      onConfirm={() => {
+        if (target) {
+          leaveChannel.mutate();
+        }
+        setTarget(null);
+      }}
+    />
+  );
+
+  return { requestLeaveChannel: setTarget, dialog };
 }

@@ -47,15 +47,16 @@ const overrides = new Map([
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup.
-  ["src-tauri/src/managed_agents/runtime.rs", 2001],
+  ["src-tauri/src/managed_agents/runtime.rs", 2031],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
   // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
   // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
   // event_d_tag/parse_deletion_coordinate helpers, and the preserve/overwrite +
   // secret-injection + tombstone test coverage. Load-bearing feature growth,
-  // queued to split with the list.
-  ["src-tauri/src/commands/personas.rs", 1271],
+  // queued to split with the list. The two `agents-data-changed` emits (live
+  // UI refresh on inbound reconcile + tombstone) add the latest growth.
+  ["src-tauri/src/commands/personas.rs", 1279],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
@@ -82,7 +83,7 @@ const overrides = new Map([
   // syncs team-dir edits before all personas.json readers; run_event_sync
   // signs the persona/team retention events post-identity) layered on top of
   // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1026],
+  ["src-tauri/src/lib.rs", 1034],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.

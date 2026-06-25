@@ -8,13 +8,18 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleDot,
+  Clipboard,
+  Copy,
   GripVertical,
+  LogOut,
   Pencil,
   Plus,
   Star,
   StarOff,
   Trash2,
 } from "lucide-react";
+
+import { toast } from "sonner";
 
 import {
   ContextMenu,
@@ -106,6 +111,17 @@ function MoveToSectionSubmenu({
   );
 }
 
+function copyToClipboard(text: string, successMessage: string) {
+  void navigator.clipboard
+    .writeText(text)
+    .then(() => {
+      toast.success(successMessage);
+    })
+    .catch(() => {
+      toast.error("Failed to copy to clipboard");
+    });
+}
+
 export function ChannelContextMenuItems({
   channel,
   hasUnread,
@@ -122,6 +138,7 @@ export function ChannelContextMenuItems({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  onLeaveChannel,
 }: {
   channel: Channel;
   hasUnread: boolean;
@@ -141,6 +158,7 @@ export function ChannelContextMenuItems({
   onAssignChannel?: (channelId: string, sectionId: string) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
+  onLeaveChannel?: (channel: Channel) => void;
 }) {
   const showStar = Boolean(onStarChannel && onUnstarChannel);
   const showReadToggle = hasUnread
@@ -206,6 +224,35 @@ export function ChannelContextMenuItems({
             onUnassignChannel={onUnassignChannel}
             onCreateSectionForChannel={onCreateSectionForChannel}
           />
+        </>
+      ) : null}
+      <ContextMenuSeparator />
+      <ContextMenuItem
+        onClick={() =>
+          copyToClipboard(channel.name, "Channel name copied to clipboard")
+        }
+      >
+        <Copy className="h-4 w-4" />
+        Copy channel name
+      </ContextMenuItem>
+      <ContextMenuItem
+        onClick={() =>
+          copyToClipboard(channel.id, "Channel ID copied to clipboard")
+        }
+      >
+        <Clipboard className="h-4 w-4" />
+        Copy channel ID
+      </ContextMenuItem>
+      {onLeaveChannel ? (
+        <>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            className="text-destructive focus:text-destructive"
+            onClick={() => onLeaveChannel(channel)}
+          >
+            <LogOut className="h-4 w-4" />
+            Leave channel
+          </ContextMenuItem>
         </>
       ) : null}
     </>
@@ -307,6 +354,7 @@ export function ChannelGroupSection({
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
+  onLeaveChannel,
 }: {
   browseAriaLabel?: string;
   createAriaLabel: string;
@@ -343,6 +391,7 @@ export function ChannelGroupSection({
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
+  onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-${listTestId}`;
 
@@ -399,6 +448,7 @@ export function ChannelGroupSection({
                 onAssignChannel={onAssignChannel}
                 onUnassignChannel={onUnassignChannel}
                 onCreateSectionForChannel={onCreateSectionForChannel}
+                onLeaveChannel={onLeaveChannel}
               />
             </ContextMenuContent>
           </ContextMenu>
@@ -407,7 +457,9 @@ export function ChannelGroupSection({
     ) : null;
 
   const sectionContent = (
-    <SidebarGroup className={cn("group/sidebar-section", groupClassName)}>
+    <SidebarGroup
+      className={cn("group/sidebar-section select-none", groupClassName)}
+    >
       <div className="relative">
         <SidebarGroupLabel asChild>
           <button
@@ -482,6 +534,7 @@ export function CustomChannelSection({
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
+  onLeaveChannel,
 }: {
   section: ChannelSection;
   channels: Channel[];
@@ -517,6 +570,7 @@ export function CustomChannelSection({
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
+  onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-section-${section.id}`;
 
@@ -525,7 +579,10 @@ export function CustomChannelSection({
       {({ dragHandleProps, isDragging }) => (
         <DroppableSectionBody sectionId={section.id}>
           <SidebarGroup
-            className={cn("group/sidebar-section", isDragging && "opacity-30")}
+            className={cn(
+              "group/sidebar-section select-none",
+              isDragging && "opacity-30",
+            )}
           >
             <ContextMenu>
               <ContextMenuTrigger asChild>
@@ -670,6 +727,7 @@ export function CustomChannelSection({
                             onCreateSectionForChannel={
                               onCreateSectionForChannel
                             }
+                            onLeaveChannel={onLeaveChannel}
                           />
                         </ContextMenuContent>
                       </ContextMenu>
