@@ -49,6 +49,7 @@ import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
@@ -629,7 +630,7 @@ function ProfilePrimaryActions({
   };
 
   return (
-    <div className="flex items-start justify-center gap-8">
+    <div className="flex items-center justify-center gap-8">
       {showFollowAction ? (
         <ProfileQuickAction
           active={isFollowing}
@@ -681,7 +682,7 @@ function ProfilePersonaPrimaryActions({
   onStartAgent: () => void;
 }) {
   return (
-    <div className="flex items-start justify-center gap-8">
+    <div className="flex items-center justify-center gap-8">
       <ProfileQuickAction
         disabled={disabled}
         icon={Play}
@@ -718,32 +719,28 @@ function ProfileQuickAction({
   testId?: string;
 }) {
   return (
-    <button
-      className="flex flex-col items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50"
-      data-testid={testId}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      <span
-        className={cn(
-          "flex h-14 w-14 items-center justify-center rounded-full transition-colors",
-          active
-            ? "bg-foreground text-background hover:bg-foreground/90"
-            : "bg-muted/60 text-foreground hover:bg-muted/80",
-        )}
-      >
-        <Icon className="h-4 w-4" />
-      </span>
-      <span
-        className={cn(
-          "text-xs",
-          active ? "text-foreground" : "text-muted-foreground",
-        )}
-      >
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={label}
+          className={cn(
+            "flex h-12 w-12 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+            active
+              ? "bg-foreground text-background hover:bg-foreground/90"
+              : "bg-muted/60 text-foreground hover:bg-muted/80",
+          )}
+          data-testid={testId}
+          disabled={disabled}
+          onClick={onClick}
+          type="button"
+        >
+          <Icon className="h-4 w-4" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent align="center" side="top">
         {label}
-      </span>
-    </button>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
