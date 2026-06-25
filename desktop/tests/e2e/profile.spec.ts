@@ -58,6 +58,7 @@ async function addGenericAgent(
   page: Page,
   channelName: string,
   agentName: string,
+  systemPrompt = "Watch the channel and help when asked.",
 ): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
@@ -78,7 +79,7 @@ async function addGenericAgent(
     );
   });
   return page.evaluate(
-    async ({ agentName, channelId }) => {
+    async ({ agentName, channelId, systemPrompt }) => {
       const invoke = (
         window as Window & {
           __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
@@ -95,7 +96,7 @@ async function addGenericAgent(
         input: {
           name: agentName,
           spawnAfterCreate: true,
-          systemPrompt: "Watch the channel and help when asked.",
+          systemPrompt,
         },
       });
       const pubkey = created.agent?.pubkey;
@@ -119,7 +120,7 @@ async function addGenericAgent(
 
       return pubkey;
     },
-    { agentName, channelId },
+    { agentName, channelId, systemPrompt },
   );
 }
 
@@ -635,7 +636,19 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   });
   await page.goto("/");
 
-  const agentPubkey = await addGenericAgent(page, "general", "Memory Bot");
+  const longAgentInstruction = [
+    "Watch the channel and help when asked.",
+    "Summarize active decisions, call out risks plainly, and keep the tone concise.",
+    "Prefer concrete next steps over broad commentary, and cite the relevant thread context when responding.",
+    "Avoid catchphrases, theatrical roleplay, and unsupported guesses.",
+    "When uncertainty remains, say exactly what evidence would resolve it.",
+  ].join("\n\n");
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    "Memory Bot",
+    longAgentInstruction,
+  );
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -673,9 +686,26 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 
   await expect(page.getByTestId("user-profile-tab-info")).toBeVisible();
+  await expect(page.getByTestId("user-profile-runtime-status")).toHaveAttribute(
+    "data-status",
+    "running",
+  );
+  const instructionPane = page.getByTestId("user-profile-agent-instruction");
+  await expect(instructionPane).toContainText(
+    "Watch the channel and help when asked.",
+  );
+  await expect(instructionPane).toHaveClass(/line-clamp-2/);
+  await page.getByTestId("user-profile-agent-instruction-row").click();
   await expect(
-    page.getByTestId("user-profile-agent-instruction"),
-  ).toContainText("Watch the channel and help when asked.");
+    page.getByRole("heading", { level: 2, name: "Instructions" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-agent-instructions-view"),
+  ).toContainText("When uncertainty remains");
+  await page.getByTestId("user-profile-panel-back").click();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Profile" }),
+  ).toBeVisible();
 
   await page.getByTestId("user-profile-tab-runtime").click();
   await expect(page.getByTestId("user-profile-model")).toBeVisible();

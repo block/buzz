@@ -238,7 +238,7 @@ export function ProfileTabBar({
               {tab.trailing ? (
                 <span
                   className={cn(
-                    "text-2xs",
+                    "inline-flex items-center leading-none text-2xs",
                     isActive
                       ? "text-secondary-foreground/80"
                       : "text-muted-foreground",
@@ -259,6 +259,7 @@ export function ProfileInfoTabContent({
   agentInfoFields,
   agentInstruction,
   onOpenActivity,
+  onOpenInstructions,
   pubkey,
   showActivityIngress,
   showInstructionBlock,
@@ -266,6 +267,7 @@ export function ProfileInfoTabContent({
   agentInfoFields: ProfileField[];
   agentInstruction: string | null;
   onOpenActivity: () => void;
+  onOpenInstructions: () => void;
   pubkey: string | null;
   showActivityIngress: boolean;
   showInstructionBlock: boolean;
@@ -280,7 +282,10 @@ export function ProfileInfoTabContent({
     <div className="space-y-2">
       {showInstructionBlock ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
-          <AgentInstructionRow instruction={agentInstruction} />
+          <AgentInstructionRow
+            instruction={agentInstruction}
+            onOpenInstructions={onOpenInstructions}
+          />
         </div>
       ) : null}
       {hasInfoFields ? <ProfileFieldGroup fields={agentInfoFields} /> : null}

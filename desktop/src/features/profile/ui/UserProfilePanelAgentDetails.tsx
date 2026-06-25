@@ -1,4 +1,4 @@
-import { Cpu, MessageSquare } from "lucide-react";
+import { ChevronRight, Cpu, MessageSquare } from "lucide-react";
 
 import type { ManagedAgent } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
@@ -149,34 +149,93 @@ function hasAgentConfigurationRows({
 
 export function AgentInstructionRow({
   instruction,
+  onOpenInstructions,
 }: {
   instruction: string | null;
+  onOpenInstructions?: () => void;
 }) {
   const trimmedInstruction = instruction?.trim() ?? "";
-
-  return (
-    <div className="flex items-start gap-3 px-4 py-3">
+  const canOpenInstructions =
+    trimmedInstruction.length > 0 && onOpenInstructions !== undefined;
+  const rowContent = (
+    <>
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
         <MessageSquare className="h-4 w-4 text-muted-foreground" />
       </span>
       <div className="min-w-0 flex-1 text-left">
         <div className="text-xs font-medium text-foreground">Instructions</div>
         {trimmedInstruction ? (
-          <div
-            className="mt-1 max-h-40 overflow-y-auto pr-1"
-            data-testid="user-profile-agent-instruction"
-          >
-            <Markdown
-              className="text-sm leading-6"
-              content={trimmedInstruction}
-              interactive={false}
-            />
-          </div>
+          canOpenInstructions ? (
+            <span
+              className="mt-1 line-clamp-2 whitespace-pre-wrap pr-1 text-sm leading-6"
+              data-testid="user-profile-agent-instruction"
+            >
+              {trimmedInstruction}
+            </span>
+          ) : (
+            <div
+              className="mt-1 pr-1"
+              data-testid="user-profile-agent-instruction"
+            >
+              <Markdown
+                className="text-sm leading-6"
+                content={trimmedInstruction}
+                interactive={false}
+              />
+            </div>
+          )
         ) : (
           <p
             className="mt-0.5 text-sm leading-6 text-muted-foreground"
             data-testid="user-profile-agent-instruction-empty"
           >
+            No instruction set.
+          </p>
+        )}
+      </div>
+      {canOpenInstructions ? (
+        <ChevronRight className="mt-2.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : null}
+    </>
+  );
+
+  if (canOpenInstructions) {
+    return (
+      <button
+        className="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        data-testid="user-profile-agent-instruction-row"
+        onClick={onOpenInstructions}
+        type="button"
+      >
+        {rowContent}
+      </button>
+    );
+  }
+
+  return <div className="flex items-start gap-3 px-4 py-3">{rowContent}</div>;
+}
+
+export function AgentInstructionsFocusedView({
+  instruction,
+}: {
+  instruction: string | null;
+}) {
+  const trimmedInstruction = instruction?.trim() ?? "";
+
+  return (
+    <div className="pt-4">
+      <div
+        className="rounded-2xl bg-muted/20 px-4 py-3"
+        data-testid="user-profile-agent-instructions-view"
+      >
+        {trimmedInstruction ? (
+          <Markdown
+            className="text-sm leading-6"
+            content={trimmedInstruction}
+            interactive={false}
+          />
+        ) : (
+          <p className="text-sm leading-6 text-muted-foreground">
             No instruction set.
           </p>
         )}

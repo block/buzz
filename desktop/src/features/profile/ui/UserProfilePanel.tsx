@@ -1,5 +1,4 @@
 import * as React from "react";
-import { ArrowLeft, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -7,7 +6,6 @@ import {
   useAgentMemoryQuery,
   useIsManagedAgent,
 } from "@/features/agent-memory/hooks";
-import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
   type AttachManagedAgentToChannelResult,
   useAcpRuntimesQuery,
@@ -54,6 +52,7 @@ import {
 } from "@/features/profile/hooks";
 import {
   AgentInfoFocusedView,
+  AgentInstructionsFocusedView,
   ChannelsFocusedView,
   DiagnosticsFocusedView,
   MemoryFocusedView,
@@ -67,7 +66,6 @@ import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePan
 import { UserProfilePersonaDialogs } from "@/features/profile/ui/UserProfilePersonaDialogs";
 import {
   deriveProfileChannels,
-  PROFILE_PANEL_VIEW_TITLES,
   type ProfilePanelView,
   resolveAgentInstruction,
   resolvePanelProfile,
@@ -80,11 +78,7 @@ import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import {
-  AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
-  auxiliaryPanelContentPaddingClass,
-} from "@/shared/layout/AuxiliaryPanelHeader";
+import { auxiliaryPanelContentPaddingClass } from "@/shared/layout/AuxiliaryPanelHeader";
 import { cn } from "@/shared/lib/cn";
 import type {
   AgentPersona,
@@ -94,8 +88,8 @@ import type {
   ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
-import { Button } from "@/shared/ui/button";
 import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFrame";
+import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProfilePanelHeaderContent";
 
 export type { ProfilePanelView };
 
@@ -773,47 +767,15 @@ export function UserProfilePanel({
     pubkey: effectivePubkey,
     relayAgent,
   });
-  const headerLeftContent = (
-    <AuxiliaryPanelHeaderGroup>
-      {view !== "summary" ? (
-        <Button
-          aria-label="Back to profile"
-          className="shrink-0"
-          data-testid="user-profile-panel-back"
-          onClick={() => setView("summary")}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <ArrowLeft />
-        </Button>
-      ) : null}
-      <AuxiliaryPanelTitle>
-        {PROFILE_PANEL_VIEW_TITLES[view]}
-      </AuxiliaryPanelTitle>
-    </AuxiliaryPanelHeaderGroup>
-  );
-  const headerActions = (
-    <div className="ml-auto flex shrink-0 items-center gap-2">
-      {view === "memories" && viewerIsOwner && effectivePubkey ? (
-        <MemoryRefreshButton
-          agentPubkey={effectivePubkey}
-          variant="outline"
-          viewerIsOwner={viewerIsOwner}
-        />
-      ) : null}
-      {view === "summary" ? agentSettingsMenu : null}
-      <Button
-        aria-label="Close profile"
-        data-testid="user-profile-panel-close"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
-    </div>
+  const { headerActions, headerLeftContent } = getUserProfilePanelHeaderContent(
+    {
+      agentSettingsMenu,
+      effectivePubkey,
+      onBack: () => setView("summary"),
+      onClose,
+      view,
+      viewerIsOwner,
+    },
   );
   const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
 
@@ -863,6 +825,7 @@ export function UserProfilePanel({
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
+          onOpenInstructions={() => setView("instructions")}
           onOpenDm={onOpenDm}
           presenceStatus={presenceStatus}
           profile={profile}
@@ -887,6 +850,9 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
           modelLabel={modelLabel}
         />
+      ) : null}
+      {view === "instructions" ? (
+        <AgentInstructionsFocusedView instruction={agentInstruction} />
       ) : null}
       {view === "diagnostics" ? (
         <DiagnosticsFocusedView

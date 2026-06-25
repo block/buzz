@@ -50,6 +50,8 @@ import { useNow } from "@/shared/lib/useNow";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 
+export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
@@ -86,6 +88,7 @@ export type ProfileSummaryViewProps = {
   onOpenActivity: () => void;
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
+  onOpenInstructions: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
@@ -94,6 +97,52 @@ export type ProfileSummaryViewProps = {
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
 };
+
+type RuntimeTabStatus = "running" | "stopped" | "error";
+
+function resolveRuntimeTabStatus({
+  diagnosticsError,
+  managedAgent,
+}: {
+  diagnosticsError: boolean;
+  managedAgent: ManagedAgent | undefined;
+}): RuntimeTabStatus | undefined {
+  if (diagnosticsError || managedAgent?.lastError) {
+    return "error";
+  }
+
+  if (!managedAgent) {
+    return undefined;
+  }
+
+  if (managedAgent.status === "running" || managedAgent.status === "deployed") {
+    return "running";
+  }
+
+  return "stopped";
+}
+
+function RuntimeTabStatusDot({ status }: { status: RuntimeTabStatus }) {
+  const label =
+    status === "error" ? "Error" : status === "running" ? "Running" : "Stopped";
+
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "block h-1.5 w-1.5 rounded-full ring-1 ring-background",
+        status === "error"
+          ? "bg-destructive"
+          : status === "running"
+            ? "bg-emerald-500"
+            : "bg-muted-foreground/50",
+      )}
+      data-status={status}
+      data-testid="user-profile-runtime-status"
+      title={label}
+    />
+  );
+}
 
 export function ProfileSummaryView({
   canAddToChannel,
@@ -129,6 +178,7 @@ export function ProfileSummaryView({
   onOpenActivity,
   onOpenChannel,
   onOpenDiagnostics,
+  onOpenInstructions,
   onOpenDm,
   presenceStatus,
   profile,
@@ -183,6 +233,10 @@ export function ProfileSummaryView({
     ) : (
       "View"
     );
+  const runtimeTabStatus = resolveRuntimeTabStatus({
+    diagnosticsError: diagnosticsErrorField !== undefined,
+    managedAgent,
+  });
 
   const tabs = React.useMemo(() => {
     const items: Array<{
@@ -194,7 +248,13 @@ export function ProfileSummaryView({
       items.push({ id: "info", label: "Info" });
     }
     if (showRuntimeTab) {
-      items.push({ id: "runtime", label: "Runtime" });
+      items.push({
+        id: "runtime",
+        label: "Runtime",
+        trailing: runtimeTabStatus ? (
+          <RuntimeTabStatusDot status={runtimeTabStatus} />
+        ) : undefined,
+      });
     }
     if (showChannelsTab) {
       items.push({
@@ -224,6 +284,7 @@ export function ProfileSummaryView({
     channelsLoading,
     memoriesLoading,
     memoryCount,
+    runtimeTabStatus,
     showChannelsTab,
     showInfoTab,
     showMemoriesTab,
@@ -312,6 +373,7 @@ export function ProfileSummaryView({
               agentInfoFields={agentInfoFields}
               agentInstruction={agentInstruction}
               onOpenActivity={onOpenActivity}
+              onOpenInstructions={onOpenInstructions}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
               showInstructionBlock={showInstructionBlock}

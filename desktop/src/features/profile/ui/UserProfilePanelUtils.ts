@@ -17,6 +17,7 @@ export type ProfileChannelLink = {
 
 export type ProfilePanelView =
   | "summary"
+  | "instructions"
   | "info"
   | "configuration"
   | "diagnostics"
@@ -26,6 +27,7 @@ export type ProfilePanelView =
 
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
+  instructions: "Instructions",
   info: "Agent info",
   configuration: "Runtime",
   diagnostics: "Harness Log",
@@ -39,7 +41,6 @@ const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(
 );
 
 const LEGACY_PROFILE_PANEL_VIEW_ALIASES: Record<string, ProfilePanelView> = {
-  instructions: "configuration",
   model: "configuration",
   settings: "configuration",
 };
