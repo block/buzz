@@ -899,6 +899,7 @@ export function DiagnosticsFocusedView({
       {hasLog ? (
         <div className="min-h-0 flex-1">
           <ManagedAgentLogPanel
+            chrome="bare"
             error={logError}
             isLoading={logLoading}
             logContent={logContent}

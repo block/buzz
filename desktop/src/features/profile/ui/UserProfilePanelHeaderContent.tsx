@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ArrowLeft, X } from "lucide-react";
 
+import { CopyButton } from "@/features/agents/ui/CopyButton";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
   PROFILE_PANEL_VIEW_TITLES,
@@ -15,6 +16,8 @@ import { Button } from "@/shared/ui/button";
 export function getUserProfilePanelHeaderContent({
   agentSettingsMenu,
   effectivePubkey,
+  logCopyValue,
+  logSubtitle,
   onBack,
   onClose,
   view,
@@ -22,17 +25,24 @@ export function getUserProfilePanelHeaderContent({
 }: {
   agentSettingsMenu: ReactNode;
   effectivePubkey: string | null;
+  logCopyValue?: string | null;
+  logSubtitle?: string | null;
   onBack: () => void;
   onClose: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
+  const title = PROFILE_PANEL_VIEW_TITLES[view];
+  const shouldShowLogDetails =
+    (view === "diagnostics" || view === "logs") && Boolean(logSubtitle);
   const headerLeftContent = (
-    <AuxiliaryPanelHeaderGroup>
+    <AuxiliaryPanelHeaderGroup
+      className={shouldShowLogDetails ? "items-start" : undefined}
+    >
       {view !== "summary" ? (
         <Button
           aria-label="Back to profile"
-          className="shrink-0"
+          className={shouldShowLogDetails ? "mt-0.5 shrink-0" : "shrink-0"}
           data-testid="user-profile-panel-back"
           onClick={onBack}
           size="icon"
@@ -42,9 +52,21 @@ export function getUserProfilePanelHeaderContent({
           <ArrowLeft />
         </Button>
       ) : null}
-      <AuxiliaryPanelTitle>
-        {PROFILE_PANEL_VIEW_TITLES[view]}
-      </AuxiliaryPanelTitle>
+      {shouldShowLogDetails ? (
+        <div className="min-w-0 flex-1">
+          <AuxiliaryPanelTitle className="translate-y-0 leading-5">
+            {title}
+          </AuxiliaryPanelTitle>
+          <p
+            className="min-w-0 truncate font-mono text-2xs text-muted-foreground"
+            title={logSubtitle ?? undefined}
+          >
+            {logSubtitle}
+          </p>
+        </div>
+      ) : (
+        <AuxiliaryPanelTitle>{title}</AuxiliaryPanelTitle>
+      )}
     </AuxiliaryPanelHeaderGroup>
   );
   const headerActions = (
@@ -57,6 +79,16 @@ export function getUserProfilePanelHeaderContent({
         />
       ) : null}
       {view === "summary" ? agentSettingsMenu : null}
+      {shouldShowLogDetails ? (
+        <CopyButton
+          className="text-muted-foreground hover:text-foreground"
+          iconOnly
+          label="Copy log"
+          size="icon"
+          value={logCopyValue ?? ""}
+          variant="ghost"
+        />
+      ) : null}
       <Button
         aria-label="Close profile"
         data-testid="user-profile-panel-close"

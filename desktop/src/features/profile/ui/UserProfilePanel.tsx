@@ -35,6 +35,7 @@ import {
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import {
   duplicatePersonaDialogState,
@@ -785,17 +786,24 @@ export function UserProfilePanel({
     pubkey: effectivePubkey,
     relayAgent,
   });
+  const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
+  const managedAgentLogContent = managedAgentLogQuery.data?.content ?? null;
+  const logHeaderSubtitle =
+    isDiagnosticsLikeView && managedAgent
+      ? `${managedAgent.name} · ${describeLogFile(managedAgent.logPath)}`
+      : null;
   const { headerActions, headerLeftContent } = getUserProfilePanelHeaderContent(
     {
       agentSettingsMenu,
       effectivePubkey,
+      logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
+      logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),
       onClose,
       view,
       viewerIsOwner,
     },
   );
-  const isDiagnosticsLikeView = view === "diagnostics" || view === "logs";
 
   const profileBody = (
     <div
@@ -878,7 +886,7 @@ export function UserProfilePanel({
         <DiagnosticsFocusedView
           canOpenAgentLogs={canOpenAgentLogs}
           fields={diagnosticsFields}
-          logContent={managedAgentLogQuery.data?.content ?? null}
+          logContent={managedAgentLogContent}
           logError={
             managedAgentLogQuery.error instanceof Error
               ? managedAgentLogQuery.error
@@ -902,7 +910,7 @@ export function UserProfilePanel({
         <DiagnosticsFocusedView
           canOpenAgentLogs={canOpenAgentLogs}
           fields={[]}
-          logContent={managedAgentLogQuery.data?.content ?? null}
+          logContent={managedAgentLogContent}
           logError={
             managedAgentLogQuery.error instanceof Error
               ? managedAgentLogQuery.error

@@ -7,12 +7,14 @@ import { CopyButton } from "./CopyButton";
 import { describeLogFile } from "./agentUi";
 
 export function ManagedAgentLogPanel({
+  chrome = "framed",
   error,
   isLoading,
   logContent,
   selectedAgent,
   variant = "section",
 }: {
+  chrome?: "bare" | "framed";
   error: Error | null;
   isLoading: boolean;
   logContent: string | null;
@@ -20,6 +22,7 @@ export function ManagedAgentLogPanel({
   variant?: "inline" | "section";
 }) {
   const isInline = variant === "inline";
+  const isBare = chrome === "bare";
   const logFileLabel = selectedAgent
     ? describeLogFile(selectedAgent.logPath)
     : null;
@@ -67,39 +70,65 @@ export function ManagedAgentLogPanel({
       ) : isLoading ? (
         <div
           className={cn(
-            "overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100",
+            isBare
+              ? "overflow-hidden rounded-2xl bg-muted/20 text-xs text-foreground"
+              : "overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100",
             isInline ? "flex min-h-0 flex-1 flex-col" : "mt-4",
           )}
         >
-          <HarnessLogHeader
-            logContent={logContent ?? ""}
-            logFileLabel={logFileLabel ?? ""}
-            selectedAgent={selectedAgent}
-          />
+          {!isBare ? (
+            <HarnessLogHeader
+              logContent={logContent ?? ""}
+              logFileLabel={logFileLabel ?? ""}
+              selectedAgent={selectedAgent}
+            />
+          ) : null}
           <div className="p-4">
-            <Skeleton className="h-4 w-48 bg-white/10" />
-            <Skeleton className="mt-3 h-4 w-full bg-white/10" />
-            <Skeleton className="mt-2 h-4 w-full bg-white/10" />
-            <Skeleton className="mt-2 h-4 w-3/4 bg-white/10" />
+            <Skeleton
+              className={cn("h-4 w-48", isBare ? "bg-muted" : "bg-white/10")}
+            />
+            <Skeleton
+              className={cn(
+                "mt-3 h-4 w-full",
+                isBare ? "bg-muted" : "bg-white/10",
+              )}
+            />
+            <Skeleton
+              className={cn(
+                "mt-2 h-4 w-full",
+                isBare ? "bg-muted" : "bg-white/10",
+              )}
+            />
+            <Skeleton
+              className={cn(
+                "mt-2 h-4 w-3/4",
+                isBare ? "bg-muted" : "bg-white/10",
+              )}
+            />
           </div>
         </div>
       ) : (
         <div
           className={cn(
-            "overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100",
+            isBare
+              ? "overflow-hidden rounded-2xl bg-muted/20 text-xs text-foreground"
+              : "overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100",
             isInline && "flex min-h-0 flex-1 flex-col",
             !isInline && "mt-4",
           )}
         >
-          <HarnessLogHeader
-            logContent={logContent ?? ""}
-            logFileLabel={logFileLabel ?? ""}
-            selectedAgent={selectedAgent}
-          />
+          {!isBare ? (
+            <HarnessLogHeader
+              logContent={logContent ?? ""}
+              logFileLabel={logFileLabel ?? ""}
+              selectedAgent={selectedAgent}
+            />
+          ) : null}
           <pre
             className={cn(
               "overflow-auto whitespace-pre-wrap px-4 py-4",
               isInline ? "min-h-0 flex-1" : "max-h-88",
+              isBare && "font-mono",
             )}
             data-testid="managed-agent-log-content"
           >
