@@ -71,6 +71,8 @@ export function usePersonaActions() {
     React.useState<PersonaFeedbackSurface>("library");
   const [createdAgent, setCreatedAgent] =
     React.useState<CreateManagedAgentResponse | null>(null);
+  const [isPersonaSubmitPending, setIsPersonaSubmitPending] =
+    React.useState(false);
 
   const personas = personasQuery.data ?? [];
   const availableRuntimes = React.useMemo(
@@ -102,7 +104,12 @@ export function usePersonaActions() {
   }
 
   async function handleSubmit(input: CreatePersonaInput | UpdatePersonaInput) {
+    if (isPersonaSubmitPending) {
+      return;
+    }
+
     clearFeedback("library");
+    setIsPersonaSubmitPending(true);
     try {
       if ("id" in input) {
         await updatePersonaMutation.mutateAsync(input);
@@ -170,6 +177,8 @@ export function usePersonaActions() {
       setPersonaErrorMessage(
         error instanceof Error ? error.message : "Failed to save persona.",
       );
+    } finally {
+      setIsPersonaSubmitPending(false);
     }
   }
 
@@ -287,6 +296,7 @@ export function usePersonaActions() {
   }
 
   const isPending =
+    isPersonaSubmitPending ||
     createPersonaMutation.isPending ||
     createAgentMutation.isPending ||
     updatePersonaMutation.isPending ||
