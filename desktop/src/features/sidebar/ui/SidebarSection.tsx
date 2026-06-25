@@ -40,6 +40,8 @@ const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 const SIDEBAR_ROW_ACTION_VISIBILITY_CLASS =
   "group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 md:opacity-0";
+const SIDEBAR_ROW_ACTION_REPLACED_BADGE_CLASS =
+  "max-md:opacity-0 md:group-focus-within/menu-item:opacity-0 md:group-hover/menu-item:opacity-0";
 const SIDEBAR_ROW_ICON_ACTION_CLASS =
   "flex size-6 items-center justify-center p-1 text-sidebar-foreground/45 transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring peer-data-[active=true]/menu-button:text-sidebar-active-foreground/75 peer-data-[active=true]/menu-button:hover:text-sidebar-active-foreground [&>svg]:size-4 [&>svg]:shrink-0";
 
@@ -376,7 +378,10 @@ export function SidebarSection({
                     !(isActiveChannel && selectedChannelId === channel.id) ? (
                       <UnreadCountBadge
                         channelName={channel.name}
-                        className="absolute right-1 top-1/2 -translate-y-1/2"
+                        className={cn(
+                          "pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 transition-opacity",
+                          onHideDm && SIDEBAR_ROW_ACTION_REPLACED_BADGE_CLASS,
+                        )}
                         count={Math.max(
                           unreadChannelCounts.get(channel.id) ?? 0,
                           1,
