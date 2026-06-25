@@ -100,7 +100,7 @@ test("buildPersonaImportPlan detects avatar ref changes", () => {
 
 test("buildPersonaImportPlan ignores raw relative avatar refs", () => {
   const plan = buildPersonaImportPlan({
-    persona: createPersona({ avatarUrl: null }),
+    persona: createPersona({ avatarUrl: "https://old.example/avatar.png" }),
     preview: createPreview({ avatarRef: "./avatars/lep.png" }),
   });
 

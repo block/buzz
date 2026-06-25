@@ -126,7 +126,11 @@ export function buildPersonaImportPlan({
 
   const existingAvatar = normalizeOptionalText(persona.avatarUrl);
   const importedAvatar = normalizeOptionalText(importedAvatarUrl(preview));
-  if (existingAvatar !== importedAvatar) {
+  const hasUnusableAvatarRef =
+    !preview.avatarDataUrl &&
+    Boolean(preview.avatarRef?.trim()) &&
+    !importedAvatar;
+  if (!hasUnusableAvatarRef && existingAvatar !== importedAvatar) {
     fields.push({
       field: "avatarUrl",
       label: "Avatar",
