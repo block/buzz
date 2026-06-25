@@ -106,18 +106,18 @@ export function ChannelScreen({
     readStateVersion,
   } = useAppShell();
   const {
+    channelManagementOpen,
     clearMessageRouteTarget,
     openAgentSessionPubkey,
     openThreadHeadId,
     profilePanelPubkey,
     profilePanelView,
+    setChannelManagementOpen,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
     setProfilePanelPubkey,
     setProfilePanelView,
   } = useChannelPanelHistoryState();
-  const [isChannelManagementOpen, setIsChannelManagementOpen] =
-    React.useState(false);
   const {
     canReset: canResetThreadPanelWidth,
     onResetWidth: handleThreadPanelWidthReset,
@@ -507,6 +507,7 @@ export function ChannelScreen({
     handleOpenThread,
     managedAgents: activeChannelAgentSessionAgents,
     openAgentSessionPubkey,
+    setChannelManagementOpen,
     setExpandedThreadReplyIds,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
@@ -517,6 +518,7 @@ export function ChannelScreen({
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,
+      setChannelManagementOpen,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,
       setProfilePanelPubkey,
@@ -558,7 +560,6 @@ export function ChannelScreen({
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
       setEditTargetId(null);
-      setIsChannelManagementOpen(false);
     },
     [],
   );
@@ -626,7 +627,7 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
-      isChannelManagementOpen,
+      channelManagementOpen,
   );
   const displayedThreadHeadMessage =
     openThreadHeadMessage?.id === effectiveOpenThreadHeadId
@@ -689,7 +690,7 @@ export function ChannelScreen({
         setThreadReplyTargetId(null);
         handleCloseAgentSession();
         setProfilePanelPubkey(null);
-        setIsChannelManagementOpen(true);
+        setChannelManagementOpen(true);
       }}
       onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
       showHeaderContent={!isSinglePanelView}
@@ -728,7 +729,7 @@ export function ChannelScreen({
                   agentSessionAgents={channelAgentSessionAgents}
                   botTypingEntries={botTypingEntries}
                   channelFind={channelFind}
-                  channelManagementOpen={isChannelManagementOpen}
+                  channelManagementOpen={channelManagementOpen}
                   currentPubkey={currentPubkey}
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
@@ -762,7 +763,7 @@ export function ChannelScreen({
                   onCancelEdit={handleCancelEdit}
                   onCancelThreadReply={handleCancelThreadReply}
                   onChannelManagementDeleted={() => {
-                    setIsChannelManagementOpen(false);
+                    setChannelManagementOpen(false);
                     void goHome({ replace: true });
                   }}
                   onFollowThread={
@@ -779,7 +780,7 @@ export function ChannelScreen({
                   }
                   onCloseAgentSession={handleCloseAgentSession}
                   onCloseChannelManagement={() =>
-                    setIsChannelManagementOpen(false)
+                    setChannelManagementOpen(false)
                   }
                   onCloseThread={handleCloseThread}
                   onDelete={
