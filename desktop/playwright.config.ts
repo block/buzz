@@ -47,6 +47,7 @@ export default defineConfig({
         "**/sidebar-more-unread-overlap.spec.ts",
         "**/home-collapsed-top-chrome.spec.ts",
         "**/thread-unread.spec.ts",
+        "**/thread-reply-anchor-roleplay.spec.ts",
         "**/animated-avatar.spec.ts",
         "**/reminders.spec.ts",
         "**/virtualization.spec.ts",
