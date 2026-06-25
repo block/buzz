@@ -524,9 +524,13 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
 /// a domain allowlist. Without this, `buzz-cli` requests to the relay are blocked before
 /// they reach WARP or any other outbound network path.
 ///
-/// Returns `["-c", "network.enabled=true", "-c", "network.allowed_domains=[\"<host>\"]"]`
+/// Returns `["-c", "network_proxy.mode=\"full\"", "-c", "network_proxy.domains.\"<host>\"=\"allow\""]`
 /// for Codex agents, or an empty vec for non-Codex agents or when the hostname cannot
 /// be parsed from the relay URL.
+///
+/// The `network_proxy` keys map to `NetworkProxyConfigToml` in codex-acp's config schema:
+/// - `network_proxy.mode="full"` enables the managed proxy for all outbound traffic
+/// - `network_proxy.domains."<host>"="allow"` adds the relay hostname to the allowlist
 ///
 /// Handles `ws://`, `wss://`, `http://`, and `https://` schemes. Port is stripped —
 /// Codex's domain allowlist matches on hostname only.
@@ -556,9 +560,9 @@ pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
 
     vec![
         "-c".into(),
-        "network.enabled=true".into(),
+        "network_proxy.mode=\"full\"".into(),
         "-c".into(),
-        format!("network.allowed_domains=[\"{host}\"]"),
+        format!("network_proxy.domains.\"{host}\"=\"allow\""),
     ]
 }
 
@@ -1424,9 +1428,9 @@ mod tests {
             args,
             vec![
                 "-c",
-                "network.enabled=true",
+                "network_proxy.mode=\"full\"",
                 "-c",
-                "network.allowed_domains=[\"sprout-oss.stage.blox.sqprod.co\"]",
+                "network_proxy.domains.\"sprout-oss.stage.blox.sqprod.co\"=\"allow\"",
             ]
         );
     }
@@ -1438,9 +1442,9 @@ mod tests {
             args,
             vec![
                 "-c",
-                "network.enabled=true",
+                "network_proxy.mode=\"full\"",
                 "-c",
-                "network.allowed_domains=[\"localhost\"]",
+                "network_proxy.domains.\"localhost\"=\"allow\"",
             ]
         );
     }
@@ -1452,9 +1456,9 @@ mod tests {
             args,
             vec![
                 "-c",
-                "network.enabled=true",
+                "network_proxy.mode=\"full\"",
                 "-c",
-                "network.allowed_domains=[\"relay.example.com\"]",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
             ]
         );
     }
@@ -1466,9 +1470,9 @@ mod tests {
             args,
             vec![
                 "-c",
-                "network.enabled=true",
+                "network_proxy.mode=\"full\"",
                 "-c",
-                "network.allowed_domains=[\"relay.example.com\"]",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
             ]
         );
     }
@@ -1481,9 +1485,9 @@ mod tests {
             args,
             vec![
                 "-c",
-                "network.enabled=true",
+                "network_proxy.mode=\"full\"",
                 "-c",
-                "network.allowed_domains=[\"relay.example.com\"]",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
             ]
         );
     }
@@ -1497,9 +1501,9 @@ mod tests {
             args,
             vec![
                 "-c",
-                "network.enabled=true",
+                "network_proxy.mode=\"full\"",
                 "-c",
-                "network.allowed_domains=[\"relay.example.com\"]",
+                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
             ]
         );
     }
