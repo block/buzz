@@ -1,0 +1,410 @@
+theory MultiTenantAuth
+begin
+
+builtins: signing, hashing
+
+// ============================================================================
+// Multi-tenant relay auth/key/audit model (draft skeleton)
+// ============================================================================
+//
+// This model covers the symbolic security surface for the multi-tenant relay:
+// NIP-98 minting, stamped bearer-token use, per-community signing keys, and
+// independent per-community audit chains. It intentionally follows the house
+// style of crates/buzz-core/src/pairing/NIP-AB.spthy: explicit adversary/leak
+// rules, action facts for theorem statements, and reachability / anti-vacuity
+// lemmas near the bottom.
+//
+// Final theorem wording is expected to be tightened by the prose contract in
+// docs/multi-tenant-relay.md. Until then these lemmas are the intended shape,
+// not the final public statement.
+
+// Tamarin has no primitive != in lemma conclusions; model inequality through an
+// action fact guarded by a global restriction. Rules emit Neq(x,y) only at the
+// comparison point relevant to the counterexample.
+restriction Inequality:
+  "All x #i. Neq(x, x) @ i ==> F"
+
+restriction Equality:
+  "All x y #i. Eq(x, y) @ i ==> x = y"
+
+// ============================================================================
+// Setup: communities, channels, clients
+// ============================================================================
+
+rule Create_Community:
+  [ Fr(~comm), Fr(~sk_comm) ]
+  --[
+      CommunityCreated(~comm, pk(~sk_comm))
+    ]->
+  [
+      !Community(~comm),
+      !CommunitySigningKey(~comm, ~sk_comm),
+      AuditHead(~comm, 'genesis')
+  ]
+
+rule Register_Channel:
+  [ !Community(comm), Fr(~chan) ]
+  --[
+      ChannelRegistered(~chan, comm)
+    ]->
+  [
+      !ChannelCommunity(~chan, comm),
+      Out(~chan)
+  ]
+
+rule Register_Client:
+  [ Fr(~sk_client) ]
+  --[
+      ClientRegistered(pk(~sk_client))
+    ]->
+  [
+      !ClientPublic(pk(~sk_client)),
+      !ClientSecret(pk(~sk_client), ~sk_client),
+      Out(pk(~sk_client))
+  ]
+
+rule Compromise_Client_Key:
+  [ !ClientSecret(client, sk) ]
+  --[
+      ClientKeyCompromised(client)
+    ]->
+  [ Out(sk) ]
+
+// ============================================================================
+// NIP-98 minting
+// ============================================================================
+
+// A single wire constructor models all mint requests. The requested channel set
+// is bounded to two slots for model finiteness; a one-channel mint is represented
+// as (chanA = chanB). This avoids proving S2 only for a special "multi" shape:
+// acceptance vs rejection is forced solely by server-side resolution of the
+// requested channels, not by which constructor the client chose.
+//
+// The client signs a kind:27235 event binding URL, method, payload hash,
+// freshness bucket, and the full requested channel set. Freshness is abstracted
+// as a relay-accepted time bucket; exact ±60s wall-clock arithmetic is a prose
+// / implementation axiom under P3.
+rule Client_Sends_NIP98_Mint:
+  [ !ClientSecret(client, sk),
+    !ChannelCommunity(chanA, commA),
+    !ChannelCommunity(chanB, commB),
+    Fr(~url), Fr(~body), Fr(~time) ]
+  --[
+      NIP98MintRequested(h(< client, ~url, h(~body), ~time, chanA, chanB >),
+                         client, chanA, commA, chanB, commB)
+    ]->
+  [
+      Out(
+        < 'nip98_mint',
+          client,
+          ~url,
+          'POST',
+          h(~body),
+          ~time,
+          chanA,
+          chanB,
+          sign(< 'kind27235', client, ~url, 'POST', h(~body), ~time, chanA, chanB >, sk)
+        >
+      )
+  ]
+
+// Successful mint: both requested channels resolve to the same community. The
+// stamped community is a fact on the token term (`!Token(tok, client, comm)`) and
+// each requested channel is recorded as resolving to that stamp.
+rule Relay_Mints_Token_All_Channels_Same_Community:
+  [ In(
+      < 'nip98_mint',
+        client,
+        url,
+        'POST',
+        payload_hash,
+        time,
+        chanA,
+        chanB,
+        sig
+      >
+    ),
+    !ClientPublic(client),
+    !ChannelCommunity(chanA, comm),
+    !ChannelCommunity(chanB, comm),
+    Fr(~tok)
+  ]
+  --[
+      Eq(verify(sig, < 'kind27235', client, url, 'POST', payload_hash, time, chanA, chanB >, client), true),
+      AllResolveSame(h(< client, url, payload_hash, time, chanA, chanB >), comm, chanA, chanB),
+      NIP98Accepted(h(< client, url, payload_hash, time, chanA, chanB >), client, comm, chanA),
+      NIP98Accepted(h(< client, url, payload_hash, time, chanA, chanB >), client, comm, chanB),
+      TokenMinted(~tok, client, comm),
+      TokenMintedForRequest(~tok, h(< client, url, payload_hash, time, chanA, chanB >), client, comm),
+      TokenStamped(~tok, comm),
+      MintChannel(~tok, chanA, comm),
+      MintChannel(~tok, chanB, comm),
+      RequestChannel(h(< client, url, payload_hash, time, chanA, chanB >), chanA, comm),
+      RequestChannel(h(< client, url, payload_hash, time, chanA, chanB >), chanB, comm)
+    ]->
+  [
+      !Token(~tok, client, comm),
+      Out(~tok)
+  ]
+
+// Failed mint: the same wire constructor, same signed shape, but the server-side
+// resolver finds two different communities. This emits a rejection witness and
+// produces no token. S2 is therefore about resolution, not about the client
+// selecting a special "cross-community" event type.
+rule Relay_Rejects_Mint_Channels_Resolve_Differently:
+  [ In(
+      < 'nip98_mint',
+        client,
+        url,
+        'POST',
+        payload_hash,
+        time,
+        chanA,
+        chanB,
+        sig
+      >
+    ),
+    !ClientPublic(client),
+    !ChannelCommunity(chanA, commA),
+    !ChannelCommunity(chanB, commB)
+  ]
+  --[
+      Eq(verify(sig, < 'kind27235', client, url, 'POST', payload_hash, time, chanA, chanB >, client), true),
+      Neq(commA, commB),
+      ChannelsResolveDifferently(h(< client, url, payload_hash, time, chanA, chanB >), commA, commB, chanA, chanB),
+      CrossCommunityMintRejected(h(< client, url, payload_hash, time, chanA, chanB >), client, commA, commB, chanA, chanB)
+    ]->
+  [ ]
+
+rule Leak_Token:
+  [ !Token(tok, client, comm) ]
+  --[
+      TokenLeaked(tok, client, comm)
+    ]->
+  [ Out(tok) ]
+
+// ============================================================================
+// Token use
+// ============================================================================
+
+// Token use resolves the target community server-side from the requested channel.
+// There is intentionally no client-supplied community or h-tag in this rule.
+rule Use_Token:
+  [ In(tok), !Token(tok, client, comm), !ChannelCommunity(chan, comm) ]
+  --[
+      ActionAuthorized(tok, client, comm, chan),
+      TokenUsedForCommunity(tok, comm)
+    ]->
+  [ ]
+
+// Non-vacuity mutation for S1 (DO NOT ENABLE in the real model): this is the
+// tempting confused-deputy bug where the relay authorizes from a client-supplied
+// claimed community / h-tag rather than from `!ChannelCommunity(chan, comm)`.
+//
+// rule MUTATION_Use_Token_Claimed_Community:
+//   [ In(< tok, claimed_comm >), !Token(tok, client, minted_comm) ]
+//   --[
+//       Neq(minted_comm, claimed_comm),
+//       ActionAuthorized(tok, client, claimed_comm, 'attacker-chosen-channel'),
+//       TokenUsedForCommunity(tok, claimed_comm)
+//     ]->
+//   [ ]
+//
+// Expected mutation result: `token_confinement` goes red with a trace containing
+// TokenMinted(tok, client, minted_comm) and ActionAuthorized(..., claimed_comm,
+// ...) under Neq(minted_comm, claimed_comm). Confirmed by uncommenting this
+// rule and running `tamarin-prover --prove=token_confinement`: falsified with a
+// 15-step trace on Tamarin 1.12.0 / Maude 3.5.1.
+
+// Probe rule: the adversary can try to use a token against a channel in another
+// community; the real model records the attempt but does not authorize it.
+rule Probe_Cross_Community_Token_Use:
+  [ In(tok), !Token(tok, client, minted_comm), !ChannelCommunity(chan, resolved_comm) ]
+  --[
+      Neq(minted_comm, resolved_comm),
+      CrossCommunityUseAttempt(tok, client, minted_comm, resolved_comm, chan)
+    ]->
+  [ ]
+
+// ============================================================================
+// Per-community signing keys
+// ============================================================================
+//
+// NIP-29 grounding: relay-signed `39000`/`39001`/`39002` discovery/system events
+// are community-scoped even when group ids collide. The signed preimage commits
+// to (event kind, community id, group id, payload), so a B-key-signed metadata,
+// admin-list, or member-list event cannot be replayed as an A event.
+
+rule Community_Signs_NIP29_System_Event:
+  [ !CommunitySigningKey(comm, sk), Fr(~group), Fr(~payload) ]
+  --[
+      SystemEventSigned(comm, '39000', ~group, h(~payload)),
+      SystemEventSigned(comm, '39001', ~group, h(~payload)),
+      SystemEventSigned(comm, '39002', ~group, h(~payload))
+    ]->
+  [
+      Out(< 'system_event', '39000', comm, ~group, h(~payload),
+            sign(< 'system_event', '39000', comm, ~group, h(~payload) >, sk) >),
+      Out(< 'system_event', '39001', comm, ~group, h(~payload),
+            sign(< 'system_event', '39001', comm, ~group, h(~payload) >, sk) >),
+      Out(< 'system_event', '39002', comm, ~group, h(~payload),
+            sign(< 'system_event', '39002', comm, ~group, h(~payload) >, sk) >)
+  ]
+
+rule Relay_Accepts_System_Event:
+  [ In(< 'system_event', kind, comm, group, msg,
+         sign(< 'system_event', kind, comm, group, msg >, sk) >),
+    !CommunitySigningKey(comm, sk)
+  ]
+  --[
+      SystemEventAccepted(comm, kind, group, msg)
+    ]->
+  [ ]
+
+rule Compromise_Community_Signing_Key:
+  [ !CommunitySigningKey(comm, sk) ]
+  --[
+      CommunityKeyCompromised(comm)
+    ]->
+  [ Out(sk) ]
+
+// ============================================================================
+// Independent per-community audit chains
+// ============================================================================
+//
+// Target shape, not today's implementation: current `buzz-audit` has one global
+// chain (`buzz-audit/src/service.rs` reads the latest global hash). Multi-tenant
+// safety requires N independent community-labeled heads so the spec's
+// Implementation Correspondence section can track replacing the global chain.
+
+rule Append_Audit:
+  [ AuditHead(comm, prev), Fr(~seq), Fr(~entry) ]
+  --[
+      AuditEntryCreated(comm, ~seq, prev, h(< 'audit', comm, ~seq, prev, ~entry >)),
+      AuditAppended(comm, prev, h(< 'audit', comm, ~seq, prev, ~entry >)),
+      AuditHeadAdvanced(comm, prev, h(< 'audit', comm, ~seq, prev, ~entry >))
+    ]->
+  [
+      AuditHead(comm, h(< 'audit', comm, ~seq, prev, ~entry >)),
+      Out(h(< 'audit', comm, ~seq, prev, ~entry >))
+  ]
+
+rule Probe_Audit_Cross_Community_Splice:
+  [ AuditHead(commA, prevA), AuditHead(commB, prevB), Fr(~seq), Fr(~entry) ]
+  --[
+      Neq(commA, commB),
+      CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, h(< 'audit', commA, ~seq, prevB, ~entry >))
+    ]->
+  [ ]
+
+// ============================================================================
+// Draft security lemmas
+// ============================================================================
+
+lemma executable_core_flow:
+  exists-trace
+  "Ex tok client comm chan #i #j.
+      TokenMinted(tok, client, comm) @ i
+    & ActionAuthorized(tok, client, comm, chan) @ j
+    & #i < #j"
+
+lemma executable_cross_community_mint_rejection:
+  exists-trace
+  "Ex req client commA commB chanA chanB #i.
+      CrossCommunityMintRejected(req, client, commA, commB, chanA, chanB) @ i"
+
+// S1: token use is confined to the token's stamped community. This remains true
+// even when `Leak_Token` makes the bearer token known to the adversary.
+lemma token_confinement:
+  "All tok client minted_comm used_comm chan #i #j.
+      TokenMinted(tok, client, minted_comm) @ i
+    & ActionAuthorized(tok, client, used_comm, chan) @ j
+    ==> minted_comm = used_comm"
+
+lemma leaked_token_blast_radius_contained:
+  "All tok client minted_comm used_comm chan #i #j.
+      TokenLeaked(tok, client, minted_comm) @ i
+    & ActionAuthorized(tok, client, used_comm, chan) @ j
+    ==> minted_comm = used_comm"
+
+lemma cross_community_use_attempts_are_not_authorized:
+  "All tok client minted_comm resolved_comm chan #i.
+      CrossCommunityUseAttempt(tok, client, minted_comm, resolved_comm, chan) @ i
+    ==> not (Ex #j. ActionAuthorized(tok, client, resolved_comm, chan) @ j)"
+
+// S2: every minted token has exactly one stamped community, and every requested
+// channel recorded for that mint resolved to that stamp.
+lemma minted_token_channels_match_stamp:
+  "All tok client comm chan chan_comm #i #j.
+      TokenMinted(tok, client, comm) @ i
+    & MintChannel(tok, chan, chan_comm) @ j
+    ==> comm = chan_comm"
+
+lemma minted_request_channels_match_stamp:
+  "All tok req client comm chan chan_comm #i #j #k.
+      TokenMintedForRequest(tok, req, client, comm) @ i
+    & RequestChannel(req, chan, chan_comm) @ j
+    & TokenStamped(tok, comm) @ k
+    ==> comm = chan_comm"
+
+lemma token_stamp_matches_mint:
+  "All tok client comm stamp #i #j.
+      TokenMinted(tok, client, comm) @ i
+    & TokenStamped(tok, stamp) @ j
+    ==> comm = stamp"
+
+lemma cross_community_mint_yields_no_token_for_that_request:
+  "All req client commA commB chanA chanB #i.
+      CrossCommunityMintRejected(req, client, commA, commB, chanA, chanB) @ i
+    ==> not (Ex tok comm #j. TokenMintedForRequest(tok, req, client, comm) @ j)"
+
+// S3 shape: accepting an event for community A requires A's signing key, unless
+// A's signing key has been compromised. Compromise of another community's key is
+// not sufficient because the signed preimage includes the community id.
+lemma system_event_acceptance_requires_same_community_key_or_compromise:
+  "All comm kind group msg #i.
+      SystemEventAccepted(comm, kind, group, msg) @ i
+    ==> (Ex #j. SystemEventSigned(comm, kind, group, msg) @ j & #j < #i)
+      | (Ex #k. CommunityKeyCompromised(comm) @ k & #k < #i)"
+
+lemma other_community_key_compromise_does_not_authorize:
+  "All commA commB kind group msg #i #j.
+      CommunityKeyCompromised(commB) @ i
+    & SystemEventAccepted(commA, kind, group, msg) @ j
+    & Neq(commA, commB) @ i
+    ==> (Ex #k. SystemEventSigned(commA, kind, group, msg) @ k & #k < #j)
+      | (Ex #l. CommunityKeyCompromised(commA) @ l & #l < #j)"
+
+// S4 shape: every audit append advances a head for the same community and the
+// next hash binds that community id, so another community's head cannot be used
+// as a splice without changing the hash/preimage.
+lemma audit_append_advances_same_community_head:
+  "All comm prev next #i.
+      AuditAppended(comm, prev, next) @ i
+    ==> AuditHeadAdvanced(comm, prev, next) @ i"
+
+lemma cross_community_audit_splice_attempt_is_not_append:
+  "All commA commB prevA prevB forged #i.
+      CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, forged) @ i
+    ==> not (Ex #j. AuditAppended(commA, prevB, forged) @ j)"
+
+// Reachability / anti-vacuity probes.
+lemma executable_token_leak:
+  exists-trace
+  "Ex tok client comm #i. TokenLeaked(tok, client, comm) @ i"
+
+lemma leaked_token_can_authorize_within_its_community:
+  exists-trace
+  "Ex tok client comm chan #i #j.
+      TokenLeaked(tok, client, comm) @ i
+    & ActionAuthorized(tok, client, comm, chan) @ j"
+
+lemma executable_signing_key_compromise:
+  exists-trace
+  "Ex comm #i. CommunityKeyCompromised(comm) @ i"
+
+lemma executable_audit_append:
+  exists-trace
+  "Ex comm prev next #i. AuditAppended(comm, prev, next) @ i"
+
+end
