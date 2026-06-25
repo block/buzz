@@ -17,16 +17,14 @@ import { toast } from "sonner";
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { getPresenceLabel } from "@/features/presence/lib/presence";
-import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type {
   useFollowMutation,
   useUnfollowMutation,
   useUserProfileQuery,
 } from "@/features/profile/hooks";
+import { AgentWorkingBadge } from "@/features/profile/ui/AgentWorkingBadge";
 import {
   type ProfileField,
   ProfileFieldGroup,
@@ -38,7 +36,8 @@ import {
   ProfileRuntimeTabContent,
   ProfileTabBar,
 } from "@/features/profile/ui/UserProfilePanelTabs";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { ProfileAvatarWithPresence } from "@/features/profile/ui/ProfileAvatarWithPresence";
+import { ProfilePanelSurface } from "@/features/profile/ui/ProfilePanelPrimitives";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
@@ -48,7 +47,6 @@ import type {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
-import { useNow } from "@/shared/lib/useNow";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -348,12 +346,13 @@ export function ProfileSummaryView({
       {activeTurns.length > 0 ? (
         <div className="flex flex-wrap justify-center gap-1.5">
           {activeTurns.map(({ channelId, anchorAt }) => (
-            <ProfileWorkingBadge
-              key={channelId}
-              channelId={channelId}
-              name={channelIdToName[channelId] ?? channelId}
+            <AgentWorkingBadge
               anchorAt={anchorAt}
+              channelId={channelId}
+              key={channelId}
+              name={channelIdToName[channelId] ?? channelId}
               onNavigate={goChannel}
+              variant="panel"
             />
           ))}
         </div>
@@ -415,32 +414,6 @@ export function ProfileSummaryView({
   );
 }
 
-function ProfileWorkingBadge({
-  channelId,
-  name,
-  anchorAt,
-  onNavigate,
-}: {
-  channelId: string;
-  name: string;
-  anchorAt: number;
-  onNavigate: (channelId: string) => void;
-}) {
-  const now = useNow(1000);
-
-  return (
-    <Badge
-      className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
-      variant="default"
-      onClick={() => onNavigate(channelId)}
-    >
-      Working in #{name} · {formatElapsed(now - anchorAt)}
-    </Badge>
-  );
-}
-
-// ── Hero & metadata ──────────────────────────────────────────────────────────
-
 function ProfileHero({
   displayName,
   isBot,
@@ -456,26 +429,18 @@ function ProfileHero({
 }) {
   return (
     <div className="flex flex-col items-center gap-3 text-center">
-      <div className="relative">
-        <ProfileAvatar
-          avatarUrl={profile?.avatarUrl ?? null}
-          className="h-20 w-20 text-xl"
-          iconClassName="h-8 w-8"
-          label={displayName}
-          plain
-          testId="user-profile-avatar"
-        />
-        {presenceStatus ? (
-          <span
-            aria-label={getPresenceLabel(presenceStatus)}
-            className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full bg-background"
-            data-testid="user-profile-presence-badge"
-            role="img"
-          >
-            <PresenceDot className="h-3.5 w-3.5" status={presenceStatus} />
-          </span>
-        ) : null}
-      </div>
+      <ProfileAvatarWithPresence
+        avatarUrl={profile?.avatarUrl ?? null}
+        className="h-20 w-20 text-xl"
+        iconClassName="h-8 w-8"
+        label={displayName}
+        plain
+        presenceClassName="bottom-0 right-0 h-6 w-6"
+        presenceDotClassName="h-3.5 w-3.5"
+        presenceStatus={presenceStatus}
+        presenceTestId="user-profile-presence-badge"
+        testId="user-profile-avatar"
+      />
 
       <div className="flex flex-col items-center gap-1">
         <div className="flex items-center justify-center gap-2">
@@ -808,28 +773,29 @@ export function ChannelsFocusedView({
           No visible channel memberships.
         </p>
       ) : (
-        <ul
-          className="overflow-hidden rounded-2xl bg-muted/20"
-          data-testid="user-profile-channels-list"
-        >
-          {channels.map((channel) => (
-            <li key={channel.id}>
-              <button
-                aria-label={`Open #${channel.name}`}
-                className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
-                data-testid={`user-profile-channel-link-${channel.name}`}
-                onClick={() => onOpenChannel(channel.id)}
-                type="button"
-              >
-                <span className="min-w-0 flex-1 truncate">#{channel.name}</span>
-                <ArrowUpRight
-                  aria-hidden="true"
-                  className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-                />
-              </button>
-            </li>
-          ))}
-        </ul>
+        <ProfilePanelSurface testId="user-profile-channels-list">
+          <ul>
+            {channels.map((channel) => (
+              <li key={channel.id}>
+                <button
+                  aria-label={`Open #${channel.name}`}
+                  className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
+                  data-testid={`user-profile-channel-link-${channel.name}`}
+                  onClick={() => onOpenChannel(channel.id)}
+                  type="button"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    #{channel.name}
+                  </span>
+                  <ArrowUpRight
+                    aria-hidden="true"
+                    className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+                  />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </ProfilePanelSurface>
       )}
     </div>
   );

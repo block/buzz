@@ -15,6 +15,7 @@ import {
   useUserSearchQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { ProfileListIdentity } from "@/features/profile/ui/ProfileListIdentity";
 import { truncatePubkey } from "@/features/profile/lib/identity";
 import {
   getKeyboardSearchSelection,
@@ -733,37 +734,14 @@ export function NewDirectMessageDialog({
                           label={formatUserName(user)}
                         />
                         <div className="pointer-events-none relative z-10 min-w-0 flex-1">
-                          {user.isAgent ? (
-                            <div className="relative min-w-0">
-                              <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
-                                <span className="truncate text-sm font-medium tracking-tight">
-                                  {formatUserName(user)}
-                                </span>
-                                <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                                  <Bot
-                                    aria-hidden="true"
-                                    className="h-3 w-3"
-                                    data-testid="new-dm-agent-icon"
-                                  />
-                                  agent
-                                </span>
-                              </div>
-                              {ownerLabel ? (
-                                <span className="block truncate text-xs text-muted-foreground transition-opacity duration-150 ease-out group-hover/dm-result:opacity-0 group-focus-within/dm-result:opacity-0">
-                                  owned by {ownerLabel}
-                                </span>
-                              ) : null}
-                              <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100">
-                                <span className="truncate font-mono text-sm text-muted-foreground">
-                                  {truncatePubkey(user.pubkey)}
-                                </span>
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="block truncate text-sm font-medium tracking-tight">
-                              {formatUserName(user)}
-                            </span>
-                          )}
+                          <ProfileListIdentity
+                            agentIconTestId="new-dm-agent-icon"
+                            hoverGroup="dm-result"
+                            isAgent={user.isAgent}
+                            label={formatUserName(user)}
+                            ownerLabel={ownerLabel}
+                            pubkey={user.pubkey}
+                          />
                         </div>
                         <Button
                           aria-label={`Add ${formatUserName(user)}`}

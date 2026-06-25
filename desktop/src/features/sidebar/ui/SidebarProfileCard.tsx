@@ -1,9 +1,7 @@
 import * as React from "react";
 
-import { getPresenceLabel } from "@/features/presence/lib/presence";
-import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { useSelfProfileCache } from "@/features/profile/hooks";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { ProfileAvatarWithPresence } from "@/features/profile/ui/ProfileAvatarWithPresence";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Workspace } from "@/features/workspaces/types";
@@ -102,22 +100,18 @@ export function SidebarProfileCard({
           }}
           type="button"
         >
-          <ProfileAvatar
+          <ProfileAvatarWithPresence
             avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
             avatarUrl={profile?.avatarUrl ?? null}
             className="h-8 w-8 text-xs"
             iconClassName="h-4 w-4"
             label={resolvedDisplayName}
+            presenceClassName="-bottom-0.5 -right-0.5 h-3.5 w-3.5 bg-sidebar"
+            presenceDotClassName="h-2 w-2"
+            presenceStatus={selfPresenceStatus}
+            presenceTestId="self-presence-badge"
             testId="sidebar-profile-avatar"
           />
-          <span
-            aria-label={getPresenceLabel(selfPresenceStatus)}
-            className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-sidebar"
-            data-testid="self-presence-badge"
-            role="img"
-          >
-            <PresenceDot className="h-2 w-2" status={selfPresenceStatus} />
-          </span>
         </button>
 
         <div className="min-w-0 flex-1">

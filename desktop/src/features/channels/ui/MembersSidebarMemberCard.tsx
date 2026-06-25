@@ -1,6 +1,5 @@
 import {
   Activity,
-  Bot,
   Ellipsis,
   Pencil,
   Play,
@@ -14,9 +13,8 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import { ProfileAvatarWithPresence } from "@/features/profile/ui/ProfileAvatarWithPresence";
+import { ProfileListIdentity } from "@/features/profile/ui/ProfileListIdentity";
 import type {
   ChannelMember,
   ManagedAgent,
@@ -126,52 +124,24 @@ export function MembersSidebarMemberCard({
 
   const memberIdentity = (
     <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-3">
-      <div className="relative shrink-0">
-        <ProfileAvatar
-          avatarUrl={profileAvatarUrl ?? null}
-          className="h-8 w-8 text-xs shadow-none"
-          iconClassName="h-4 w-4"
-          label={memberAvatarLabel}
-        />
-        {presenceStatus ? (
-          <span
-            className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background"
-            data-testid={`sidebar-member-presence-${member.pubkey}`}
-          >
-            <PresenceDot className="h-2 w-2" status={presenceStatus} />
-          </span>
-        ) : null}
-      </div>
+      <ProfileAvatarWithPresence
+        avatarUrl={profileAvatarUrl ?? null}
+        className="h-8 w-8 text-xs shadow-none"
+        iconClassName="h-4 w-4"
+        label={memberAvatarLabel}
+        presenceClassName="-bottom-0.5 -right-0.5 h-3.5 w-3.5 bg-background"
+        presenceDotClassName="h-2 w-2"
+        presenceStatus={presenceStatus ?? undefined}
+        presenceTestId={`sidebar-member-presence-${member.pubkey}`}
+      />
       <div className="min-w-0 flex-1">
-        {memberIsBot ? (
-          <div className="relative min-w-0">
-            <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
-              <span className="truncate text-sm font-medium tracking-tight">
-                {memberLabel}
-              </span>
-              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                <Bot aria-hidden="true" className="h-4 w-4" />
-                {roleLabel}
-              </span>
-            </div>
-            <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
-              <span className="truncate font-mono text-sm text-muted-foreground">
-                {truncatePubkey(member.pubkey)}
-              </span>
-            </span>
-          </div>
-        ) : (
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="truncate text-sm font-medium tracking-tight">
-              {memberLabel}
-            </span>
-            {roleLabel ? (
-              <span className="inline-flex shrink-0 items-center text-xs text-muted-foreground">
-                {roleLabel}
-              </span>
-            ) : null}
-          </div>
-        )}
+        <ProfileListIdentity
+          agentIconClassName="h-4 w-4"
+          isAgent={memberIsBot}
+          label={memberLabel}
+          pubkey={member.pubkey}
+          roleLabel={roleLabel}
+        />
         {managedAgent ? (
           <span
             className="sr-only"

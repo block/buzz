@@ -4,7 +4,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { ProfileIdentityTrigger } from "@/features/profile/ui/ProfileIdentityTrigger";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
   getThreadReplyAvatarCenterRem,
@@ -621,39 +621,31 @@ export const MessageRow = React.memo(
           {isThreadReplyLayout ? (
             <>
               {message.pubkey ? (
-                <UserProfilePopover
-                  pubkey={message.pubkey}
-                  role={message.role}
+                <ProfileIdentityTrigger
                   botIdenticonValue={message.author}
+                  buttonClassName={cn(
+                    "flex shrink-0 items-start",
+                    avatarButtonRadiusClass,
+                  )}
+                  pubkey={message.pubkey}
+                  authorRole={message.role}
                 >
-                  <button
-                    className={cn(
-                      "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                      avatarButtonRadiusClass,
-                    )}
-                    type="button"
-                  >
-                    {avatarNode}
-                  </button>
-                </UserProfilePopover>
+                  {avatarNode}
+                </ProfileIdentityTrigger>
               ) : (
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <MessageHeaderRow>
                   {message.pubkey ? (
-                    <UserProfilePopover
-                      pubkey={message.pubkey}
-                      role={message.role}
+                    <ProfileIdentityTrigger
                       botIdenticonValue={message.author}
+                      buttonClassName="truncate rounded leading-4"
+                      pubkey={message.pubkey}
+                      authorRole={message.role}
                     >
-                      <button
-                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                        type="button"
-                      >
-                        {authorNode}
-                      </button>
-                    </UserProfilePopover>
+                      {authorNode}
+                    </ProfileIdentityTrigger>
                   ) : (
                     authorNode
                   )}
@@ -671,39 +663,31 @@ export const MessageRow = React.memo(
           ) : (
             <>
               {message.pubkey ? (
-                <UserProfilePopover
-                  pubkey={message.pubkey}
-                  role={message.role}
+                <ProfileIdentityTrigger
                   botIdenticonValue={message.author}
+                  buttonClassName={cn(
+                    "flex shrink-0 items-start",
+                    avatarButtonRadiusClass,
+                  )}
+                  pubkey={message.pubkey}
+                  authorRole={message.role}
                 >
-                  <button
-                    className={cn(
-                      "flex shrink-0 items-start focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                      avatarButtonRadiusClass,
-                    )}
-                    type="button"
-                  >
-                    {avatarNode}
-                  </button>
-                </UserProfilePopover>
+                  {avatarNode}
+                </ProfileIdentityTrigger>
               ) : (
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <MessageHeaderRow>
                   {message.pubkey ? (
-                    <UserProfilePopover
-                      pubkey={message.pubkey}
-                      role={message.role}
+                    <ProfileIdentityTrigger
                       botIdenticonValue={message.author}
+                      buttonClassName="truncate rounded leading-4"
+                      pubkey={message.pubkey}
+                      authorRole={message.role}
                     >
-                      <button
-                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                        type="button"
-                      >
-                        {authorNode}
-                      </button>
-                    </UserProfilePopover>
+                      {authorNode}
+                    </ProfileIdentityTrigger>
                   ) : (
                     authorNode
                   )}

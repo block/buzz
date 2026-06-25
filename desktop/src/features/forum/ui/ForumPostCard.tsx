@@ -5,7 +5,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { ProfileIdentityTrigger } from "@/features/profile/ui/ProfileIdentityTrigger";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { ForumPost } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -79,21 +79,19 @@ export function ForumPostCard({
       <div className="flex items-center gap-2">
         {/* biome-ignore lint/a11y/noStaticElementInteractions: presentation wrapper stops click propagation to parent card */}
         <div onClick={(e) => e.stopPropagation()} role="presentation">
-          <UserProfilePopover pubkey={post.pubkey}>
-            <button
-              className="flex items-center gap-2 rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              <UserAvatar
-                avatarUrl={avatarUrl}
-                displayName={authorLabel}
-                size="sm"
-              />
-              <span className="truncate text-sm font-medium text-foreground hover:underline">
-                {authorLabel}
-              </span>
-            </button>
-          </UserProfilePopover>
+          <ProfileIdentityTrigger
+            buttonClassName="flex items-center gap-2 rounded-lg"
+            pubkey={post.pubkey}
+          >
+            <UserAvatar
+              avatarUrl={avatarUrl}
+              displayName={authorLabel}
+              size="sm"
+            />
+            <span className="truncate text-sm font-medium text-foreground hover:underline">
+              {authorLabel}
+            </span>
+          </ProfileIdentityTrigger>
         </div>
         <span className="text-xs text-muted-foreground">
           {formatRelativeTime(post.createdAt)}
