@@ -111,7 +111,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 suggestion.notInChannel ? (
                   <span
                     className={cn(
-                      "flex min-w-0 items-center gap-1.5 text-[11px] leading-none",
+                      "flex min-w-0 items-center gap-1.5 text-2xs leading-none",
                       index === selectedIndex
                         ? "text-accent-foreground/60"
                         : "text-muted-foreground",
