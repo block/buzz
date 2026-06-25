@@ -6,12 +6,13 @@
 //! stored — the same pattern used by Goose.
 //!
 //! The chosen backend is selected at compile time by the per-target feature in
-//! `Cargo.toml`. On macOS the modern Data Protection Keychain API is used;
-//! unsigned dev builds (which lack the hardened-runtime entitlement) fall back
-//! to the legacy `keyring` crate automatically. Windows and Linux use the
-//! `keyring` crate directly. The `system-keyring` feature gates the whole
-//! store; when it is off, [`SecretStore`] is unusable and callers fall back to
-//! their own `0o600` file storage.
+//! `Cargo.toml`. On macOS the legacy `keyring` crate (SecKeychain API) is used
+//! for the blob entry so that signed release builds and unsigned dev builds
+//! share the same store. DPK (Data Protection Keychain) is used only by the
+//! one-time migration path that reads old per-key entries written by #1264.
+//! Windows and Linux use the `keyring` crate directly. The `system-keyring`
+//! feature gates the whole store; when it is off, [`SecretStore`] is unusable
+//! and callers fall back to their own `0o600` file storage.
 //!
 //! The store is deliberately NOT on any env-read path. `BUZZ_PRIVATE_KEY`
 //! resolution for harnessed agents and CI is handled upstream (an env
@@ -85,8 +86,7 @@ fn keyring_entry(service: &str, key: &str) -> Result<keyring::Entry, keyring::Er
 use security_framework::base::Error as SFError;
 #[cfg(all(feature = "system-keyring", target_os = "macos"))]
 use security_framework::passwords::{
-    delete_generic_password_options, generic_password, set_generic_password_options,
-    PasswordOptions,
+    delete_generic_password_options, generic_password, PasswordOptions,
 };
 
 /// Returns true when the security-framework error is "item not found" (-25300).
@@ -146,17 +146,13 @@ impl SecretStore {
     }
 
     /// Read the raw blob bytes from the keychain. `Ok(None)` = not found.
+    ///
+    /// Always uses the legacy keyring crate on macOS so that signed and
+    /// unsigned (dev) builds share the same store. DPK is only used by
+    /// `migrate_legacy_key` to read old per-key entries written by #1264.
     #[cfg(all(feature = "system-keyring", target_os = "macos"))]
     fn read_blob_raw(&self) -> Result<Option<Vec<u8>>, String> {
-        match generic_password(dpk_opts(&self.service, BLOB_KEY)) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(ref e) if is_not_found(e) => Ok(None),
-            Err(ref e) if is_dpk_unavailable(e) => {
-                // Unsigned dev build — fall back to legacy keyring crate.
-                self.read_blob_raw_keyring()
-            }
-            Err(e) => Err(format!("keyring read: {e}")),
-        }
+        self.read_blob_raw_keyring()
     }
 
     #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
@@ -189,13 +185,10 @@ impl SecretStore {
         Ok(())
     }
 
+    /// Always uses the legacy keyring crate on macOS — see `read_blob_raw`.
     #[cfg(all(feature = "system-keyring", target_os = "macos"))]
     fn write_blob_raw(&self, bytes: &[u8]) -> Result<(), String> {
-        match set_generic_password_options(bytes, dpk_opts(&self.service, BLOB_KEY)) {
-            Ok(()) => Ok(()),
-            Err(ref e) if is_dpk_unavailable(e) => self.write_blob_raw_keyring(bytes),
-            Err(e) => Err(format!("keyring write: {e}")),
-        }
+        self.write_blob_raw_keyring(bytes)
     }
 
     #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
