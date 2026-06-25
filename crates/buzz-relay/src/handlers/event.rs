@@ -1021,7 +1021,7 @@ mod tests {
         use std::sync::Arc;
 
         use axum::extract::ws::Message;
-        use buzz_core::kind::KIND_PRESENCE_UPDATE;
+        use buzz_core::kind::{KIND_MEMBER_ADDED_NOTIFICATION, KIND_PRESENCE_UPDATE};
         use buzz_pubsub::ChannelEvent;
         use nostr::{EventBuilder, Filter, Keys, Kind};
         use tokio::sync::{mpsc, Mutex};
@@ -1035,9 +1035,11 @@ mod tests {
             super::fanout_access::test_state().await
         }
 
-        fn register_presence_sub(
+        fn register_global_sub(
             state: &AppState,
             sub_id: &str,
+            filter: Filter,
+            pubkey: Option<Vec<u8>>,
         ) -> (Uuid, mpsc::Receiver<Message>) {
             let conn_id = Uuid::new_v4();
             let (tx, rx) = mpsc::channel(10);
@@ -1049,19 +1051,56 @@ mod tests {
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
             );
-            state.sub_registry.register(
-                conn_id,
-                sub_id.to_string(),
-                vec![Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16))],
-                None,
-            );
+            if let Some(pubkey) = pubkey {
+                state.conn_manager.set_authenticated_pubkey(conn_id, pubkey);
+            }
+            state
+                .sub_registry
+                .register(conn_id, sub_id.to_string(), vec![filter], None);
             (conn_id, rx)
+        }
+
+        fn register_presence_sub(
+            state: &AppState,
+            sub_id: &str,
+        ) -> (Uuid, mpsc::Receiver<Message>) {
+            register_global_sub(
+                state,
+                sub_id,
+                Filter::new().kind(Kind::Custom(KIND_PRESENCE_UPDATE as u16)),
+                None,
+            )
+        }
+
+        fn register_membership_sub(
+            state: &AppState,
+            sub_id: &str,
+            target: &Keys,
+        ) -> (Uuid, mpsc::Receiver<Message>) {
+            register_global_sub(
+                state,
+                sub_id,
+                Filter::new()
+                    .kind(Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16))
+                    .pubkey(target.public_key()),
+                Some(target.public_key().to_bytes().to_vec()),
+            )
         }
 
         fn presence_event(status: &str) -> nostr::Event {
             EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
                 .sign_with_keys(&Keys::generate())
                 .expect("sign presence")
+        }
+
+        fn membership_event(target: &Keys, channel_id: Uuid) -> nostr::Event {
+            EventBuilder::new(Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16), "{}")
+                .tags([
+                    nostr::Tag::parse(["p", &target.public_key().to_hex()]).expect("p tag"),
+                    nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                ])
+                .sign_with_keys(&Keys::generate())
+                .expect("sign membership notification")
         }
 
         fn event_from_ws_message(msg: Message) -> nostr::Event {
@@ -1113,6 +1152,39 @@ mod tests {
             assert!(
                 rx.try_recv().is_err(),
                 "Redis echo of locally fanned-out presence must be suppressed"
+            );
+        }
+
+        #[tokio::test]
+        async fn global_membership_pubsub_event_fans_out_by_p_tag() {
+            let state = test_state().await;
+            let target = Keys::generate();
+            let other = Keys::generate();
+            let (_target_conn, mut target_rx) =
+                register_membership_sub(&state, "membership-target", &target);
+            let (_other_conn, mut other_rx) =
+                register_membership_sub(&state, "membership-other", &other);
+            let event = membership_event(&target, Uuid::new_v4());
+            let event_id = event.id;
+
+            fan_out_pubsub_event(
+                &state,
+                ChannelEvent {
+                    channel_id: Uuid::nil(),
+                    event,
+                },
+            )
+            .await;
+
+            let delivered = event_from_ws_message(
+                target_rx
+                    .try_recv()
+                    .expect("target receives membership notification"),
+            );
+            assert_eq!(delivered.id, event_id);
+            assert!(
+                other_rx.try_recv().is_err(),
+                "membership notification should only reach matching #p subscribers"
             );
         }
 

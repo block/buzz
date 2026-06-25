@@ -605,9 +605,26 @@ pub async fn emit_membership_notification(
         return Ok(());
     }
 
-    // Fan-out only — skip search indexing and workflow evaluation. Routed
-    // through the guarded send path for uniformity; the access gate no-ops for
-    // these globally-scoped (channel_id = None) events.
+    // Fan-out only — skip search indexing and workflow evaluation. Publish through
+    // Redis before local fan-out so agents connected to other relay pods receive
+    // the global membership notification and can subscribe to the new channel.
+    // Use the nil UUID sentinel for globally-scoped events, matching
+    // `dispatch_persistent_event` and `fan_out_pubsub_event`.
+    state.mark_local_event(&stored.event.id);
+    if let Err(e) = state.pubsub.publish_event(Uuid::nil(), &stored.event).await {
+        state
+            .local_event_ids
+            .invalidate(&stored.event.id.to_bytes());
+        warn!(
+            channel = %channel_id,
+            target = %target_hex,
+            kind = notification_kind,
+            "membership notification Redis publish failed: {e}"
+        );
+    }
+
+    // Routed through the guarded send path for uniformity; the access gate no-ops
+    // for these globally-scoped (channel_id = None) events.
     crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 
     info!(
