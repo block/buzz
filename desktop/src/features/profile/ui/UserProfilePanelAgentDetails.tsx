@@ -15,16 +15,12 @@ export const AGENT_DETAILS_FIELD_LABELS = new Set([
 
 export function AgentConfigurationFocusedView({
   fields,
-  instruction,
   managedAgent,
   modelLabel,
-  onEditInstruction,
 }: {
   fields: ProfileField[];
-  instruction: string | null;
   managedAgent: ManagedAgent | undefined;
   modelLabel: string;
-  onEditInstruction?: () => void;
 }) {
   const runtimeConfigurationFields = fields.filter((field) =>
     AGENT_DETAILS_FIELD_LABELS.has(field.label),
@@ -34,10 +30,8 @@ export function AgentConfigurationFocusedView({
     <div className="pt-4">
       <AgentConfigurationRows
         fields={runtimeConfigurationFields}
-        instruction={instruction}
         managedAgent={managedAgent}
         modelLabel={modelLabel}
-        showInstructionPlaceholder={onEditInstruction !== undefined}
         showModel={true}
       />
     </div>
@@ -153,7 +147,11 @@ function hasAgentConfigurationRows({
   );
 }
 
-function AgentInstructionRow({ instruction }: { instruction: string | null }) {
+export function AgentInstructionRow({
+  instruction,
+}: {
+  instruction: string | null;
+}) {
   const trimmedInstruction = instruction?.trim() ?? "";
 
   return (
@@ -189,7 +187,10 @@ function AgentInstructionRow({ instruction }: { instruction: string | null }) {
 
 function AgentModelRow({ modelLabel }: { modelLabel: string }) {
   return (
-    <div className="flex items-center gap-3 px-4 py-3">
+    <div
+      className="flex items-center gap-3 px-4 py-3"
+      data-testid="user-profile-model"
+    >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
         <Cpu className="h-4 w-4 text-muted-foreground" />
       </span>

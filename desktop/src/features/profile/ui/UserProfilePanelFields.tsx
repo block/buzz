@@ -50,7 +50,6 @@ export type ProfileField = {
 const AGENT_INFO_LABELS = new Set([
   "Public key",
   "Owned by",
-  "Owned by & responds to",
   "NIP-05",
   "Agent type",
   "Capabilities",
@@ -61,6 +60,7 @@ const AGENT_SETTINGS_LABELS = new Set([
   "Respond to",
   "ACP command",
   "MCP command",
+  "Start on launch",
 ]);
 const DIAGNOSTICS_LABELS = new Set(["Status", "Last error"]);
 
@@ -252,12 +252,8 @@ export function buildOwnerFields({
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
-  const combinesOwnerRespondTo =
-    managedAgent?.respondTo === "owner-only" && Boolean(ownerDisplayName);
-  const respondToOwner =
-    managedAgent?.respondTo === "owner-only" && ownerDisplayName;
   const respondToDisplayValue = managedAgent
-    ? respondToOwner
+    ? managedAgent.respondTo === "owner-only" && ownerDisplayName
       ? ownerDisplayName
       : managedAgent.respondTo.replace(/-/g, " ")
     : null;
@@ -302,20 +298,12 @@ export function buildOwnerFields({
         </span>
       ),
       icon: UserRound,
-      label: combinesOwnerRespondTo ? "Owned by & responds to" : "Owned by",
+      label: "Owned by",
       testId: "user-profile-owned-by",
     });
   }
 
   if (!includeOperationalFields) {
-    if (managedAgent && !respondToOwner && respondToDisplayValue) {
-      fields.push({
-        displayValue: respondToDisplayValue,
-        icon: Ear,
-        label: "Respond to",
-        testId: "user-profile-respond-to",
-      });
-    }
     return fields;
   }
 
@@ -419,7 +407,7 @@ export function buildOwnerFields({
       label: "Start on launch",
       testId: "user-profile-start-on-launch",
     });
-    if (!respondToOwner && respondToDisplayValue) {
+    if (respondToDisplayValue) {
       fields.push({
         displayValue: respondToDisplayValue,
         icon: Ear,
@@ -445,19 +433,14 @@ export function buildOwnerFields({
 function orderProfileFields(fields: ProfileField[]) {
   const publicKeyLabel = "Public key";
   const ownedByLabel = "Owned by";
-  const ownedByRespondsToLabel = "Owned by & responds to";
   const statusLabel = "Status";
   return [
     ...fields.filter((field) => field.label === publicKeyLabel),
-    ...fields.filter(
-      (field) =>
-        field.label === ownedByLabel || field.label === ownedByRespondsToLabel,
-    ),
+    ...fields.filter((field) => field.label === ownedByLabel),
     ...fields.filter(
       (field) =>
         field.label !== publicKeyLabel &&
         field.label !== ownedByLabel &&
-        field.label !== ownedByRespondsToLabel &&
         field.copyValue,
     ),
     ...fields.filter((field) => field.label === statusLabel),
@@ -465,7 +448,6 @@ function orderProfileFields(fields: ProfileField[]) {
       if (
         field.label === publicKeyLabel ||
         field.label === ownedByLabel ||
-        field.label === ownedByRespondsToLabel ||
         field.label === statusLabel
       ) {
         return false;

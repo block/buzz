@@ -831,12 +831,14 @@ export function UserProfilePanel({
     >
       {view === "summary" ? (
         <ProfileSummaryView
+          canAddToChannel={managedAgent !== undefined && isOwner === true}
           canEditAgent={canEditAgent}
           canInstantiateAgent={canInstantiateAgent}
           canOpenAgentLogs={canOpenAgentLogs}
           canViewActivity={canViewActivity}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
+          channels={profileChannels}
           channelsLoading={channelsQuery.isLoading}
           displayName={displayName}
           followMutation={followMutation}
@@ -854,15 +856,15 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}
+          modelLabel={modelLabel}
           agentInfoFields={agentInfoFields}
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
           diagnosticsSummary={diagnosticsSummary}
+          onAddToChannel={() => setAddToChannelOpen(true)}
           onOpenActivity={handleOpenActivity}
-          onOpenAgentConfiguration={() => setView("configuration")}
-          onOpenChannels={() => setView("channels")}
+          onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
-          onOpenMemories={() => setView("memories")}
           onOpenDm={onOpenDm}
           presenceStatus={presenceStatus}
           profile={profile}
@@ -884,10 +886,8 @@ export function UserProfilePanel({
       {view === "configuration" ? (
         <AgentConfigurationFocusedView
           fields={agentSettingsFields}
-          instruction={agentInstruction}
           managedAgent={managedAgent}
           modelLabel={modelLabel}
-          onEditInstruction={canEditPersona ? handleEditPersona : undefined}
         />
       ) : null}
       {view === "diagnostics" ? (

@@ -1,22 +1,16 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity,
   ArrowUpRight,
-  Brain,
   ChevronDown,
-  ChevronRight,
   ChevronUp,
   CircleAlert,
-  Cpu,
-  Hash,
   MessageSquare,
   Pencil,
   Play,
   Square,
   UserMinus,
   UserPlus,
-  Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -36,16 +30,20 @@ import type {
 import {
   type ProfileField,
   ProfileFieldGroup,
-  ProfileFieldRows,
 } from "@/features/profile/ui/UserProfilePanelFields";
+import { AGENT_DETAILS_FIELD_LABELS } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import {
-  AGENT_DETAILS_FIELD_LABELS,
-  AgentDetailsRows,
-} from "@/features/profile/ui/UserProfilePanelAgentDetails";
+  ProfileInfoTabContent,
+  ProfileIngressRow,
+  ProfileRuntimeTabContent,
+  ProfileTabBar,
+  type ProfileTab,
+} from "@/features/profile/ui/UserProfilePanelTabs";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type { ProfileChannelLink } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -55,11 +53,13 @@ import { Badge } from "@/shared/ui/badge";
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
+  canAddToChannel: boolean;
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
   canViewActivity: boolean;
   channelCount: number;
   channelIdToName: Record<string, string>;
+  channels: ProfileChannelLink[];
   channelsLoading: boolean;
   displayName: string;
   followMutation: ReturnType<typeof useFollowMutation>;
@@ -78,15 +78,15 @@ export type ProfileSummaryViewProps = {
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
+  modelLabel: string;
   agentInfoFields: ProfileField[];
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: string | null;
+  onAddToChannel: () => void;
   onOpenActivity: () => void;
-  onOpenAgentConfiguration: () => void;
-  onOpenChannels: () => void;
+  onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
-  onOpenMemories: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
@@ -97,11 +97,13 @@ export type ProfileSummaryViewProps = {
 };
 
 export function ProfileSummaryView({
+  canAddToChannel,
   canEditAgent,
   canOpenAgentLogs,
   canViewActivity,
   channelCount,
   channelIdToName,
+  channels,
   channelsLoading,
   displayName,
   followMutation,
@@ -120,15 +122,15 @@ export function ProfileSummaryView({
   managedAgent,
   memoriesLoading,
   memoryCount,
+  modelLabel,
   agentInfoFields,
   agentSettingsFields,
   diagnosticsFields,
   diagnosticsSummary,
+  onAddToChannel,
   onOpenActivity,
-  onOpenAgentConfiguration,
-  onOpenChannels,
+  onOpenChannel,
   onOpenDiagnostics,
-  onOpenMemories,
   onOpenDm,
   presenceStatus,
   profile,
@@ -139,31 +141,38 @@ export function ProfileSummaryView({
 }: ProfileSummaryViewProps) {
   const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
+  const [activeTab, setActiveTab] = React.useState<ProfileTab>("info");
 
-  const showMemoriesIngress = isOwner === true && Boolean(pubkey);
-  const showInstructionIngress =
+  const showMemoriesTab = isOwner === true && Boolean(pubkey);
+  const showInstructionBlock =
     isOwner === true &&
     (agentInstruction !== null || handleEditPersona !== undefined);
-  const showChannelsIngress =
+  const showChannelsTab =
     channelsLoading || channelCount > 0 || isBot || relayAgent !== undefined;
-  const showModelIngress = isOwner === true && isBot;
   const runtimeConfigurationFields = agentSettingsFields.filter((field) =>
     AGENT_DETAILS_FIELD_LABELS.has(field.label),
   );
-  const summaryAgentDetailFields = agentSettingsFields.filter(
+  const runtimeSettingsFields = agentSettingsFields.filter(
     (field) => !AGENT_DETAILS_FIELD_LABELS.has(field.label),
   );
-  const showRuntimeConfigurationIngress =
+  const showRuntimeTab =
     isOwner === true &&
     isBot &&
-    (showInstructionIngress ||
-      showModelIngress ||
-      runtimeConfigurationFields.length > 0);
-  const showAgentSettingsRows = summaryAgentDetailFields.length > 0;
-  const showAgentConfigurationRows = showAgentSettingsRows;
+    (runtimeConfigurationFields.length > 0 ||
+      runtimeSettingsFields.length > 0 ||
+      managedAgent !== undefined ||
+      modelLabel.trim().length > 0 ||
+      diagnosticsFields.length > 0 ||
+      canOpenAgentLogs);
   const showDiagnosticsIngress =
     diagnosticsFields.length > 0 || canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
+  const showInfoTab =
+    showInstructionBlock ||
+    agentInfoFields.length > 0 ||
+    showActivityIngress ||
+    !showRuntimeTab;
+
   const diagnosticsStatusField = diagnosticsFields.find(
     (field) => field.label === "Status",
   );
@@ -178,13 +187,61 @@ export function ProfileSummaryView({
     ) : (
       (diagnosticsStatusField?.displayNode ?? diagnosticsSummary ?? "View")
     );
-  const topLevelAgentInfoFields = agentInfoFields.filter(
-    (field) =>
-      field.label === "Public key" ||
-      field.label === "Owned by" ||
-      field.label === "Owned by & responds to",
-  );
-  const showTopLevelAgentInfo = topLevelAgentInfoFields.length > 0;
+
+  const tabs = React.useMemo(() => {
+    const items: Array<{
+      id: ProfileTab;
+      label: string;
+      trailing?: React.ReactNode;
+    }> = [];
+    if (showInfoTab) {
+      items.push({ id: "info", label: "Info" });
+    }
+    if (showRuntimeTab) {
+      items.push({ id: "runtime", label: "Runtime" });
+    }
+    if (showChannelsTab) {
+      items.push({
+        id: "channels",
+        label: "Channels",
+        trailing: channelsLoading
+          ? "…"
+          : channelCount > 0
+            ? String(channelCount)
+            : undefined,
+      });
+    }
+    if (showMemoriesTab) {
+      items.push({
+        id: "memories",
+        label: "Memories",
+        trailing: memoriesLoading
+          ? "…"
+          : memoryCount !== undefined
+            ? String(memoryCount)
+            : undefined,
+      });
+    }
+    return items;
+  }, [
+    channelCount,
+    channelsLoading,
+    memoriesLoading,
+    memoryCount,
+    showChannelsTab,
+    showInfoTab,
+    showMemoriesTab,
+    showRuntimeTab,
+  ]);
+
+  React.useEffect(() => {
+    if (tabs.some((tab) => tab.id === activeTab)) {
+      return;
+    }
+    setActiveTab(tabs[0]?.id ?? "info");
+  }, [activeTab, tabs]);
+
+  const showTabSection = tabs.length > 0;
 
   return (
     <div className="flex flex-col gap-6 pt-4">
@@ -244,97 +301,56 @@ export function ProfileSummaryView({
         </div>
       ) : null}
 
-      {showAgentConfigurationRows ||
-      showMemoriesIngress ||
-      showChannelsIngress ||
-      showRuntimeConfigurationIngress ||
-      showDiagnosticsIngress ||
-      showActivityIngress ||
-      showTopLevelAgentInfo ? (
-        <section className="space-y-2">
-          {showAgentConfigurationRows ||
-          showRuntimeConfigurationIngress ||
-          showTopLevelAgentInfo ? (
-            <div className="overflow-hidden rounded-2xl bg-muted/20">
-              {showTopLevelAgentInfo ? (
-                <ProfileFieldRows fields={topLevelAgentInfoFields} />
-              ) : null}
-              <AgentDetailsRows fields={summaryAgentDetailFields} />
-              {showRuntimeConfigurationIngress ? (
-                <AdvancedDetailsRow onClick={onOpenAgentConfiguration} />
-              ) : null}
-            </div>
-          ) : null}
-          {showMemoriesIngress ? (
-            <ProfileIngressRow
-              icon={Brain}
-              label="Memories"
-              onClick={onOpenMemories}
-              testId="user-profile-memories-ingress"
-              trailing={
-                memoriesLoading
-                  ? "Loading…"
-                  : memoryCount !== undefined
-                    ? String(memoryCount)
-                    : "View"
-              }
+      {showTabSection ? (
+        <section className="space-y-3">
+          <ProfileTabBar
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            tabs={tabs}
+          />
+          {activeTab === "info" ? (
+            <ProfileInfoTabContent
+              agentInfoFields={agentInfoFields}
+              agentInstruction={agentInstruction}
+              onOpenActivity={onOpenActivity}
+              pubkey={pubkey}
+              showActivityIngress={showActivityIngress}
+              showInstructionBlock={showInstructionBlock}
             />
           ) : null}
-          {showChannelsIngress ? (
-            <ProfileIngressRow
-              icon={Hash}
-              label="Channels"
-              onClick={onOpenChannels}
-              testId="user-profile-channels-ingress"
-              trailing={
-                channelsLoading
-                  ? "Loading…"
-                  : channelCount > 0
-                    ? String(channelCount)
-                    : "None"
-              }
+          {activeTab === "runtime" ? (
+            <ProfileRuntimeTabContent
+              diagnosticsFields={diagnosticsFields}
+              diagnosticsSummary={diagnosticsTrailing}
+              managedAgent={managedAgent}
+              modelLabel={modelLabel}
+              onOpenDiagnostics={onOpenDiagnostics}
+              runtimeConfigurationFields={runtimeConfigurationFields}
+              runtimeSettingsFields={runtimeSettingsFields}
+              showDiagnosticsIngress={showDiagnosticsIngress}
             />
           ) : null}
-          {showDiagnosticsIngress ? (
-            <ProfileIngressRow
-              icon={Activity}
-              label="Diagnostics"
-              onClick={onOpenDiagnostics}
-              testId="user-profile-diagnostics-ingress"
-              trailing={diagnosticsTrailing}
+          {activeTab === "channels" ? (
+            <ChannelsFocusedView
+              canAddToChannel={canAddToChannel}
+              channels={channels}
+              isActionPending={isAgentActionPending}
+              isLoading={channelsLoading}
+              onAddToChannel={onAddToChannel}
+              onOpenChannel={onOpenChannel}
+              variant="embedded"
             />
           ) : null}
-          {showActivityIngress ? (
-            <ProfileIngressRow
-              icon={Wrench}
-              label="Activity log"
-              onClick={onOpenActivity}
-              testId={`user-profile-view-activity-${pubkey}`}
-              trailing="View"
+          {activeTab === "memories" && pubkey ? (
+            <MemoryFocusedView
+              agentPubkey={pubkey}
+              variant="embedded"
+              viewerIsOwner={isOwner}
             />
           ) : null}
         </section>
       ) : null}
     </div>
-  );
-}
-
-function AdvancedDetailsRow({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-      data-testid="user-profile-agent-configuration-ingress"
-      onClick={onClick}
-      type="button"
-    >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <Cpu className="h-4 w-4 text-muted-foreground" />
-      </span>
-      <span className="min-w-0 flex-1 text-sm font-medium text-foreground">
-        Advanced
-      </span>
-      <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-    </button>
   );
 }
 
@@ -672,59 +688,15 @@ function ProfileQuickAction({
   );
 }
 
-// ── Ingress rows ─────────────────────────────────────────────────────────────
-
-function ProfileIngressRow({
-  disabled,
-  icon: Icon,
-  label,
-  onClick,
-  testId,
-  trailing,
-}: {
-  disabled?: boolean;
-  icon: LucideIcon;
-  label: string;
-  onClick: () => void;
-  testId: string;
-  trailing?: React.ReactNode;
-}) {
-  const trailingTitle = typeof trailing === "string" ? trailing : undefined;
-
-  return (
-    <button
-      className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
-      data-testid={testId}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <Icon className="h-4 w-4 text-muted-foreground" />
-      </span>
-      <span className="min-w-0 flex-1 text-sm font-medium text-foreground">
-        {label}
-      </span>
-      {trailing ? (
-        <span
-          className="max-w-[45%] truncate text-right text-sm text-muted-foreground"
-          title={trailingTitle}
-        >
-          {trailing}
-        </span>
-      ) : null}
-      <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-    </button>
-  );
-}
-
 // ── Focused views ────────────────────────────────────────────────────────────
 
 export function MemoryFocusedView({
   agentPubkey,
+  variant = "focused",
   viewerIsOwner,
 }: {
   agentPubkey: string;
+  variant?: "embedded" | "focused";
   viewerIsOwner: boolean | undefined;
 }) {
   if (viewerIsOwner !== true) {
@@ -732,16 +704,11 @@ export function MemoryFocusedView({
   }
 
   return (
-    <div className="pt-4">
+    <div className={variant === "focused" ? "pt-4" : undefined}>
       <MemorySection agentPubkey={agentPubkey} viewerIsOwner={viewerIsOwner} />
     </div>
   );
 }
-
-type ProfileChannelLink = {
-  id: string;
-  name: string;
-};
 
 export function ChannelsFocusedView({
   canAddToChannel,
@@ -750,6 +717,7 @@ export function ChannelsFocusedView({
   isLoading,
   onAddToChannel,
   onOpenChannel,
+  variant = "focused",
 }: {
   canAddToChannel: boolean;
   channels: ProfileChannelLink[];
@@ -757,9 +725,10 @@ export function ChannelsFocusedView({
   isLoading: boolean;
   onAddToChannel: () => void;
   onOpenChannel: (channelId: string) => void;
+  variant?: "embedded" | "focused";
 }) {
   return (
-    <div className="space-y-3 pt-4">
+    <div className={cn("space-y-3", variant === "focused" && "pt-4")}>
       {canAddToChannel ? (
         <ProfileIngressRow
           disabled={isActionPending}

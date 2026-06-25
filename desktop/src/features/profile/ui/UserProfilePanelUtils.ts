@@ -27,7 +27,7 @@ export type ProfilePanelView =
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
   info: "Agent info",
-  configuration: "Advanced",
+  configuration: "Runtime",
   diagnostics: "Diagnostics",
   memories: "Memories",
   channels: "Channels",
