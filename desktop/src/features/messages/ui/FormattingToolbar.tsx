@@ -291,7 +291,14 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
               <item.icon className="h-4 w-4" />
             </button>
           </TooltipTrigger>
-          <TooltipContent>
+          {/* pointer-events-none keeps these label tooltips click-through so
+              they don't block the message textarea floating beneath them,
+              matching ComposerIconButton. Content only — the trigger button
+              keeps its pointer/focus behavior (WCAG content-on-hover-or-focus).
+              These formatting buttons are raw <button>s with custom active
+              styling, so we apply the override here rather than swap in
+              ComposerIconButton. */}
+          <TooltipContent className="pointer-events-none">
             {"shortcut" in item
               ? `${item.label} (${item.shortcut})`
               : item.label}
