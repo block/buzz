@@ -44,7 +44,7 @@ import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
-  PANEL_BASE_CLASS,
+  PANEL_ENTER_BASE_CLASS,
   PANEL_OVERLAY_CLASS,
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
@@ -461,7 +461,7 @@ export function UserProfilePanel({
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
         className={cn(
-          PANEL_BASE_CLASS,
+          PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
         )}
