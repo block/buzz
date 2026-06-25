@@ -316,8 +316,11 @@ export function ProfileRuntimeTabContent({
   runtimeSettingsFields: ProfileField[];
   showDiagnosticsIngress: boolean;
 }) {
+  const statusDiagnosticsFields = diagnosticsFields.filter(
+    (field) => field.label === "Status",
+  );
   const detailDiagnosticsFields = diagnosticsFields.filter(
-    (field) => field.label !== "Last error",
+    (field) => field.label !== "Last error" && field.label !== "Status",
   );
   const hasRuntimeRows =
     runtimeConfigurationFields.length > 0 ||
@@ -327,6 +330,7 @@ export function ProfileRuntimeTabContent({
 
   if (
     !hasRuntimeRows &&
+    statusDiagnosticsFields.length === 0 &&
     detailDiagnosticsFields.length === 0 &&
     !showDiagnosticsIngress
   ) {
@@ -335,6 +339,9 @@ export function ProfileRuntimeTabContent({
 
   return (
     <div className="space-y-2">
+      {statusDiagnosticsFields.length > 0 ? (
+        <ProfileFieldGroup fields={statusDiagnosticsFields} />
+      ) : null}
       {hasRuntimeRows ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
           <AgentDetailsRows

@@ -242,6 +242,7 @@ export function ProfileSummaryView({
   }, [activeTab, tabs]);
 
   const showTabSection = tabs.length > 0;
+  const showTabBar = !(tabs.length === 1 && tabs[0]?.id === "info");
 
   return (
     <div className="flex flex-col gap-6 pt-4">
@@ -303,11 +304,13 @@ export function ProfileSummaryView({
 
       {showTabSection ? (
         <section className="space-y-3">
-          <ProfileTabBar
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            tabs={tabs}
-          />
+          {showTabBar ? (
+            <ProfileTabBar
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              tabs={tabs}
+            />
+          ) : null}
           {activeTab === "info" ? (
             <ProfileInfoTabContent
               agentInfoFields={agentInfoFields}
