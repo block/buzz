@@ -66,6 +66,13 @@
 (*       (Init -> WriteInsert) for the insert path and a 3-state trace            *)
 (*       (Init -> WriteInsert -> WriteDuplicate) for the duplicate path.  (Trace  *)
 (*       length, not TLC's run-dependent "depth of complete graph search" line.)  *)
+(*   M9: NIP-43 community admission keyed globally (admit-if-member-of-ANY-      *)
+(*       community) instead of by (community, actor) -> Inv_AdmissionFence       *)
+(*       breaks when a B-admitted actor joins or channel-less-reads in A.         *)
+(*       Confirmed red: 5-state membership trace (Init -> WriteInsert ->         *)
+(*       WriteInsert -> AdmitMember(commA, alice) -> AddMembership(commB)) and    *)
+(*       4-state channel-less read trace (Init -> WriteInsert ->                 *)
+(*       AdmitMember(commB, alice) -> ReadMessageRows(commA, NoChannel, hostA)). *)
 (***************************************************************************)
 EXTENDS FiniteSets, Naturals, TLC
 
@@ -139,6 +146,8 @@ VARIABLES
     messages,          \* set of canonical message rows (source="message")
     projections,       \* set of rebuildable projection rows (source="projection")
     memberships,       \* tenant-scoped active channel membership rows
+    admittedMembers,   \* NIP-43 community member-npub allowlist rows
+    channelLessReads,  \* successful channel-less read admissions (current capabilities)
     openChannels,      \* set of open/public channel ids
     auditHeads,        \* function: community -> current audit head
     observations,      \* typed outputs visible to tenant-scoped clients
@@ -146,8 +155,9 @@ VARIABLES
     duplicateWrites,   \* write requests that no-op'd on scoped conflict
     queryFaults        \* fail-closed query-layer faults (e.g. no TenantContext)
 
-vars == <<messages, projections, memberships, openChannels, auditHeads,
-          observations, acceptedWrites, duplicateWrites, queryFaults>>
+vars == <<messages, projections, memberships, admittedMembers, channelLessReads,
+          openChannels, auditHeads, observations, acceptedWrites, duplicateWrites,
+          queryFaults>>
 
 DataRows == [
     id        : MsgIds,
@@ -163,6 +173,18 @@ ProjectionRows == {r \in DataRows : r.source = "projection"}
 MembershipRows == [
     community : Communities,
     channel   : Channels,
+    actor     : Actors
+]
+
+AdmissionRows == [
+    community : Communities,
+    actor     : Actors
+]
+
+ChannelLessReadRows == [
+    worker    : Workers,
+    community : Communities,
+    host      : Hosts,
     actor     : Actors
 ]
 
@@ -257,6 +279,8 @@ TypeOK ==
     /\ projections \subseteq ProjectionRows
     /\ projections \subseteq DerivedProjectionRows
     /\ memberships \subseteq MembershipRows
+    /\ admittedMembers \subseteq AdmissionRows
+    /\ channelLessReads \subseteq ChannelLessReadRows
     /\ openChannels \subseteq Channels
     /\ auditHeads \in [Communities -> AuditVals]
     /\ observations \subseteq Observations
@@ -281,12 +305,23 @@ Init ==
     /\ messages = {}
     /\ projections = {}
     /\ memberships = {}
+    /\ admittedMembers = {}
+    /\ channelLessReads = {}
     /\ openChannels = {}
     /\ auditHeads \in [Communities -> AuditVals]
     /\ observations = {}
     /\ acceptedWrites = {}
     /\ duplicateWrites = {}
     /\ queryFaults = {}
+
+IsAdmitted(community, actor) ==
+    [community |-> community, actor |-> actor] \in admittedMembers
+
+\* Intentionally-bad admission helper for mutation M9: treats the NIP-43 member
+\* allowlist as relay-global by dropping community from the key.  Substitute this
+\* for IsAdmitted in AddMembership / channel-less reads to reproduce M9.
+GloballyAdmitted(actor) ==
+    \E c \in Communities : [community |-> c, actor |-> actor] \in admittedMembers
 
 ScopedAccessible(community, actor) ==
     {ch \in Channels :
@@ -304,21 +339,30 @@ UnscopedAccessible(actor) ==
         \E c \in Communities :
             [community |-> c, channel |-> ch, actor |-> actor] \in memberships}
 
-VisibleMessageRows(community, actor) ==
+VisibleMessageRows(community, actor, targetChannel) ==
     {m \in messages :
         /\ m.community = community
-        /\ m.channel \in ScopedAccessible(community, actor)}
+        /\ IF targetChannel = NoChannel
+           THEN /\ m.channel = NoChannel
+                /\ IsAdmitted(community, actor)
+           ELSE m.channel \in ScopedAccessible(community, actor)}
 
-VisibleProjectionRows(community, actor) ==
+VisibleProjectionRows(community, actor, targetChannel) ==
     {p \in projections :
         /\ p.community = community
-        /\ p.channel \in ScopedAccessible(community, actor)}
+        /\ IF targetChannel = NoChannel
+           THEN /\ p.channel = NoChannel
+                /\ IsAdmitted(community, actor)
+           ELSE p.channel \in ScopedAccessible(community, actor)}
 
-VisibleDirectIdRows(community, actor, id) ==
+VisibleDirectIdRows(community, actor, id, targetChannel) ==
     {m \in messages :
         /\ m.id = id
         /\ m.community = community
-        /\ m.channel \in ScopedAccessible(community, actor)}
+        /\ IF targetChannel = NoChannel
+           THEN /\ m.channel = NoChannel
+                /\ IsAdmitted(community, actor)
+           ELSE m.channel \in ScopedAccessible(community, actor)}
 
 \* Intentionally-bad direct lookup mutation: answer by global id first and trust
 \* the row's own community as scope.  Substitute this into ReadByIdRows for M7.
@@ -353,8 +397,8 @@ WriteInsert(w) ==
                 IN
                     /\ observations' = observations \cup {obs}
                     /\ queryFaults' = queryFaults \cup {fault}
-                    /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                                  auditHeads, acceptedWrites, duplicateWrites>>
+                    /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                                  openChannels, auditHeads, acceptedWrites, duplicateWrites>>
             ELSE \* host agrees with the channel mapping: accept, stamp the host.
                 LET key == [community |-> real, id |-> id]
                     row == MessageRow(id, real, ch, a)
@@ -368,8 +412,8 @@ WriteInsert(w) ==
                     /\ messages' = messages \cup {row}
                     /\ observations' = observations \cup {obs}
                     /\ acceptedWrites' = acceptedWrites \cup {wr}
-                    /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
-                                  duplicateWrites, queryFaults>>
+                    /\ UNCHANGED <<projections, memberships, admittedMembers, channelLessReads,
+                                  openChannels, auditHeads, duplicateWrites, queryFaults>>
 
 \* Channel-less write (kind:0 profiles, 1059 DMs, 30023/30174/30315/30078, lists).
 \* There is no h tag to resolve, so the community is derived from the connection's
@@ -384,8 +428,8 @@ WriteInsertGlobal(w) ==
     /\ \E id \in MsgIds, host \in Hosts, a \in Actors, claimed \in Communities :
         LET resolved == HostCommunity[host]
         IN
-            IF resolved = NoCommunity
-            THEN \* fail-closed: unmapped/unknown host, write nothing.
+            IF resolved = NoCommunity \/ ~IsAdmitted(resolved, a)
+            THEN \* fail-closed: unmapped/unknown host or community admission miss.
                 LET obs == [worker |-> w, actor |-> a, community |-> claimed,
                             channel |-> NoChannel, kind |-> "SanitizedError",
                             labels |-> {}, rows |-> {}, error |-> "restricted",
@@ -395,8 +439,8 @@ WriteInsertGlobal(w) ==
                 IN
                     /\ observations' = observations \cup {obs}
                     /\ queryFaults' = queryFaults \cup {fault}
-                    /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                                  auditHeads, acceptedWrites, duplicateWrites>>
+                    /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                                  openChannels, auditHeads, acceptedWrites, duplicateWrites>>
             ELSE \* mapped host: stamp the host-resolved community, channel-less.
                 LET key == [community |-> resolved, id |-> id]
                     row == [id |-> id, community |-> resolved, channel |-> NoChannel,
@@ -412,8 +456,8 @@ WriteInsertGlobal(w) ==
                     /\ messages' = messages \cup {row}
                     /\ observations' = observations \cup {obs}
                     /\ acceptedWrites' = acceptedWrites \cup {wr}
-                    /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
-                                  duplicateWrites, queryFaults>>
+                    /\ UNCHANGED <<projections, memberships, admittedMembers, channelLessReads,
+                                  openChannels, auditHeads, duplicateWrites, queryFaults>>
 
 \* Duplicate / no-op write outcome (scoped conflict on (community_id, id)).  This
 \* is client-observable write surface -- the "Duplicate" WriteResult exposes the
@@ -439,8 +483,8 @@ WriteDuplicate(w) ==
                 IN
                     /\ observations' = observations \cup {obs}
                     /\ queryFaults' = queryFaults \cup {fault}
-                    /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                                  auditHeads, acceptedWrites, duplicateWrites>>
+                    /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                                  openChannels, auditHeads, acceptedWrites, duplicateWrites>>
             ELSE \* host agrees with the channel mapping: report the scoped duplicate.
                 LET key == [community |-> real, id |-> id]
                     conflicts == ScopedConflictRows(real, id)
@@ -454,44 +498,65 @@ WriteDuplicate(w) ==
                     /\ messages' = messages
                     /\ observations' = observations \cup {obs}
                     /\ duplicateWrites' = duplicateWrites \cup {wr}
-                    /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
-                                  acceptedWrites, queryFaults>>
+                    /\ UNCHANGED <<projections, memberships, admittedMembers, channelLessReads,
+                                  openChannels, auditHeads, acceptedWrites, queryFaults>>
 
 ReadMessageRows(w) ==
     /\ Cardinality(observations) < MaxObservations
-    /\ \E c \in Communities, a \in Actors, ch \in Channels :
-        LET rows == VisibleMessageRows(c, a)
+    /\ \E c \in Communities, a \in Actors, ch \in ChannelsExt, host \in Hosts :
+        LET rows == VisibleMessageRows(c, a, ch)
             obs == [worker |-> w, actor |-> a, community |-> c, channel |-> ch,
                     kind |-> "ResultRows", labels |-> RowLabels(rows), rows |-> rows,
                     error |-> NoError, result |-> "None", verdict |-> "None", audit |-> NoAudit]
+            read == [worker |-> w, community |-> c, host |-> host, actor |-> a]
         IN
+            /\ IF ch = NoChannel
+               THEN /\ HostCommunity[host] = c
+                    /\ IsAdmitted(c, a)
+                    /\ channelLessReads' = channelLessReads \cup {read}
+               ELSE channelLessReads' = channelLessReads
             /\ observations' = observations \cup {obs}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites,
+                          queryFaults>>
 
 ReadProjectionRows(w) ==
     /\ Cardinality(observations) < MaxObservations
-    /\ \E c \in Communities, a \in Actors, ch \in Channels :
-        \E rows \in SUBSET VisibleProjectionRows(c, a) :
+    /\ \E c \in Communities, a \in Actors, ch \in ChannelsExt, host \in Hosts :
+        \E rows \in SUBSET VisibleProjectionRows(c, a, ch) :
             LET obs == [worker |-> w, actor |-> a, community |-> c, channel |-> ch,
                         kind |-> "ResultRows", labels |-> RowLabels(rows), rows |-> rows,
                         error |-> NoError, result |-> "None", verdict |-> "None", audit |-> NoAudit]
+                read == [worker |-> w, community |-> c, host |-> host, actor |-> a]
             IN
+                /\ IF ch = NoChannel
+                   THEN /\ HostCommunity[host] = c
+                        /\ IsAdmitted(c, a)
+                        /\ channelLessReads' = channelLessReads \cup {read}
+                   ELSE channelLessReads' = channelLessReads
                 /\ observations' = observations \cup {obs}
-                /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                              auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+                /\ UNCHANGED <<messages, projections, memberships, admittedMembers,
+                              openChannels, auditHeads, acceptedWrites, duplicateWrites,
+                              queryFaults>>
 
 ReadByIdRows(w) ==
     /\ Cardinality(observations) < MaxObservations
-    /\ \E c \in Communities, a \in Actors, ch \in Channels, id \in MsgIds :
-        LET rows == VisibleDirectIdRows(c, a, id)
+    /\ \E c \in Communities, a \in Actors, ch \in ChannelsExt, host \in Hosts, id \in MsgIds :
+        LET rows == VisibleDirectIdRows(c, a, id, ch)
             obs == [worker |-> w, actor |-> a, community |-> c, channel |-> ch,
                     kind |-> "ResultRows", labels |-> RowLabels(rows), rows |-> rows,
                     error |-> NoError, result |-> "None", verdict |-> "None", audit |-> NoAudit]
+            read == [worker |-> w, community |-> c, host |-> host, actor |-> a]
         IN
+            /\ IF ch = NoChannel
+               THEN /\ HostCommunity[host] = c
+                    /\ IsAdmitted(c, a)
+                    /\ channelLessReads' = channelLessReads \cup {read}
+               ELSE channelLessReads' = channelLessReads
             /\ observations' = observations \cup {obs}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites,
+                          queryFaults>>
 
 \* Explicit community predicate was accidentally omitted, but the transaction is
 \* inside TenantContext and Postgres RLS applies the community fence.
@@ -505,8 +570,8 @@ ReadForgotPredicateWithRLS(w) ==
                            error |-> NoError, result |-> "None", verdict |-> "None", audit |-> NoAudit]
         IN
             /\ observations' = observations \cup {obs}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
 
 \* If the query does not establish TenantContext at all, RLS must fail closed.
 ReadNoTenantContext(w) ==
@@ -520,8 +585,8 @@ ReadNoTenantContext(w) ==
         IN
             /\ observations' = observations \cup {obs}
             /\ queryFaults' = queryFaults \cup {fault}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites>>
 
 SanitizedError(w) ==
     /\ Cardinality(observations) < MaxObservations
@@ -531,8 +596,8 @@ SanitizedError(w) ==
                     error |-> e, result |-> "None", verdict |-> "None", audit |-> NoAudit]
         IN
             /\ observations' = observations \cup {obs}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
 
 \* Channel-bearing authorization.  Community resolves from the channel mapping;
 \* the host is also authoritative.  Host/channel disagreement (A-host + B-channel)
@@ -550,14 +615,14 @@ AuthCheck(w) ==
                     error |-> NoError, result |-> "None", verdict |-> verdict, audit |-> NoAudit]
         IN
             /\ observations' = observations \cup {obs}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
 
 AppendAudit(w) ==
     \E c \in Communities, newHead \in AuditVals :
         /\ auditHeads' = [auditHeads EXCEPT ![c] = newHead]
-        /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                      observations, acceptedWrites, duplicateWrites, queryFaults>>
+        /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                      openChannels, observations, acceptedWrites, duplicateWrites, queryFaults>>
 
 ObserveAuditHead(w) ==
     /\ Cardinality(observations) < MaxObservations
@@ -567,25 +632,46 @@ ObserveAuditHead(w) ==
                     error |-> NoError, result |-> "None", verdict |-> "None", audit |-> auditHeads[c]]
         IN
             /\ observations' = observations \cup {obs}
-            /\ UNCHANGED <<messages, projections, memberships, openChannels,
-                          auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
 
 \* Projection rebuild is privileged internal work. It may touch all communities
 \* and may leave projections temporarily partial, but it emits no observation.
 RebuildProjections(w) ==
     \E rebuilt \in SUBSET DerivedProjectionRows :
         /\ projections' = rebuilt
-        /\ UNCHANGED <<messages, memberships, openChannels, auditHeads,
-                      observations, acceptedWrites, duplicateWrites, queryFaults>>
+        /\ UNCHANGED <<messages, memberships, admittedMembers, channelLessReads,
+                      openChannels, auditHeads, observations, acceptedWrites, duplicateWrites, queryFaults>>
+
+AdmitMember(w) ==
+    \E c \in Communities, a \in Actors :
+        LET row == [community |-> c, actor |-> a]
+        IN
+            /\ admittedMembers' = admittedMembers \cup {row}
+            /\ UNCHANGED <<messages, projections, memberships, channelLessReads,
+                          openChannels, auditHeads, observations, acceptedWrites,
+                          duplicateWrites, queryFaults>>
+
+RevokeMember(w) ==
+    \E c \in Communities, a \in Actors :
+        LET row == [community |-> c, actor |-> a]
+        IN
+            /\ admittedMembers' = admittedMembers \ {row}
+            /\ memberships' = {m \in memberships : ~(m.community = c /\ m.actor = a)}
+            /\ channelLessReads' = {r \in channelLessReads : ~(r.community = c /\ r.actor = a)}
+            /\ UNCHANGED <<messages, projections, openChannels, auditHeads,
+                          observations, acceptedWrites, duplicateWrites, queryFaults>>
 
 AddMembership(w) ==
     \E ch \in Channels, a \in Actors :
         LET c == ChannelCommunity[ch]
             row == [community |-> c, channel |-> ch, actor |-> a]
         IN
+            /\ IsAdmitted(c, a)
             /\ memberships' = memberships \cup {row}
-            /\ UNCHANGED <<messages, projections, openChannels, auditHeads,
-                          observations, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, observations, acceptedWrites,
+                          duplicateWrites, queryFaults>>
 
 RemoveMembership(w) ==
     \E ch \in Channels, a \in Actors :
@@ -593,20 +679,21 @@ RemoveMembership(w) ==
             row == [community |-> c, channel |-> ch, actor |-> a]
         IN
             /\ memberships' = memberships \ {row}
-            /\ UNCHANGED <<messages, projections, openChannels, auditHeads,
-                          observations, acceptedWrites, duplicateWrites, queryFaults>>
+            /\ UNCHANGED <<messages, projections, admittedMembers, channelLessReads,
+                          openChannels, auditHeads, observations, acceptedWrites,
+                          duplicateWrites, queryFaults>>
 
 OpenChannel(w) ==
     \E ch \in Channels :
         /\ openChannels' = openChannels \cup {ch}
-        /\ UNCHANGED <<messages, projections, memberships, auditHeads,
-                      observations, acceptedWrites, duplicateWrites, queryFaults>>
+        /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                      auditHeads, observations, acceptedWrites, duplicateWrites, queryFaults>>
 
 CloseChannel(w) ==
     \E ch \in Channels :
         /\ openChannels' = openChannels \ {ch}
-        /\ UNCHANGED <<messages, projections, memberships, auditHeads,
-                      observations, acceptedWrites, duplicateWrites, queryFaults>>
+        /\ UNCHANGED <<messages, projections, memberships, admittedMembers, channelLessReads,
+                      auditHeads, observations, acceptedWrites, duplicateWrites, queryFaults>>
 
 Next ==
     \E w \in Workers :
@@ -623,6 +710,8 @@ Next ==
         \/ AppendAudit(w)
         \/ ObserveAuditHead(w)
         \/ RebuildProjections(w)
+        \/ AdmitMember(w)
+        \/ RevokeMember(w)
         \/ AddMembership(w)
         \/ RemoveMembership(w)
         \/ OpenChannel(w)
@@ -701,6 +790,19 @@ Inv_HostBindingFence ==
         /\ HostCommunity[w.host] \in Communities
         /\ w.community = HostCommunity[w.host]
 
+\* I2-admission fence: NIP-43 member-npub admission is scoped by community, not
+\* relay-global pubkey.  Active channel memberships and current channel-less read
+\* capabilities may only exist when the actor is admitted in that same community;
+\* channel-less read capabilities also carry the host that resolved that community.
+\* This records the observable admission capability, not historical message rows:
+\* revoking admission removes current memberships/reads but does not relabel rows
+\* already written while admitted.
+Inv_AdmissionFence ==
+    /\ \A m \in memberships : IsAdmitted(m.community, m.actor)
+    /\ \A r \in channelLessReads :
+        /\ IsAdmitted(r.community, r.actor)
+        /\ HostCommunity[r.host] = r.community
+
 \* I3a append persistence: every accepted append remains present in the shared log.
 Inv_AcceptedWritesPersist ==
     \A w \in acceptedWrites : MessageRow(w.id, w.community, w.channel, w.author) \in messages
@@ -733,6 +835,7 @@ Safety ==
     /\ Inv_ReadConfinement
     /\ Inv_ResolutionFence
     /\ Inv_HostBindingFence
+    /\ Inv_AdmissionFence
     /\ Inv_AcceptedWritesPersist
     /\ Inv_MessageKeyUnique
     /\ Inv_NoTenantContextFailsClosed
