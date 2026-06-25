@@ -78,6 +78,16 @@ fn is_not_found(e: &SFError) -> bool {
     e.code() == -25300
 }
 
+/// Returns true when DPK is unavailable because the binary lacks the required
+/// entitlement (`errSecMissingEntitlement`, -34018). This happens for unsigned
+/// dev builds (`tauri dev` / `cargo run`). The caller should fall back to the
+/// legacy `keyring` crate path, which uses the old-style keychain and does not
+/// require hardened-runtime entitlements.
+#[cfg(all(feature = "system-keyring", target_os = "macos"))]
+fn is_dpk_unavailable(e: &SFError) -> bool {
+    e.code() == -34018
+}
+
 /// Build a `PasswordOptions` for the Data Protection Keychain.
 #[cfg(all(feature = "system-keyring", target_os = "macos"))]
 fn dpk_opts(service: &str, key: &str) -> PasswordOptions {
@@ -89,13 +99,32 @@ fn dpk_opts(service: &str, key: &str) -> PasswordOptions {
 impl SecretStore {
     /// Probe whether `key` exists and whether the backend is reachable.
     pub fn probe(&self, key: &str) -> KeyringProbe {
-        // macOS: probe the Data Protection Keychain only. Items still in the
-        // old keychain will be migrated on the first `load` call.
+        // macOS: probe the Data Protection Keychain first. If DPK is
+        // unavailable (unsigned dev build), fall back to the legacy keyring
+        // crate path. Items still in the old keychain will be migrated on the
+        // first `load` call.
         #[cfg(all(feature = "system-keyring", target_os = "macos"))]
         {
             match generic_password(dpk_opts(&self.service, key)) {
                 Ok(_) => KeyringProbe::Present,
                 Err(ref e) if is_not_found(e) => KeyringProbe::ReachableButEmpty,
+                Err(ref e) if is_dpk_unavailable(e) => {
+                    // DPK unavailable (unsigned build) — fall back to keyring.
+                    match keyring_entry(&self.service, key) {
+                        Ok(entry) => match entry.get_password() {
+                            Ok(_) => KeyringProbe::Present,
+                            Err(keyring::Error::NoEntry) => KeyringProbe::ReachableButEmpty,
+                            Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                                KeyringProbe::Unreachable
+                            }
+                            Err(_) => KeyringProbe::ReachableButEmpty,
+                        },
+                        Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                            KeyringProbe::Unreachable
+                        }
+                        Err(_) => KeyringProbe::Unreachable,
+                    }
+                }
                 Err(ref e) if is_keyring_availability_error(&e.to_string()) => {
                     KeyringProbe::Unreachable
                 }
@@ -131,7 +160,9 @@ impl SecretStore {
     /// when the backend errored in a way that is not "missing".
     pub fn load(&self, key: &str) -> Result<Option<String>, String> {
         // macOS: try Data Protection Keychain first; fall back to old keychain
-        // and migrate on a miss (one-time per item).
+        // and migrate on a miss (one-time per item). If DPK is unavailable
+        // (unsigned dev build, errSecMissingEntitlement), use the legacy
+        // keyring crate path directly — no migration needed in that case.
         #[cfg(all(feature = "system-keyring", target_os = "macos"))]
         {
             match generic_password(dpk_opts(&self.service, key)) {
@@ -150,6 +181,16 @@ impl SecretStore {
                             let _ = entry.delete_credential();
                             Ok(Some(old_val))
                         }
+                        Err(keyring::Error::NoEntry) => Ok(None),
+                        Err(e) => Err(format!("keyring get: {e}")),
+                    }
+                }
+                Err(ref e) if is_dpk_unavailable(e) => {
+                    // DPK unavailable (unsigned build) — use keyring directly.
+                    let entry = keyring_entry(&self.service, key)
+                        .map_err(|e| format!("keyring entry: {e}"))?;
+                    match entry.get_password() {
+                        Ok(secret) => Ok(Some(secret)),
                         Err(keyring::Error::NoEntry) => Ok(None),
                         Err(e) => Err(format!("keyring get: {e}")),
                     }
@@ -178,11 +219,23 @@ impl SecretStore {
     /// Store `value` for `key`. Reports `Err` on availability failures — callers
     /// decide whether to fall back to file storage.
     pub fn store(&self, key: &str, value: &str) -> Result<(), String> {
-        // macOS: write directly to the Data Protection Keychain.
+        // macOS: write directly to the Data Protection Keychain. If DPK is
+        // unavailable (unsigned dev build), fall back to the legacy keyring
+        // crate path.
         #[cfg(all(feature = "system-keyring", target_os = "macos"))]
         {
-            set_generic_password_options(value.as_bytes(), dpk_opts(&self.service, key))
-                .map_err(|e| format!("keyring set: {e}"))
+            match set_generic_password_options(value.as_bytes(), dpk_opts(&self.service, key)) {
+                Ok(()) => Ok(()),
+                Err(ref e) if is_dpk_unavailable(e) => {
+                    // DPK unavailable (unsigned build) — use keyring directly.
+                    let entry = keyring_entry(&self.service, key)
+                        .map_err(|e| format!("keyring entry: {e}"))?;
+                    entry
+                        .set_password(value)
+                        .map_err(|e| format!("keyring set: {e}"))
+                }
+                Err(e) => Err(format!("keyring set: {e}")),
+            }
         }
         // Non-macOS system-keyring path (Windows, Linux).
         #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
@@ -203,12 +256,23 @@ impl SecretStore {
     /// Delete the secret for `key`. A missing entry is not an error.
     pub fn delete(&self, key: &str) -> Result<(), String> {
         // macOS: delete from both DPK and old keychain (best-effort on old).
+        // If DPK is unavailable (unsigned dev build), fall back to the legacy
+        // keyring crate path.
         #[cfg(all(feature = "system-keyring", target_os = "macos"))]
         {
             // Delete from Data Protection Keychain; missing is fine.
             match delete_generic_password_options(dpk_opts(&self.service, key)) {
                 Ok(()) => {}
                 Err(ref e) if is_not_found(e) => {}
+                Err(ref e) if is_dpk_unavailable(e) => {
+                    // DPK unavailable (unsigned build) — use keyring directly.
+                    let entry = keyring_entry(&self.service, key)
+                        .map_err(|e| format!("keyring entry: {e}"))?;
+                    return match entry.delete_credential() {
+                        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                        Err(e) => Err(format!("keyring delete: {e}")),
+                    };
+                }
                 Err(e) => return Err(format!("keyring delete: {e}")),
             }
             // Best-effort cleanup from old keychain.
@@ -256,5 +320,19 @@ mod tests {
         ));
         // A plain "not found" is per-entry, not an availability failure.
         assert!(!is_keyring_availability_error("entry not found"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dpk_unavailable_discriminator() {
+        // errSecMissingEntitlement = -34018 signals unsigned dev build.
+        let e = SFError::from_code(-34018);
+        assert!(is_dpk_unavailable(&e));
+        // errSecItemNotFound = -25300 is not a DPK-unavailable error.
+        let e = SFError::from_code(-25300);
+        assert!(!is_dpk_unavailable(&e));
+        // errSecDuplicateItem = -25299 is not a DPK-unavailable error.
+        let e = SFError::from_code(-25299);
+        assert!(!is_dpk_unavailable(&e));
     }
 }
