@@ -17,6 +17,10 @@ pub struct SkillEntry {
     pub description: String,
     /// Absolute path to the SKILL.md file; used by `load_skill` to read on demand.
     pub path: PathBuf,
+    /// Absolute paths to every non-SKILL.md file in the skill directory tree.
+    /// Pre-enumerated at discovery time so `load_skill` can match by relative path
+    /// without doing arbitrary filesystem lookups at call time.
+    pub supporting_files: Vec<PathBuf>,
 }
 
 /// Handles both normal repos (`.git/` dir) and worktrees (`.git` file).
@@ -126,11 +130,55 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
             continue;
         }
         seen.insert(name.clone());
+
+        // Collect supporting files: every non-SKILL.md file in the skill dir tree.
+        // Don't descend into subdirs that themselves have a SKILL.md — those are
+        // separate skills with their own entries.
+        let supporting_files = collect_supporting_files(&subdir);
+
         skills.push(SkillEntry {
             name,
             description,
             path: skill_md,
+            supporting_files,
         });
+    }
+}
+
+/// Walk `skill_dir` recursively and return the absolute path of every file
+/// that is not `SKILL.md`. Subdirectories that contain their own `SKILL.md`
+/// are treated as separate skills and are not descended into.
+fn collect_supporting_files(skill_dir: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    collect_supporting_files_impl(skill_dir, skill_dir, &mut result);
+    result.sort();
+    result
+}
+
+fn collect_supporting_files_impl(skill_dir: &Path, current: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+    let mut items: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+    items.sort_by_key(|e| e.path());
+
+    for entry in items {
+        let path = entry.path();
+        let ft = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            // Don't descend into subdirs that are themselves skills.
+            if path.join("SKILL.md").is_file() {
+                continue;
+            }
+            collect_supporting_files_impl(skill_dir, &path, out);
+        } else if ft.is_file() {
+            if path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+                out.push(path);
+            }
+        }
     }
 }
 
@@ -530,5 +578,81 @@ mod tests {
         let skills = discover_skills_impl(cwd.path(), None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "local");
+    }
+
+    #[test]
+    fn collect_supporting_files_finds_non_skill_md_files() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        // SKILL.md should be excluded.
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        // A references subdir with files.
+        let refs = skill_dir.join("references");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("foo.md"), "foo").unwrap();
+        std::fs::write(refs.join("bar.md"), "bar").unwrap();
+        // A script at the top level.
+        std::fs::write(skill_dir.join("setup.sh"), "#!/bin/sh").unwrap();
+
+        let files = collect_supporting_files(skill_dir);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"foo.md".to_owned()), "missing foo.md: {names:?}");
+        assert!(names.contains(&"bar.md".to_owned()), "missing bar.md: {names:?}");
+        assert!(names.contains(&"setup.sh".to_owned()), "missing setup.sh: {names:?}");
+        assert!(!names.contains(&"SKILL.md".to_owned()), "SKILL.md should be excluded: {names:?}");
+    }
+
+    #[test]
+    fn collect_supporting_files_does_not_descend_into_nested_skills() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        std::fs::write(skill_dir.join("helper.sh"), "#!/bin/sh").unwrap();
+
+        // A nested subdir that is itself a skill — should not be descended into.
+        let nested = skill_dir.join("nested-skill");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), "---\nname: nested\n---\n").unwrap();
+        std::fs::write(nested.join("secret.md"), "should not appear").unwrap();
+
+        let files = collect_supporting_files(skill_dir);
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"helper.sh".to_owned()), "missing helper.sh: {names:?}");
+        assert!(
+            !names.contains(&"secret.md".to_owned()),
+            "nested skill's files should not appear: {names:?}"
+        );
+    }
+
+    #[test]
+    fn discover_skills_populates_supporting_files() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let skill_dir = cwd.join(".agents/skills/with-refs");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: with-refs\ndescription: Has refs\n---\nBody.\n",
+        )
+        .unwrap();
+        let refs = skill_dir.join("references");
+        std::fs::create_dir_all(&refs).unwrap();
+        std::fs::write(refs.join("guide.md"), "guide content").unwrap();
+
+        let skills = discover_skills_impl(cwd, None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "with-refs");
+        assert_eq!(skills[0].supporting_files.len(), 1);
+        assert!(
+            skills[0].supporting_files[0].ends_with("references/guide.md"),
+            "unexpected path: {:?}",
+            skills[0].supporting_files[0]
+        );
     }
 }
