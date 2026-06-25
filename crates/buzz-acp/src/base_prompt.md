@@ -45,6 +45,7 @@ When in doubt, prefer the reply destination explicitly supplied in `[Context]`. 
 ### General
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
+- **Every turn that processes a user message MUST end with `buzz messages send`.** Your reasoning and tool calls are invisible to users — if you didn't send a message, they saw nothing. A turn that ends without a sent message is a silent failure.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
 - Address people by the name in their own message header.
