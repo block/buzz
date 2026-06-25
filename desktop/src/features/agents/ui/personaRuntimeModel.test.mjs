@@ -11,6 +11,10 @@ test("shouldClearModelForRuntimeChange clears model when switching runtimes", ()
   assert.equal(shouldClearModelForRuntimeChange("goose", "claude"), true);
 });
 
+test("shouldClearModelForRuntimeChange clears model when runtime is removed", () => {
+  assert.equal(shouldClearModelForRuntimeChange("goose", ""), true);
+});
+
 test("shouldClearModelForRuntimeChange keeps model for unchanged runtime", () => {
   assert.equal(shouldClearModelForRuntimeChange("goose", "goose"), false);
 });

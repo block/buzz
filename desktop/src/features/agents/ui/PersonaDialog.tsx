@@ -168,6 +168,8 @@ export function PersonaDialog({
   const [model, setModel] = React.useState("");
   const [provider, setProvider] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
+  const [isAvatarUploadPending, setIsAvatarUploadPending] =
+    React.useState(false);
   const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
@@ -192,6 +194,7 @@ export function PersonaDialog({
     setModel(initialValues.model ?? "");
     setProvider(initialValues.provider ?? "");
     setEnvVars("envVars" in initialValues ? (initialValues.envVars ?? {}) : {});
+    setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
     setIsImportingUpdate(false);
   }, [initialValues, open]);
@@ -313,6 +316,7 @@ export function PersonaDialog({
       setModel("");
       setProvider("");
       setEnvVars({});
+      setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
       setIsImportingUpdate(false);
       setIsWindowFileDragOver(false);
@@ -324,7 +328,8 @@ export function PersonaDialog({
   async function handleSubmit() {
     if (
       !initialValues ||
-      !canSubmitPersonaDialog({ displayName, isPending })
+      !canSubmitPersonaDialog({ displayName, isPending }) ||
+      isAvatarUploadPending
     ) {
       return;
     }
@@ -337,8 +342,8 @@ export function PersonaDialog({
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt.trim(),
       runtime: trimmedRuntime || undefined,
-      model: model.trim() || undefined,
-      provider: provider.trim() || undefined,
+      model: trimmedRuntime ? model.trim() || undefined : undefined,
+      provider: trimmedRuntime ? provider.trim() || undefined : undefined,
       namePool: preservedNamePool,
       envVars,
     };
@@ -379,12 +384,16 @@ export function PersonaDialog({
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
-    (!isCreateMode || selectedRuntimeIsAvailable);
+    (!isCreateMode || selectedRuntimeIsAvailable) &&
+    !isAvatarUploadPending;
   const modelOptions = getPersonaModelOptions(runtime, model);
   const providerOptions = getPersonaProviderOptions(provider);
-  const selectedRuntimeLabel = runtimesLoading
-    ? "Loading providers..."
-    : (selectedRuntime?.label ?? "Choose a provider");
+  const blankRuntimeOptionLabel =
+    isCreateMode && runtimesLoading
+      ? "Loading providers..."
+      : isCreateMode
+        ? "Choose a provider"
+        : "No preference (use app default)";
   const selectedModelLabel =
     modelOptions.find((option) => option.id === model)?.label ??
     AUTO_MODEL_OPTION.label;
@@ -410,7 +419,7 @@ export function PersonaDialog({
   return (
     <Dialog
       onOpenChange={(nextOpen) => {
-        if (!nextOpen && isPending) return;
+        if (!nextOpen && (isPending || isAvatarUploadPending)) return;
         handleOpenChange(nextOpen);
       }}
       open={open}
@@ -468,7 +477,7 @@ export function PersonaDialog({
 
             <div className="flex items-center gap-2">
               <Button
-                disabled={isPending}
+                disabled={isPending || isAvatarUploadPending}
                 onClick={() => handleOpenChange(false)}
                 type="button"
                 variant="outline"
@@ -481,7 +490,11 @@ export function PersonaDialog({
                 form="persona-dialog-form"
                 type="submit"
               >
-                {isPending ? "Saving..." : submitLabel}
+                {isPending
+                  ? "Saving..."
+                  : isAvatarUploadPending
+                    ? "Uploading..."
+                    : submitLabel}
               </Button>
             </div>
           </div>
@@ -494,8 +507,9 @@ export function PersonaDialog({
         >
           <AgentCreationPreview
             avatarUrl={previewAvatarUrl}
-            disabled={isPending}
+            disabled={isPending || isAvatarUploadPending}
             label={previewLabel}
+            onUploadPendingChange={setIsAvatarUploadPending}
             onSelectAvatar={setAvatarUrl}
           />
 
@@ -577,11 +591,14 @@ export function PersonaDialog({
                     ) {
                       setModel("");
                     }
+                    if (nextRuntime.trim().length === 0) {
+                      setProvider("");
+                    }
                   }}
                   value={runtime}
                 >
-                  <option value="" disabled>
-                    {selectedRuntimeLabel}
+                  <option disabled={isCreateMode} value="">
+                    {blankRuntimeOptionLabel}
                   </option>
                   {runtimes.map((candidate) => (
                     <option
@@ -747,11 +764,13 @@ function AgentCreationPreview({
   avatarUrl,
   disabled = false,
   label,
+  onUploadPendingChange,
   onSelectAvatar,
 }: {
   avatarUrl: string | null;
   disabled?: boolean;
   label: string;
+  onUploadPendingChange?: (isPending: boolean) => void;
   onSelectAvatar: (avatarUrl: string) => void;
 }) {
   const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
@@ -767,6 +786,13 @@ function AgentCreationPreview({
   } = useAvatarUpload({
     onUploadSuccess: onSelectAvatar,
   });
+
+  React.useEffect(() => {
+    onUploadPendingChange?.(isUploading);
+    return () => {
+      onUploadPendingChange?.(false);
+    };
+  }, [isUploading, onUploadPendingChange]);
 
   const handleAvatarDragEnter = React.useCallback(
     (event: React.DragEvent<HTMLFieldSetElement>) => {

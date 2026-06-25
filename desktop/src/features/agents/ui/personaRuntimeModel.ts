@@ -5,5 +5,5 @@ export function shouldClearModelForRuntimeChange(
   const previous = previousRuntime.trim();
   const next = nextRuntime.trim();
 
-  return previous.length > 0 && next.length > 0 && previous !== next;
+  return previous.length > 0 && previous !== next;
 }
