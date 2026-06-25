@@ -268,6 +268,7 @@ pub struct ManagedAgentSummary {
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
     pub system_prompt: Option<String>,
+    pub avatar_url: Option<String>,
     pub model: Option<String>,
     /// LLM inference provider, from the agent's pinned record snapshot.
     pub provider: Option<String>,

@@ -35,6 +35,7 @@ export type MarkdownRuntime = {
 export type MarkdownProps = {
   channelNames?: string[];
   className?: string;
+  compact?: boolean;
   content: string;
   customEmoji?: CustomEmoji[];
   imetaByUrl?: ImetaLookup;
@@ -42,6 +43,10 @@ export type MarkdownProps = {
   agentMentionPubkeysByName?: Record<string, string>;
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
+  mediaInset?: boolean;
   searchQuery?: string;
+  tight?: boolean;
   videoReviewContext?: VideoReviewContext;
 };
+
+export type MarkdownVariant = "default" | "compact" | "tight";

@@ -63,6 +63,37 @@ test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () 
   );
 });
 
+test("parsePromptText preserves multiline event content in the user bubble text", () => {
+  const text = [
+    "[Buzz event: @mention]",
+    "Event ID: event-1",
+    "Channel: agents",
+    `From: tho (hex: ${HEX})`,
+    "Time: 2026-06-15T17:15:00Z",
+    "Content: @Ned",
+    "",
+    "- remove that stray cherry pick if it's not adding value here",
+    "- help me understand what that e2eBridge change does",
+    "- we'd want the e2e seed path as a separate pull request",
+    'Tags: [["h","agents"]]',
+    "Parsed: mentions=[Ned]",
+  ].join("\n");
+
+  const result = parsePromptText(text);
+
+  assert.equal(
+    result.userText,
+    [
+      "@Ned",
+      "",
+      "- remove that stray cherry pick if it's not adding value here",
+      "- help me understand what that e2eBridge change does",
+      "- we'd want the e2e seed path as a separate pull request",
+    ].join("\n"),
+  );
+  assert.equal(result.userPubkey, HEX);
+});
+
 test("parsePromptText lowercases the extracted hex pubkey", () => {
   const text = [
     "[Buzz event: dm]",

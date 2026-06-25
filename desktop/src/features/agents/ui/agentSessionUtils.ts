@@ -64,6 +64,91 @@ export function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * True when a tool image source is an inline `data:image/` URI that should be
+ * rendered as-is. This is the dual-layer image-scheme guard: only the
+ * `data:image/` prefix is treated as a safe passthrough — every other scheme
+ * (including other `data:` subtypes) must be routed through the relay rewriter.
+ * Never widen this beyond `data:image/`.
+ */
+export function isInlineImageData(source: string): boolean {
+  return source.startsWith("data:image/");
+}
+
+function getToolNumber(
+  record: Record<string, unknown>,
+  keys: string[],
+): number | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/** Format a millisecond duration; negative input yields null. */
+export function formatDurationMs(ms: number): string | null {
+  if (ms < 0) return null;
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) {
+    return totalSeconds < 10
+      ? `${totalSeconds.toFixed(1)}s`
+      : `${Math.round(totalSeconds)}s`;
+  }
+  let minutes = Math.floor(totalSeconds / 60);
+  let seconds = Math.round(totalSeconds % 60);
+  if (seconds === 60) {
+    minutes += 1;
+    seconds = 0;
+  }
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}
+
+/**
+ * Parse a tool result string into a value. Handles the double-encoding case
+ * where a JSON string itself contains JSON. Returns null on empty or invalid
+ * input.
+ */
+export function parseToolResultValue(result: string): unknown {
+  const trimmed = result.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed !== "string") return parsed;
+    try {
+      return JSON.parse(parsed);
+    } catch {
+      return parsed;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a tool's display duration. Prefers the start/complete timestamps,
+ * then falls back to `duration_ms`/`elapsed_ms` fields inside the parsed
+ * result payload.
+ */
+export function getToolDurationDisplay(item: {
+  startedAt?: string | null;
+  completedAt?: string | null;
+  result: string;
+}): string | null {
+  if (item.startedAt && item.completedAt) {
+    return formatDuration(item.startedAt, item.completedAt);
+  }
+
+  const resultRecord = asRecord(parseToolResultValue(item.result));
+  const durationMs =
+    getToolNumber(resultRecord, ["duration_ms", "durationMs"]) ??
+    getToolNumber(resultRecord, ["elapsed_ms", "elapsedMs"]);
+  return durationMs == null ? null : formatDurationMs(durationMs);
+}
+
 export function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }

@@ -73,6 +73,8 @@ const overrides = new Map([
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
   // re-introduced after 826d735fe removal (config-bridge caller still needs it).
   // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
+  // activity-feed threads avatar_url into build_managed_agent_summary for the
+  // assistant-bubble pinned snapshot.
   ["src-tauri/src/managed_agents/runtime.rs", 2150],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
@@ -121,7 +123,7 @@ const overrides = new Map([
   ["src/features/channels/readState/readStateManager.ts", 1030],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
-  ["src/shared/ui/markdown.tsx", 2082],
+  ["src/shared/ui/markdown.tsx", 2119],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
   // Option C databricks-model-discovery: parse/HTTP logic moved to buzz-agent

@@ -21,14 +21,23 @@ import type {
   ObserverEvent,
   TranscriptItem,
 } from "./agentSessionTypes";
+import {
+  deriveLatestSessionId,
+  resolveRawRailLayout,
+  scopeByChannel,
+} from "./agentSessionPanelLayout";
 import { shorten } from "./agentSessionUtils";
 import { useObserverEvents, useAgentTranscript } from "./useObserverEvents";
 
 type ManagedAgentSessionPanelProps = {
-  agent: Pick<ManagedAgent, "pubkey" | "name" | "status">;
+  agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
+    avatarUrl?: string | null;
+  };
   channelId?: string | null;
   className?: string;
   emptyDescription?: string;
+  isWorking?: boolean;
+  rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
   showRaw?: boolean;
   profiles?: UserProfileLookup;
@@ -39,6 +48,8 @@ export function ManagedAgentSessionPanel({
   channelId = null,
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
+  isWorking = false,
+  rawLayout = "responsive",
   showHeader = true,
   showRaw = true,
   profiles,
@@ -51,27 +62,19 @@ export function ManagedAgentSessionPanel({
   const transcript = useAgentTranscript(hasObserver, agent.pubkey);
 
   const scopedTranscript = React.useMemo(
-    () =>
-      channelId
-        ? transcript.filter((item) => item.channelId === channelId)
-        : transcript,
+    () => scopeByChannel(transcript, channelId),
     [channelId, transcript],
   );
 
   const scopedEvents = React.useMemo(
-    () =>
-      channelId
-        ? events.filter((event) => event.channelId === channelId)
-        : events,
+    () => scopeByChannel(events, channelId),
     [channelId, events],
   );
 
-  const latestSessionId = React.useMemo(() => {
-    for (let i = scopedEvents.length - 1; i >= 0; i--) {
-      if (scopedEvents[i].sessionId) return scopedEvents[i].sessionId;
-    }
-    return null;
-  }, [scopedEvents]);
+  const latestSessionId = React.useMemo(
+    () => deriveLatestSessionId(scopedEvents),
+    [scopedEvents],
+  );
 
   return (
     <section
@@ -90,13 +93,17 @@ export function ManagedAgentSessionPanel({
       ) : null}
 
       <SessionBody
+        agentAvatarUrl={agent.avatarUrl ?? null}
         agentName={agent.name}
+        agentPubkey={agent.pubkey}
         connectionState={connectionState}
         emptyDescription={emptyDescription}
         errorMessage={errorMessage}
         events={scopedEvents}
         hasObserver={hasObserver}
+        isWorking={isWorking}
         profiles={profiles}
+        rawLayout={rawLayout}
         showRaw={showRaw}
         transcript={scopedTranscript}
       />
@@ -140,26 +147,51 @@ function SessionHeader({
 }
 
 function SessionBody({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   connectionState,
   emptyDescription,
   errorMessage,
   events,
   hasObserver,
+  isWorking,
   profiles,
+  rawLayout,
   showRaw,
   transcript,
 }: {
+  agentAvatarUrl: string | null;
   agentName: string;
+  agentPubkey: string;
   connectionState: ConnectionState;
   emptyDescription: string;
   errorMessage: string | null;
   events: ObserverEvent[];
   hasObserver: boolean;
+  isWorking: boolean;
   profiles?: UserProfileLookup;
+  rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
   transcript: TranscriptItem[];
 }) {
+  const rawRail = resolveRawRailLayout(showRaw, rawLayout);
+
+  if (rawRail.mode === "exclusive") {
+    return (
+      <>
+        <RawEventRail events={events} />
+
+        {errorMessage ? (
+          <p className="mt-4 inline-flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            <CircleAlert className="h-4 w-4" />
+            {errorMessage}
+          </p>
+        ) : null}
+      </>
+    );
+  }
+
   return (
     <>
       {!hasObserver ? (
@@ -169,18 +201,21 @@ function SessionBody({
       ) : (
         <div
           className={cn(
-            showRaw
+            rawRail.mode === "side"
               ? "mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]"
               : "mt-0",
           )}
         >
           <AgentSessionTranscriptList
+            agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
+            agentPubkey={agentPubkey}
             emptyDescription={emptyDescription}
+            isWorking={isWorking}
             items={transcript}
             profiles={profiles}
           />
-          {showRaw ? <RawEventRail events={events} /> : null}
+          {rawRail.mode === "side" ? <RawEventRail events={events} /> : null}
         </div>
       )}
 

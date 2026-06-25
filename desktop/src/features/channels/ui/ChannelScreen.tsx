@@ -285,32 +285,13 @@ export function ChannelScreen({
         : [],
     [activeChannel],
   );
-  const messageProfilePubkeys = React.useMemo(
-    () => [
-      ...new Set([
-        ...messageAuthorPubkeys,
-        ...messageMentionPubkeys,
-        ...activeDmParticipantPubkeys,
-        ...typingEntries.map((entry) => entry.pubkey),
-      ]),
-    ],
-    [
-      activeDmParticipantPubkeys,
-      messageAuthorPubkeys,
-      messageMentionPubkeys,
-      typingEntries,
-    ],
-  );
-  const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
-    enabled: messageProfilePubkeys.length > 0,
-  });
   const channelMembersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
   const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data ?? [];
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
-  const agentPubkeys = React.useMemo(() => {
+  const knownAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
     for (const member of channelMembers ?? []) {
       if (member.role === "bot" || member.isAgent) {
@@ -323,6 +304,31 @@ export function ChannelScreen({
     for (const agent of relayAgents) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
+    return pubkeys;
+  }, [channelMembers, managedAgents, relayAgents]);
+  const messageProfilePubkeys = React.useMemo(
+    () => [
+      ...new Set([
+        ...messageAuthorPubkeys,
+        ...messageMentionPubkeys,
+        ...activeDmParticipantPubkeys,
+        ...knownAgentPubkeys,
+        ...typingEntries.map((entry) => entry.pubkey),
+      ]),
+    ],
+    [
+      activeDmParticipantPubkeys,
+      knownAgentPubkeys,
+      messageAuthorPubkeys,
+      messageMentionPubkeys,
+      typingEntries,
+    ],
+  );
+  const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
+    enabled: messageProfilePubkeys.length > 0,
+  });
+  const agentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(knownAgentPubkeys);
     for (const [pubkey, profile] of Object.entries(
       messageProfilesQuery.data?.profiles ?? {},
     )) {
@@ -331,7 +337,7 @@ export function ChannelScreen({
       }
     }
     return pubkeys;
-  }, [channelMembers, managedAgents, messageProfilesQuery.data, relayAgents]);
+  }, [knownAgentPubkeys, messageProfilesQuery.data]);
   const agentPubkeysPending =
     activeChannel?.channelType === "dm" &&
     (channelMembersQuery.isPending ||

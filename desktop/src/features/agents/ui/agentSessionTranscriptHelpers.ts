@@ -127,9 +127,39 @@ function parsePromptSections(text: string): PromptSection[] {
   return sections;
 }
 
+const EVENT_CONTENT_BOUNDARY_RE =
+  /^(?:Event ID|Channel|Kind|From|Time|Tags|Parsed):\s*/;
+const EVENT_BLOCK_BOUNDARY_RE = /^--- Event \d+\b/;
+
 function extractEventContent(body: string): string {
-  const contentMatch = body.match(/^Content:\s*(.*)$/m);
-  return contentMatch?.[1]?.trim() ?? "";
+  const lines = body.split(/\r?\n/);
+  const chunks: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^Content:\s?(.*)$/);
+    if (!match) {
+      continue;
+    }
+
+    const contentLines = [match[1] ?? ""];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      if (
+        EVENT_CONTENT_BOUNDARY_RE.test(line) ||
+        EVENT_BLOCK_BOUNDARY_RE.test(line)
+      ) {
+        break;
+      }
+      contentLines.push(line);
+    }
+
+    const content = contentLines.join("\n").trim();
+    if (content) {
+      chunks.push(content);
+    }
+  }
+
+  return chunks.join("\n\n");
 }
 
 function extractEventAuthorPubkey(body: string): string | null {

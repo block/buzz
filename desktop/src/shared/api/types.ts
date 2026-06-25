@@ -293,6 +293,7 @@ export type ManagedAgent = {
   maxTurnDurationSeconds: number | null;
   parallelism: number;
   systemPrompt: string | null;
+  avatarUrl: string | null;
   model: string | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;

@@ -20,42 +20,52 @@ export type ConnectionState =
 
 export type ToolStatus = "executing" | "completed" | "failed" | "pending";
 
+/** Observer/ACP wire label for dev-only transcript debugging. */
+export type TranscriptAcpSource = string;
+
+/** Shared optional identity fields attached during transcript construction. */
+export type TranscriptItemIdentity = {
+  turnId?: string | null;
+  sessionId?: string | null;
+  channelId?: string | null;
+};
+
 export type TranscriptItem =
-  | {
+  | ({
       id: string;
       type: "message";
       role: "assistant" | "user";
       title: string;
       text: string;
       timestamp: string;
+      acpSource?: TranscriptAcpSource;
       authorPubkey?: string | null;
-      channelId?: string | null;
-    }
-  | {
+    } & TranscriptItemIdentity)
+  | ({
       id: string;
       type: "thought";
       title: string;
       text: string;
       timestamp: string;
-      channelId?: string | null;
-    }
-  | {
+      acpSource?: TranscriptAcpSource;
+    } & TranscriptItemIdentity)
+  | ({
       id: string;
       type: "lifecycle";
       title: string;
       text: string;
       timestamp: string;
-      channelId?: string | null;
-    }
-  | {
+      acpSource?: TranscriptAcpSource;
+    } & TranscriptItemIdentity)
+  | ({
       id: string;
       type: "metadata";
       title: string;
       sections: PromptSection[];
       timestamp: string;
-      channelId?: string | null;
-    }
-  | {
+      acpSource?: TranscriptAcpSource;
+    } & TranscriptItemIdentity)
+  | ({
       id: string;
       type: "tool";
       title: string;
@@ -68,8 +78,8 @@ export type TranscriptItem =
       timestamp: string;
       startedAt: string;
       completedAt: string | null;
-      channelId?: string | null;
-    };
+      acpSource?: TranscriptAcpSource;
+    } & TranscriptItemIdentity);
 
 export type PromptSection = {
   title: string;

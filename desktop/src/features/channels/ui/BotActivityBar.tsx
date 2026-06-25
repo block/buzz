@@ -2,8 +2,7 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
-import type { TranscriptItem } from "@/features/agents/ui/agentSessionTypes";
-import { formatToolTitle } from "@/features/agents/ui/agentSessionToolCatalog";
+import { getActivityHeadline } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -26,18 +25,6 @@ type BotActivityBarProps = {
 const HOVER_OPEN_DELAY_MS = 150;
 const HOVER_CLOSE_DELAY_MS = 180;
 const HEADLINE_ROTATION_MS = 2200;
-
-function getActivityHeadline(item: TranscriptItem): string | null {
-  if (item.type === "tool") {
-    return formatToolTitle(item.buzzToolName ?? item.toolName, item.title);
-  }
-
-  if (item.type === "message") {
-    return item.role === "assistant" ? "Responding" : item.title;
-  }
-
-  return item.title;
-}
 
 export function BotActivityComposerAction({
   agents,
@@ -185,10 +172,11 @@ export function BotActivityComposerAction({
                   "border border-background",
                   isInline
                     ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-3xs"
-                    : "!h-5 !w-5 text-3xs",
+                    : "shrink-0",
                 )}
                 displayName={agent.name}
                 key={agent.pubkey}
+                size="xs"
               />
             ))}
           </span>
@@ -248,8 +236,9 @@ export function BotActivityComposerAction({
               >
                 <UserAvatar
                   avatarUrl={agentAvatarUrl(agent)}
-                  className="!h-6 !w-6 shrink-0 text-2xs"
+                  className="shrink-0"
                   displayName={agent.name}
+                  size="sm"
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
                 <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
