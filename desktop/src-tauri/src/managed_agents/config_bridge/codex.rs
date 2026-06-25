@@ -1,7 +1,5 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
-const CODEX_SCHEMA: &str = include_str!("schemas/codex.config.schema.json");
-
 /// Read Codex config from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     let path = codex_config_path()?;
@@ -30,7 +28,8 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
     // MCP servers from [mcp_servers.<id>] tables
     let extensions = parse_mcp_servers(&table);
 
-    // Schema-driven extra fields — skip normalized keys to avoid double-counting.
+    // Config-driven extra fields — skip normalized keys to avoid double-counting.
+    // The skip list covers fields extracted into typed struct fields above.
     let config_json = toml_to_json(&toml::Value::Table(table));
     let skip = &[
         "model",
@@ -43,17 +42,15 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
         "mcp_servers",
         "model_providers",
     ];
-    let mut extra = super::schema_walker::extract_schema_fields(CODEX_SCHEMA, &config_json, skip);
+    let mut extra = super::schema_walker::extract_config_fields(&config_json, skip);
 
-    // Custom model providers from [model_providers.<id>] — not in the schema's
-    // top-level properties as individual keys, so surface them explicitly.
+    // Custom model providers from [model_providers.<id>] — surface as
+    // "model_providers.<name> = configured" rather than flattening their internals.
     if let Some(serde_json::Value::Object(providers)) = config_json.get("model_providers") {
         for (name, _) in providers {
             extra.insert(format!("model_providers.{name}"), "configured".to_string());
         }
     }
-
-    let schema_version = super::schema_walker::schema_version("codex");
 
     Some(RuntimeFileConfig {
         model,
@@ -65,7 +62,6 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
         system_prompt: toml_to_json_string(&config_json, "instructions"),
         extensions,
         extra,
-        schema_version,
     })
 }
 
@@ -212,16 +208,8 @@ base_url = "http://localhost:8080"
     }
 
     #[test]
-    fn schema_version_is_populated() {
-        let toml = r#"model = "o3""#;
-        let cfg = parse_codex_config(toml).unwrap();
-        // schema_version is the fetched_at timestamp from versions.json
-        assert!(cfg.schema_version.is_some());
-    }
-
-    #[test]
     fn extra_contains_fast_mode_from_features() {
-        // features.fast_mode is a nested field — walker flattens to features.fast_mode
+        // features is a nested table — walker flattens to features.fast_mode
         let toml = r#"
 model = "o3"
 
@@ -270,6 +258,19 @@ fast_mode = true
                 .map(|s| s.as_str()),
             Some("auto"),
             "model_reasoning_summary should appear in extra"
+        );
+    }
+
+    #[test]
+    fn extra_contains_unknown_future_field() {
+        // Config-driven: any key the user has set appears, even if we've never
+        // heard of it. This is the core benefit of the config-driven approach.
+        let toml = r#"some_new_codex_field = "value""#;
+        let cfg = parse_codex_config(toml).unwrap();
+        assert_eq!(
+            cfg.extra.get("some_new_codex_field").map(|s| s.as_str()),
+            Some("value"),
+            "unknown future fields should appear in extra"
         );
     }
 

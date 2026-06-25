@@ -1,7 +1,5 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
-const CLAUDE_SCHEMA: &str = include_str!("schemas/claude-code-settings.schema.json");
-
 /// Read Claude Code config from `~/.claude/settings.json` and `~/.claude.json`.
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     let home = dirs::home_dir()?;
@@ -23,11 +21,9 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
         // effortLevel → thinking_effort (direct mapping per spec)
         cfg.thinking_effort = json_string(s, "effortLevel");
 
-        // Schema-driven extra fields — skip normalized keys.
+        // Config-driven extra fields — skip normalized keys to avoid double-counting.
         let skip = &["model", "effortLevel"];
-        cfg.extra = super::schema_walker::extract_schema_fields(CLAUDE_SCHEMA, s, skip);
-
-        cfg.schema_version = super::schema_walker::schema_version("claude");
+        cfg.extra = super::schema_walker::extract_config_fields(s, skip);
     }
 
     // MCP servers from ~/.claude.json
@@ -45,7 +41,6 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     }
     cfg.extensions = extensions;
 
-    // Provider is always Anthropic for Claude Code.
     // Buzz-synthesized annotation — not a field from the user's config file.
     cfg.extra
         .insert("provider_locked".to_string(), "true".to_string());
@@ -78,7 +73,7 @@ mod tests {
         cfg.model = json_string(&val, "model");
         cfg.thinking_effort = json_string(&val, "effortLevel");
         let skip = &["model", "effortLevel"];
-        cfg.extra = super::super::schema_walker::extract_schema_fields(CLAUDE_SCHEMA, &val, skip);
+        cfg.extra = super::super::schema_walker::extract_config_fields(&val, skip);
         // provider_locked is always added by read_config_file; add here for parity.
         cfg.extra
             .insert("provider_locked".to_string(), "true".to_string());
@@ -129,13 +124,23 @@ mod tests {
     }
 
     #[test]
-    fn enabled_plugins_formats_as_item_count() {
-        // enabledPlugins is an object in the schema — walker flattens one level.
-        // Each plugin entry is a value (bool or array), so they appear as subkeys.
+    fn arbitrary_env_var_surfaced_without_schema() {
+        // Config-driven: any env var the user has set appears, even if no schema
+        // defines it — this is the core benefit over the schema-driven approach.
+        let cfg = parse_settings(r#"{"env": {"MY_CUSTOM_VAR": "hello"}}"#);
+        assert_eq!(
+            cfg.extra.get("env.MY_CUSTOM_VAR").map(|s| s.as_str()),
+            Some("hello"),
+            "arbitrary env vars should appear in extra"
+        );
+    }
+
+    #[test]
+    fn enabled_plugins_flattened_in_extra() {
         let cfg = parse_settings(
             r#"{"enabledPlugins": {"plugin-a": true, "plugin-b": true}}"#,
         );
-        // The walker flattens one level: enabledPlugins.plugin-a = "true"
+        // Walker flattens one level: enabledPlugins.plugin-a = "true"
         assert!(
             cfg.extra.contains_key("enabledPlugins.plugin-a")
                 || cfg.extra.contains_key("enabledPlugins.plugin-b"),
@@ -191,5 +196,17 @@ mod tests {
         let cfg = parse_settings(r#"{"model": "claude-opus-4", "effortLevel": "high"}"#);
         assert!(!cfg.extra.contains_key("model"));
         assert!(!cfg.extra.contains_key("effortLevel"));
+    }
+
+    #[test]
+    fn unknown_future_field_appears_in_extra() {
+        // Config-driven: any field the user has set appears, even if we've never
+        // heard of it. No schema gate.
+        let cfg = parse_settings(r#"{"someNewClaudeField": "value"}"#);
+        assert_eq!(
+            cfg.extra.get("someNewClaudeField").map(|s| s.as_str()),
+            Some("value"),
+            "unknown future fields should appear in extra"
+        );
     }
 }

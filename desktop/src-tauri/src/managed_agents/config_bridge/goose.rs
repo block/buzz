@@ -64,7 +64,6 @@ fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
         system_prompt: None,
         extensions,
         extra,
-        schema_version: None,
     })
 }
 

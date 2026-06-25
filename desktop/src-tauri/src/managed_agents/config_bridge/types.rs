@@ -113,8 +113,6 @@ pub struct ConfigSourceReport {
     pub env_vars: ConfigTierStatus,
     pub config_file: ConfigTierStatus,
     pub config_file_path: Option<String>,
-    /// Schema version used to extract config fields, if applicable.
-    pub config_schema_version: Option<String>,
 }
 
 /// Full config surface returned to the frontend.
@@ -174,8 +172,6 @@ pub struct RuntimeFileConfig {
     pub system_prompt: Option<String>,
     pub extensions: Vec<ExtensionEntry>,
     pub extra: BTreeMap<String, String>,
-    /// Schema version string used to populate `extra`, if schema-driven extraction was used.
-    pub schema_version: Option<String>,
 }
 
 /// A detected MCP server or extension from a config file.
