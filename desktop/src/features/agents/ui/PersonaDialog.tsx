@@ -53,6 +53,7 @@ const PERSONA_FIELD_CONTROL_CLASS =
 const PERSONA_LABEL_OPTIONAL_CLASS =
   "ml-1 text-xs font-normal text-muted-foreground/50";
 const AUTO_MODEL_DROPDOWN_VALUE = "__auto_model__";
+const CUSTOM_MODEL_DROPDOWN_VALUE = "__custom_model__";
 const AUTO_PROVIDER_DROPDOWN_VALUE = "__auto_provider__";
 
 type PersonaModelOption = {
@@ -101,20 +102,35 @@ const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
 
 function getPersonaModelOptions(
   runtimeId: string,
-  currentModel: string,
 ): readonly PersonaModelOption[] {
-  const options = PERSONA_MODEL_OPTIONS_BY_RUNTIME[runtimeId] ?? [
-    AUTO_MODEL_OPTION,
-  ];
-  const trimmedModel = currentModel.trim();
-  if (
+  return PERSONA_MODEL_OPTIONS_BY_RUNTIME[runtimeId] ?? [AUTO_MODEL_OPTION];
+}
+
+function hasPersonaModelOption(
+  options: readonly PersonaModelOption[],
+  modelId: string,
+) {
+  const trimmedModel = modelId.trim();
+  return (
     trimmedModel.length === 0 ||
     options.some((option) => option.id === trimmedModel)
-  ) {
-    return options;
+  );
+}
+
+function getModelSelectValue({
+  isCustomModelEditing,
+  isModelCustom,
+  model,
+}: {
+  isCustomModelEditing: boolean;
+  isModelCustom: boolean;
+  model: string;
+}) {
+  if (isCustomModelEditing || isModelCustom) {
+    return CUSTOM_MODEL_DROPDOWN_VALUE;
   }
 
-  return [...options, { id: trimmedModel, label: `${trimmedModel} (current)` }];
+  return model.trim() || AUTO_MODEL_DROPDOWN_VALUE;
 }
 
 function getPersonaProviderOptions(
@@ -166,6 +182,7 @@ export function PersonaDialog({
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -192,6 +209,7 @@ export function PersonaDialog({
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
+    setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
     setEnvVars("envVars" in initialValues ? (initialValues.envVars ?? {}) : {});
     setIsAvatarUploadPending(false);
@@ -314,6 +332,7 @@ export function PersonaDialog({
       setSystemPrompt("");
       setRuntime("");
       setModel("");
+      setIsCustomModelEditing(false);
       setProvider("");
       setEnvVars({});
       setIsAvatarUploadPending(false);
@@ -386,7 +405,15 @@ export function PersonaDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     !isAvatarUploadPending;
-  const modelOptions = getPersonaModelOptions(runtime, model);
+  const modelOptions = getPersonaModelOptions(runtime);
+  const isModelCustom = !hasPersonaModelOption(modelOptions, model);
+  const modelSelectValue = getModelSelectValue({
+    isCustomModelEditing,
+    isModelCustom,
+    model,
+  });
+  const showCustomModelInput =
+    modelFieldVisible && (isCustomModelEditing || isModelCustom);
   const providerOptions = getPersonaProviderOptions(provider);
   const blankRuntimeOptionLabel =
     isCreateMode && runtimesLoading
@@ -395,7 +422,7 @@ export function PersonaDialog({
         ? "Choose a provider"
         : "No preference (use app default)";
   const selectedModelLabel =
-    modelOptions.find((option) => option.id === model)?.label ??
+    modelOptions.find((option) => option.id === model.trim())?.label ??
     AUTO_MODEL_OPTION.label;
   const selectedProviderLabel =
     providerOptions.find((option) => option.id === provider)?.label ??
@@ -590,8 +617,10 @@ export function PersonaDialog({
                       )
                     ) {
                       setModel("");
+                      setIsCustomModelEditing(false);
                     }
                     if (nextRuntime.trim().length === 0) {
+                      setIsCustomModelEditing(false);
                       setProvider("");
                     }
                   }}
@@ -653,13 +682,22 @@ export function PersonaDialog({
                       id="persona-model"
                       onChange={(event) => {
                         const nextModel = event.target.value;
+                        if (nextModel === CUSTOM_MODEL_DROPDOWN_VALUE) {
+                          setIsCustomModelEditing(true);
+                          if (!isModelCustom) {
+                            setModel("");
+                          }
+                          return;
+                        }
+
+                        setIsCustomModelEditing(false);
                         setModel(
                           nextModel === AUTO_MODEL_DROPDOWN_VALUE
                             ? ""
                             : nextModel,
                         );
                       }}
-                      value={model.trim() || AUTO_MODEL_DROPDOWN_VALUE}
+                      value={modelSelectValue}
                     >
                       <option value="" disabled>
                         {selectedModelLabel}
@@ -672,8 +710,33 @@ export function PersonaDialog({
                           {option.label}
                         </option>
                       ))}
+                      <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>
+                        Custom model...
+                      </option>
                     </select>
                   </div>
+                  {showCustomModelInput ? (
+                    <div
+                      className={cn(
+                        "mt-2 flex min-h-11 items-center px-3",
+                        PERSONA_FIELD_SHELL_CLASS,
+                      )}
+                    >
+                      <Input
+                        aria-label="Custom model ID"
+                        autoCorrect="off"
+                        className={cn(
+                          "h-8 px-0 py-0 leading-6",
+                          PERSONA_FIELD_CONTROL_CLASS,
+                        )}
+                        disabled={isPending || !modelFieldVisible}
+                        id="persona-custom-model"
+                        onChange={(event) => setModel(event.target.value)}
+                        placeholder="Custom model ID"
+                        value={model}
+                      />
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>

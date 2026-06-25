@@ -201,6 +201,40 @@ test("importPersonaDialogState preserves Goose app-avatar refs from persona mark
   assert.equal(state.initialValues.avatarUrl, "app-avatar:gloopies-19");
 });
 
+test("importPersonaDialogState preserves URL-like avatar refs", () => {
+  const state = importPersonaDialogState({
+    displayName: "Hosted avatar",
+    avatarDataUrl: null,
+    avatarRef: "https://relay.example/avatar.png",
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: [],
+    sourceFile: "hosted.persona.md",
+  });
+
+  assert.equal(
+    state.initialValues.avatarUrl,
+    "https://relay.example/avatar.png",
+  );
+});
+
+test("importPersonaDialogState filters relative avatar refs from packs", () => {
+  const state = importPersonaDialogState({
+    displayName: "Packed avatar",
+    avatarDataUrl: null,
+    avatarRef: "./avatars/lep.png",
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: [],
+    sourceFile: "pack.persona.zip",
+  });
+
+  assert.equal(state.initialValues.avatarUrl, "");
+});
 test("editPersonaDialogState preserves provider=databricks", () => {
   const state = editPersonaDialogState({
     id: "persona-provider",

@@ -28,6 +28,32 @@ export function canSubmitPersonaDialog(args: {
   return args.displayName.trim().length > 0 && !args.isPending;
 }
 
+function isSafeImportedAvatarRef(
+  ref: string | null | undefined,
+): ref is string {
+  const trimmed = ref?.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("app-avatar:")) return true;
+
+  try {
+    const parsed = new URL(trimmed);
+    return (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      parsed.protocol === "blob:" ||
+      parsed.protocol === "ipfs:" ||
+      (parsed.protocol === "data:" && trimmed.startsWith("data:image/"))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function importedAvatarUrl(persona: ParsedPersonaDraft) {
+  if (persona.avatarDataUrl) return persona.avatarDataUrl;
+  return isSafeImportedAvatarRef(persona.avatarRef) ? persona.avatarRef : "";
+}
+
 export function createPersonaDialogState(): PersonaDialogState {
   return {
     title: "Create agent",
@@ -104,7 +130,7 @@ export function importPersonaDialogState(
     submitLabel: "Create agent",
     initialValues: {
       displayName: persona.displayName,
-      avatarUrl: persona.avatarDataUrl ?? persona.avatarRef ?? "",
+      avatarUrl: importedAvatarUrl(persona),
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
