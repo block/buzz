@@ -1,16 +1,26 @@
 //! OS keyring access for desktop nsec private keys.
 //!
-//! Backed by the `keyring` crate (macOS Keychain / Windows Credential Manager /
-//! Linux Secret Service via D-Bus). The chosen backend is selected at compile
-//! time by the per-target feature in `Cargo.toml`. The `system-keyring`
-//! feature gates the whole store; when it is off, [`SecretStore`] is unusable
-//! and callers fall back to their own `0o600` file storage.
+//! All secrets are stored as a single JSON blob under one keychain entry
+//! (service = the store's service name, username = `"secrets"`). This means
+//! exactly one OS prompt per process lifetime regardless of how many keys are
+//! stored — the same pattern used by Goose.
+//!
+//! The chosen backend is selected at compile time by the per-target feature in
+//! `Cargo.toml`. On macOS the modern Data Protection Keychain API is used;
+//! unsigned dev builds (which lack the hardened-runtime entitlement) fall back
+//! to the legacy `keyring` crate automatically. Windows and Linux use the
+//! `keyring` crate directly. The `system-keyring` feature gates the whole
+//! store; when it is off, [`SecretStore`] is unusable and callers fall back to
+//! their own `0o600` file storage.
 //!
 //! The store is deliberately NOT on any env-read path. `BUZZ_PRIVATE_KEY`
 //! resolution for harnessed agents and CI is handled upstream (an env
 //! short-circuit for the human key, child-process env injection for agents);
 //! adding an env tier here would duplicate that precedence and create a
 //! divergent-behavior trap.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Result of probing the keyring before a migration: distinguishes "reachable
 /// but holds no entry" (safe to migrate into) from "unreachable this boot"
@@ -27,10 +37,16 @@ pub enum KeyringProbe {
     Unreachable,
 }
 
-/// An OS keyring, addressed by service name. Each logical secret is a distinct
-/// key within the service (passed to each operation as the keyring "username").
+/// Username used for the single blob keychain entry. All secrets are stored
+/// as a JSON map under this name within the service.
+const BLOB_KEY: &str = "secrets";
+
+/// An OS keyring, addressed by service name. All secrets are stored in a
+/// single JSON blob entry (one OS prompt per process lifetime).
 pub struct SecretStore {
     service: String,
+    /// In-memory cache of the deserialized blob. `None` means "not yet loaded".
+    cache: Arc<Mutex<Option<HashMap<String, String>>>>,
 }
 
 impl SecretStore {
@@ -40,6 +56,7 @@ impl SecretStore {
     pub fn keyring(service: impl Into<String>) -> Self {
         SecretStore {
             service: service.into(),
+            cache: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -97,55 +114,122 @@ fn dpk_opts(service: &str, key: &str) -> PasswordOptions {
 }
 
 impl SecretStore {
-    /// Probe whether `key` exists and whether the backend is reachable.
-    pub fn probe(&self, key: &str) -> KeyringProbe {
-        // macOS: probe the Data Protection Keychain first. If DPK is
-        // unavailable (unsigned dev build), fall back to the legacy keyring
-        // crate path. Items still in the old keychain will be migrated on the
-        // first `load` call.
-        #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    /// Read the blob from the keychain and return the deserialized map.
+    ///
+    /// Returns `Ok(None)` when no blob entry exists yet (first launch or
+    /// fresh install). Returns `Err` when the backend is unavailable or the
+    /// stored JSON is corrupt.
+    ///
+    /// On success the result is stored in `self.cache` so subsequent calls
+    /// within the same process return immediately without a keychain round-trip.
+    #[cfg(feature = "system-keyring")]
+    fn load_blob(&self) -> Result<Option<HashMap<String, String>>, String> {
         {
-            match generic_password(dpk_opts(&self.service, key)) {
-                Ok(_) => KeyringProbe::Present,
-                Err(ref e) if is_not_found(e) => KeyringProbe::ReachableButEmpty,
-                Err(ref e) if is_dpk_unavailable(e) => {
-                    // DPK unavailable (unsigned build) — fall back to keyring.
-                    match keyring_entry(&self.service, key) {
-                        Ok(entry) => match entry.get_password() {
-                            Ok(_) => KeyringProbe::Present,
-                            Err(keyring::Error::NoEntry) => KeyringProbe::ReachableButEmpty,
-                            Err(e) if is_keyring_availability_error(&e.to_string()) => {
-                                KeyringProbe::Unreachable
-                            }
-                            Err(_) => KeyringProbe::ReachableButEmpty,
-                        },
-                        Err(e) if is_keyring_availability_error(&e.to_string()) => {
-                            KeyringProbe::Unreachable
-                        }
-                        Err(_) => KeyringProbe::Unreachable,
-                    }
-                }
-                Err(ref e) if is_keyring_availability_error(&e.to_string()) => {
-                    KeyringProbe::Unreachable
-                }
-                Err(_) => KeyringProbe::ReachableButEmpty,
+            let guard = self.cache.lock().unwrap();
+            if let Some(ref map) = *guard {
+                return Ok(Some(map.clone()));
             }
         }
-        // Non-macOS system-keyring path (Windows, Linux).
-        #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+
+        let raw = self.read_blob_raw()?;
+        let map = match raw {
+            None => return Ok(None),
+            Some(bytes) => {
+                let json = String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
+                serde_json::from_str::<HashMap<String, String>>(&json)
+                    .map_err(|e| format!("blob json: {e}"))?
+            }
+        };
+
+        *self.cache.lock().unwrap() = Some(map.clone());
+        Ok(Some(map))
+    }
+
+    /// Read the raw blob bytes from the keychain. `Ok(None)` = not found.
+    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    fn read_blob_raw(&self) -> Result<Option<Vec<u8>>, String> {
+        match generic_password(dpk_opts(&self.service, BLOB_KEY)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(ref e) if is_not_found(e) => Ok(None),
+            Err(ref e) if is_dpk_unavailable(e) => {
+                // Unsigned dev build — fall back to legacy keyring crate.
+                self.read_blob_raw_keyring()
+            }
+            Err(e) => Err(format!("keyring read: {e}")),
+        }
+    }
+
+    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+    fn read_blob_raw(&self) -> Result<Option<Vec<u8>>, String> {
+        self.read_blob_raw_keyring()
+    }
+
+    /// Read blob via the legacy `keyring` crate (Windows, Linux, or macOS dev
+    /// builds that lack hardened-runtime entitlements).
+    #[cfg(feature = "system-keyring")]
+    fn read_blob_raw_keyring(&self) -> Result<Option<Vec<u8>>, String> {
+        let entry =
+            keyring_entry(&self.service, BLOB_KEY).map_err(|e| format!("keyring entry: {e}"))?;
+        match entry.get_password() {
+            Ok(s) => Ok(Some(s.into_bytes())),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) if is_keyring_availability_error(&e.to_string()) => {
+                Err(format!("keyring unavailable: {e}"))
+            }
+            Err(e) => Err(format!("keyring read: {e}")),
+        }
+    }
+
+    /// Serialize `map` to JSON and write it as the single blob keychain entry.
+    /// Invalidates the cache so the next `load_blob` re-reads from the store.
+    #[cfg(feature = "system-keyring")]
+    fn save_blob(&self, map: &HashMap<String, String>) -> Result<(), String> {
+        let json = serde_json::to_string(map).map_err(|e| format!("blob serialize: {e}"))?;
+        self.write_blob_raw(json.as_bytes())?;
+        // Invalidate cache — next load_blob will re-read from keychain.
+        *self.cache.lock().unwrap() = None;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    fn write_blob_raw(&self, bytes: &[u8]) -> Result<(), String> {
+        match set_generic_password_options(bytes, dpk_opts(&self.service, BLOB_KEY)) {
+            Ok(()) => Ok(()),
+            Err(ref e) if is_dpk_unavailable(e) => self.write_blob_raw_keyring(bytes),
+            Err(e) => Err(format!("keyring write: {e}")),
+        }
+    }
+
+    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+    fn write_blob_raw(&self, bytes: &[u8]) -> Result<(), String> {
+        self.write_blob_raw_keyring(bytes)
+    }
+
+    #[cfg(feature = "system-keyring")]
+    fn write_blob_raw_keyring(&self, bytes: &[u8]) -> Result<(), String> {
+        let value = std::str::from_utf8(bytes).map_err(|e| format!("blob utf8 encode: {e}"))?;
+        let entry =
+            keyring_entry(&self.service, BLOB_KEY).map_err(|e| format!("keyring entry: {e}"))?;
+        entry
+            .set_password(value)
+            .map_err(|e| format!("keyring write: {e}"))
+    }
+
+    /// Probe whether `key` exists and whether the backend is reachable.
+    pub fn probe(&self, key: &str) -> KeyringProbe {
+        #[cfg(feature = "system-keyring")]
         {
-            match keyring_entry(&self.service, key) {
-                Ok(entry) => match entry.get_password() {
-                    Ok(_) => KeyringProbe::Present,
-                    Err(keyring::Error::NoEntry) => KeyringProbe::ReachableButEmpty,
-                    Err(e) if is_keyring_availability_error(&e.to_string()) => {
-                        KeyringProbe::Unreachable
+            match self.load_blob() {
+                Ok(Some(map)) => {
+                    if map.contains_key(key) {
+                        KeyringProbe::Present
+                    } else {
+                        KeyringProbe::ReachableButEmpty
                     }
-                    Err(_) => KeyringProbe::ReachableButEmpty,
-                },
-                Err(e) if is_keyring_availability_error(&e.to_string()) => {
-                    KeyringProbe::Unreachable
                 }
+                // No blob yet — backend is reachable, key is absent.
+                Ok(None) => KeyringProbe::ReachableButEmpty,
+                Err(e) if is_keyring_availability_error(&e) => KeyringProbe::Unreachable,
                 Err(_) => KeyringProbe::Unreachable,
             }
         }
@@ -158,55 +242,22 @@ impl SecretStore {
 
     /// Load the secret for `key`. `Ok(None)` when there is no entry; `Err` only
     /// when the backend errored in a way that is not "missing".
+    ///
+    /// On first launch after an upgrade from the per-key DPK format, the blob
+    /// will not exist yet. In that case the macOS path falls back to reading the
+    /// old per-key DPK entry for `key` specifically, writes it into a new blob,
+    /// and deletes the old item — a one-time migration per key.
     pub fn load(&self, key: &str) -> Result<Option<String>, String> {
-        // macOS: try Data Protection Keychain first; fall back to old keychain
-        // and migrate on a miss (one-time per item). If DPK is unavailable
-        // (unsigned dev build, errSecMissingEntitlement), use the legacy
-        // keyring crate path directly — no migration needed in that case.
-        #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+        #[cfg(feature = "system-keyring")]
         {
-            match generic_password(dpk_opts(&self.service, key)) {
-                Ok(bytes) => String::from_utf8(bytes)
-                    .map(Some)
-                    .map_err(|e| format!("keyring utf8: {e}")),
-                Err(ref e) if is_not_found(e) => {
-                    // Not in DPK — check old keychain and migrate if found.
-                    let entry = keyring_entry(&self.service, key)
-                        .map_err(|e| format!("keyring entry: {e}"))?;
-                    match entry.get_password() {
-                        Ok(old_val) => {
-                            // Migrate to DPK.
-                            self.store(key, &old_val)?;
-                            // Best-effort cleanup from old keychain.
-                            let _ = entry.delete_credential();
-                            Ok(Some(old_val))
-                        }
-                        Err(keyring::Error::NoEntry) => Ok(None),
-                        Err(e) => Err(format!("keyring get: {e}")),
-                    }
+            match self.load_blob() {
+                Ok(Some(map)) => Ok(map.get(key).cloned()),
+                Ok(None) => {
+                    // No blob yet — attempt one-time migration from old per-key
+                    // DPK entry (macOS) or return Ok(None) (other platforms).
+                    self.migrate_legacy_key(key)
                 }
-                Err(ref e) if is_dpk_unavailable(e) => {
-                    // DPK unavailable (unsigned build) — use keyring directly.
-                    let entry = keyring_entry(&self.service, key)
-                        .map_err(|e| format!("keyring entry: {e}"))?;
-                    match entry.get_password() {
-                        Ok(secret) => Ok(Some(secret)),
-                        Err(keyring::Error::NoEntry) => Ok(None),
-                        Err(e) => Err(format!("keyring get: {e}")),
-                    }
-                }
-                Err(e) => Err(format!("keyring get: {e}")),
-            }
-        }
-        // Non-macOS system-keyring path (Windows, Linux).
-        #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
-        {
-            let entry =
-                keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
-            match entry.get_password() {
-                Ok(secret) => Ok(Some(secret)),
-                Err(keyring::Error::NoEntry) => Ok(None),
-                Err(e) => Err(format!("keyring get: {e}")),
+                Err(e) => Err(e),
             }
         }
         #[cfg(not(feature = "system-keyring"))]
@@ -216,35 +267,63 @@ impl SecretStore {
         }
     }
 
+    /// On first launch after upgrading from the per-key DPK format, read the
+    /// old DPK entry for `key`, write it into a new blob, and delete the old
+    /// item. Returns `Ok(None)` when no old entry exists.
+    #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+    fn migrate_legacy_key(&self, key: &str) -> Result<Option<String>, String> {
+        // Try the old per-key DPK entry.
+        match generic_password(dpk_opts(&self.service, key)) {
+            Ok(bytes) => {
+                let value = String::from_utf8(bytes).map_err(|e| format!("keyring utf8: {e}"))?;
+                // Write into blob (creates the blob if it doesn't exist).
+                self.store(key, &value)?;
+                // Best-effort cleanup of the old per-key entry.
+                let _ = delete_generic_password_options(dpk_opts(&self.service, key));
+                Ok(Some(value))
+            }
+            Err(ref e) if is_not_found(e) => {
+                // Also check the old keyring-crate entry (pre-#1264 installs).
+                self.migrate_legacy_key_keyring(key)
+            }
+            Err(ref e) if is_dpk_unavailable(e) => {
+                // Unsigned dev build — check old keyring-crate entry only.
+                self.migrate_legacy_key_keyring(key)
+            }
+            Err(e) => Err(format!("keyring get: {e}")),
+        }
+    }
+
+    #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
+    fn migrate_legacy_key(&self, key: &str) -> Result<Option<String>, String> {
+        // Non-macOS: no DPK, just check the old keyring-crate per-key entry.
+        self.migrate_legacy_key_keyring(key)
+    }
+
+    /// Check the old per-key `keyring` crate entry (pre-#1264 format) and
+    /// migrate it into the blob if found.
+    #[cfg(feature = "system-keyring")]
+    fn migrate_legacy_key_keyring(&self, key: &str) -> Result<Option<String>, String> {
+        let entry = keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
+        match entry.get_password() {
+            Ok(value) => {
+                self.store(key, &value)?;
+                let _ = entry.delete_credential();
+                Ok(Some(value))
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(format!("keyring get: {e}")),
+        }
+    }
+
     /// Store `value` for `key`. Reports `Err` on availability failures — callers
     /// decide whether to fall back to file storage.
     pub fn store(&self, key: &str, value: &str) -> Result<(), String> {
-        // macOS: write directly to the Data Protection Keychain. If DPK is
-        // unavailable (unsigned dev build), fall back to the legacy keyring
-        // crate path.
-        #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+        #[cfg(feature = "system-keyring")]
         {
-            match set_generic_password_options(value.as_bytes(), dpk_opts(&self.service, key)) {
-                Ok(()) => Ok(()),
-                Err(ref e) if is_dpk_unavailable(e) => {
-                    // DPK unavailable (unsigned build) — use keyring directly.
-                    let entry = keyring_entry(&self.service, key)
-                        .map_err(|e| format!("keyring entry: {e}"))?;
-                    entry
-                        .set_password(value)
-                        .map_err(|e| format!("keyring set: {e}"))
-                }
-                Err(e) => Err(format!("keyring set: {e}")),
-            }
-        }
-        // Non-macOS system-keyring path (Windows, Linux).
-        #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
-        {
-            let entry =
-                keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
-            entry
-                .set_password(value)
-                .map_err(|e| format!("keyring set: {e}"))
+            let mut map = self.load_blob()?.unwrap_or_default();
+            map.insert(key.to_string(), value.to_string());
+            self.save_blob(&map)
         }
         #[cfg(not(feature = "system-keyring"))]
         {
@@ -255,45 +334,15 @@ impl SecretStore {
 
     /// Delete the secret for `key`. A missing entry is not an error.
     pub fn delete(&self, key: &str) -> Result<(), String> {
-        // macOS: delete from both DPK and old keychain (best-effort on old).
-        // If DPK is unavailable (unsigned dev build), fall back to the legacy
-        // keyring crate path.
-        #[cfg(all(feature = "system-keyring", target_os = "macos"))]
+        #[cfg(feature = "system-keyring")]
         {
-            // Delete from Data Protection Keychain; missing is fine.
-            match delete_generic_password_options(dpk_opts(&self.service, key)) {
-                Ok(()) => {}
-                Err(ref e) if is_not_found(e) => {}
-                Err(ref e) if is_dpk_unavailable(e) => {
-                    // DPK unavailable (unsigned build) — use keyring directly.
-                    let entry = keyring_entry(&self.service, key)
-                        .map_err(|e| format!("keyring entry: {e}"))?;
-                    return match entry.delete_credential() {
-                        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                        Err(e) => Err(format!("keyring delete: {e}")),
-                    };
+            match self.load_blob()? {
+                Some(mut map) => {
+                    map.remove(key);
+                    self.save_blob(&map)
                 }
-                Err(e) => return Err(format!("keyring delete: {e}")),
-            }
-            // Best-effort cleanup from old keychain.
-            if let Ok(entry) = keyring_entry(&self.service, key) {
-                match entry.delete_credential() {
-                    Ok(()) | Err(keyring::Error::NoEntry) => {}
-                    Err(e) => {
-                        eprintln!("buzz-desktop: old-keychain delete for {key}: {e}");
-                    }
-                }
-            }
-            Ok(())
-        }
-        // Non-macOS system-keyring path (Windows, Linux).
-        #[cfg(all(feature = "system-keyring", not(target_os = "macos")))]
-        {
-            let entry =
-                keyring_entry(&self.service, key).map_err(|e| format!("keyring entry: {e}"))?;
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-                Err(e) => Err(format!("keyring delete: {e}")),
+                // No blob — nothing to delete.
+                None => Ok(()),
             }
         }
         #[cfg(not(feature = "system-keyring"))]
@@ -324,15 +373,62 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn dpk_unavailable_discriminator() {
+    fn dpk_error_discriminators() {
         // errSecMissingEntitlement = -34018 signals unsigned dev build.
         let e = SFError::from_code(-34018);
         assert!(is_dpk_unavailable(&e));
+        assert!(!is_not_found(&e));
         // errSecItemNotFound = -25300 is not a DPK-unavailable error.
         let e = SFError::from_code(-25300);
+        assert!(is_not_found(&e));
         assert!(!is_dpk_unavailable(&e));
-        // errSecDuplicateItem = -25299 is not a DPK-unavailable error.
-        let e = SFError::from_code(-25299);
-        assert!(!is_dpk_unavailable(&e));
+    }
+
+    // Integration tests that exercise the real OS keychain. Skipped in CI
+    // (unsigned builds lack keychain entitlements); run locally with:
+    //   cargo test -p buzz-desktop -- --ignored blob_
+    //
+    // Each test uses a unique service name to avoid cross-test pollution.
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn blob_stores_and_retrieves_multiple_keys() {
+        let store = SecretStore::keyring("buzz-test-blob-multi");
+        store.store("key_a", "val_a").unwrap();
+        store.store("key_b", "val_b").unwrap();
+        assert_eq!(store.load("key_a").unwrap(), Some("val_a".to_string()));
+        assert_eq!(store.load("key_b").unwrap(), Some("val_b".to_string()));
+        assert_eq!(store.load("key_c").unwrap(), None);
+        // Cleanup.
+        let _ = store.delete("key_a");
+        let _ = store.delete("key_b");
+    }
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn blob_probe_present_absent_unreachable() {
+        let store = SecretStore::keyring("buzz-test-blob-probe");
+        // No blob yet — key absent, backend reachable.
+        assert_eq!(store.probe("identity"), KeyringProbe::ReachableButEmpty);
+        store.store("identity", "nsec1test").unwrap();
+        // Key now present.
+        assert_eq!(store.probe("identity"), KeyringProbe::Present);
+        // Different key — blob exists but key absent.
+        assert_eq!(store.probe("other"), KeyringProbe::ReachableButEmpty);
+        // Cleanup.
+        let _ = store.delete("identity");
+    }
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn blob_delete_removes_key_not_others() {
+        let store = SecretStore::keyring("buzz-test-blob-delete");
+        store.store("keep", "keep_val").unwrap();
+        store.store("remove", "remove_val").unwrap();
+        store.delete("remove").unwrap();
+        assert_eq!(store.load("keep").unwrap(), Some("keep_val".to_string()));
+        assert_eq!(store.load("remove").unwrap(), None);
+        // Cleanup.
+        let _ = store.delete("keep");
     }
 }
