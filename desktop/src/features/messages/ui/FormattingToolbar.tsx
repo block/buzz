@@ -269,7 +269,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   return (
     <div className="flex items-center gap-0.5">
       {items.map((item) => (
-        <Tooltip key={item.label}>
+        <Tooltip key={item.label} disableHoverableContent>
           <TooltipTrigger asChild>
             <button
               type="button"
@@ -295,9 +295,11 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
               they don't block the message textarea floating beneath them,
               matching ComposerIconButton. Content only — the trigger button
               keeps its pointer/focus behavior (WCAG content-on-hover-or-focus).
-              These formatting buttons are raw <button>s with custom active
-              styling, so we apply the override here rather than swap in
-              ComposerIconButton. */}
+              disableHoverableContent (on the Root above) kills Radix's
+              hover-to-persist safe bridge so the tooltip dismisses the instant
+              the cursor leaves the trigger. These formatting buttons are raw
+              <button>s with custom active styling, so we apply the overrides
+              here rather than swap in ComposerIconButton. */}
           <TooltipContent className="pointer-events-none">
             {"shortcut" in item
               ? `${item.label} (${item.shortcut})`

@@ -25,6 +25,13 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
  * accommodation) and the hover/show lifecycle are untouched (WCAG
  * content-on-hover-or-focus). It only fits short, non-interactive labels —
  * keep interactive content out of the tooltip.
+ *
+ * `disableHoverableContent` turns off Radix's "safe bridge" — the keep-alive
+ * window that normally lets the cursor slide off the trigger onto the popup
+ * and persist it. Without it these label tooltips would camp open (and even be
+ * text-selectable) while the pointer hovers the popup; with it they dismiss the
+ * instant the cursor leaves the trigger. Scoped to this composer Root only —
+ * the shared TooltipProvider keeps its app-wide default.
  */
 export interface ComposerIconButtonProps extends ButtonProps {
   /** Short, non-interactive label shown in the click-through tooltip. */
@@ -41,7 +48,7 @@ const ComposerIconButton = React.forwardRef<
     { tooltip, tooltipClassName, size = "icon", type = "button", ...props },
     ref,
   ) => (
-    <Tooltip>
+    <Tooltip disableHoverableContent>
       <TooltipTrigger asChild>
         <Button ref={ref} size={size} type={type} {...props} />
       </TooltipTrigger>
