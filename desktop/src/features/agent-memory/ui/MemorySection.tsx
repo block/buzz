@@ -230,9 +230,9 @@ function MemoryGraphView({
         data-testid="agent-memory-empty"
       >
         <Brain className="mx-auto h-4 w-4 text-muted-foreground" />
-        <p className="mt-3 text-sm font-medium">No memories yet</p>
+        <p className="mt-3 text-sm font-medium">Build this agent's memory</p>
         <p className="mt-1 text-sm text-muted-foreground">
-          This agent has no memories yet.
+          Try telling this agent to remember something for next time.
         </p>
       </div>
     );

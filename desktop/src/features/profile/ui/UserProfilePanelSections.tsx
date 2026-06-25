@@ -766,12 +766,25 @@ export function ChannelsFocusedView({
           Loading channels…
         </p>
       ) : channels.length === 0 ? (
-        <p
-          className="text-base leading-7 italic text-muted-foreground"
+        <div
+          className={cn(
+            "flex flex-col items-center justify-center px-6 text-center",
+            canAddToChannel ? "min-h-20 py-4" : "min-h-56 py-10",
+          )}
           data-testid="user-profile-channels-empty"
         >
-          No visible channel memberships.
-        </p>
+          <UserPlus className="mx-auto h-4 w-4 text-muted-foreground" />
+          <p className="mt-3 text-sm font-medium">
+            {canAddToChannel
+              ? "Add this agent to a channel"
+              : "Channels appear here"}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {canAddToChannel
+              ? "Choose a channel above so it can join the conversation."
+              : "Visible memberships appear as this agent joins channels."}
+          </p>
+        </div>
       ) : (
         <ProfilePanelSurface testId="user-profile-channels-list">
           <ul>
