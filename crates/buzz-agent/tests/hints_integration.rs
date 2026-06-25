@@ -464,6 +464,7 @@ async fn global_skills_loaded_and_project_wins() {
 /// correctly — `DirEntry::file_type()` returns `FileType::Symlink` for symlinks,
 /// so the old `is_dir()` check silently dropped them. We now use
 /// `std::fs::metadata()` which follows the symlink.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn symlinked_skill_dir_is_discovered() {
     let real_skill_root = tempfile::TempDir::new().unwrap();

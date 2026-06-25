@@ -116,7 +116,11 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
         // Use std::fs::metadata (follows symlinks) rather than DirEntry::file_type
         // (which returns FileType::Symlink for symlinks, causing is_dir() to return
         // false even when the symlink target is a directory).
-        .filter(|e| std::fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false))
+        .filter(|e| {
+            std::fs::metadata(e.path())
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+        })
         .map(|e| e.path())
         .collect();
     subdirs.sort();
