@@ -37,13 +37,18 @@ pub(super) fn extract_config_fields(
                     match subval {
                         serde_json::Value::Object(subobj) => {
                             // Second level: "key.subkey.subsubkey"
-                            for (subsubkey, subsubval) in subobj {
-                                let deep_key = format!("{flat_key}.{subsubkey}");
-                                out.insert(deep_key, format_scalar(subsubval));
+                            if subobj.is_empty() {
+                                // Empty inner object — emit placeholder so the key is visible.
+                                out.insert(flat_key, "{...}".to_string());
+                            } else {
+                                for (subsubkey, subsubval) in subobj {
+                                    let deep_key = format!("{flat_key}.{subsubkey}");
+                                    out.insert(deep_key, format_scalar(subsubval));
+                                }
                             }
                         }
                         serde_json::Value::Array(arr) => {
-                            out.insert(flat_key, format!("[{} items]", arr.len()));
+                            out.insert(flat_key, format_array(arr));
                         }
                         other => {
                             out.insert(flat_key, format_scalar(other));
@@ -52,7 +57,7 @@ pub(super) fn extract_config_fields(
                 }
             }
             serde_json::Value::Array(arr) => {
-                out.insert(key.clone(), format!("[{} items]", arr.len()));
+                out.insert(key.clone(), format_array(arr));
             }
             other => {
                 out.insert(key.clone(), format_scalar(other));
@@ -69,8 +74,40 @@ fn format_scalar(v: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Array(arr) => format!("[{} items]", arr.len()),
+        serde_json::Value::Array(arr) => format_array(arr),
         serde_json::Value::Object(_) => "{...}".to_string(),
+    }
+}
+
+/// Format an array for display.
+///
+/// When all elements are scalars (string, bool, number, null), joins them
+/// comma-separated so the actual values are visible (e.g. `tui.status_line`).
+/// When any element is a nested object or array, falls back to `[N items]`
+/// since the values can't be meaningfully inlined.
+fn format_array(arr: &[serde_json::Value]) -> String {
+    let all_scalar = arr.iter().all(|v| {
+        matches!(
+            v,
+            serde_json::Value::String(_)
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::Null
+        )
+    });
+    if all_scalar {
+        arr.iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Null => "null".to_string(),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        format!("[{} items]", arr.len())
     }
 }
 
@@ -101,10 +138,10 @@ mod tests {
     }
 
     #[test]
-    fn formats_array_as_item_count() {
+    fn formats_scalar_array_as_joined_values() {
         let config = json!({ "tags": ["a", "b", "c"] });
         let result = extract_config_fields(&config, &[]);
-        assert_eq!(result.get("tags").map(|s| s.as_str()), Some("[3 items]"));
+        assert_eq!(result.get("tags").map(|s| s.as_str()), Some("a, b, c"));
     }
 
     #[test]
@@ -114,6 +151,16 @@ mod tests {
         assert_eq!(result.get("env.FOO").map(|s| s.as_str()), Some("bar"));
         assert_eq!(result.get("env.BAR").map(|s| s.as_str()), Some("baz"));
         assert!(!result.contains_key("env"));
+    }
+
+    #[test]
+    fn empty_inner_object_emits_placeholder() {
+        let config = json!({ "hooks": { "pre-commit": {} } });
+        let result = extract_config_fields(&config, &[]);
+        assert_eq!(
+            result.get("hooks.pre-commit").map(|s| s.as_str()),
+            Some("{...}")
+        );
     }
 
     #[test]
@@ -174,7 +221,7 @@ mod tests {
             result
                 .get("tui.status_line")
                 .map(|s| s.as_str()),
-            Some("[2 items]")
+            Some("model-with-reasoning, git-branch")
         );
         assert_eq!(
             result
@@ -215,10 +262,18 @@ mod tests {
     }
 
     #[test]
-    fn empty_array_formats_as_zero_items() {
+    fn empty_array_formats_as_empty_string() {
         let config = json!({ "list": [] });
         let result = extract_config_fields(&config, &[]);
-        assert_eq!(result.get("list").map(|s| s.as_str()), Some("[0 items]"));
+        // Empty array: all-scalar vacuously → join produces empty string
+        assert_eq!(result.get("list").map(|s| s.as_str()), Some(""));
+    }
+
+    #[test]
+    fn array_with_nested_objects_falls_back_to_item_count() {
+        let config = json!({ "items": [{"key": "val"}, {"key": "val2"}] });
+        let result = extract_config_fields(&config, &[]);
+        assert_eq!(result.get("items").map(|s| s.as_str()), Some("[2 items]"));
     }
 
     #[test]

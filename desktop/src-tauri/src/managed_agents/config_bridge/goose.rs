@@ -34,11 +34,9 @@ fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
         .and_then(|ap| nested_provider_fields(&map, ap));
 
     let provider = goose_provider.or_else(|| active_provider.clone()).or_else(|| {
-        // Databricks OAuth path: DATABRICKS_HOST is set but no explicit provider.
+        // Databricks OAuth path: flat DATABRICKS_HOST key is set but no explicit provider.
         // The goose runtime uses Databricks implicitly in this case.
-        if yaml_string(&map, "DATABRICKS_HOST").is_some()
-            || nested.as_ref().and_then(|n| n.host.clone()).is_some()
-        {
+        if yaml_string(&map, "DATABRICKS_HOST").is_some() {
             Some("databricks".to_string())
         } else {
             None
