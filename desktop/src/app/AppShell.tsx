@@ -154,9 +154,12 @@ export function AppShell() {
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data ?? [];
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
+    channels,
   );
   const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
@@ -165,9 +168,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     refetchHomeFeedFromLiveSignal,
   );
-  const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
-  const channels = channelsQuery.data ?? [];
   const channelsErrorMessage =
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message

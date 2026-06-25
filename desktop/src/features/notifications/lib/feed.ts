@@ -1,46 +1,47 @@
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
-
-const FEED_NOTIFICATION_BODY_MAX_LENGTH = 140;
+import {
+  formatNotificationTitle,
+  truncateNotificationBody,
+} from "@/features/notifications/lib/notificationFormat";
 
 export function notificationTitle(item: FeedItem, senderName?: string) {
-  const channelLabel = item.channelName.trim()
-    ? ` in #${item.channelName.trim()}`
-    : "";
+  const channelLabel =
+    item.channelType !== "dm" && item.channelName.trim()
+      ? `#${item.channelName.trim()}`
+      : null;
 
   if (item.channelType === "dm") {
     return senderName || "Direct message";
   }
 
   if (item.category === "mention") {
-    return senderName
-      ? `${senderName} mentioned you${channelLabel}`
-      : `@Mention${channelLabel}`;
+    return formatNotificationTitle({
+      prefix: senderName ? `${senderName} mentioned you` : "@Mention",
+      channelLabel,
+    });
   }
 
   if (item.kind === 46010) {
-    return senderName
-      ? `${senderName} requested approval${channelLabel}`
-      : `Approval Requested${channelLabel}`;
+    return formatNotificationTitle({
+      prefix: senderName
+        ? `${senderName} requested approval`
+        : "Approval Requested",
+      channelLabel,
+    });
   }
 
-  return senderName
-    ? `${senderName}${channelLabel}`
-    : `Needs Action${channelLabel}`;
+  return formatNotificationTitle({
+    prefix: senderName ? senderName : "Needs Action",
+    channelLabel,
+  });
 }
 
 export function notificationBody(item: FeedItem) {
-  const content = item.content.trim();
   const fallback =
     item.kind === 46010
       ? "A workflow is waiting for your approval."
       : "Something in Buzz needs your attention.";
-  const body = content.length > 0 ? content : fallback;
-
-  if (body.length <= FEED_NOTIFICATION_BODY_MAX_LENGTH) {
-    return body;
-  }
-
-  return `${body.slice(0, FEED_NOTIFICATION_BODY_MAX_LENGTH - 3).trimEnd()}...`;
+  return truncateNotificationBody(item.content, fallback);
 }
 
 export function collectHomeAlertItems(feed: HomeFeedResponse) {
