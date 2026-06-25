@@ -17,20 +17,16 @@ fn agent_keyring_name(pubkey: &str) -> String {
 }
 
 /// The agent secret store. `None` when the build has no keyring backend, in
-/// which case agent keys stay inline in the `0o600` JSON file. Cached via
-/// `OnceLock` so the in-memory blob cache survives across call sites.
+/// which case agent keys stay inline in the `0o600` JSON file. Uses
+/// `SecretStore::shared` so identity and agent callers share one instance —
+/// and therefore one in-memory cache and one mutex — preventing last-writer-wins
+/// races on concurrent blob writes.
 fn agent_secret_store() -> Option<&'static SecretStore> {
-    use std::sync::OnceLock;
-    static STORE: OnceLock<Option<SecretStore>> = OnceLock::new();
-    STORE
-        .get_or_init(|| {
-            if cfg!(feature = "system-keyring") {
-                Some(SecretStore::keyring(KEYRING_SERVICE))
-            } else {
-                None
-            }
-        })
-        .as_ref()
+    if cfg!(feature = "system-keyring") {
+        Some(SecretStore::shared(KEYRING_SERVICE))
+    } else {
+        None
+    }
 }
 
 pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
