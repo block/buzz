@@ -6,7 +6,7 @@
 
 use serde_json::{json, Value};
 
-use crate::hints::{SkillEntry, MAX_SKILL_BODY_BYTES};
+use crate::hints::{strip_frontmatter, SkillEntry, MAX_SKILL_BODY_BYTES};
 use crate::mcp::truncate_at_boundary;
 use crate::types::{ToolDef, ToolResult, ToolResultContent};
 
@@ -36,9 +36,9 @@ pub fn load_skill_def() -> ToolDef {
     }
 }
 
-/// Execute a `load_skill` call. Returns `Ok(ToolResult)` on success or a
+/// Execute a `load_skill` call. Returns a `ToolResult` on success or a
 /// user-visible error result if the skill is not found or cannot be read.
-pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
+pub async fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
     let name = match arguments.get("name").and_then(Value::as_str) {
         Some(n) => n,
         None => {
@@ -50,7 +50,7 @@ pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
     //   "skill-name"            → load SKILL.md body + ## Supporting Files section
     //   "skill-name/rel/path"   → load a specific supporting file
     if let Some((skill_name, rel_path)) = name.split_once('/') {
-        return load_supporting_file(skill_name, rel_path, skills);
+        return load_supporting_file(skill_name, rel_path, skills).await;
     }
 
     // Plain skill-name form: load SKILL.md body.
@@ -64,7 +64,12 @@ pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
         }
     };
 
-    let raw = match std::fs::read_to_string(&entry.path) {
+    // Read the file off the async executor to avoid blocking a Tokio worker.
+    let skill_path = entry.path.clone();
+    let raw = match tokio::task::spawn_blocking(move || std::fs::read_to_string(&skill_path))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+    {
         Ok(s) => s,
         Err(e) => {
             return error_result(&format!("load_skill: could not read {:?}: {e}", entry.path));
@@ -84,10 +89,9 @@ pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
         for file in &entry.supporting_files {
             if let Ok(rel) = file.strip_prefix(skill_dir) {
                 let rel_str = rel.to_string_lossy().replace('\\', "/");
-                let abs_str = file.to_string_lossy().replace('\\', "/");
                 output.push_str(&format!(
-                    "- {} → {} (load_skill(name: \"{}/{}\"))\n",
-                    rel_str, abs_str, entry.name, rel_str
+                    "- {} (load_skill(name: \"{}/{}\"))\n",
+                    rel_str, entry.name, rel_str
                 ));
             }
         }
@@ -111,7 +115,11 @@ pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
 /// Load a supporting file identified by `skill_name/rel_path`.
 /// Matches against the pre-enumerated `supporting_files` list and applies a
 /// canonicalize-based traversal guard before reading.
-fn load_supporting_file(skill_name: &str, rel_path: &str, skills: &[SkillEntry]) -> ToolResult {
+async fn load_supporting_file(
+    skill_name: &str,
+    rel_path: &str,
+    skills: &[SkillEntry],
+) -> ToolResult {
     let rel_path = rel_path.replace('\\', "/");
 
     let entry = match skills.iter().find(|s| s.name == skill_name) {
@@ -176,41 +184,41 @@ fn load_supporting_file(skill_name: &str, rel_path: &str, skills: &[SkillEntry])
         }
     };
 
-    match file_path.canonicalize() {
-        Ok(canonical_file) if canonical_file.starts_with(&canonical_skill_dir) => {
-            match std::fs::read_to_string(&canonical_file) {
+    // Clone the path so we can move it into spawn_blocking.
+    let file_path = file_path.clone();
+    let skill_name = skill_name.to_owned();
+    let rel_path_owned = rel_path.clone();
+
+    match tokio::task::spawn_blocking(move || file_path.canonicalize().map(|c| (c, file_path)))
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+    {
+        Ok((canonical_file, resolved_path)) if canonical_file.starts_with(&canonical_skill_dir) => {
+            match tokio::task::spawn_blocking(move || std::fs::read_to_string(&resolved_path))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+            {
                 Ok(content) => ToolResult {
                     provider_id: String::new(),
                     content: vec![ToolResultContent::Text(format!(
                         "# Loaded: {}/{}\n\n{}\n\n---\nFile loaded into context.",
-                        skill_name, rel_path, content
+                        skill_name, rel_path_owned, content
                     ))],
                     is_error: false,
                 },
                 Err(e) => error_result(&format!(
-                    "load_skill: could not read {skill_name:?}/{rel_path}: {e}"
+                    "load_skill: could not read {skill_name:?}/{rel_path_owned}: {e}"
                 )),
             }
         }
         Ok(_) => error_result(&format!(
-            "load_skill: refusing to load {skill_name:?}/{rel_path}: \
+            "load_skill: refusing to load {skill_name:?}/{rel_path_owned}: \
              resolves outside the skill directory"
         )),
         Err(e) => error_result(&format!(
-            "load_skill: could not resolve {skill_name:?}/{rel_path}: {e}"
+            "load_skill: could not resolve {skill_name:?}/{rel_path_owned}: {e}"
         )),
     }
-}
-
-fn strip_frontmatter(content: &str) -> &str {
-    let Some(rest) = content.strip_prefix("---\n") else {
-        return content;
-    };
-    let Some(close_pos) = rest.find("\n---") else {
-        return content;
-    };
-    let after = &rest[close_pos + 4..]; // skip "\n---"
-    after.strip_prefix('\n').unwrap_or(after)
 }
 
 fn error_result(msg: &str) -> ToolResult {
@@ -257,24 +265,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn call_load_skill_missing_name_arg() {
-        let result = call_load_skill(&serde_json::json!({}), &[]);
+    #[tokio::test]
+    async fn call_load_skill_missing_name_arg() {
+        let result = call_load_skill(&serde_json::json!({}), &[]).await;
         assert!(result.is_error);
         let text = text_content(&result);
         assert!(text.contains("missing required argument"), "got: {text}");
     }
 
-    #[test]
-    fn call_load_skill_skill_not_found() {
-        let result = call_load_skill(&serde_json::json!({"name": "no-such"}), &[]);
+    #[tokio::test]
+    async fn call_load_skill_skill_not_found() {
+        let result = call_load_skill(&serde_json::json!({"name": "no-such"}), &[]).await;
         assert!(result.is_error);
         let text = text_content(&result);
         assert!(text.contains("not found"), "got: {text}");
     }
 
-    #[test]
-    fn call_load_skill_returns_body_strips_frontmatter() {
+    #[tokio::test]
+    async fn call_load_skill_returns_body_strips_frontmatter() {
         let tmp = TempDir::new().unwrap();
         let skill_md = tmp.path().join("SKILL.md");
         std::fs::write(
@@ -283,7 +291,7 @@ mod tests {
         )
         .unwrap();
         let skills = vec![make_skill("test", "A test", skill_md)];
-        let result = call_load_skill(&serde_json::json!({"name": "test"}), &skills);
+        let result = call_load_skill(&serde_json::json!({"name": "test"}), &skills).await;
         assert!(!result.is_error);
         let text = text_content(&result);
         assert!(text.contains("Skill body here."), "got: {text}");
@@ -293,8 +301,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn call_load_skill_appends_supporting_files_section() {
+    #[tokio::test]
+    async fn call_load_skill_appends_supporting_files_section() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path();
         let skill_md = skill_dir.join("SKILL.md");
@@ -314,7 +322,7 @@ mod tests {
             skill_md,
             vec![ref_file],
         )];
-        let result = call_load_skill(&serde_json::json!({"name": "my-skill"}), &skills);
+        let result = call_load_skill(&serde_json::json!({"name": "my-skill"}), &skills).await;
         assert!(!result.is_error);
         let text = text_content(&result);
         assert!(text.contains("Body."), "body missing: {text}");
@@ -332,8 +340,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn call_load_skill_no_supporting_files_section_when_empty() {
+    #[tokio::test]
+    async fn call_load_skill_no_supporting_files_section_when_empty() {
         let tmp = TempDir::new().unwrap();
         let skill_md = tmp.path().join("SKILL.md");
         std::fs::write(
@@ -342,7 +350,7 @@ mod tests {
         )
         .unwrap();
         let skills = vec![make_skill("bare", "desc", skill_md)];
-        let result = call_load_skill(&serde_json::json!({"name": "bare"}), &skills);
+        let result = call_load_skill(&serde_json::json!({"name": "bare"}), &skills).await;
         assert!(!result.is_error);
         let text = text_content(&result);
         assert!(
@@ -351,8 +359,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn call_load_skill_supporting_file_returns_content() {
+    #[tokio::test]
+    async fn call_load_skill_supporting_file_returns_content() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path();
         let skill_md = skill_dir.join("SKILL.md");
@@ -375,7 +383,8 @@ mod tests {
         let result = call_load_skill(
             &serde_json::json!({"name": "my-skill/references/foo.md"}),
             &skills,
-        );
+        )
+        .await;
         assert!(!result.is_error, "expected success, got error");
         let text = text_content(&result);
         assert!(
@@ -388,8 +397,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn call_load_skill_supporting_file_not_found_lists_available() {
+    #[tokio::test]
+    async fn call_load_skill_supporting_file_not_found_lists_available() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path();
         let skill_md = skill_dir.join("SKILL.md");
@@ -412,7 +421,8 @@ mod tests {
         let result = call_load_skill(
             &serde_json::json!({"name": "my-skill/references/missing.md"}),
             &skills,
-        );
+        )
+        .await;
         assert!(result.is_error);
         let text = text_content(&result);
         assert!(text.contains("not found"), "got: {text}");
@@ -422,8 +432,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn call_load_skill_no_supporting_files_error_message() {
+    #[tokio::test]
+    async fn call_load_skill_no_supporting_files_error_message() {
         let tmp = TempDir::new().unwrap();
         let skill_md = tmp.path().join("SKILL.md");
         std::fs::write(
@@ -432,14 +442,15 @@ mod tests {
         )
         .unwrap();
         let skills = vec![make_skill("bare", "desc", skill_md)];
-        let result = call_load_skill(&serde_json::json!({"name": "bare/anything.md"}), &skills);
+        let result =
+            call_load_skill(&serde_json::json!({"name": "bare/anything.md"}), &skills).await;
         assert!(result.is_error);
         let text = text_content(&result);
         assert!(text.contains("no supporting files"), "got: {text}");
     }
 
-    #[test]
-    fn call_load_skill_traversal_guard_rejects_escape() {
+    #[tokio::test]
+    async fn call_load_skill_traversal_guard_rejects_escape() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path().join("my-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -471,12 +482,49 @@ mod tests {
         let result = call_load_skill(
             &serde_json::json!({"name": "my-skill/../secret.txt"}),
             &skills,
-        );
+        )
+        .await;
         assert!(result.is_error, "traversal attempt should be rejected");
         let text = text_content(&result);
         assert!(
             !text.contains("secret content"),
             "secret content must not be returned: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_load_skill_truncates_large_body() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        let skill_md = skill_dir.join("SKILL.md");
+        // Build a body that exceeds MAX_SKILL_BODY_BYTES (32 KiB).
+        let large_body = "x".repeat(40 * 1024);
+        std::fs::write(
+            &skill_md,
+            format!("---\nname: big\ndescription: desc\n---\n{large_body}\n"),
+        )
+        .unwrap();
+        // Add a supporting file so the Supporting Files section is also appended
+        // before the cap is applied.
+        let refs_dir = skill_dir.join("references");
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        let ref_file = refs_dir.join("extra.md");
+        std::fs::write(&ref_file, "extra content").unwrap();
+
+        let skills = vec![make_skill_with_files(
+            "big",
+            "desc",
+            skill_md,
+            vec![ref_file],
+        )];
+        let result = call_load_skill(&serde_json::json!({"name": "big"}), &skills).await;
+        assert!(!result.is_error);
+        let text = text_content(&result);
+        assert!(
+            text.len() <= MAX_SKILL_BODY_BYTES,
+            "output length {} exceeds MAX_SKILL_BODY_BYTES {}",
+            text.len(),
+            MAX_SKILL_BODY_BYTES
         );
     }
 }

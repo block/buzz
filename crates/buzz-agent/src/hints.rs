@@ -197,20 +197,16 @@ fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
     skills
 }
 
-pub fn build_hints_section(cwd: &Path) -> String {
+pub fn build_hints_section(cwd: &Path) -> (String, Vec<SkillEntry>) {
     build_hints_section_impl(cwd, home_dir().as_deref())
 }
 
-pub fn discover_skills(cwd: &Path) -> Vec<SkillEntry> {
-    discover_skills_impl(cwd, home_dir().as_deref())
-}
-
-fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
+fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> (String, Vec<SkillEntry>) {
     let hints_text = load_hint_files_impl(cwd, home);
     let skills = discover_skills_impl(cwd, home);
 
     if hints_text.is_empty() && skills.is_empty() {
-        return String::new();
+        return (String::new(), skills);
     }
 
     let mut out = String::from("# Additional Instructions\n");
@@ -231,7 +227,20 @@ fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
         );
     }
 
-    out
+    (out, skills)
+}
+
+/// Strip the YAML frontmatter block from a skill file's content and return
+/// the body. If no valid frontmatter is found, returns the content unchanged.
+pub(crate) fn strip_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return content;
+    };
+    let Some(close_pos) = rest.find("\n---") else {
+        return content;
+    };
+    let after = &rest[close_pos + 4..]; // skip "\n---"
+    after.strip_prefix('\n').unwrap_or(after)
 }
 
 #[cfg(test)]
@@ -408,8 +417,9 @@ mod tests {
     #[test]
     fn build_hints_section_empty() {
         let tmp = TempDir::new().unwrap();
-        let result = build_hints_section_impl(tmp.path(), None);
+        let (result, skills) = build_hints_section_impl(tmp.path(), None);
         assert_eq!(result, "");
+        assert!(skills.is_empty());
     }
 
     #[test]
@@ -427,7 +437,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = build_hints_section_impl(cwd, None);
+        let (result, skills) = build_hints_section_impl(cwd, None);
 
         assert!(
             result.contains("# Additional Instructions"),
@@ -461,6 +471,9 @@ mod tests {
             !result.contains("### buzz-cli"),
             "skill body heading must not be inlined"
         );
+        // The returned skills list should contain the discovered skill.
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "buzz-cli");
     }
 
     #[test]

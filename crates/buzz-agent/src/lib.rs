@@ -271,12 +271,12 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             .await;
         }
     }
+    let (hints_text, skills) = if app.cfg.hints_enabled {
+        hints::build_hints_section(std::path::Path::new(&p.cwd))
+    } else {
+        (String::new(), Vec::new())
+    };
     let effective_system_prompt: Arc<str> = {
-        let hints = if app.cfg.hints_enabled {
-            hints::build_hints_section(std::path::Path::new(&p.cwd))
-        } else {
-            String::new()
-        };
         // When the harness provides a systemPrompt (base_prompt + persona), use
         // it as the primary content and suppress the default. The default is only
         // a fallback for legacy harnesses that don't send systemPrompt.
@@ -284,10 +284,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             Some(client_prompt) if !client_prompt.trim().is_empty() => client_prompt.to_owned(),
             _ => app.cfg.system_prompt.clone(),
         };
-        let prompt = if hints.is_empty() {
+        let prompt = if hints_text.is_empty() {
             base
         } else {
-            format!("{base}\n\n{hints}")
+            format!("{base}\n\n{hints_text}")
         };
         // Reject combined prompts exceeding 512KB.
         if prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
@@ -304,11 +304,6 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             .await;
         }
         Arc::from(prompt)
-    };
-    let skills = if app.cfg.hints_enabled {
-        hints::discover_skills(std::path::Path::new(&p.cwd))
-    } else {
-        Vec::new()
     };
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
         Ok(m) => Arc::new(m),
