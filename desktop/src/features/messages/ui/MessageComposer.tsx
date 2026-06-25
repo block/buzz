@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
-import { CornerUpLeft, Pencil, X } from "lucide-react";
+import { CornerUpLeft, Info, Pencil, X } from "lucide-react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -59,6 +59,7 @@ type MessageComposerProps = {
   containerClassName?: string;
   disabled?: boolean;
   draftKey?: string;
+  composerNotice?: React.ReactNode;
   editTarget?: {
     author: string;
     body: string;
@@ -111,6 +112,7 @@ export function MessageComposer({
   containerClassName,
   disabled = false,
   draftKey,
+  composerNotice,
   editTarget = null,
   isSending = false,
   onCancelEdit,
@@ -877,6 +879,14 @@ export function MessageComposer({
                   <X className="h-4 w-4" />
                 </Button>
               ) : null}
+            </div>
+          ) : composerNotice ? (
+            <div
+              className="relative z-0 -mb-4 flex transform-gpu items-start gap-2 rounded-t-2xl border border-b-0 border-border/60 bg-muted/55 px-4 pb-6 pt-2.5 text-sm leading-5 text-muted-foreground backdrop-blur-sm transition-colors"
+              data-testid="composer-notice"
+            >
+              <Info aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0 flex-1">{composerNotice}</div>
             </div>
           ) : null}
           <form

@@ -7,6 +7,7 @@ import {
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
+import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -32,6 +33,7 @@ export type MessageTimelineHandle = {
 };
 
 type MessageTimelineProps = {
+  agentConversationMarkers?: readonly AgentConversationMarker[];
   agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
   channelIntro?: ChannelIntro | null;
@@ -54,7 +56,10 @@ type MessageTimelineProps = {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
+  contentTopPadding?: "chrome" | "compact";
   isFetchingOlder?: boolean;
+  layoutShiftKey?: string | number | null;
+  messageListPlacement?: "bottom" | "top";
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
@@ -66,6 +71,10 @@ type MessageTimelineProps = {
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
+  onOpenAgentConversation?: (
+    message: TimelineMessage,
+    options?: { publishMarker?: boolean },
+  ) => void;
   onReply?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
@@ -95,6 +104,7 @@ type MessageTimelineProps = {
   unreadCount?: number;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  trailingContent?: React.ReactNode;
 };
 
 type ChannelIntroAction = {
@@ -139,6 +149,7 @@ const MessageTimelineBase = React.forwardRef<
   MessageTimelineProps
 >(function MessageTimeline(
   {
+    agentConversationMarkers,
     agentPubkeys,
     channelId,
     channelIntro = null,
@@ -151,8 +162,11 @@ const MessageTimelineBase = React.forwardRef<
     currentPubkey,
     fetchOlder,
     hasComposerOverlay = true,
+    contentTopPadding = "chrome",
     hasOlderMessages = true,
     isFetchingOlder = false,
+    layoutShiftKey = null,
+    messageListPlacement = "bottom",
     followThreadById,
     isFollowingThreadById,
     isMessageUnreadById,
@@ -163,6 +177,7 @@ const MessageTimelineBase = React.forwardRef<
     onEdit,
     onMarkUnread,
     onMarkRead,
+    onOpenAgentConversation,
     onReply,
     channelName,
     channelType,
@@ -179,6 +194,7 @@ const MessageTimelineBase = React.forwardRef<
     firstUnreadMessageId = null,
     unreadCount = 0,
     threadUnreadCounts,
+    trailingContent,
   }: MessageTimelineProps,
   ref,
 ) {
@@ -535,7 +551,9 @@ const MessageTimelineBase = React.forwardRef<
           <div
             className={cn(
               "flex w-full flex-col gap-2",
-              channelChrome.contentPadding,
+              contentTopPadding === "chrome"
+                ? channelChrome.contentPadding
+                : "pt-2",
               (showIntro || showGenericEmpty) && "min-h-full",
             )}
             ref={contentRef}
@@ -551,9 +569,13 @@ const MessageTimelineBase = React.forwardRef<
 
             <div
               className={cn(
-                "flex min-h-[18rem] min-w-0 flex-col gap-2",
+                "flex min-w-0 flex-col gap-2",
+                messageListPlacement === "bottom" ? "min-h-[18rem]" : "min-h-0",
                 (showIntro || showGenericEmpty) && "min-h-full",
-                showMessageList && !showIntro && "mt-auto",
+                showMessageList &&
+                  !showIntro &&
+                  messageListPlacement === "bottom" &&
+                  "mt-auto",
               )}
             >
               {showTimelineSkeleton ? (
@@ -689,10 +711,16 @@ const MessageTimelineBase = React.forwardRef<
 
               {showMessageList ? (
                 <div
-                  className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
+                  className={cn(
+                    "flex flex-col gap-2",
+                    !showIntro &&
+                      messageListPlacement === "bottom" &&
+                      "mt-auto",
+                  )}
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
+                    agentConversationMarkers={agentConversationMarkers}
                     key={scrollContainerDomKey}
                     agentPubkeys={agentPubkeys}
                     channelId={channelId}
@@ -713,6 +741,7 @@ const MessageTimelineBase = React.forwardRef<
                     onEdit={onEdit}
                     onMarkUnread={onMarkUnread}
                     onMarkRead={onMarkRead}
+                    onOpenAgentConversation={onOpenAgentConversation}
                     onReply={onReply}
                     isSendingVideoReviewComment={isSendingVideoReviewComment}
                     onSendVideoReviewComment={onSendVideoReviewComment}
@@ -728,6 +757,7 @@ const MessageTimelineBase = React.forwardRef<
                     headerOverlayRef={activeDayHeaderRef}
                     onVirtualizer={handleVirtualizer}
                   />
+                  {trailingContent}
                 </div>
               ) : null}
             </div>

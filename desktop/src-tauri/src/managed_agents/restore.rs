@@ -197,15 +197,46 @@ pub async fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
-    // Snapshot the workspace owner pubkey once for the legacy auth_tag fallback.
-    // Read outside the per-agent spawn loop so all parallel spawns see the same
-    // value and we don't lock `state.keys` repeatedly.
-    let owner_hex: Option<String> = state
-        .keys
-        .lock()
-        .map_err(|e| e.to_string())
-        .ok()
-        .map(|k| k.public_key().to_hex());
+    // Snapshot the workspace owner once and refresh each restored agent's
+    // NIP-OA auth tag when the app identity changed since the record was
+    // created. Without this, owner-only agents can start successfully but ignore
+    // the current user's messages because the harness resolves an old owner.
+    let (owner_hex, auth_tag_updates): (Option<String>, Vec<(String, Option<String>, String)>) = {
+        let owner_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        let owner_hex = owner_keys.public_key().to_hex();
+        let mut updates = Vec::new();
+        for record in &mut agents_to_start {
+            if super::auth_tag_matches_owner(
+                record.auth_tag.as_deref(),
+                &record.pubkey,
+                Some(&owner_hex),
+            ) {
+                continue;
+            }
+            let refreshed_auth_tag =
+                super::managed_agent_auth_tag_for_owner(&owner_keys, &record.pubkey)?;
+            let updated_at = util::now_iso();
+            record.auth_tag = refreshed_auth_tag.clone();
+            record.updated_at = updated_at.clone();
+            updates.push((record.pubkey.clone(), refreshed_auth_tag, updated_at));
+        }
+        (Some(owner_hex), updates)
+    };
+
+    if !auth_tag_updates.is_empty() {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(app)?;
+        for (pubkey, auth_tag, updated_at) in &auth_tag_updates {
+            if let Ok(record) = find_managed_agent_mut(&mut records, pubkey) {
+                record.auth_tag = auth_tag.clone();
+                record.updated_at = updated_at.clone();
+            }
+        }
+        save_managed_agents(app, &records)?;
+    }
 
     #[cfg(feature = "mesh-llm")]
     let agents_to_start = {
@@ -310,6 +341,7 @@ pub async fn restore_managed_agents_on_launch(
                     record.persona_id.as_deref(),
                     &reconcile_personas,
                     record.agent_command_override.as_deref(),
+                    Some(&record.agent_command),
                 );
                 Some((
                     pubkey.clone(),

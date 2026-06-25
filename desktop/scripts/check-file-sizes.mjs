@@ -36,7 +36,9 @@ const overrides = new Map([
   // rebase, queued to split with the rest of this list.
   // persona-refresh-on-spawn: re-snapshot + retain_managed_agent_pending call
   // in start_local_agent_with_preflight adds ~23 lines. Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1380],
+  // continued-agent-conversations: refreshes the owner auth tag before
+  // starting/restoring agents so staged identities keep working.
+  ["src-tauri/src/commands/agents.rs", 1388],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
@@ -47,7 +49,9 @@ const overrides = new Map([
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup.
-  ["src-tauri/src/managed_agents/runtime.rs", 2031],
+  // continued-agent-conversations: owner-scoped auth tag refresh is threaded
+  // through the runtime env builder and covered by regression tests.
+  ["src-tauri/src/managed_agents/runtime.rs", 2084],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
   // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
@@ -69,7 +73,9 @@ const overrides = new Map([
   // (the effective_agent_command / divergent / create-time override matrix);
   // types.rs adds the persona/instance harness fields. Load-bearing, not
   // generic debt.
-  ["src-tauri/src/managed_agents/discovery.rs", 1043],
+  // continued-agent-conversations: effective command fallback tests ensure
+  // persisted staged agents restart with their stored command.
+  ["src-tauri/src/managed_agents/discovery.rs", 1063],
   ["src-tauri/src/managed_agents/types.rs", 1037],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
@@ -87,7 +93,18 @@ const overrides = new Map([
   // useDueReminderBadgeCount hook call + sum to wire due-reminder count into
   // the Inbox nav badge — a small overage from load-bearing badge plumbing,
   // not generic debt growth. Approved override; still queued to split.
-  ["src/app/AppShell.tsx", 1010],
+  // continued-agent-conversations: persisted channel-scoped conversation state
+  // and route wiring. Queued to split with the rest of AppShell state.
+  ["src/app/AppShell.tsx", 1060],
+  // continued-agent-conversations: marker filtering, thread handoff, and
+  // activity handoff props live at the channel surface for now.
+  ["src/features/channels/ui/ChannelPane.tsx", 1107],
+  // continued-agent-conversations: composer notice banner for read-only agent
+  // conversations.
+  ["src/features/messages/ui/MessageComposer.tsx", 1010],
+  // continued-agent-conversations: channel sidebar children and active
+  // conversation unread suppression. Queued to split with sidebar sections.
+  ["src/features/sidebar/ui/AppSidebar.tsx", 1081],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at

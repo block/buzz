@@ -1,4 +1,9 @@
 import * as React from "react";
+import type {
+  AgentConversation,
+  AgentConversationTitleStatus,
+  OpenAgentConversationInput,
+} from "@/features/agents/agentConversations";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
@@ -7,6 +12,7 @@ import type { FeedItem } from "@/shared/api/types";
 const EMPTY_SET = new Set<string>();
 
 type AppShellContextValue = {
+  agentConversations: readonly AgentConversation[];
   markAllChannelsRead: () => void;
   markChannelRead: (
     channelId: string,
@@ -14,6 +20,15 @@ type AppShellContextValue = {
     options?: { topLevelOnly?: boolean },
   ) => void;
   markChannelUnread: (channelId: string) => void;
+  openAgentConversation: (
+    input: OpenAgentConversationInput,
+    options?: { publishMarker?: boolean },
+  ) => void;
+  updateAgentConversationTitle: (
+    conversationId: string,
+    title: string,
+    titleStatus: AgentConversationTitleStatus,
+  ) => void;
   openCreateChannel: () => void;
   openChannelManagement: (channelId?: string) => void;
   // NIP-RS read marker for a channel as a unix-seconds timestamp, or null
@@ -48,9 +63,12 @@ type AppShellContextValue = {
 };
 
 const AppShellContext = React.createContext<AppShellContextValue>({
+  agentConversations: [],
   markAllChannelsRead: () => {},
   markChannelRead: () => {},
   markChannelUnread: () => {},
+  openAgentConversation: () => {},
+  updateAgentConversationTitle: () => {},
   openCreateChannel: () => {},
   openChannelManagement: () => {},
   getChannelReadAt: () => null,

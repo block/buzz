@@ -499,7 +499,7 @@ impl EventQueue {
     /// Also clears any `retry_after` throttle for the channel.
     ///
     /// Returns the event IDs of dropped events so the caller can clean up
-    /// any reactions (👀) that were added at queue-push time.
+    /// channel-scoped side effects if needed.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
         let ids = self
             .queues
@@ -872,15 +872,15 @@ fn format_event_block(
 
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
-/// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
-/// while still allowing an explicit human request to post at the channel root or
-/// top level.
-fn append_reply_instruction(s: &mut String, event_id: &str) {
+/// Tells the agent to pass `--reply-to <thread_root_id>` on every `buzz
+/// messages send` call for ordinary replies, while still allowing an explicit
+/// human request to post at the channel root or top level.
+fn append_reply_instruction(s: &mut String, thread_root_id: &str) {
     s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
+        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {thread_root_id}` \
+         on `buzz messages send` so the conversation stays in the thread without adding \
+         another visible nesting level. If the human explicitly asks for a channel-root, \
+         top-level, or broadcast post, send that message without `--reply-to`. \
          If the requested destination is ambiguous, ask before sending."
     ));
 }
@@ -1166,6 +1166,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         }
     }
 
+    // 2. Context hints (with a human-aware reply anchor).
     // 2. Context hints (with a human-aware reply anchor).
     //
     // Human-facing turns are anchored so replies stay readable at layer 1:
@@ -3164,9 +3165,8 @@ mod tests {
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3190,7 +3190,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
+            prompt.contains(&format!("--reply-to {root_id}")),
             "DM thread reply should include reply instruction"
         );
     }

@@ -7,6 +7,7 @@ import {
   resolveActiveDayTimestamp,
   type TimelineItem,
 } from "@/features/messages/lib/timelineItems";
+import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import {
@@ -22,6 +23,7 @@ import {
   type ListVirtualizer,
   VirtualizedList,
 } from "@/shared/ui/VirtualizedList";
+import { AgentConversationMarkerRow } from "./AgentConversationMarkerRow";
 import { DayDivider } from "./DayDivider";
 import { ActiveDayHeader } from "./ActiveDayHeader";
 import { MessageRow } from "./MessageRow";
@@ -30,6 +32,7 @@ import { SystemMessageRow } from "./SystemMessageRow";
 import { UnreadDivider } from "./UnreadDivider";
 
 type TimelineMessageListProps = {
+  agentConversationMarkers?: readonly AgentConversationMarker[];
   agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
   channelName?: string;
@@ -50,6 +53,10 @@ type TimelineMessageListProps = {
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
+  onOpenAgentConversation?: (
+    message: TimelineMessage,
+    options?: { publishMarker?: boolean },
+  ) => void;
   onReply?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
@@ -86,6 +93,7 @@ type TimelineMessageListProps = {
 };
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
+  agentConversationMarkers,
   agentPubkeys,
   channelId,
   channelName,
@@ -103,6 +111,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onEdit,
   onMarkUnread,
   onMarkRead,
+  onOpenAgentConversation,
   onReply,
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
@@ -176,6 +185,16 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     () => buildTimelineItems(entries, firstUnreadMessageId),
     [entries, firstUnreadMessageId],
   );
+  const agentConversationMarkerByMessageId = React.useMemo(
+    () =>
+      new Map(
+        (agentConversationMarkers ?? []).map((marker) => [
+          marker.agentReplyId,
+          marker,
+        ]),
+      ),
+    [agentConversationMarkers],
+  );
 
   const renderItem = React.useCallback(
     (item: TimelineItem) => {
@@ -200,6 +219,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
           return (
             <MessageRowItem
               agentPubkeys={agentPubkeys}
+              agentConversationMarker={agentConversationMarkerByMessageId.get(
+                item.entry.message.id,
+              )}
               channelId={channelId}
               currentPubkey={currentPubkey}
               entry={item.entry}
@@ -212,6 +234,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onEdit={onEdit}
               onMarkRead={onMarkRead}
               onMarkUnread={onMarkUnread}
+              onOpenAgentConversation={onOpenAgentConversation}
               onReply={onReply}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
@@ -229,6 +252,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     },
     [
       agentPubkeys,
+      agentConversationMarkerByMessageId,
       channelId,
       currentPubkey,
       followThreadById,
@@ -240,6 +264,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onEdit,
       onMarkRead,
       onMarkUnread,
+      onOpenAgentConversation,
       onReply,
       onToggleReaction,
       profiles,
@@ -323,6 +348,7 @@ type MessageRowItemProps = Pick<
   | "onEdit"
   | "onMarkUnread"
   | "onMarkRead"
+  | "onOpenAgentConversation"
   | "onReply"
   | "onToggleReaction"
   | "profiles"
@@ -332,6 +358,7 @@ type MessageRowItemProps = Pick<
   | "threadUnreadCounts"
   | "unfollowThreadById"
 > & {
+  agentConversationMarker?: AgentConversationMarker;
   entry: MainTimelineEntry;
   footer: React.ReactNode;
   isUnread?: boolean;
@@ -340,6 +367,7 @@ type MessageRowItemProps = Pick<
 
 function MessageRowItem({
   agentPubkeys,
+  agentConversationMarker,
   channelId,
   currentPubkey,
   entry,
@@ -352,6 +380,7 @@ function MessageRowItem({
   onEdit,
   onMarkUnread,
   onMarkRead,
+  onOpenAgentConversation,
   onReply,
   onToggleReaction,
   profiles,
@@ -401,6 +430,7 @@ function MessageRowItem({
           }
           onMarkRead={onMarkRead}
           onMarkUnread={onMarkUnread}
+          onOpenAgentConversation={onOpenAgentConversation}
           onToggleReaction={onToggleReaction}
           onReply={onReply}
           onUnfollowThread={
@@ -420,6 +450,16 @@ function MessageRowItem({
           summary={summary}
           unreadCount={threadUnreadCounts?.get(message.id)}
         />
+        {agentConversationMarker ? (
+          <AgentConversationMarkerRow
+            className="mx-0"
+            currentPubkey={currentPubkey}
+            marker={agentConversationMarker}
+            message={message}
+            onOpenAgentConversation={onOpenAgentConversation}
+            profiles={profiles}
+          />
+        ) : null}
         {footer}
       </div>
     );
@@ -440,6 +480,7 @@ function MessageRowItem({
         onEdit={canEdit}
         onMarkRead={onMarkRead}
         onMarkUnread={onMarkUnread}
+        onOpenAgentConversation={onOpenAgentConversation}
         onToggleReaction={onToggleReaction}
         onReply={onReply}
         profiles={profiles}
@@ -447,6 +488,15 @@ function MessageRowItem({
         showDepthGuides={false}
         videoReviewContext={videoReviewContext}
       />
+      {agentConversationMarker ? (
+        <AgentConversationMarkerRow
+          currentPubkey={currentPubkey}
+          marker={agentConversationMarker}
+          message={message}
+          onOpenAgentConversation={onOpenAgentConversation}
+          profiles={profiles}
+        />
+      ) : null}
       {footer}
     </div>
   );

@@ -19,6 +19,18 @@ import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import {
+  buildAgentConversation,
+  type AgentConversation,
+  type AgentConversationTitleStatus,
+  type OpenAgentConversationInput,
+  publishAgentConversationMarker,
+  readHiddenAgentConversationIds,
+  readPersistedAgentConversations,
+  writeHiddenAgentConversationIds,
+  writePersistedAgentConversations,
+} from "@/features/agents/agentConversations";
+import { AgentConversationScreen } from "@/features/agents/ui/AgentConversationScreen";
+import {
   channelsQueryKey,
   useChannelsQuery,
   useCreateChannelMutation,
@@ -101,6 +113,15 @@ export function AppShell() {
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
+  const [agentConversations, setAgentConversations] = React.useState<
+    AgentConversation[]
+  >([]);
+  const [hiddenAgentConversationIds, setHiddenAgentConversationIds] =
+    React.useState<Set<string>>(() => new Set());
+  const [agentConversationStoragePubkey, setAgentConversationStoragePubkey] =
+    React.useState<string | null>(null);
+  const [selectedAgentConversationId, setSelectedAgentConversationId] =
+    React.useState<string | null>(null);
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
@@ -133,14 +154,34 @@ export function AppShell() {
   const startupReady = useDeferredStartup();
 
   const identityQuery = useIdentityQuery();
-  const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
-    identityQuery.data?.pubkey,
-  );
-  const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
-    identityQuery.data?.pubkey,
-  );
-  usePersonaSync(identityQuery.data?.pubkey);
   useAgentsDataRefresh();
+  const currentPubkey = identityQuery.data?.pubkey;
+  React.useEffect(() => {
+    if (!currentPubkey) {
+      setAgentConversations([]);
+      setHiddenAgentConversationIds(new Set());
+      setAgentConversationStoragePubkey(null);
+      return;
+    }
+
+    setAgentConversations(readPersistedAgentConversations(currentPubkey));
+    setHiddenAgentConversationIds(
+      readHiddenAgentConversationIds(currentPubkey),
+    );
+    setAgentConversationStoragePubkey(currentPubkey);
+  }, [currentPubkey]);
+  React.useEffect(() => {
+    if (!currentPubkey || agentConversationStoragePubkey !== currentPubkey) {
+      return;
+    }
+
+    writePersistedAgentConversations(currentPubkey, agentConversations);
+  }, [agentConversationStoragePubkey, agentConversations, currentPubkey]);
+  const { mutedChannelIds, muteChannel, unmuteChannel } =
+    useChannelMutes(currentPubkey);
+  const { starredChannelIds, starChannel, unstarChannel } =
+    useChannelStars(currentPubkey);
+  usePersonaSync(currentPubkey);
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
@@ -196,6 +237,24 @@ export function AppShell() {
       ? (channels.find((channel) => channel.id === targetChannelId) ?? null)
       : null;
   }, [channels, managedChannelId, selectedChannelId]);
+  const selectedAgentConversation =
+    selectedView === "agents" && selectedAgentConversationId
+      ? (agentConversations.find(
+          (conversation) => conversation.id === selectedAgentConversationId,
+        ) ?? null)
+      : null;
+  const visibleAgentConversations = React.useMemo(
+    () =>
+      agentConversations.filter(
+        (conversation) => !hiddenAgentConversationIds.has(conversation.id),
+      ),
+    [agentConversations, hiddenAgentConversationIds],
+  );
+  const selectedAgentConversationChannel = selectedAgentConversation
+    ? (channels.find(
+        (channel) => channel.id === selectedAgentConversation.channelId,
+      ) ?? null)
+    : null;
 
   const {
     handleChannelNotification,
@@ -421,9 +480,118 @@ export function AppShell() {
 
   const handleOpenSearchResult = React.useCallback(
     (hit: SearchHit) => {
+      setSelectedAgentConversationId(null);
       void openSearchHit(hit);
     },
     [openSearchHit],
+  );
+  const handleOpenAgentConversation = React.useCallback(
+    (
+      input: OpenAgentConversationInput,
+      options?: { publishMarker?: boolean },
+    ) => {
+      const conversation = buildAgentConversation(input);
+      if (options?.publishMarker !== false) {
+        void publishAgentConversationMarker(input).catch((error) => {
+          console.warn("[agentConversations] marker publish failed:", error);
+        });
+      }
+      if (currentPubkey) {
+        setHiddenAgentConversationIds((current) => {
+          if (!current.has(conversation.id)) {
+            return current;
+          }
+
+          const next = new Set(current);
+          next.delete(conversation.id);
+          writeHiddenAgentConversationIds(currentPubkey, next);
+          return next;
+        });
+      }
+      setAgentConversations((current) => {
+        const existingIndex = current.findIndex(
+          (item) => item.id === conversation.id,
+        );
+        if (existingIndex < 0) {
+          return [conversation, ...current];
+        }
+
+        const next = [...current];
+        next.splice(existingIndex, 1);
+        return [conversation, ...next];
+      });
+      setSelectedAgentConversationId(conversation.id);
+      void goAgents();
+    },
+    [currentPubkey, goAgents],
+  );
+  const handleUpdateAgentConversationTitle = React.useCallback(
+    (
+      conversationId: string,
+      title: string,
+      titleStatus: AgentConversationTitleStatus,
+    ) => {
+      setAgentConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === conversationId
+            ? { ...conversation, title, titleStatus }
+            : conversation,
+        ),
+      );
+    },
+    [],
+  );
+  const handleHideAgentConversation = React.useCallback(
+    (conversationId: string) => {
+      const conversation =
+        agentConversations.find((item) => item.id === conversationId) ?? null;
+      if (!currentPubkey) {
+        return;
+      }
+
+      setHiddenAgentConversationIds((current) => {
+        if (current.has(conversationId)) {
+          return current;
+        }
+
+        const next = new Set(current);
+        next.add(conversationId);
+        writeHiddenAgentConversationIds(currentPubkey, next);
+        return next;
+      });
+
+      if (selectedAgentConversationId === conversationId) {
+        setSelectedAgentConversationId(null);
+        if (conversation) {
+          void goChannel(conversation.channelId);
+        }
+      }
+    },
+    [agentConversations, currentPubkey, goChannel, selectedAgentConversationId],
+  );
+  const handleSelectAgentConversation = React.useCallback(
+    (conversationId: string) => {
+      setSelectedAgentConversationId(conversationId);
+      void goAgents();
+    },
+    [goAgents],
+  );
+  const handleBackToAgentConversationThread = React.useCallback(
+    (conversation: AgentConversation) => {
+      setSelectedAgentConversationId(null);
+      void goChannel(conversation.channelId, {
+        messageId: conversation.agentReply.id,
+        threadRootId: conversation.threadRootId,
+      });
+    },
+    [goChannel],
+  );
+  const handleSelectChannel = React.useCallback(
+    (channelId: string) => {
+      setSelectedAgentConversationId(null);
+      void goChannel(channelId);
+    },
+    [goChannel],
   );
 
   // Prevent webview file:/// navigation on file drop outside the composer.
@@ -569,9 +737,12 @@ export function AppShell() {
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{
+            agentConversations,
             markAllChannelsRead,
             markChannelRead,
             markChannelUnread,
+            openAgentConversation: handleOpenAgentConversation,
+            updateAgentConversationTitle: handleUpdateAgentConversationTitle,
             openCreateChannel: handleOpenCreateChannel,
             openChannelManagement: (channelId?: string) => {
               setManagedChannelId(
@@ -663,6 +834,7 @@ export function AppShell() {
                       <div className="flex min-h-0 flex-1 overflow-hidden">
                         <AppSidebar
                           activeWorkspace={workspacesHook.activeWorkspace}
+                          agentConversations={visibleAgentConversations}
                           channels={sidebarChannels}
                           currentPubkey={identityQuery.data?.pubkey}
                           errorMessage={channelsErrorMessage}
@@ -682,6 +854,7 @@ export function AppShell() {
                           }}
                           onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
                           onNewDmOpenChange={setIsNewDmOpen}
+                          onHideAgentConversation={handleHideAgentConversation}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                           onUpdateWorkspace={workspacesHook.updateWorkspace}
@@ -713,6 +886,7 @@ export function AppShell() {
                               createdChannel.id,
                               name,
                             );
+                            setSelectedAgentConversationId(null);
                             await goChannel(createdChannel.id);
                             void applyAgents(templateId, createdChannel.id);
                           }}
@@ -737,6 +911,7 @@ export function AppShell() {
                               createdForum.id,
                               name,
                             );
+                            setSelectedAgentConversationId(null);
                             await goChannel(createdForum.id);
                             void applyAgents(templateId, createdForum.id);
                           }}
@@ -750,20 +925,37 @@ export function AppShell() {
                               await openDmMutation.mutateAsync({
                                 pubkeys,
                               });
+                            setSelectedAgentConversationId(null);
                             await goChannel(directMessage.id);
                           }}
-                          onSelectAgents={() => void goAgents()}
-                          onSelectChannel={(channelId) =>
-                            void goChannel(channelId)
+                          onSelectAgentConversation={
+                            handleSelectAgentConversation
                           }
+                          onSelectAgents={() => {
+                            setSelectedAgentConversationId(null);
+                            void goAgents();
+                          }}
+                          onSelectChannel={handleSelectChannel}
                           onOpenSearchResult={handleOpenSearchResult}
                           searchChannels={channels}
                           searchFocusRequest={searchFocusRequest}
-                          onSelectHome={() => void goHome()}
-                          onSelectProjects={() => void goProjects()}
-                          onSelectPulse={() => void goPulse()}
+                          onSelectHome={() => {
+                            setSelectedAgentConversationId(null);
+                            void goHome();
+                          }}
+                          onSelectProjects={() => {
+                            setSelectedAgentConversationId(null);
+                            void goProjects();
+                          }}
+                          onSelectPulse={() => {
+                            setSelectedAgentConversationId(null);
+                            void goPulse();
+                          }}
                           onSelectSettings={handleOpenSettings}
-                          onSelectWorkflows={() => void goWorkflows()}
+                          onSelectWorkflows={() => {
+                            setSelectedAgentConversationId(null);
+                            void goWorkflows();
+                          }}
                           onSetPresenceStatus={(status) =>
                             presenceSession.setStatus(status)
                           }
@@ -785,6 +977,9 @@ export function AppShell() {
                               : undefined
                           }
                           selectedChannelId={selectedChannelId}
+                          selectedAgentConversationId={
+                            selectedAgentConversationId
+                          }
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}
                           unreadChannelCounts={unreadChannelCounts}
@@ -805,7 +1000,19 @@ export function AppShell() {
                               <ConnectionBanner
                                 errorMessage={channelsErrorMessage}
                               />
-                              <Outlet />
+                              {selectedAgentConversation ? (
+                                <AgentConversationScreen
+                                  channel={selectedAgentConversationChannel}
+                                  conversation={selectedAgentConversation}
+                                  currentIdentity={identityQuery.data}
+                                  currentProfile={profileQuery.data}
+                                  onBackToThread={
+                                    handleBackToAgentConversationThread
+                                  }
+                                />
+                              ) : (
+                                <Outlet />
+                              )}
                             </div>
                           </SidebarInset>
                         </MainInsetProvider>
@@ -828,11 +1035,10 @@ export function AppShell() {
                       onDeleteActiveChannel={() => {
                         setIsChannelManagementOpen(false);
                         setManagedChannelId(null);
+                        setSelectedAgentConversationId(null);
                         void goHome({ replace: true });
                       }}
-                      onSelectChannel={(channelId) => {
-                        void goChannel(channelId);
-                      }}
+                      onSelectChannel={handleSelectChannel}
                     />
                   </SidebarProvider>
                 </div>

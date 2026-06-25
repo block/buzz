@@ -2,6 +2,7 @@ import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
+  CHANNEL_TIMELINE_STATE_KINDS,
   HOME_MENTION_EVENT_KINDS,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
@@ -41,9 +42,9 @@ export function buildChannelFilter(
 }
 
 /**
- * History filter for cold-load and scrollback: message kinds *only*, so the
- * `limit` budget buys visible message depth. Auxiliary events (reactions,
- * edits, deletions) are backfilled separately by `#e` reference via
+ * History filter for cold-load and scrollback: message kinds plus lightweight
+ * timeline state markers. Auxiliary events (reactions, edits, deletions) are
+ * backfilled separately by `#e` reference via
  * {@link buildChannelStructuralAuxFilter} and
  * {@link buildChannelReactionAuxFilter}, and arrive for future messages
  * through the live subscription ({@link buildChannelFilter}, which keeps the
@@ -55,7 +56,7 @@ export function buildChannelHistoryFilter(
   until?: number,
 ): RelaySubscriptionFilter {
   const filter: RelaySubscriptionFilter = {
-    kinds: [...CHANNEL_TIMELINE_CONTENT_KINDS],
+    kinds: [...CHANNEL_TIMELINE_CONTENT_KINDS, ...CHANNEL_TIMELINE_STATE_KINDS],
     "#h": [channelId],
     limit,
   };

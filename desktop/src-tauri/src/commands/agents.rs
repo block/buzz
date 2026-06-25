@@ -242,6 +242,11 @@ async fn start_local_agent_with_preflight(
 
     ensure_relay_mesh_for_record(app, &record_snapshot, allow_fresh_create_start).await?;
 
+    let refreshed_auth_tag = {
+        let owner_keys = state.keys.lock().map_err(|e| e.to_string())?;
+        crate::managed_agents::managed_agent_auth_tag_for_owner(&owner_keys, pubkey)?
+    };
+
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -254,6 +259,14 @@ async fn start_local_agent_with_preflight(
     let record = find_managed_agent_mut(&mut records, pubkey)?;
     if record.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is no longer a local agent"));
+    }
+    if !crate::managed_agents::auth_tag_matches_owner(
+        record.auth_tag.as_deref(),
+        &record.pubkey,
+        Some(owner_hex),
+    ) {
+        record.auth_tag = refreshed_auth_tag;
+        record.updated_at = crate::util::now_iso();
     }
     // Re-snapshot the persona onto the record at every spawn so the agent always
     // starts with the current persona config (system_prompt, model, provider,
@@ -606,6 +619,7 @@ pub async fn create_managed_agent(
             requested_persona_id.as_deref(),
             &personas,
             agent_command_override.as_deref(),
+            None,
         );
         let agent_args = normalize_agent_args(
             &agent_command,
@@ -963,6 +977,7 @@ pub async fn start_managed_agent(
             record.persona_id.as_deref(),
             &reconcile_personas,
             record.agent_command_override.as_deref(),
+            Some(&record.agent_command),
         );
 
         let reconcile = ProfileReconcileData {

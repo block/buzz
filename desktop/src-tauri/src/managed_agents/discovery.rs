@@ -252,11 +252,14 @@ pub fn default_agent_command() -> String {
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
 ///   2. the linked persona's `runtime` id mapped to its primary command;
-///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
+///   3. the record's stored `agent_command` snapshot for legacy records whose
+///      persona has no runtime field;
+///   4. `default_agent_command()` — no persona/runtime/snapshot, or persona deleted.
 pub fn effective_agent_command(
     persona_id: Option<&str>,
     personas: &[crate::managed_agents::types::PersonaRecord],
     agent_command_override: Option<&str>,
+    record_agent_command: Option<&str>,
 ) -> String {
     if let Some(pin) = agent_command_override
         .map(str::trim)
@@ -271,6 +274,12 @@ pub fn effective_agent_command(
         .and_then(known_acp_runtime_exact)
         .and_then(|r| r.commands.first().copied())
         .map(str::to_string)
+        .or_else(|| {
+            record_agent_command
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
         .unwrap_or_else(default_agent_command)
 }
 
@@ -293,7 +302,7 @@ pub fn divergent_agent_command_override(
     let picked = picked_command
         .map(str::trim)
         .filter(|value| !value.is_empty())?;
-    let persona_command = effective_agent_command(persona_id, personas, None);
+    let persona_command = effective_agent_command(persona_id, personas, None, None);
     let same_runtime = match (
         known_acp_runtime(picked),
         known_acp_runtime(&persona_command),
@@ -891,7 +900,7 @@ mod tests {
         // An explicit pin beats the persona's runtime.
         let personas = vec![persona_with_runtime("p1", Some("claude"))];
         assert_eq!(
-            effective_agent_command(Some("p1"), &personas, Some("codex-acp")),
+            effective_agent_command(Some("p1"), &personas, Some("codex-acp"), Some("goose")),
             "codex-acp"
         );
     }
@@ -901,7 +910,7 @@ mod tests {
         // No override → persona runtime id maps to its primary command.
         let personas = vec![persona_with_runtime("p1", Some("claude"))];
         assert_eq!(
-            effective_agent_command(Some("p1"), &personas, None),
+            effective_agent_command(Some("p1"), &personas, None, Some("goose")),
             "claude-agent-acp"
         );
     }
@@ -911,26 +920,37 @@ mod tests {
         // A blank/whitespace override is treated as "inherit", not a pin.
         let personas = vec![persona_with_runtime("p1", Some("goose"))];
         assert_eq!(
-            effective_agent_command(Some("p1"), &personas, Some("   ")),
+            effective_agent_command(Some("p1"), &personas, Some("   "), Some("buzz-agent")),
+            "goose"
+        );
+    }
+
+    #[test]
+    fn effective_agent_command_falls_back_to_record_snapshot() {
+        // Legacy records may predate persona runtime fields. Preserve their
+        // stored harness instead of silently changing them to the new default.
+        let personas = vec![persona_with_runtime("p1", None)];
+        assert_eq!(
+            effective_agent_command(Some("p1"), &personas, None, Some("goose")),
             "goose"
         );
     }
 
     #[test]
     fn effective_agent_command_falls_back_to_default() {
-        // No override, no persona runtime, and a deleted persona all fall back
-        // to the bundled default.
+        // No override, no persona runtime, no record snapshot, and a deleted
+        // persona all fall back to the bundled default.
         let personas = vec![persona_with_runtime("p1", None)];
         assert_eq!(
-            effective_agent_command(Some("p1"), &personas, None),
+            effective_agent_command(Some("p1"), &personas, None, None),
             default_agent_command()
         );
         assert_eq!(
-            effective_agent_command(Some("gone"), &personas, None),
+            effective_agent_command(Some("gone"), &personas, None, None),
             default_agent_command()
         );
         assert_eq!(
-            effective_agent_command(None, &personas, None),
+            effective_agent_command(None, &personas, None, None),
             default_agent_command()
         );
     }
