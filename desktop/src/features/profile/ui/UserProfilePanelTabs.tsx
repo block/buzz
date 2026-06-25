@@ -337,6 +337,14 @@ export function ProfileRuntimeTabContent({
 
   return (
     <div className="space-y-2">
+      {showInstructionBlock ? (
+        <div className="overflow-hidden rounded-2xl bg-muted/20">
+          <AgentInstructionRow
+            instruction={agentInstruction}
+            onOpenInstructions={onOpenInstructions}
+          />
+        </div>
+      ) : null}
       {statusDiagnosticsFields.length > 0 ? (
         <ProfileFieldGroup fields={statusDiagnosticsFields} />
       ) : null}
@@ -348,14 +356,6 @@ export function ProfileRuntimeTabContent({
           testId="user-profile-diagnostics-ingress"
           trailing={diagnosticsSummary}
         />
-      ) : null}
-      {showInstructionBlock ? (
-        <div className="overflow-hidden rounded-2xl bg-muted/20">
-          <AgentInstructionRow
-            instruction={agentInstruction}
-            onOpenInstructions={onOpenInstructions}
-          />
-        </div>
       ) : null}
       {hasRuntimeRows ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
