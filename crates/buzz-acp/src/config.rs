@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use nostr::Keys;
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
@@ -535,21 +536,23 @@ pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
         _ => return vec![],
     }
 
-    // Strip scheme prefix, then take only the authority (before the first '/'),
-    // then strip the port suffix. Handles ws://, wss://, http://, https://.
-    let without_scheme = relay_url
-        .trim_start_matches("wss://")
-        .trim_start_matches("ws://")
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
+    // Use the `url` crate so ws://, wss://, http://, https:// are all handled
+    // correctly. On parse failure, skip injection rather than panicking.
+    let host = match Url::parse(relay_url) {
+        Ok(u) => match u.host_str() {
+            Some(h) => h.to_owned(),
+            None => {
+                tracing::warn!(relay_url, "codex network allowlist: no host in relay URL — skipping injection");
+                return vec![];
+            }
+        },
+        Err(e) => {
+            tracing::warn!(relay_url, error = %e, "codex network allowlist: failed to parse relay URL — skipping injection");
+            return vec![];
+        }
+    };
 
-    let authority = without_scheme.split('/').next().unwrap_or("");
-    // Strip port (e.g. "example.com:3000" → "example.com").
-    let host = authority.split(':').next().unwrap_or("").trim();
-
-    if host.is_empty() {
-        return vec![];
-    }
+    tracing::debug!(host, "injecting codex network allowlist for host");
 
     vec![
         "-c".into(),
@@ -1510,16 +1513,14 @@ mod tests {
 
     #[test]
     fn codex_network_args_empty_relay_url_returns_empty() {
+        // Empty string fails Url::parse — graceful empty return.
         assert!(codex_network_args("codex-acp", "").is_empty());
     }
 
     #[test]
-    fn codex_network_args_schemeless_string_extracts_as_host() {
-        // A bare string with no scheme is treated as the host — no panic, no empty result.
-        // This is an edge case; real relay URLs always have a scheme.
-        let args = codex_network_args("codex-acp", "not-a-url");
-        assert_eq!(args.len(), 4);
-        assert!(args[3].contains("not-a-url"));
+    fn codex_network_args_schemeless_string_returns_empty() {
+        // A bare string with no scheme fails Url::parse — graceful empty return.
+        assert!(codex_network_args("codex-acp", "not-a-url").is_empty());
     }
 
     #[test]
