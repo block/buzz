@@ -517,6 +517,48 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Build `-c` flag pairs that allowlist the relay hostname in Codex's network sandbox.
+///
+/// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a local proxy with
+/// a domain allowlist. Without this, `buzz-cli` requests to the relay are blocked before
+/// they reach WARP or any other outbound network path.
+///
+/// Returns `["-c", "network.enabled=true", "-c", "network.allowed_domains=[\"<host>\"]"]`
+/// for Codex agents, or an empty vec for non-Codex agents or when the hostname cannot
+/// be parsed from the relay URL.
+///
+/// Handles `ws://`, `wss://`, `http://`, and `https://` schemes. Port is stripped —
+/// Codex's domain allowlist matches on hostname only.
+pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
+    match normalize_agent_command_identity(agent_command).as_str() {
+        "codex" | "codex-acp" => {}
+        _ => return vec![],
+    }
+
+    // Strip scheme prefix, then take only the authority (before the first '/'),
+    // then strip the port suffix. Handles ws://, wss://, http://, https://.
+    let without_scheme = relay_url
+        .trim_start_matches("wss://")
+        .trim_start_matches("ws://")
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+
+    let authority = without_scheme.split('/').next().unwrap_or("");
+    // Strip port (e.g. "example.com:3000" → "example.com").
+    let host = authority.split(':').next().unwrap_or("").trim();
+
+    if host.is_empty() {
+        return vec![];
+    }
+
+    vec![
+        "-c".into(),
+        "network.enabled=true".into(),
+        "-c".into(),
+        format!("network.allowed_domains=[\"{host}\"]"),
+    ]
+}
+
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
     let normalized = agent_args
         .into_iter()
@@ -645,7 +687,16 @@ impl Config {
             ));
         }
 
-        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let mut agent_args = normalize_agent_args(&agent_command, args.agent_args);
+
+        // Prepend Codex network allowlist flags so buzz-cli (an MCP subprocess)
+        // can reach the relay through Codex's sandbox proxy. No-op for non-Codex agents.
+        let network_args = codex_network_args(&agent_command, &args.relay_url);
+        if !network_args.is_empty() {
+            let mut merged = network_args;
+            merged.extend(agent_args);
+            agent_args = merged;
+        }
 
         // Finding #49b — warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
@@ -1359,6 +1410,116 @@ mod tests {
             normalize_agent_args("codex-acp", vec!["ACP".into()]),
             Vec::<String>::new()
         );
+    }
+
+    // --- codex_network_args tests ---
+
+    #[test]
+    fn codex_network_args_wss_url() {
+        let args = codex_network_args("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network.enabled=true",
+                "-c",
+                "network.allowed_domains=[\"sprout-oss.stage.blox.sqprod.co\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_ws_url() {
+        let args = codex_network_args("codex-acp", "ws://localhost:3000");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network.enabled=true",
+                "-c",
+                "network.allowed_domains=[\"localhost\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_https_url() {
+        let args = codex_network_args("codex-acp", "https://relay.example.com/path");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network.enabled=true",
+                "-c",
+                "network.allowed_domains=[\"relay.example.com\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_http_url_with_port() {
+        let args = codex_network_args("codex-acp", "http://relay.example.com:8080/query");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network.enabled=true",
+                "-c",
+                "network.allowed_domains=[\"relay.example.com\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_bare_codex_command() {
+        // "codex" (not "codex-acp") should also get the args.
+        let args = codex_network_args("codex", "wss://relay.example.com");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network.enabled=true",
+                "-c",
+                "network.allowed_domains=[\"relay.example.com\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_full_path_codex_command() {
+        // Full path like /usr/local/bin/codex-acp should be normalized.
+        let args =
+            codex_network_args("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        assert_eq!(
+            args,
+            vec![
+                "-c",
+                "network.enabled=true",
+                "-c",
+                "network.allowed_domains=[\"relay.example.com\"]",
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_network_args_non_codex_agent_returns_empty() {
+        assert!(codex_network_args("goose", "wss://relay.example.com").is_empty());
+        assert!(codex_network_args("claude-agent-acp", "wss://relay.example.com").is_empty());
+        assert!(codex_network_args("buzz-agent", "wss://relay.example.com").is_empty());
+    }
+
+    #[test]
+    fn codex_network_args_empty_relay_url_returns_empty() {
+        assert!(codex_network_args("codex-acp", "").is_empty());
+    }
+
+    #[test]
+    fn codex_network_args_schemeless_string_extracts_as_host() {
+        // A bare string with no scheme is treated as the host — no panic, no empty result.
+        // This is an edge case; real relay URLs always have a scheme.
+        let args = codex_network_args("codex-acp", "not-a-url");
+        assert_eq!(args.len(), 4);
+        assert!(args[3].contains("not-a-url"));
     }
 
     #[test]
