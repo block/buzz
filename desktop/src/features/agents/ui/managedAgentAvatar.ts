@@ -8,6 +8,7 @@ type UploadMediaBytes = (
 export async function resolveManagedAgentAvatarUrl(
   avatarUrl: string | null | undefined,
   upload: UploadMediaBytes = uploadMediaBytes,
+  fallbackAvatarUrl?: string | null,
 ): Promise<string | undefined> {
   const resolvedAvatarUrl = avatarUrl?.trim() || undefined;
   if (!resolvedAvatarUrl?.startsWith("data:image/")) {
@@ -24,6 +25,11 @@ export async function resolveManagedAgentAvatarUrl(
     return blob.url;
   } catch (err) {
     console.warn("Avatar upload failed, proceeding without avatar:", err);
-    return undefined;
+    return safeFallbackAvatarUrl(fallbackAvatarUrl);
   }
+}
+
+function safeFallbackAvatarUrl(avatarUrl: string | null | undefined) {
+  const trimmed = avatarUrl?.trim() || undefined;
+  return trimmed?.startsWith("data:image/") ? undefined : trimmed;
 }

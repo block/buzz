@@ -116,7 +116,11 @@ export function usePersonaActions() {
         }
 
         const persona = await createPersonaMutation.mutateAsync(input);
-        const avatarUrl = await resolveManagedAgentAvatarUrl(persona.avatarUrl);
+        const avatarUrl = await resolveManagedAgentAvatarUrl(
+          persona.avatarUrl,
+          undefined,
+          runtime.avatarUrl,
+        );
         const agentInput: CreateManagedAgentInput = {
           name: persona.displayName,
           acpCommand: "buzz-acp",

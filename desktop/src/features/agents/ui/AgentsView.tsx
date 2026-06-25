@@ -206,10 +206,7 @@ export function AgentsView() {
           isImportPending={
             personas.personaImportActions.isApplyingPersonaImportUpdate
           }
-          isPending={
-            personas.createPersonaMutation.isPending ||
-            personas.updatePersonaMutation.isPending
-          }
+          isPending={personas.isPending}
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
           onImportUpdateFile={

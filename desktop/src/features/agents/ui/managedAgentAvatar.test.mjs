@@ -42,3 +42,27 @@ test("resolveManagedAgentAvatarUrl omits invalid data image URIs", async () => {
 
   assert.equal(uploaded, undefined);
 });
+
+test("resolveManagedAgentAvatarUrl uses safe fallback when data image upload fails", async () => {
+  const uploaded = await resolveManagedAgentAvatarUrl(
+    "data:image/png;base64,YQ==",
+    async () => {
+      throw new Error("upload failed");
+    },
+    "app-avatar://goose",
+  );
+
+  assert.equal(uploaded, "app-avatar://goose");
+});
+
+test("resolveManagedAgentAvatarUrl ignores data URI fallbacks", async () => {
+  const uploaded = await resolveManagedAgentAvatarUrl(
+    "data:image/png;base64,YQ==",
+    async () => {
+      throw new Error("upload failed");
+    },
+    "data:image/png;base64,Yg==",
+  );
+
+  assert.equal(uploaded, undefined);
+});
