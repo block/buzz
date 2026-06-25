@@ -12,13 +12,16 @@ import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
   extractThemeInfo,
+  getThemePair,
   loadThemeData,
+  resolveSystemTheme,
 } from "./theme-loader";
 
 export const THEME_STORAGE_KEY = "buzz-theme";
 const CACHE_KEY = "buzz-theme-cache";
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
+const FOLLOW_SYSTEM_KEY = "buzz-follow-system";
 const VIDEO_REVIEW_NEUTRAL_ACCENT = "0 0% 98%";
 const VIDEO_REVIEW_CHIP_SURFACE = "#161616";
 const VIDEO_REVIEW_TEXT_CONTRAST = 4.5;
@@ -44,8 +47,11 @@ type ThemeContextValue = {
   isDark: boolean;
   isLoading: boolean;
   accentColor: string;
+  followSystem: boolean;
+  hasPair: boolean;
   setTheme: (name: string) => void;
   setAccentColor: (color: string) => void;
+  setFollowSystem: (enabled: boolean) => void;
 };
 
 type ThemeProviderProps = {
@@ -259,7 +265,7 @@ export function ThemeProvider({
   defaultTheme = "houston",
 }: ThemeProviderProps) {
   // Apply cached vars synchronously before first render
-  const [themeName, setThemeName] = useState<string>(() => {
+  const [selectedTheme, setSelectedTheme] = useState<string>(() => {
     const cached = applyCachedVars();
     return cached ?? readStoredTheme(defaultTheme);
   });
@@ -271,17 +277,34 @@ export function ThemeProvider({
   const [accentColor, setAccentColorState] = useState<string>(() => {
     return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
+  const [followSystem, setFollowSystemState] = useState<boolean>(() => {
+    return window.localStorage.getItem(FOLLOW_SYSTEM_KEY) === "true";
+  });
+
+  // Resolve the effective theme based on follow-system preference
+  const effectiveTheme = (() => {
+    if (!followSystem || !isValidThemeName(selectedTheme)) return selectedTheme;
+    const systemIsDark = window.matchMedia(
+      "(prefers-color-scheme: dark)",
+    ).matches;
+    return resolveSystemTheme(selectedTheme as SyntaxThemeName, systemIsDark);
+  })();
+
+  // Check if the selected theme has a pair (for UI hint)
+  const hasPair = isValidThemeName(selectedTheme)
+    ? getThemePair(selectedTheme as SyntaxThemeName) !== null
+    : false;
 
   // Load and apply theme
   useEffect(() => {
-    if (!isValidThemeName(themeName)) return;
+    if (!isValidThemeName(effectiveTheme)) return;
 
     // Track which theme we're loading to avoid race conditions
-    const thisTheme = themeName;
+    const thisTheme = effectiveTheme;
     loadingRef.current = thisTheme;
     setIsLoading(true);
 
-    applyTheme(themeName).then(({ isDark: dark }) => {
+    applyTheme(effectiveTheme as SyntaxThemeName).then(({ isDark: dark }) => {
       // Only update if this is still the theme we want
       if (loadingRef.current === thisTheme) {
         setIsDark(dark);
@@ -292,7 +315,47 @@ export function ThemeProvider({
         );
       }
     });
-  }, [themeName]);
+  }, [effectiveTheme]);
+
+  // Listen for system color scheme changes when followSystem is enabled
+  useEffect(() => {
+    if (!followSystem) return;
+
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => {
+      // Force a re-render by toggling a state update — effectiveTheme
+      // is derived and will recalculate on next render
+      setFollowSystemState((prev) => {
+        // No-op toggle to trigger re-render with new media query value
+        return prev;
+      });
+      // Directly resolve and apply the theme for immediate response
+      if (isValidThemeName(selectedTheme)) {
+        const resolved = resolveSystemTheme(
+          selectedTheme as SyntaxThemeName,
+          mq.matches,
+        );
+        if (isValidThemeName(resolved)) {
+          const thisTheme = resolved;
+          loadingRef.current = thisTheme;
+          setIsLoading(true);
+          applyTheme(resolved as SyntaxThemeName).then(({ isDark: dark }) => {
+            if (loadingRef.current === thisTheme) {
+              setIsDark(dark);
+              setIsLoading(false);
+              applyAccentColor(
+                window.localStorage.getItem(ACCENT_STORAGE_KEY) ??
+                  DEFAULT_ACCENT,
+              );
+            }
+          });
+        }
+      }
+    };
+
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [followSystem, selectedTheme]);
 
   // Apply accent color changes
   useEffect(() => {
@@ -301,7 +364,7 @@ export function ThemeProvider({
 
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;
-    setThemeName(name);
+    setSelectedTheme(name);
     window.localStorage.setItem(THEME_STORAGE_KEY, name);
   }, []);
 
@@ -310,13 +373,21 @@ export function ThemeProvider({
     setAccentColorState(color);
   }, []);
 
+  const setFollowSystem = useCallback((enabled: boolean) => {
+    window.localStorage.setItem(FOLLOW_SYSTEM_KEY, enabled ? "true" : "false");
+    setFollowSystemState(enabled);
+  }, []);
+
   const value: ThemeContextValue = {
-    themeName,
+    themeName: effectiveTheme,
     isDark,
     isLoading,
     accentColor,
+    followSystem,
+    hasPair,
     setTheme,
     setAccentColor,
+    setFollowSystem,
   };
 
   return (

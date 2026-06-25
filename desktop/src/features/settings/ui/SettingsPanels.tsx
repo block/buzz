@@ -9,6 +9,7 @@ import {
   Keyboard,
   LayoutTemplate,
   LockKeyhole,
+  Monitor,
   MonitorCog,
   Moon,
   Search,
@@ -30,9 +31,15 @@ import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
   NEUTRAL_ACCENT,
+  THEME_STORAGE_KEY,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
-import { SYNTAX_THEMES, isLightTheme } from "@/shared/theme/theme-loader";
+import {
+  SYNTAX_THEMES,
+  type SyntaxThemeName,
+  getThemePair,
+  isLightTheme,
+} from "@/shared/theme/theme-loader";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
@@ -188,8 +195,16 @@ function formatThemeLabel(name: string): string {
 }
 
 function ThemeSettingsCard() {
-  const { setTheme, themeName, isDark, accentColor, setAccentColor } =
-    useTheme();
+  const {
+    setTheme,
+    themeName,
+    isDark,
+    accentColor,
+    setAccentColor,
+    followSystem,
+    hasPair,
+    setFollowSystem,
+  } = useTheme();
   const [search, setSearch] = useState("");
   const didScrollRef = useRef(false);
   const activeRef = (node: HTMLButtonElement | null) => {
@@ -199,18 +214,59 @@ function ThemeSettingsCard() {
     }
   };
 
+  // Read the user's selected theme from localStorage (not the effective/resolved one)
+  const selectedTheme = useMemo(() => {
+    return window.localStorage.getItem(THEME_STORAGE_KEY) ?? themeName;
+  }, [themeName]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     if (!q) return SYNTAX_THEMES;
     return SYNTAX_THEMES.filter((name) => name.includes(q));
   }, [search]);
 
+  // Determine the paired theme name for the hint text
+  const pairName = useMemo(() => {
+    if (!hasPair) return null;
+    const pair = getThemePair(selectedTheme as SyntaxThemeName);
+    return pair ? formatThemeLabel(pair) : null;
+  }, [selectedTheme, hasPair]);
+
   return (
     <section className="min-w-0" data-testid="settings-theme">
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose a theme for Buzz. Light and dark mode is auto-detected."
+        description="Choose a theme for Buzz."
       />
+
+      {/* Follow System toggle */}
+      <label
+        className="mb-3 flex cursor-pointer items-center gap-3 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5"
+        data-testid="follow-system-toggle"
+      >
+        <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <div className="flex-1 min-w-0">
+          <span className="text-sm font-medium">Follow system</span>
+          {followSystem && pairName && (
+            <p className="text-xs text-muted-foreground truncate">
+              Switches to {pairName} in{" "}
+              {isLightTheme(selectedTheme) ? "dark" : "light"} mode
+            </p>
+          )}
+          {followSystem && !hasPair && (
+            <p className="text-xs text-muted-foreground">
+              No paired theme available — select a theme with a light/dark
+              counterpart
+            </p>
+          )}
+        </div>
+        <input
+          checked={followSystem}
+          className="h-4 w-4 rounded border-border accent-primary"
+          onChange={(e) => setFollowSystem(e.target.checked)}
+          type="checkbox"
+        />
+      </label>
 
       <div className="relative mb-3">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -233,7 +289,8 @@ function ThemeSettingsCard() {
           </p>
         ) : (
           filtered.map((name) => {
-            const isActive = themeName === name;
+            const isActive = selectedTheme === name;
+            const isEffective = themeName === name;
             const light = isLightTheme(name);
 
             return (
@@ -243,7 +300,9 @@ function ThemeSettingsCard() {
                   "flex w-full items-center gap-3 px-3 py-2 text-left text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                   isActive
                     ? "bg-primary/10 text-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    : isEffective && followSystem
+                      ? "bg-primary/5 text-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                 )}
                 data-testid={`theme-option-${name}`}
                 key={name}
@@ -261,6 +320,9 @@ function ThemeSettingsCard() {
                 </span>
                 {isActive && (
                   <Check className="h-4 w-4 shrink-0 text-primary" />
+                )}
+                {!isActive && isEffective && followSystem && (
+                  <Monitor className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 )}
               </button>
             );
