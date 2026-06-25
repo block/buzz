@@ -64,15 +64,22 @@ async function setMesh(
   }, mesh);
 }
 
-async function openManagedAgentActions(
+async function openManagedAgentProfile(
   page: import("@playwright/test").Page,
   pubkey: string,
 ) {
-  const trigger = page.getByTestId(`managed-agent-actions-${pubkey}`);
-  await trigger.scrollIntoViewIfNeeded();
-  await trigger.focus();
-  await trigger.press("Enter");
-  await expect(trigger).toHaveAttribute("data-state", "open");
+  const row = page.getByTestId(`managed-agent-${pubkey}`);
+  await row.getByRole("button", { name: "Manage" }).click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+}
+
+async function clickManagedAgentPrimaryAction(
+  page: import("@playwright/test").Page,
+  label: string,
+) {
+  const action = page.getByTestId("user-profile-agent-primary-action");
+  await expect(action).toContainText(label);
+  await action.click();
 }
 
 async function openNewAgentMenu(page: import("@playwright/test").Page) {
@@ -330,8 +337,8 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
     0,
   );
 
-  await openManagedAgentActions(page, pubkey);
-  await page.getByRole("menuitem", { name: "Stop" }).click();
+  await openManagedAgentProfile(page, pubkey);
+  await clickManagedAgentPrimaryAction(page, "Stop");
   await expect
     .poll(async () => await commands(page))
     .toContain("stop_managed_agent");
@@ -339,22 +346,19 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
 
   // With a live serve target for the model, manual restart goes through:
   // the backend preflight re-resolves the target and the agent starts.
-  await openManagedAgentActions(page, pubkey);
-  await page.getByRole("menuitem", { name: "Spawn" }).click();
+  await clickManagedAgentPrimaryAction(page, "Respawn");
   await expect
     .poll(async () => await commands(page))
     .toContain("start_managed_agent");
   await expect(row).toContainText("running");
 
-  await openManagedAgentActions(page, pubkey);
-  await page.getByRole("menuitem", { name: "Stop" }).click();
+  await clickManagedAgentPrimaryAction(page, "Stop");
   await expect(row).toContainText("stopped");
 
   // Without a live serve target, the backend preflight rejects the start
   // with an actionable error, surfaced as a toast; the agent stays stopped.
   await setMesh(page, { models: [] });
-  await openManagedAgentActions(page, pubkey);
-  await page.getByRole("menuitem", { name: "Spawn" }).click();
+  await clickManagedAgentPrimaryAction(page, "Respawn");
 
   await expect(
     page
