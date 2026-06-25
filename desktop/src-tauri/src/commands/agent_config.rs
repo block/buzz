@@ -488,6 +488,9 @@ mod tests {
             respond_to: RespondTo::OwnerOnly,
             respond_to_allowlist: vec![],
             relay_mesh: None,
+            agent_command_override: None,
+            persona_source_version: None,
+            provider: None,
         }
     }
 

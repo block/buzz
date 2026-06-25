@@ -558,6 +558,9 @@ mod tests {
             respond_to: crate::managed_agents::types::RespondTo::OwnerOnly,
             respond_to_allowlist: vec![],
             relay_mesh: None,
+            agent_command_override: None,
+            persona_source_version: None,
+            provider: None,
         }
     }
 
