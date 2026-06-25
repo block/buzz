@@ -7,7 +7,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
@@ -44,7 +43,6 @@ impl FromStr for ChannelVisibility {
         }
     }
 }
-
 
 /// The functional type of a channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +88,6 @@ impl FromStr for ChannelType {
         }
     }
 }
-
 
 /// A member's role within a channel.
 ///

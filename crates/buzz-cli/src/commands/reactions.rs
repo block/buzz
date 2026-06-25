@@ -124,7 +124,6 @@ pub async fn cmd_get_reactions(client: &BuzzClient, event_id: &str) -> Result<()
     Ok(())
 }
 
-
 pub async fn dispatch(cmd: crate::ReactionsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::ReactionsCmd;
     match cmd {

@@ -419,7 +419,6 @@ mod tests {
         assert!(super::parse_uuid("not-a-uuid").is_err());
     }
 
-
     #[test]
     fn validate_repo_id_valid() {
         assert!(super::validate_repo_id("my-repo").is_ok());

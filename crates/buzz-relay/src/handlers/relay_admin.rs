@@ -24,7 +24,6 @@ use crate::handlers::side_effects::{
 };
 use crate::state::AppState;
 
-
 /// Extract the hex pubkey from the first `p` tag, returning it as a `String`.
 fn extract_p_tag_hex(event: &Event) -> Option<String> {
     for tag in event.tags.iter() {
@@ -51,7 +50,6 @@ fn extract_tag_value(event: &Event, name: &str) -> Option<String> {
     }
     None
 }
-
 
 /// Validate and execute a relay admin command (kinds 9030–9032).
 ///
@@ -294,7 +292,6 @@ mod tests {
             .expect("signing failed")
     }
 
-
     #[test]
     fn extract_p_tag_valid_hex() {
         let hex = "a".repeat(64);
@@ -335,7 +332,6 @@ mod tests {
         let event = make_test_event(9030, vec![vec!["role", "admin"]]);
         assert_eq!(extract_p_tag_hex(&event), None);
     }
-
 
     #[test]
     fn extract_tag_value_found() {

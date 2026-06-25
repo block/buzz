@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::persona::RespondTo;
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     #[error("failed to read file: {0}")]
@@ -31,7 +30,6 @@ pub enum ManifestError {
     #[error("missing required field: {0}")]
     MissingField(String),
 }
-
 
 /// Semver engine constraints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +68,6 @@ pub struct BehavioralDefaults {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broadcast_replies: Option<bool>,
 }
-
 
 /// The pack manifest from `.plugin/plugin.json`.
 ///
@@ -123,7 +120,6 @@ pub struct PackManifest {
     pub defaults: Option<BehavioralDefaults>,
 }
 
-
 /// Mirrors `PackManifest` but with required fields as `Option` so we can
 /// produce a clean `MissingField` error instead of a serde path error.
 ///
@@ -151,7 +147,6 @@ struct RawManifest {
     hooks_config: Option<String>,
     defaults: Option<BehavioralDefaults>,
 }
-
 
 /// Parse a `plugin.json` string into a [`PackManifest`].
 pub fn parse_manifest(content: &str) -> Result<PackManifest, ManifestError> {
@@ -197,16 +192,13 @@ pub fn parse_manifest_file(path: &Path) -> Result<PackManifest, ManifestError> {
     parse_manifest(&content)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-
     fn minimal_json() -> &'static str {
         r#"{"id":"my-pack","name":"My Pack","version":"1.0.0","personas":["personas/bot.persona.md"]}"#
     }
-
 
     #[test]
     fn parse_minimal_valid() {
@@ -295,7 +287,6 @@ mod tests {
         assert_eq!(rt.keywords, vec!["hey"]);
     }
 
-
     #[test]
     fn missing_id_errors() {
         let json = r#"{"name":"P","version":"1.0.0"}"#;
@@ -325,7 +316,6 @@ mod tests {
             "got: {err}"
         );
     }
-
 
     #[test]
     fn empty_id_errors() {
@@ -366,7 +356,6 @@ mod tests {
             "got: {err}"
         );
     }
-
 
     #[test]
     fn malformed_json_errors() {

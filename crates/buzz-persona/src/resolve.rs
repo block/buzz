@@ -17,7 +17,6 @@ use crate::merge::TriggersData;
 use crate::pack::{self, LoadedPack, LoadedPersona, PackError};
 use crate::persona::split_model;
 
-
 /// A fully resolved persona — ready for ACP consumption.
 /// All merge, composition, and projection is done.
 #[derive(Debug, Clone)]
@@ -97,7 +96,6 @@ pub struct ResolvedPack {
     pub description: String,
     pub personas: Vec<ResolvedPersona>,
 }
-
 
 /// Load, validate, merge, and resolve a pack directory.
 ///
@@ -191,7 +189,6 @@ pub fn resolve_persona_by_name(pack_dir: &Path, name: &str) -> Result<ResolvedPe
         .ok_or_else(|| PackError::PersonaNotFound(pack_dir.join(name)))
 }
 
-
 fn resolve_one_persona(
     lp: &LoadedPersona,
     pack_version: &str,
@@ -247,7 +244,6 @@ fn resolve_one_persona(
     }
 }
 
-
 /// Compose the effective system prompt: persona body + pack instructions.
 fn compose_prompt(persona_prompt: &str, pack_instructions: Option<&str>) -> String {
     match pack_instructions {
@@ -257,7 +253,6 @@ fn compose_prompt(persona_prompt: &str, pack_instructions: Option<&str>) -> Stri
         _ => persona_prompt.to_owned(),
     }
 }
-
 
 /// Convert `TriggersData` to `ResolvedTriggers`.
 fn resolve_triggers(rt: Option<&TriggersData>) -> ResolvedTriggers {
@@ -274,7 +269,6 @@ fn resolve_triggers(rt: Option<&TriggersData>) -> ResolvedTriggers {
         },
     }
 }
-
 
 /// Merge pack-level shared MCP servers with per-persona servers.
 ///
@@ -346,7 +340,6 @@ fn parse_mcp_server_config(name: &str, config: &serde_json::Value) -> Option<Res
     })
 }
 
-
 /// Store hook paths as raw relative strings (no path resolution).
 ///
 /// Security: we intentionally do NOT resolve these to absolute paths.
@@ -365,7 +358,6 @@ fn resolve_hooks(hooks: Option<&crate::merge::HooksData>) -> Option<ResolvedHook
         on_message: h.on_message.clone(),
     })
 }
-
 
 /// Project persona config into agent subprocess env vars.
 ///
@@ -408,14 +400,12 @@ fn runtime_env_vars(persona: &LoadedPersona) -> Vec<(String, String)> {
     vars
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
     use crate::merge::{HooksData, TriggersData};
-
 
     #[test]
     fn compose_prompt_body_only() {
@@ -437,7 +427,6 @@ mod tests {
         assert_eq!(result, "You are a bot.");
     }
 
-
     #[test]
     fn triggers_from_triggers_data() {
         let data = TriggersData {
@@ -458,7 +447,6 @@ mod tests {
         assert!(t.keywords.is_empty());
         assert!(!t.all_messages);
     }
-
 
     #[test]
     fn mcp_merge_shared_only() {
@@ -540,7 +528,6 @@ mod tests {
         assert_eq!(env["SECRET"], "${MY_SECRET}");
     }
 
-
     #[test]
     fn hooks_stored_as_raw_relative_paths() {
         // Security: hooks are stored as raw strings, NOT resolved to absolute.
@@ -569,7 +556,6 @@ mod tests {
     fn hooks_none_when_absent() {
         assert!(resolve_hooks(None).is_none());
     }
-
 
     #[test]
     fn env_vars_projected_from_model() {
@@ -653,7 +639,6 @@ mod tests {
         assert_eq!(map["BUZZ_AGENT_MODEL"], "gpt-4o");
         assert!(!map.contains_key("BUZZ_AGENT_PROVIDER"));
     }
-
 
     #[test]
     fn resolve_minimal_pack() {
@@ -805,7 +790,6 @@ mod tests {
         assert!(lep.thread_replies);
     }
 
-
     #[test]
     fn resolve_persona_by_name_found() {
         let tmp = tempfile::tempdir().unwrap();
@@ -856,7 +840,6 @@ mod tests {
         assert!(matches!(err, PackError::PersonaNotFound(_)));
     }
 
-
     #[test]
     fn model_split_provider_and_id() {
         let tmp = tempfile::tempdir().unwrap();
@@ -904,7 +887,6 @@ mod tests {
         assert_eq!(p.model.as_deref(), Some("gpt-4o"));
         assert!(p.llm_provider.is_none());
     }
-
 
     fn stub_persona(
         model: Option<&str>,

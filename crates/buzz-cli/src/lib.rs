@@ -45,7 +45,6 @@ where
     }
 }
 
-
 #[derive(Parser)]
 #[command(
     name = "buzz",
@@ -83,7 +82,6 @@ struct Cli {
     #[command(subcommand)]
     command: Cmd,
 }
-
 
 #[derive(Clone, clap::ValueEnum)]
 pub enum ChannelType {
@@ -159,7 +157,6 @@ pub enum OutputFormat {
     Compact,
 }
 
-
 #[derive(Subcommand)]
 enum Cmd {
     /// Send, read, search, and manage messages
@@ -214,7 +211,6 @@ enum Cmd {
     #[command(subcommand)]
     Pack(PackCmd),
 }
-
 
 #[derive(Subcommand)]
 pub enum MessagesCmd {
@@ -351,7 +347,6 @@ pub enum MessagesCmd {
         direction: String,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum ChannelsCmd {
@@ -521,7 +516,6 @@ pub enum ChannelsCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum CanvasCmd {
     /// Get the canvas document for a channel
@@ -540,7 +534,6 @@ pub enum CanvasCmd {
         content: String,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum ReactionsCmd {
@@ -572,7 +565,6 @@ pub enum ReactionsCmd {
         event: String,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum EmojiCmd {
@@ -616,7 +608,6 @@ pub enum EmojiCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum DmsCmd {
     /// List direct message conversations
@@ -647,7 +638,6 @@ pub enum DmsCmd {
         channel: String,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum UsersCmd {
@@ -690,7 +680,6 @@ pub enum UsersCmd {
         status: PresenceStatus,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum WorkflowsCmd {
@@ -771,7 +760,6 @@ pub enum WorkflowsCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum FeedCmd {
     /// Get recent activity feed entries
@@ -787,7 +775,6 @@ pub enum FeedCmd {
         types: Option<String>,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum SocialCmd {
@@ -865,7 +852,6 @@ pub enum SocialCmd {
         d_tag: Option<String>,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum NotesCmd {
@@ -946,7 +932,6 @@ pub enum NotesCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum ReposCmd {
     /// Announce a git repository (NIP-34)
@@ -989,7 +974,6 @@ pub enum ReposCmd {
         limit: Option<u32>,
     },
 }
-
 
 #[derive(Subcommand)]
 pub enum PatchesCmd {
@@ -1097,7 +1081,6 @@ pub enum PatchesCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
@@ -1173,7 +1156,6 @@ pub enum IssuesCmd {
     },
 }
 
-
 #[derive(Subcommand)]
 pub enum UploadCmd {
     /// Upload a file to the relay's Blossom store
@@ -1183,7 +1165,6 @@ pub enum UploadCmd {
         file: String,
     },
 }
-
 
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
@@ -1268,7 +1249,6 @@ pub enum MemCmd {
     },
 }
 
-
 /// Subcommands for `buzz pack`.
 #[derive(Subcommand)]
 pub enum PackCmd {
@@ -1283,7 +1263,6 @@ pub enum PackCmd {
         path: String,
     },
 }
-
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
@@ -1342,7 +1321,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

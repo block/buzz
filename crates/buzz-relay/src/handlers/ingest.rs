@@ -41,7 +41,6 @@ use crate::state::AppState;
 
 use super::event::dispatch_persistent_event;
 
-
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
 pub enum HttpAuthMethod {
@@ -144,7 +143,6 @@ pub enum IngestError {
     Internal(String),
 }
 
-
 /// Determine the required scope for a given event kind.
 ///
 /// Returns `Err` for unknown kinds — the relay rejects them.
@@ -243,7 +241,6 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         _ => Err("restricted: unknown event kind"),
     }
 }
-
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
 pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
@@ -438,7 +435,6 @@ pub(crate) async fn check_channel_membership(
     }
 }
 
-
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
     if let Some(allowed) = auth.channel_ids() {
         if !allowed.contains(&channel_id) {
@@ -447,7 +443,6 @@ fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(),
     }
     Ok(())
 }
-
 
 /// Owned thread metadata for the DB insert.
 pub(crate) struct ThreadMetadataOwned {
@@ -624,7 +619,6 @@ pub(crate) async fn resolve_nip10_thread_meta(
         broadcast,
     }))
 }
-
 
 /// Count all `e` tags regardless of content validity.
 fn count_e_tags(event: &Event) -> usize {
@@ -1115,7 +1109,6 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
 
     Ok(())
 }
-
 
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
@@ -1655,7 +1648,6 @@ pub async fn ingest_event(
     } else {
         None
     };
-
 
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.
@@ -2266,7 +2258,6 @@ mod tests {
         assert!(validate_diff_event(&event).is_err());
     }
 
-
     fn make_dummy_event() -> Event {
         let keys = nostr::Keys::generate();
         nostr::EventBuilder::new(nostr::Kind::Custom(9), "")
@@ -2304,7 +2295,6 @@ mod tests {
         let event = make_event_with_tags(5, "", &[&["e", "a".repeat(64).as_str()]]);
         assert_eq!(count_e_tags(&event), 1);
     }
-
 
     fn make_engram(tags: &[&[&str]], content: &str) -> Event {
         make_event_with_tags(KIND_AGENT_ENGRAM, content, tags)
@@ -2447,7 +2437,6 @@ mod tests {
         assert!(err.contains("base64"), "got: {err}");
     }
 
-
     #[test]
     fn not_before_accepts_zero() {
         assert_eq!(validate_not_before("0"), Ok(0));
@@ -2506,7 +2495,6 @@ mod tests {
             Err("malformed not_before")
         );
     }
-
 
     fn make_reminder(tags: &[&[&str]]) -> Event {
         make_event_with_tags(KIND_EVENT_REMINDER, "ciphertext", tags)
@@ -2645,7 +2633,6 @@ mod tests {
         );
         assert_eq!(validate_event_reminder(&ev), Err("duplicate d tag"));
     }
-
 
     fn make_persona(tags: &[&[&str]]) -> Event {
         make_event_with_tags(

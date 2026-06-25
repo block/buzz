@@ -734,7 +734,6 @@ pub async fn cmd_rm(
     Ok(())
 }
 
-
 pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::MemCmd;
     match cmd {

@@ -448,7 +448,6 @@ async fn git_concurrent_push_one_wins_and_repo_recovers() {
     );
 }
 
-
 struct TempDir(PathBuf);
 impl TempDir {
     fn path(&self) -> &Path {

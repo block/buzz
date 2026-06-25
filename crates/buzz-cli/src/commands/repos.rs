@@ -2,7 +2,6 @@ use crate::client::BuzzClient;
 use crate::error::CliError;
 use crate::validate::validate_repo_id;
 
-
 pub async fn cmd_create_repo(
     client: &BuzzClient,
     repo_id: &str,
@@ -33,7 +32,6 @@ pub async fn cmd_create_repo(
     Ok(())
 }
 
-
 pub async fn cmd_get_repo(
     client: &BuzzClient,
     repo_id: &str,
@@ -57,7 +55,6 @@ pub async fn cmd_get_repo(
     println!("{resp}");
     Ok(())
 }
-
 
 pub async fn cmd_list_repos(
     client: &BuzzClient,
@@ -86,7 +83,6 @@ pub async fn cmd_list_repos(
     println!("{resp}");
     Ok(())
 }
-
 
 pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::ReposCmd;

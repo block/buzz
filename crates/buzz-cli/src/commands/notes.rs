@@ -41,7 +41,6 @@ pub const KIND_LONG_FORM: u16 = 30023;
 /// comfortably URL/filename-safe and matches `mem` slug ergonomics.
 pub const SLUG_MAX_LEN: usize = 80;
 
-
 /// Validate and normalize a slug for use as a NIP-23 `d` tag.
 ///
 /// Rules: 1..=80 chars, `[a-z0-9._-]` only. Lowercase ascii keeps memory
@@ -68,7 +67,6 @@ pub fn parse_slug(raw: &str) -> Result<String, CliError> {
     }
     Ok(raw.to_string())
 }
-
 
 /// Parsed view of a NIP-23 long-form event. Built once via
 /// [`NoteSnapshot::from_event`] so the tag-parsing footgun lives in exactly
@@ -155,7 +153,6 @@ impl NoteSnapshot {
     }
 }
 
-
 fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
     serde_json::from_str::<Vec<Event>>(json)
         .map_err(|e| CliError::Other(format!("failed to parse relay response: {e}")))
@@ -196,7 +193,6 @@ pub async fn fetch_by_slug(client: &BuzzClient, slug: &str) -> Result<Vec<Event>
     let raw = client.query(&filter).await?;
     parse_events(&raw)
 }
-
 
 /// Resolve an `--author` flag value to a `PublicKey`.
 ///
@@ -247,7 +243,6 @@ pub async fn resolve_author(client: &BuzzClient, author_flag: &str) -> Result<Pu
     }
 }
 
-
 /// Parse a `--naddr` flag. Accepts:
 /// - bech32 `naddr1…`
 /// - `<kind>:<pubkey-hex>:<d-tag>` (KPI format)
@@ -278,7 +273,6 @@ pub fn coord_for(author: &PublicKey, slug: &str) -> nostr::nips::nip01::Coordina
         .identifier(slug.to_string())
 }
 
-
 /// Format a list of candidate notes for the "ambiguous slug" error path.
 /// One line per candidate; sorted newest-first. Designed so the user can
 /// paste a pubkey into a follow-up `--author <hex>` invocation.
@@ -301,7 +295,6 @@ pub fn format_note_candidates(snapshots: &[NoteSnapshot]) -> String {
     }
     out
 }
-
 
 #[derive(Debug, serde::Serialize)]
 struct NoteOutput {
@@ -395,7 +388,6 @@ fn print_snapshot_list_json(snapshots: &[NoteSnapshot]) -> Result<(), CliError> 
 fn sort_snapshots_newest_first(snapshots: &mut [NoteSnapshot]) {
     snapshots.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 }
-
 
 /// Build the unsigned `EventBuilder` for `notes set`. Pure function — no I/O,
 /// no clock — so every carry/clear/first-publish case is unit-testable.
@@ -491,7 +483,6 @@ fn now_secs() -> u64 {
 /// this is a guardrail against runaway producers OOMing the CLI. 1 MiB is
 /// far above any realistic skill-KB note.
 pub const SET_STDIN_MAX_BYTES: usize = 1024 * 1024;
-
 
 pub async fn cmd_set(
     client: &BuzzClient,

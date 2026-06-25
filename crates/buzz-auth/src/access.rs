@@ -82,7 +82,6 @@ pub async fn check_write_access(
     }
 }
 
-
 /// In-memory [`ChannelAccessChecker`] for unit tests.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct MockAccessChecker {

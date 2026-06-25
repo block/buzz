@@ -23,7 +23,6 @@ use std::time::Duration;
 use nostr::Keys;
 use reqwest::Client;
 
-
 /// WebSocket relay URL (e.g. `ws://localhost:3001`).
 fn relay_ws_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3001".to_string())
@@ -83,7 +82,6 @@ steps:
     )
 }
 
-
 /// POST to create a workflow in a channel. Returns the parsed JSON response body.
 async fn create_workflow(
     client: &Client,
@@ -124,7 +122,6 @@ async fn delete_workflow(client: &Client, base: &str, pubkey_hex: &str, workflow
         .as_u16()
 }
 
-
 /// GET /api/channels/:id/workflows returns 200 OK with a valid JSON array.
 /// The channel may have workflows from other tests, but the response must be
 /// a well-formed array where every element has at least `id` and `name`.
@@ -160,7 +157,6 @@ async fn test_list_workflows_empty_channel() {
         assert!(wf.get("name").is_some(), "workflow missing 'name' field");
     }
 }
-
 
 /// POST /api/channels/:id/workflows creates a workflow, and it appears in the
 /// subsequent GET list. Cleans up after itself by deleting the created workflow.
@@ -212,7 +208,6 @@ async fn test_create_and_list_workflow() {
     let status = delete_workflow(&client, &base, pubkey_hex, workflow_id).await;
     assert_eq!(status, 204, "cleanup DELETE should return 204");
 }
-
 
 /// Create a webhook-triggered workflow, POST to its trigger endpoint, then
 /// verify a run record appears in GET /api/workflows/:id/runs.
@@ -303,7 +298,6 @@ async fn test_trigger_workflow_and_check_run() {
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }
 
-
 /// Send a kind:9 message to a channel that has a `message_posted` workflow.
 /// Verify that the workflow engine creates a run record.
 ///
@@ -387,7 +381,6 @@ steps:
     let del_status = delete_workflow(&client, &base, pubkey_hex, &workflow_id).await;
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }
-
 
 /// Verify that a `message_posted` workflow with a filter expression only fires
 /// when the filter matches.
@@ -499,7 +492,6 @@ steps:
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }
 
-
 /// Full CRUD lifecycle:
 ///   1. Create a workflow
 ///   2. GET it by ID — verify fields
@@ -592,7 +584,6 @@ async fn test_workflow_update_and_delete() {
         "GET after DELETE must return 404"
     );
 }
-
 
 /// Create a workflow with a `request_approval` step, trigger it, and verify
 /// the run fails with the "approval gates not yet implemented" message.

@@ -21,7 +21,6 @@ pub use builders::*;
 /// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;
 
-
 /// Thread reference for reply builders (NIP-10 markers).
 ///
 /// - Direct reply (root == parent): emits `["e", root, "", "reply"]`
@@ -75,14 +74,12 @@ pub struct CustomEmoji {
     pub url: String,
 }
 
-
 /// Channel type.
 pub use buzz_core::channel::ChannelType as ChannelKind;
 /// Channel visibility.
 pub use buzz_core::channel::ChannelVisibility as Visibility;
 /// Member role.
 pub use buzz_core::channel::MemberRole;
-
 
 /// Errors returned by SDK builder functions.
 #[derive(Debug, thiserror::Error)]

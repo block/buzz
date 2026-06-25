@@ -12,7 +12,6 @@ use std::fs;
 
 use buzz_persona::resolve::resolve_pack;
 
-
 const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
     "GOOSE_MODEL",
     "GOOSE_PROVIDER",
@@ -30,7 +29,6 @@ fn filter_derived(env_vars: Vec<(String, String)>) -> BTreeMap<String, String> {
         })
         .collect()
 }
-
 
 #[test]
 fn resolve_pack_goose_persona_emits_correct_runtime_env_vars() {
@@ -91,7 +89,6 @@ You are a test bot.
         "should emit GOOSE_TEMPERATURE=0.7"
     );
 }
-
 
 #[test]
 fn resolve_pack_buzz_agent_persona_emits_buzz_agent_vars() {
@@ -158,7 +155,6 @@ You are a test bot.
     );
 }
 
-
 #[test]
 fn import_filter_strips_derived_preserves_knobs() {
     let tmp = tempfile::tempdir().unwrap();
@@ -216,7 +212,6 @@ You are a test bot.
         "GOOSE_TEMPERATURE must survive the import filter"
     );
 }
-
 
 #[test]
 fn full_pipeline_two_runtimes_different_env_vars() {
@@ -321,7 +316,6 @@ You are a buzz bot.
         "buzz-agent persona must not emit GOOSE_PROVIDER"
     );
 }
-
 
 #[test]
 fn model_without_provider_prefix_emits_model_only() {

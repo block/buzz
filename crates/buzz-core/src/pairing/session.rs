@@ -45,7 +45,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// NIP-AB event kind (from the kind registry).
 const PAIRING_KIND: u16 = crate::kind::KIND_PAIRING as u16;
 
-
 /// Which role this device plays in the pairing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -106,7 +105,6 @@ pub struct PairingSession {
     /// Maximum session lifetime.
     timeout: Duration,
 }
-
 
 impl PairingSession {
     /// Create a new source session. Returns the session and a QR payload
@@ -281,7 +279,6 @@ impl PairingSession {
     }
 }
 
-
 impl PairingSession {
     /// Create a new target session from a scanned QR payload.
     ///
@@ -424,7 +421,6 @@ impl PairingSession {
     }
 }
 
-
 impl PairingSession {
     /// Build an abort event. Returns `None` if no peer is known yet
     /// (nothing to encrypt to), but still transitions to [`SessionState::Aborted`].
@@ -531,7 +527,6 @@ impl PairingSession {
     }
 }
 
-
 #[cfg(test)]
 impl PairingSession {
     /// Returns `true` if the given event ID has been recorded as processed.
@@ -547,7 +542,6 @@ impl PairingSession {
         self.timeout = timeout;
     }
 }
-
 
 impl PairingSession {
     /// Encrypt a message and wrap it in a signed kind:24134 event.
@@ -758,7 +752,6 @@ fn unexpected(expected: &str, got: &PairingMessage) -> PairingError {
         got: got_name.into(),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

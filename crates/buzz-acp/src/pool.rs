@@ -43,7 +43,6 @@ use crate::relay::{ChannelInfo, RestClient};
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
-
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
     pub agent_index: usize,
@@ -253,7 +252,6 @@ pub struct PromptContext {
     pub memory_enabled: bool,
 }
 
-
 impl AgentPool {
     /// Create a pool from pre-indexed slots (may contain None for failed startups).
     ///
@@ -336,7 +334,6 @@ impl AgentPool {
         idle + checked_out
     }
 
-
     pub fn task_map(&self) -> &HashMap<tokio::task::Id, TaskMeta> {
         &self.task_map
     }
@@ -400,7 +397,6 @@ impl AgentPool {
         count
     }
 }
-
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
 /// Each call gets this budget; with one retry the total worst-case is
@@ -749,7 +745,6 @@ pub async fn run_prompt_task(
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
 ) {
-
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -957,7 +952,6 @@ pub async fn run_prompt_task(
         }),
     );
 
-
     if is_new_session {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
         {
@@ -1070,7 +1064,6 @@ pub async fn run_prompt_task(
         }
     }
 
-
     // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
     // `slash_command` holds the bare command. It is sent as the FIRST prompt
     // content block so ACP connectors' slash-command detection
@@ -1151,7 +1144,6 @@ pub async fn run_prompt_task(
             react_working(&rest, &ids).await;
         });
     }
-
 
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
@@ -1462,7 +1454,6 @@ pub async fn run_prompt_task(
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
 }
-
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
 /// on any `None` result. The closure is called twice at most.
@@ -2015,7 +2006,6 @@ fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<Conver
     })
 }
 
-
 /// Return the batch for requeue only in Queue mode; drop it in Drop mode.
 #[inline]
 fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Option<FlushBatch> {
@@ -2368,7 +2358,6 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2470,7 +2459,6 @@ mod tests {
         assert!(workspace_section("").is_none());
     }
 
-
     #[test]
     fn test_with_core_appends_below_framed() {
         let framed = with_core(
@@ -2502,7 +2490,6 @@ mod tests {
     fn test_with_core_neither_is_none() {
         assert!(with_core(None, None).is_none());
     }
-
 
     #[test]
     fn test_parse_thread_response_basic() {
@@ -2592,7 +2579,6 @@ mod tests {
         let json = json!({ "something": "else" });
         assert!(parse_thread_response(json).is_none());
     }
-
 
     #[test]
     fn test_parse_dm_response_basic() {
@@ -2703,7 +2689,6 @@ mod tests {
         let json = json!({ "data": [] });
         assert!(parse_dm_response(json, 12).is_none());
     }
-
 
     #[test]
     fn test_json_to_context_message_integer_timestamp() {
@@ -2816,7 +2801,6 @@ mod tests {
         assert_eq!(msg.pubkey, "unknown");
     }
 
-
     #[test]
     fn test_pct_encode_hex_passthrough() {
         let hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
@@ -2851,7 +2835,6 @@ mod tests {
         assert_eq!(pct_encode("+"), "%2B");
         assert_eq!(pct_encode(" "), "%20");
     }
-
 
     fn make_state() -> (SessionState, Uuid, Uuid) {
         let ch_a = Uuid::new_v4();

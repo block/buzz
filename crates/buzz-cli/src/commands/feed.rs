@@ -64,7 +64,6 @@ pub async fn cmd_get_feed(
     Ok(())
 }
 
-
 pub async fn dispatch(
     cmd: crate::FeedCmd,
     client: &BuzzClient,

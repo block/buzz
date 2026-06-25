@@ -79,7 +79,6 @@ type CollapsibleSidebarGroup =
   | "forums"
   | "directMessages";
 
-
 type CreateChannelKind = "stream" | "forum";
 
 type AppSidebarProps = {
@@ -171,7 +170,6 @@ type AppSidebarProps = {
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
 };
-
 
 export function AppSidebar({
   activeWorkspace,

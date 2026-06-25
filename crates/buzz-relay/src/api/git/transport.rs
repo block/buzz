@@ -34,12 +34,10 @@ use super::hydrate::{
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
 
-
 /// Timeout for `info/refs` — ref advertisement is fast (essentially `git show-ref`).
 const INFO_REFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// Timeout for pack operations (upload-pack, receive-pack) — large repos need time.
 const PACK_OPS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
 
 /// NIP-98 auth extractor for git routes.
 ///
@@ -191,7 +189,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
     }
 }
 
-
 /// Validate URL `(owner, repo)` parameters and return the canonical repo
 /// id (= `repo` with any `.git` suffix stripped).
 ///
@@ -280,7 +277,6 @@ fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Resp
         .into_response()
 }
 
-
 #[derive(Deserialize)]
 /// Query parameters for the `info/refs` endpoint.
 pub struct InfoRefsQuery {
@@ -293,7 +289,6 @@ pub struct GitRepoParams {
     owner: String,
     repo: String,
 }
-
 
 /// Longest refname the fast path will emit. `is_safe_refname` enforces an
 /// alphabet but no length bound; `pkt_line` encodes its payload length in a
@@ -739,7 +734,6 @@ pub async fn receive_pack(
     Ok(finalize_push(&state, ctx).await)
 }
 
-
 /// Buffered output of a `git --stateless-rpc` subprocess.
 ///
 /// The handler holds this as an owned value between subprocess completion
@@ -832,7 +826,6 @@ async fn run_git_at(
         stdout: output.stdout,
     })
 }
-
 
 /// Keeps the git subprocess and its hydrated workspace alive for exactly as
 /// long as the response body is being streamed.
@@ -972,7 +965,6 @@ fn build_git_response(service: &str, output: PackOutput) -> Response {
         .body(Body::from(output.stdout))
         .unwrap()
 }
-
 
 /// Per-push state captured between subprocess completion and response
 /// construction. Constructing a `PushContext` is the only path from a
@@ -1152,7 +1144,6 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     drop(ctx.repo_handle);
     response
 }
-
 
 /// Build the git sub-router with its own body limit.
 ///

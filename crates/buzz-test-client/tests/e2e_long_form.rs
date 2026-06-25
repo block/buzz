@@ -52,7 +52,6 @@ fn build_long_form_event(
         .unwrap()
 }
 
-
 /// kind:30023 events are accepted by the relay.
 #[tokio::test]
 #[ignore]

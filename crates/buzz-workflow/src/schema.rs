@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WorkflowError;
 
-
 /// Top-level workflow definition, authored in YAML and stored as canonical JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDef {
@@ -30,7 +29,6 @@ pub struct WorkflowDef {
 fn default_true() -> bool {
     true
 }
-
 
 /// Trigger definition. The `on` field is the tag.
 ///
@@ -69,7 +67,6 @@ pub enum TriggerDef {
     Webhook,
 }
 
-
 /// A single step in a workflow definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Step {
@@ -88,7 +85,6 @@ pub struct Step {
     #[serde(flatten)]
     pub action: ActionDef,
 }
-
 
 /// Action definition. The `action` field is the tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,7 +145,6 @@ pub enum ActionDef {
         duration: String,
     },
 }
-
 
 impl WorkflowDef {
     /// Validate the workflow definition. Returns `Err` with a descriptive message
@@ -261,7 +256,6 @@ pub(crate) fn normalize_cron(expr: &str) -> String {
     }
 }
 
-
 /// Parse a YAML workflow definition, validate it, and return the canonical JSON.
 ///
 /// Returns `(WorkflowDef, canonical_json)` on success.
@@ -273,11 +267,9 @@ pub fn parse_yaml(yaml: &str) -> Result<(WorkflowDef, String), WorkflowError> {
     Ok((def, json))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn parse_simple_message_posted_workflow() {
@@ -399,7 +391,6 @@ mod tests {
         assert_eq!(def.steps.len(), 3);
     }
 
-
     #[test]
     fn validate_rejects_empty_name() {
         let yaml =
@@ -463,7 +454,6 @@ mod tests {
         let (def, _) = parse_yaml(yaml).expect("parse failed");
         assert!(!def.enabled);
     }
-
 
     #[test]
     fn parse_missing_optional_description_defaults_to_none() {
@@ -680,7 +670,6 @@ mod tests {
         assert_eq!(reparsed.steps[0].if_expr, def.steps[0].if_expr);
     }
 
-
     #[test]
     fn validate_rejects_whitespace_only_name() {
         let yaml =
@@ -764,7 +753,6 @@ mod tests {
         assert_eq!(def.steps.len(), 3);
     }
 
-
     #[test]
     fn step_id_validation_rejects_dashes() {
         // Step ID with dash would cause evalexpr to interpret as subtraction:
@@ -810,7 +798,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn normalize_cron_5_fields_prepends_sec_appends_year() {
         let result = normalize_cron("0 9 * * 1-5");
@@ -834,8 +821,6 @@ mod tests {
         let result = normalize_cron("* * * * *");
         assert_eq!(result, "0 * * * * * *");
     }
-
-
 
     #[test]
     fn validate_rejects_sub_minute_interval() {

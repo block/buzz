@@ -208,7 +208,6 @@ pub async fn cmd_get_list(
     Ok(())
 }
 
-
 pub async fn dispatch(cmd: crate::SocialCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::SocialCmd;
     match cmd {

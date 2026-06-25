@@ -52,7 +52,6 @@ const MAX_MISSED_PONGS: u8 = 3;
 /// Auth timeout.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
-
 /// WebSocket upgrade handler for `/huddle/:channel_id/audio`.
 pub async fn ws_audio_handler(
     State(state): State<Arc<AppState>>,
@@ -61,7 +60,6 @@ pub async fn ws_audio_handler(
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_audio_connection(socket, state, channel_id))
 }
-
 
 /// Highest huddle audio protocol version this relay understands. Clients are
 /// allowed to negotiate any version in `1..=CURRENT_PROTOCOL_VERSION`; older
@@ -85,7 +83,6 @@ struct AuthMsg {
 fn default_protocol_version() -> u8 {
     1
 }
-
 
 async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channel_id: Uuid) {
     let (mut ws_send, mut ws_recv) = socket.split();
@@ -425,7 +422,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
     );
 }
 
-
 async fn recv_loop(
     mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
     room: Arc<crate::audio::room::Room>,
@@ -525,7 +521,6 @@ async fn recv_loop(
     }
 }
 
-
 /// Outbound send loop with control-frame priority (matches connection.rs pattern).
 ///
 /// Control frames (Ping, Pong, Close, control JSON) are drained first on every
@@ -598,7 +593,6 @@ async fn audio_forward_loop(
     }
 }
 
-
 async fn heartbeat_loop(
     ws_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
@@ -624,7 +618,6 @@ async fn heartbeat_loop(
         }
     }
 }
-
 
 async fn ensure_membership(
     state: &AppState,
@@ -694,7 +687,6 @@ async fn ensure_membership(
 
     Err("not a member".into())
 }
-
 
 async fn emit_participant_event(
     state: &AppState,

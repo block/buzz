@@ -12,7 +12,6 @@ use buzz_persona::persona;
 use buzz_persona::resolve;
 use buzz_persona::validate;
 
-
 /// Create a minimal valid pack in a temp directory.
 /// Returns the temp dir (holds the lifetime) and the pack root path.
 fn create_test_pack(dir: &Path) {
@@ -116,7 +115,6 @@ When asked to review code, follow these steps...
     .unwrap();
 }
 
-
 #[test]
 fn full_pipeline_load_and_validate() {
     let dir = tempfile::tempdir().unwrap();
@@ -218,7 +216,6 @@ fn full_pipeline_load_and_validate() {
     );
 }
 
-
 #[test]
 fn persona_parse_round_trip() {
     let md = r###"---
@@ -262,7 +259,6 @@ You are a test agent. Be precise and thorough.
     assert_eq!(rt.keywords, vec!["test"]);
     assert_eq!(rt.all_messages, Some(false));
 }
-
 
 #[test]
 fn validation_catches_missing_required_fields() {
@@ -340,7 +336,6 @@ fn validation_catches_unknown_behavioral_keys() {
     );
 }
 
-
 #[test]
 fn model_split_cases() {
     // provider:model
@@ -358,7 +353,6 @@ fn model_split_cases() {
     assert_eq!(provider, Some("custom"));
     assert_eq!(model, "my:model:v2");
 }
-
 
 #[test]
 fn defaults_merge_persona_overrides() {
@@ -388,7 +382,6 @@ fn defaults_merge_persona_overrides() {
     assert_eq!(pip.max_context_tokens, Some(128000));
     assert_eq!(lep.max_context_tokens, Some(128000));
 }
-
 
 /// Build a pack on disk → resolve → verify all fields on each persona.
 #[test]
@@ -582,7 +575,6 @@ fn resolve_persona_by_name_not_found() {
         "expected PersonaNotFound, got: {err}"
     );
 }
-
 
 /// Validation catches zero-persona packs in the full pipeline.
 #[test]

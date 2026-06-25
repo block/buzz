@@ -7,7 +7,6 @@ use crate::client::{
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
-
 fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "channel_id": extract_d_tag(e),
@@ -284,7 +283,6 @@ pub async fn cmd_get_canvas(client: &BuzzClient, channel_id: &str) -> Result<(),
     Ok(())
 }
 
-
 pub async fn cmd_create_channel(
     client: &BuzzClient,
     name: &str,
@@ -559,7 +557,6 @@ pub async fn cmd_set_canvas(
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
-
 
 pub async fn dispatch(
     cmd: crate::ChannelsCmd,

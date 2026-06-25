@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
 
-
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
 ///
@@ -24,7 +23,6 @@ use crate::filter::SubscriptionRule;
 /// tool calls don't race the idle deadline.
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
-
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -37,7 +35,6 @@ pub enum ConfigError {
     #[error("config file error: {0}")]
     ConfigFile(String),
 }
-
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
@@ -148,7 +145,6 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
-
 /// CLI args for `buzz-acp models` — query available models from an agent.
 ///
 /// This is a standalone `Parser` (not a subcommand variant) because the
@@ -177,7 +173,6 @@ pub struct ModelsArgs {
     #[arg(long)]
     pub json: bool,
 }
-
 
 #[derive(Debug, Parser)]
 #[command(
@@ -411,7 +406,6 @@ pub struct CliArgs {
     pub relay_observer: bool,
 }
 
-
 /// Merged NIP-01 subscription filter for a single channel.
 #[derive(Debug, Clone)]
 pub struct ChannelFilter {
@@ -420,7 +414,6 @@ pub struct ChannelFilter {
     /// Whether to include `#p` tag filter for agent pubkey.
     pub require_mention: bool,
 }
-
 
 #[derive(Debug)]
 pub struct Config {
@@ -890,7 +883,6 @@ impl Config {
     }
 }
 
-
 #[derive(Debug, serde::Deserialize)]
 struct TomlConfig {
     #[serde(default)]
@@ -973,7 +965,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
 
     Ok(config.rules)
 }
-
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
@@ -1169,7 +1160,6 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,7 +1225,6 @@ mod tests {
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
     }
-
 
     #[test]
     fn test_mentions_mode_default_kinds() {
@@ -1372,7 +1361,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_all_mode_wildcard() {
         let config = test_config(SubscribeMode::All);
@@ -1401,7 +1389,6 @@ mod tests {
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
     }
 
-
     #[test]
     fn test_channels_override_filters_to_discovered() {
         let mut config = test_config(SubscribeMode::All);
@@ -1420,7 +1407,6 @@ mod tests {
         assert!(!result.contains_key(&ch_b));
         assert!(!result.contains_key(&ch_unknown));
     }
-
 
     #[test]
     fn test_config_mode_single_rule_all_channels() {
@@ -1526,7 +1512,6 @@ mod tests {
         assert!(!f.require_mention, "most permissive (false) should win");
     }
 
-
     #[test]
     fn test_rule_applies_all() {
         let rule = make_rule("test", ChannelScope::All("all".into()), vec![], false);
@@ -1561,7 +1546,6 @@ mod tests {
         );
         assert!(!rule_applies_to_channel(&rule, Uuid::new_v4()));
     }
-
 
     #[test]
     fn test_load_rules_valid_toml() {
@@ -1707,7 +1691,6 @@ channels = "ALL"
         std::fs::remove_dir_all(&dir).ok();
     }
 
-
     fn validate_heartbeat_interval(secs: u64) -> Result<(), ConfigError> {
         if secs > 0 && secs < 10 {
             return Err(ConfigError::ConfigFile(
@@ -1750,7 +1733,6 @@ channels = "ALL"
         assert!(err.to_string().contains("heartbeat interval must be 0"));
     }
 
-
     fn validate_turn_liveness(secs: u64) -> Result<(), ConfigError> {
         if secs > 0 && secs < 5 {
             return Err(ConfigError::ConfigFile(
@@ -1787,7 +1769,6 @@ channels = "ALL"
         assert!(err.to_string().contains("turn liveness interval must be 0"));
     }
 
-
     #[test]
     fn test_summary_includes_agents_and_heartbeat() {
         let config = test_config(SubscribeMode::Mentions);
@@ -1818,7 +1799,6 @@ channels = "ALL"
         );
     }
 
-
     #[test]
     fn test_memory_enabled_default_true() {
         let config = test_config(SubscribeMode::Mentions);
@@ -1848,7 +1828,6 @@ channels = "ALL"
             "summary should include memory=true when enabled, got: {s}"
         );
     }
-
 
     #[test]
     fn test_permission_mode_wire_strings() {
@@ -1951,7 +1930,6 @@ channels = "ALL"
         }
     }
 
-
     /// Helper: resolve idle_timeout_secs using the same precedence logic as Config::from_args.
     /// Precedence: explicit --idle-timeout > --turn-timeout (deprecated) > `DEFAULT_IDLE_TIMEOUT_SECS`.
     fn resolve_idle_timeout(idle: Option<u64>, turn: Option<u64>) -> u64 {
@@ -2008,7 +1986,6 @@ channels = "ALL"
         );
     }
 
-
     #[test]
     fn test_respond_to_default_is_owner_only() {
         assert_eq!(RespondTo::default(), RespondTo::OwnerOnly);
@@ -2064,7 +2041,6 @@ channels = "ALL"
             "should show allowlist count, got: {s}"
         );
     }
-
 
     #[test]
     fn test_validate_allowlist_valid_entries() {
@@ -2137,7 +2113,6 @@ channels = "ALL"
         let result = validate_allowlist(&[]).unwrap();
         assert!(result.is_empty());
     }
-
 
     #[test]
     fn default_idle_timeout_is_900_seconds() {

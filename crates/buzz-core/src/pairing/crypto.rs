@@ -23,11 +23,9 @@
 use nostr::hashes::Hash as _;
 use nostr::util::hkdf;
 
-
 const INFO_SESSION_ID: &[u8] = b"nostr-pair-session-id";
 const INFO_SAS: &[u8] = b"nostr-pair-sas-v1";
 const INFO_TRANSCRIPT: &[u8] = b"nostr-pair-transcript-v1";
-
 
 /// Run HKDF-SHA256(IKM=`ikm`, salt=`salt`, info=`info`) and return 32 bytes.
 ///
@@ -43,7 +41,6 @@ fn hkdf32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
     out.copy_from_slice(&okm[..32]);
     out
 }
-
 
 /// Derive the session ID from the session secret.
 ///
@@ -131,11 +128,9 @@ pub fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.ct_eq(b).into()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// session_secret = 0xa1b2c3d4…
     fn session_secret() -> [u8; 32] {
@@ -160,7 +155,6 @@ mod tests {
     fn bytes_to_hex(b: &[u8]) -> String {
         hex::encode(b)
     }
-
 
     #[test]
     fn session_id_is_deterministic() {
@@ -192,7 +186,6 @@ mod tests {
             "session_id must match NIP-AB spec test vector"
         );
     }
-
 
     #[test]
     fn sas_code_is_six_digits() {
@@ -249,7 +242,6 @@ mod tests {
 
         assert!(code < 1_000_000);
     }
-
 
     #[test]
     fn transcript_hash_is_deterministic() {
@@ -357,7 +349,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn format_sas_zero_padding() {
         assert_eq!(format_sas(0), "000000");
@@ -375,7 +366,6 @@ mod tests {
             assert!(s.chars().all(|c| c.is_ascii_digit()), "all digits: {s}");
         }
     }
-
 
     #[test]
     fn full_derivation_round_trip() {

@@ -554,7 +554,6 @@ fn human_bytes(n: usize) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

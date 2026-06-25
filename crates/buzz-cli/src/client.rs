@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 use crate::error::CliError;
 
-
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BlobDescriptor {
@@ -75,7 +74,6 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
 
-
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
 /// The event includes:
@@ -109,7 +107,6 @@ fn sign_nip98(
     let json = event.as_json();
     Ok(format!("Nostr {}", B64.encode(json.as_bytes())))
 }
-
 
 pub struct BuzzClient {
     http: reqwest::Client,
@@ -204,7 +201,6 @@ impl BuzzClient {
         }
     }
 
-
     /// Execute a one-shot query via the HTTP bridge.
     /// `filter` is a Nostr filter object (will be wrapped in an array).
     /// Returns the raw JSON response (array of events).
@@ -249,7 +245,6 @@ impl BuzzClient {
         self.handle_response(resp).await
     }
 
-
     /// Submit a signed Nostr event via POST /events.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
@@ -267,7 +262,6 @@ impl BuzzClient {
 
         self.handle_response(resp).await
     }
-
 
     /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
     ///
@@ -294,7 +288,6 @@ impl BuzzClient {
         })
         .to_string())
     }
-
 
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
@@ -402,7 +395,6 @@ impl BuzzClient {
             .map_err(|e| CliError::Other(format!("invalid upload response: {e}")))
     }
 
-
     async fn handle_response(&self, resp: reqwest::Response) -> Result<String, CliError> {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -434,7 +426,6 @@ impl BuzzClient {
     }
 }
 
-
 /// Normalize a relay URL: ws:// → http://, wss:// → https://, strip trailing slash.
 /// BUZZ_RELAY_URL may be ws/wss (copied from MCP config).
 pub fn normalize_relay_url(url: &str) -> String {
@@ -450,7 +441,6 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("https://", "wss://")
         .replace("http://", "ws://")
 }
-
 
 /// Normalize raw event JSON array into consistent shape.
 /// Each event becomes: {id, pubkey, kind, content, created_at, tags}

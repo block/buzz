@@ -20,7 +20,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-
 /// Default capacity of the event channel from background task to harness.
 /// Override with `BUZZ_ACP_EVENT_BUFFER` env var at startup.
 const EVENT_CHANNEL_CAPACITY_DEFAULT: usize = 256;
@@ -74,7 +73,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ChannelFilter;
-
 
 /// Metadata about a channel, populated at discovery time.
 #[derive(Debug, Clone)]
@@ -195,7 +193,6 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
-
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -243,7 +240,6 @@ impl RestClient {
     ) -> Result<String, RelayError> {
         Ok(format!("Nostr {}", self.sign_nip98(method, url, body)?))
     }
-
 
     /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
     /// on transient failures (429, 502, 503, 504, timeout, connect errors).
@@ -301,7 +297,6 @@ impl RestClient {
         Err(last_err
             .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries"))))
     }
-
 
     /// POST with NIP-98 auth and retry. Re-signs on each attempt.
     async fn bridge_post(
@@ -405,7 +400,6 @@ impl From<nostr::event::builder::Error> for RelayError {
     }
 }
 
-
 /// A parsed NIP-01 relay message.
 #[derive(Debug, Clone)]
 enum RelayMessage {
@@ -432,7 +426,6 @@ enum RelayMessage {
         challenge: String,
     },
 }
-
 
 /// Subscription ID for the global membership notification subscription.
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
@@ -465,9 +458,7 @@ enum RelayCommand {
     SetStartupWatermark { ts: u64 },
 }
 
-
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
 
 /// Harness-side relay client.
 ///
@@ -516,7 +507,6 @@ impl RelayEventPublisher {
 }
 
 impl HarnessRelay {
-
     /// Connect to relay and authenticate via NIP-42.
     ///
     /// `auth_tag` is an optional NIP-OA owner attestation included in the AUTH
@@ -847,7 +837,6 @@ impl Drop for HarnessRelay {
         }
     }
 }
-
 
 /// Two-generation dedup set with bounded memory.
 ///
@@ -2562,7 +2551,6 @@ async fn send_auth_response(
     Ok(())
 }
 
-
 /// Convert a WebSocket URL to its HTTP equivalent.
 ///
 /// `ws://host:port` → `http://host:port`
@@ -2721,7 +2709,6 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
         ))),
     }
 }
-
 
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
 ///
@@ -2895,11 +2882,9 @@ async fn wait_for_any_ok(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn relay_ws_to_http_plain() {
@@ -2941,7 +2926,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn channel_sub_id_format() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -2973,7 +2957,6 @@ mod tests {
     fn channel_id_from_sub_id_empty() {
         assert!(channel_id_from_sub_id("").is_none());
     }
-
 
     fn meta_event(uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
         let mut tags = vec![
@@ -3039,7 +3022,6 @@ mod tests {
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
     }
-
 
     #[test]
     fn parse_ok_accepted() {
@@ -3203,7 +3185,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-
     #[test]
     fn subscription_id_starts_with_ch_prefix() {
         let uuid = Uuid::new_v4();
@@ -3217,7 +3198,6 @@ mod tests {
         let sub_id = channel_sub_id(uuid);
         assert_eq!(sub_id, "ch-12345678-1234-5678-1234-567812345678");
     }
-
 
     /// Build a real signed Nostr event for testing BgState.
     ///
@@ -3273,7 +3253,6 @@ mod tests {
         assert!(state.record_event(channel_id, &event1));
         assert!(state.record_event(channel_id, &event2));
     }
-
 
     #[test]
     fn bg_state_last_seen_set_on_first_event() {
@@ -3417,7 +3396,6 @@ mod tests {
         );
     }
 
-
     /// Test 8: channel_dropped_since records the OLDEST dropped timestamp.
     ///
     /// Simulates the backpressure path directly on BgState:
@@ -3536,7 +3514,6 @@ mod tests {
         );
     }
 
-
     /// Membership dedup must NOT contaminate per-channel `last_seen`.
     /// Using `record_event()` for membership notifications would update
     /// `last_seen[channel_uuid]`, causing channel resubscribe to use a
@@ -3594,7 +3571,6 @@ mod tests {
             "after backpressure removal, replay must be accepted"
         );
     }
-
 
     /// Subscribe a channel via the production command path so the test exercises
     /// real subscription state (active_subscriptions + active_filters + since).

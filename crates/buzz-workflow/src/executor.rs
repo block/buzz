@@ -20,7 +20,6 @@ use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
 use crate::WorkflowEngine;
 
-
 /// Data extracted from the triggering event, passed to every step.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TriggerContext {
@@ -57,7 +56,6 @@ impl TriggerContext {
         }
     }
 }
-
 
 /// Resolve `{{trigger.X}}` and `{{steps.ID.output.X}}` placeholders in a string.
 ///
@@ -215,7 +213,6 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
     )))
 }
 
-
 /// Build an `evalexpr::HashMapContext` from trigger context and step outputs.
 ///
 /// Variable names use underscores (not dots) because `evalexpr` does not
@@ -290,7 +287,6 @@ pub fn build_eval_context(
     )
     .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
 
-
     // Register webhook fields first as `trigger_FIELD` so that standard trigger
     // fields inserted below always take precedence and cannot be spoofed.
     for (key, val) in &trigger_ctx.webhook_fields {
@@ -316,7 +312,6 @@ pub fn build_eval_context(
         ctx.set_value((*name).into(), Value::String((*val).to_owned()))
             .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
     }
-
 
     for (step_id, output) in step_outputs {
         if let JsonValue::Object(map) = output {
@@ -402,7 +397,6 @@ pub async fn evaluate_condition(
     Ok(result)
 }
 
-
 /// Resolve all template variables in a step's action fields.
 ///
 /// Returns a new `ActionDef` with all `{{...}}` placeholders substituted.
@@ -470,7 +464,6 @@ pub fn resolve_step_templates(
     }
 }
 
-
 /// Result of dispatching a single step action.
 #[derive(Debug)]
 pub enum StepResult {
@@ -484,7 +477,6 @@ pub enum StepResult {
     /// Step was skipped due to `if:` condition being false.
     Skipped,
 }
-
 
 fn resolve_send_message_channel(
     explicit_channel: Option<&str>,
@@ -786,7 +778,6 @@ async fn check_ssrf(host: &str, port: u16) -> Result<std::net::IpAddr, WorkflowE
     Ok(addrs[0])
 }
 
-
 /// Maximum response body size for webhook calls (1 MiB).
 #[cfg(feature = "reqwest")]
 const WEBHOOK_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -879,7 +870,6 @@ async fn call_webhook_impl(
     }))
 }
 
-
 /// Returns a shared `reqwest::Client` reused across all workflow HTTP calls.
 /// Sharing a single client reuses the underlying connection pool.
 #[cfg(feature = "reqwest")]
@@ -962,7 +952,6 @@ pub struct ExecutionResult {
     /// Execution trace: one entry per completed/skipped step.
     pub trace: Vec<JsonValue>,
 }
-
 
 /// Execute a workflow run sequentially.
 ///
@@ -1216,7 +1205,6 @@ async fn execute_steps(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1233,7 +1221,6 @@ mod tests {
             webhook_fields: HashMap::new(),
         }
     }
-
 
     #[test]
     fn resolve_trigger_text() {
@@ -1313,7 +1300,6 @@ mod tests {
         let out = resolve_template("Service: {{trigger.service}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "Service: api-gateway");
     }
-
 
     #[tokio::test]
     async fn condition_true_when_text_contains_p1() {
@@ -1399,7 +1385,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn parse_duration_hours() {
         assert_eq!(parse_duration_secs("1h").unwrap(), 3600);
@@ -1427,7 +1412,6 @@ mod tests {
     fn parse_duration_invalid() {
         assert!(parse_duration_secs("not-a-duration").is_err());
     }
-
 
     #[test]
     fn resolve_unclosed_template_emits_literally() {
@@ -1591,7 +1575,6 @@ mod tests {
             resolve_template("{{trigger.author}}{{trigger.emoji}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "abc123def456fire");
     }
-
 
     #[tokio::test]
     async fn condition_and_expression_both_true() {
@@ -1758,7 +1741,6 @@ mod tests {
             .unwrap();
         assert!(result);
     }
-
 
     #[test]
     fn trigger_context_get_field_known_fields() {

@@ -216,7 +216,6 @@ impl Db {
         self.pool.begin().await.map_err(Into::into)
     }
 
-
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
     pub async fn insert_event(
         &self,
@@ -337,7 +336,6 @@ impl Db {
         }
         Ok(result)
     }
-
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
     pub async fn create_channel(
@@ -537,7 +535,6 @@ impl Db {
         channel::reap_expired_ephemeral_channels(&self.pool).await
     }
 
-
     /// Query due reminders ready for delivery.
     pub async fn query_due_reminders(
         &self,
@@ -555,7 +552,6 @@ impl Db {
     ) -> Result<bool> {
         event::claim_due_reminder(&self.pool, event_id, event_created_at).await
     }
-
 
     /// Ensure a user record exists (upsert).
     pub async fn ensure_user(&self, pubkey: &[u8]) -> Result<()> {
@@ -629,7 +625,6 @@ impl Db {
         user::set_channel_add_policy(&self.pool, pubkey, policy).await
     }
 
-
     /// Find an existing DM by its participant hash.
     pub async fn find_dm_by_participants(
         &self,
@@ -683,7 +678,6 @@ impl Db {
     pub async fn list_hidden_dms(&self, pubkey: &[u8]) -> Result<Vec<Uuid>> {
         dm::list_hidden_dms(&self.pool, pubkey).await
     }
-
 
     /// Insert thread metadata.
     #[allow(clippy::too_many_arguments)]
@@ -769,7 +763,6 @@ impl Db {
     ) -> Result<()> {
         thread::decrement_reply_count(&self.pool, parent_event_id, root_event_id).await
     }
-
 
     /// Add (or re-activate) a reaction.
     pub async fn add_reaction(
@@ -860,7 +853,6 @@ impl Db {
     ) -> Result<Vec<reaction::BulkReactionEntry>> {
         reaction::get_reactions_bulk(&self.pool, event_ids).await
     }
-
 
     /// Find events that @mention the given pubkey.
     pub async fn query_feed_mentions(
@@ -953,7 +945,6 @@ impl Db {
     ) -> Result<Vec<StoredEvent>> {
         feed::query_activity(&self.pool, accessible_channel_ids, since, limit).await
     }
-
 
     /// Create a new API token record.
     pub async fn create_api_token(
@@ -1093,7 +1084,6 @@ impl Db {
     pub async fn revoke_all_tokens(&self, owner_pubkey: &[u8], revoked_by: &[u8]) -> Result<u64> {
         api_token::revoke_all_tokens(&self.pool, owner_pubkey, revoked_by).await
     }
-
 
     /// Create a new workflow.
     pub async fn create_workflow(
@@ -1276,7 +1266,6 @@ impl Db {
         .await
     }
 
-
     /// Ensures monthly partitions exist for the next N months.
     pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
         partition::ensure_future_partitions(&self.pool, months_ahead).await
@@ -1300,7 +1289,6 @@ impl Db {
         .await?;
         Ok(result.rows_affected())
     }
-
 
     /// Check if a pubkey is in the allowlist.
     pub async fn is_pubkey_allowed(&self, pubkey: &[u8]) -> Result<bool> {
@@ -1369,7 +1357,6 @@ impl Db {
         Ok(out)
     }
 
-
     /// Returns `true` if `pubkey` (64-char hex) is in the relay member list.
     pub async fn is_relay_member(&self, pubkey: &str) -> Result<bool> {
         relay_members::is_relay_member(&self.pool, pubkey).await
@@ -1437,7 +1424,6 @@ impl Db {
         relay_members::backfill_from_allowlist(&self.pool).await
     }
 
-
     /// Returns `true` if `pubkey` (64-char hex) is currently archived.
     pub async fn is_archived(&self, pubkey: &str) -> Result<bool> {
         archived_identities::is_archived(&self.pool, pubkey).await
@@ -1475,7 +1461,6 @@ impl Db {
         archived_identities::list_archived(&self.pool).await
     }
 
-
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
     pub async fn soft_delete_discovery_events(
         &self,
@@ -1492,7 +1477,6 @@ impl Db {
         .await?;
         Ok(result.rows_affected())
     }
-
 
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
     /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).

@@ -22,12 +22,10 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 
-
 export type DndChannelData = { type: "channel"; channelId: string };
 export type DndSectionData = { type: "section"; sectionId: string };
 export type DndSectionDropData = { type: "section-drop"; sectionId: string };
 export type DndUngroupedData = { type: "ungrouped" };
-
 
 export function DraggableChannelRow({
   channelId,
@@ -52,7 +50,6 @@ export function DraggableChannelRow({
     </div>
   );
 }
-
 
 export function DroppableSectionBody({
   sectionId,
@@ -83,7 +80,6 @@ export function DroppableSectionBody({
   );
 }
 
-
 export function DroppableUngroupedBody({
   children,
   className,
@@ -109,7 +105,6 @@ export function DroppableUngroupedBody({
     </div>
   );
 }
-
 
 export function SortableSectionShell({
   sectionId,
@@ -150,7 +145,6 @@ export function SortableSectionShell({
   );
 }
 
-
 export function DragOverlayChannel({ name }: { name: string }) {
   return (
     <div className="flex cursor-grabbing items-center gap-2 rounded-md bg-sidebar px-2 py-1.5 text-sm text-sidebar-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border">
@@ -160,7 +154,6 @@ export function DragOverlayChannel({ name }: { name: string }) {
   );
 }
 
-
 export function DragOverlaySection({ name }: { name: string }) {
   return (
     <div className="flex cursor-grabbing items-center gap-1 rounded-md bg-sidebar px-2 py-1 text-xs font-medium uppercase tracking-wider text-sidebar-foreground/60 opacity-90 shadow-lg ring-1 ring-sidebar-border">
@@ -168,7 +161,6 @@ export function DragOverlaySection({ name }: { name: string }) {
     </div>
   );
 }
-
 
 type SidebarDragItem =
   | { type: "channel"; channelId: string; channelName: string }

@@ -21,7 +21,6 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 
-
 type SectionNameDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -97,7 +96,6 @@ function SectionNameDialog({
   );
 }
 
-
 export type CreateSectionDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -122,7 +120,6 @@ export function CreateSectionDialog({
     />
   );
 }
-
 
 export type RenameSectionDialogProps = {
   open: boolean;
@@ -152,7 +149,6 @@ export function RenameSectionDialog({
     />
   );
 }
-
 
 export type DeleteSectionAlertDialogProps = {
   open: boolean;

@@ -67,7 +67,6 @@ function copyToClipboard(text: string, successMessage: string) {
     });
 }
 
-
 function MoreActionsMenu({
   channelId,
   message,
@@ -287,7 +286,6 @@ function MoreActionsMenu({
     </>
   );
 }
-
 
 function QuickReactionButton({
   customEmojiUrl,

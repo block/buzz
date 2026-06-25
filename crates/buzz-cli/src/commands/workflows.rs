@@ -9,7 +9,6 @@ use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
 
-
 /// List workflows in a channel — query kind:30620 workflow definition events.
 pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
@@ -94,7 +93,6 @@ pub async fn cmd_get_workflow_runs(
     println!("{output}");
     Ok(())
 }
-
 
 /// Create a workflow — sign and submit a kind:30620 event.
 pub async fn cmd_create_workflow(
@@ -212,7 +210,6 @@ pub async fn cmd_approve_step(
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
-
 
 pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::WorkflowsCmd;

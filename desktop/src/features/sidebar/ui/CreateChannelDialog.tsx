@@ -37,7 +37,6 @@ type CreateChannelDialogProps = {
   }) => Promise<void>;
 };
 
-
 export function CreateChannelDialog({
   channelKind,
   isCreating,

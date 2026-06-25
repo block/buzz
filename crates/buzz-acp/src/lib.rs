@@ -38,7 +38,6 @@ use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-
 /// Check if argv[1] matches a subcommand name, before any clap parsing.
 ///
 /// This avoids clap rejecting harness flags (like `--private-key`) that aren't
@@ -53,7 +52,6 @@ fn is_subcommand(name: &str) -> bool {
 
 /// Timeout for the `buzz-acp models` subcommand (spawn + init + session/new).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
-
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -78,7 +76,6 @@ async fn publish_presence(
     publisher.publish_event(event).await?;
     Ok(())
 }
-
 
 /// Resolve the agent's owner pubkey at startup.
 ///
@@ -107,7 +104,6 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
     // Fall back to --agent-owner config.
     config.agent_owner.clone()
 }
-
 
 /// Cache for the agent's owner pubkey.
 ///
@@ -2081,13 +2077,11 @@ async fn tokio_main() -> Result<()> {
     Ok(())
 }
 
-
 #[derive(PartialEq)]
 enum LoopAction {
     Continue,
     Exit,
 }
-
 
 fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     event.tags.iter().any(|t| {
@@ -2106,7 +2100,6 @@ fn is_owner_control_command(
         && event.content.trim() == command
         && event_mentions_agent(event, agent_pubkey_hex)
 }
-
 
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
@@ -2129,7 +2122,6 @@ fn signal_in_flight_task(
     }
     false
 }
-
 
 /// Flush queued work to available agents.
 fn dispatch_pending(
@@ -2205,7 +2197,6 @@ fn dispatch_pending(
     );
     dispatched_channels
 }
-
 
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
@@ -2401,7 +2392,6 @@ fn handle_prompt_result(
     LoopAction::Continue
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn recover_panicked_agent(
     pool: &mut AgentPool,
@@ -2498,7 +2488,6 @@ fn recover_panicked_agent(
     });
 }
 
-
 #[allow(clippy::too_many_arguments)]
 fn drain_ready_join_results(
     pool: &mut AgentPool,
@@ -2535,7 +2524,6 @@ fn drain_ready_join_results(
     }
     LoopAction::Continue
 }
-
 
 fn dispatch_heartbeat(
     pool: &mut AgentPool,
@@ -2579,7 +2567,6 @@ fn dispatch_heartbeat(
     tracing::info!(agent = agent_index, "heartbeat_fired");
 }
 
-
 fn default_heartbeat_prompt() -> String {
     let now = chrono::Utc::now().to_rfc3339();
     format!(
@@ -2598,7 +2585,6 @@ fn default_heartbeat_prompt() -> String {
          Do not invent work — only act on items surfaced by the feed commands."
     )
 }
-
 
 /// Spawn a background respawn task for a crashed agent slot.
 ///
@@ -2657,7 +2643,6 @@ fn spawn_respawn_task(
     true
 }
 
-
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
@@ -2696,8 +2681,6 @@ async fn spawn_and_init(
         }
     }
 }
-
-
 
 /// `buzz-acp models` — spawn an agent, query its available models, exit.
 ///
@@ -2882,7 +2865,6 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         },
     }]
 }
-
 
 #[cfg(test)]
 mod heartbeat_base_prompt_tests {

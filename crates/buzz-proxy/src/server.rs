@@ -29,7 +29,6 @@ use crate::invite_store::InviteStore;
 use crate::translate::Translator;
 use crate::upstream::UpstreamClient;
 
-
 /// Shared state injected into every axum handler.
 #[derive(Clone)]
 pub struct ProxyState {
@@ -54,7 +53,6 @@ pub struct ProxyState {
     /// Used for NIP-42 relay tag validation.
     pub relay_url: String,
 }
-
 
 /// Query parameters accepted on the root WebSocket endpoint.
 #[derive(Deserialize)]
@@ -85,7 +83,6 @@ pub fn router(state: ProxyState) -> Router {
         )
         .with_state(state)
 }
-
 
 /// Content-negotiate between NIP-11 JSON and WebSocket upgrade.
 ///
@@ -139,7 +136,6 @@ fn nip11_response() -> impl IntoResponse {
     )
 }
 
-
 /// Compare two strings in constant time to prevent timing side-channel attacks.
 /// Returns `true` only if both strings are identical.
 ///
@@ -156,7 +152,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
 }
-
 
 /// Helper: serialize a [`RelayMessage`] and send it over the socket.
 /// Returns `true` if the send succeeded.
@@ -481,7 +476,6 @@ async fn handle_ws(mut socket: WebSocket, state: ProxyState, token: String) {
     debug!(pubkey = %client_pubkey, "client disconnected");
 }
 
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     socket: &mut WebSocket,
@@ -590,7 +584,6 @@ async fn handle_client_message(
         _ => {}
     }
 }
-
 
 /// Split a list of NIP-28 filters into local (kind:40/41) and upstream groups.
 ///
@@ -739,7 +732,6 @@ fn collect_local_events(
     events
 }
 
-
 async fn handle_req(
     socket: &mut WebSocket,
     state: &ProxyState,
@@ -790,7 +782,6 @@ async fn handle_req(
         warn!("upstream send_req failed: {e}");
     }
 }
-
 
 #[derive(Deserialize)]
 struct CreateInviteRequest {
@@ -869,7 +860,6 @@ async fn create_invite(
         .into_response()
 }
 
-
 /// Verify the admin secret from the Authorization header. Returns an error
 /// response if the secret is required but missing/wrong, or `None` if OK.
 fn check_admin_secret(admin_secret: &Option<String>, headers: &HeaderMap) -> Option<Response> {
@@ -894,7 +884,6 @@ fn check_admin_secret(admin_secret: &Option<String>, headers: &HeaderMap) -> Opt
         None // No secret configured — dev mode, allow all.
     }
 }
-
 
 #[derive(Deserialize)]
 struct RegisterGuestRequest {
@@ -1018,7 +1007,6 @@ async fn list_guests(State(state): State<ProxyState>, headers: HeaderMap) -> imp
         .into_response()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,7 +1073,6 @@ mod tests {
         // Ensure different-length strings with same prefix don't match
         assert!(!constant_time_eq("abc", "abcd"));
     }
-
 
     #[test]
     fn split_filters_pure_local() {
@@ -1164,7 +1151,6 @@ mod tests {
         assert!(local_k.contains(&41));
         assert!(upstream[0].kinds.is_none());
     }
-
 
     fn make_channel_map_with_channel() -> (Arc<ChannelMap>, Uuid) {
         let keys = Keys::generate();

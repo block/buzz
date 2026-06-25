@@ -12,7 +12,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-
 struct CapturingLlm {
     url: String,
     captured: Arc<Mutex<Vec<Value>>>,
@@ -81,7 +80,6 @@ async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
     });
     CapturingLlm { url, captured }
 }
-
 
 struct Harness {
     child: tokio::process::Child,
@@ -189,7 +187,6 @@ async fn init_session(h: &mut Harness, cwd: &str) -> String {
         .expect("sessionId")
         .to_owned()
 }
-
 
 /// AGENTS.md in cwd is loaded into the system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

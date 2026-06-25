@@ -15,7 +15,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-
 struct CapturingLlm {
     url: String,
     captured: Arc<Mutex<Vec<Value>>>,
@@ -84,7 +83,6 @@ async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
     });
     CapturingLlm { url, captured }
 }
-
 
 struct Harness {
     child: tokio::process::Child,
@@ -234,7 +232,6 @@ async fn init_session(h: &mut Harness, mcp_servers: Value) -> String {
         .expect("sessionId")
         .to_owned()
 }
-
 
 /// After a text-only assistant response, the next prompt's request must
 /// include that assistant text in `messages` history. Round 4 fix.
@@ -521,7 +518,6 @@ fn openai_n_tool_calls(n: usize) -> Value {
     })
 }
 
-
 /// History budget evicts old turns: after many prompts, the LLM request
 /// body stays below a sane bound. Round 7 fix; round 8 test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -708,7 +704,6 @@ async fn description_clamping_enforced() {
     );
     h.shutdown().await;
 }
-
 
 /// Helper: spawn a session with a fake MCP server exposing one regular tool
 /// plus an optional `_Stop` hook controlled by env vars.

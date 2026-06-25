@@ -3,7 +3,6 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 
-
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -34,7 +33,6 @@ pub async fn cmd_create_issue(
     Ok(())
 }
 
-
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
     let filter = serde_json::json!({
@@ -45,7 +43,6 @@ pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliEr
     println!("{resp}");
     Ok(())
 }
-
 
 pub async fn cmd_list_issues(
     client: &BuzzClient,
@@ -79,7 +76,6 @@ pub async fn cmd_list_issues(
     println!("{resp}");
     Ok(())
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_issue_status(
@@ -147,7 +143,6 @@ pub async fn cmd_issue_status(
     println!("{resp}");
     Ok(())
 }
-
 
 pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::IssuesCmd;

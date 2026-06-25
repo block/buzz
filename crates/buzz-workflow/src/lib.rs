@@ -49,7 +49,6 @@ use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-
 /// Runtime configuration for the workflow engine.
 #[derive(Clone, Debug)]
 pub struct WorkflowConfig {
@@ -67,7 +66,6 @@ impl Default for WorkflowConfig {
         }
     }
 }
-
 
 /// The workflow engine. Clone is cheap (Arc-backed DB pool + semaphore).
 pub struct WorkflowEngine {
@@ -475,7 +473,6 @@ impl WorkflowEngine {
     }
 }
 
-
 /// Check whether a cron expression should fire within the `window_secs`-wide
 /// window ending at `now`.
 ///
@@ -534,7 +531,6 @@ fn interval_should_fire(
         }
     }
 }
-
 
 /// Check emoji and filter-expression conditions that determine whether a
 /// matched workflow should actually fire. Extracted from `on_event` to keep
@@ -609,7 +605,6 @@ async fn should_fire_workflow(
 
     true
 }
-
 
 /// Build a [`executor::TriggerContext`] from a [`buzz_core::StoredEvent`].
 ///
@@ -690,7 +685,6 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     }
 }
 
-
 /// Returns `true` if the trigger type matches the given event kind.
 fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
     use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
@@ -703,11 +697,9 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn cron_should_fire_matches_within_window() {
@@ -787,7 +779,6 @@ mod tests {
             "cron should not fire 61s after the scheduled time"
         );
     }
-
 
     #[test]
     fn interval_should_fire_returns_false_on_first_tick() {
@@ -929,7 +920,6 @@ steps:
         assert!(!trigger_matches_event(&trigger, 0));
     }
 
-
     #[test]
     fn message_posted_matches_kind_9_only() {
         let trigger = TriggerDef::MessagePosted { filter: None };
@@ -1039,7 +1029,6 @@ steps:
         assert_eq!(cfg.max_concurrent, 50);
         assert_eq!(cfg.default_timeout_secs, 600);
     }
-
 
     fn make_message_event() -> buzz_core::StoredEvent {
         use nostr::{EventBuilder, Keys, Kind};

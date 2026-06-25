@@ -5,7 +5,6 @@ use crate::validate::{
 };
 use buzz_sdk::{GitAppliedPatchRef, GitPatchMeta, GitRepoCoord, GitStatus, GitStatusMeta};
 
-
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_send_patch(
     client: &BuzzClient,
@@ -71,7 +70,6 @@ fn parse_committer(spec: &str) -> Result<(String, String, String, String), CliEr
     }
 }
 
-
 pub async fn cmd_get_patch(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
     let filter = serde_json::json!({
@@ -82,7 +80,6 @@ pub async fn cmd_get_patch(client: &BuzzClient, event: &str) -> Result<(), CliEr
     println!("{resp}");
     Ok(())
 }
-
 
 pub async fn cmd_list_patches(
     client: &BuzzClient,
@@ -112,7 +109,6 @@ pub async fn cmd_list_patches(
     println!("{resp}");
     Ok(())
 }
-
 
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_patch_status(
@@ -206,7 +202,6 @@ pub(crate) fn parse_status(s: &str) -> Result<GitStatus, CliError> {
         ))),
     }
 }
-
 
 pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::PatchesCmd;

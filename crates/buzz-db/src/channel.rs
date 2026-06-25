@@ -900,7 +900,6 @@ fn row_to_member_record(row: sqlx::postgres::PgRow) -> Result<MemberRecord> {
     })
 }
 
-
 /// Partial update for channel metadata. Every field is `None` to leave the
 /// column unchanged.
 #[derive(Default)]

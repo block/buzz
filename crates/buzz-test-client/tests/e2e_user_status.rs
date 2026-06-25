@@ -48,7 +48,6 @@ fn build_user_status_event(
         .unwrap()
 }
 
-
 /// kind:30315 events are accepted by the relay.
 #[tokio::test]
 #[ignore]

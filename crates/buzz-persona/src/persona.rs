@@ -17,13 +17,11 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-
 /// Maximum YAML frontmatter size in bytes (1 MiB).
 pub const MAX_FRONTMATTER_BYTES: usize = 1_048_576;
 
 /// Maximum persona prompt (markdown body) size in bytes (256 KiB).
 pub const MAX_BODY_BYTES: usize = 262_144;
-
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersonaError {
@@ -48,7 +46,6 @@ pub enum PersonaError {
     #[error("missing required field: {0}")]
     MissingField(String),
 }
-
 
 /// Controls which messages trigger a response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +91,6 @@ pub struct Hooks {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_message: Option<String>,
 }
-
 
 /// Typed representation of a `.persona.md` file (V7 spec).
 ///
@@ -173,7 +169,6 @@ pub struct PersonaConfig {
     pub prompt: String,
 }
 
-
 /// Deserializes just the YAML frontmatter (no `prompt`).
 /// Unknown keys are rejected — typos cause parse errors instead of silent drops.
 #[derive(Debug, Deserialize)]
@@ -201,7 +196,6 @@ struct Frontmatter {
     broadcast_replies: Option<bool>,
     hooks: Option<Hooks>,
 }
-
 
 /// Parse a `.persona.md` file into a [`PersonaConfig`].
 ///
@@ -324,7 +318,6 @@ pub fn split_frontmatter(content: &str) -> Result<(&str, &str), PersonaError> {
     Ok((fm_str, body))
 }
 
-
 /// Split `"provider:model-id"` into `(Some("provider"), "model-id")`.
 ///
 /// If there is no colon, returns `(None, full_string)`.
@@ -335,16 +328,13 @@ pub fn split_model(model: &str) -> (Option<&str>, &str) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-
     fn minimal() -> &'static str {
         "---\nname: my-bot\ndisplay_name: My Bot\ndescription: Does things.\n---\n"
     }
-
 
     #[test]
     fn parse_minimal_valid() {
@@ -439,7 +429,6 @@ You are Full Bot.
         assert!(matches!(err, PersonaError::Yaml(_)), "got: {err}");
     }
 
-
     #[test]
     fn missing_name_errors() {
         let src = "---\ndisplay_name: Bot\ndescription: A bot.\n---\n";
@@ -469,7 +458,6 @@ You are Full Bot.
             "got: {err}"
         );
     }
-
 
     #[test]
     fn empty_name_errors() {
@@ -511,7 +499,6 @@ You are Full Bot.
         );
     }
 
-
     #[test]
     fn no_frontmatter_delimiters_errors() {
         let err = parse_persona_md("Just plain markdown.").unwrap_err();
@@ -548,14 +535,12 @@ You are Full Bot.
         assert_eq!(p.prompt, "Body here.\n");
     }
 
-
     #[test]
     fn malformed_yaml_errors() {
         let src = "---\n: bad: yaml: here\n---\n";
         let err = parse_persona_md(src).unwrap_err();
         assert!(matches!(err, PersonaError::Yaml(_)));
     }
-
 
     #[test]
     fn frontmatter_too_large_errors() {
@@ -573,7 +558,6 @@ You are Full Bot.
         let err = parse_persona_md(&src).unwrap_err();
         assert!(matches!(err, PersonaError::BodyTooLarge));
     }
-
 
     #[test]
     fn split_model_with_colon() {
@@ -595,7 +579,6 @@ You are Full Bot.
         assert_eq!(provider, Some("databricks"));
         assert_eq!(id, "gpt-5:preview");
     }
-
 
     #[test]
     fn parse_subscribe_null_is_none() {
@@ -654,7 +637,6 @@ You are Full Bot.
             Some(vec!["#general".to_owned(), "#random".to_owned()])
         );
     }
-
 
     /// Trim leading newline from indented string literals.
     fn indoc(s: &str) -> &str {

@@ -229,7 +229,6 @@ mod tests {
             .expect("sign")
     }
 
-
     // Type alias to avoid clippy::type_complexity warning on the test case table.
     // The tuple holds: raw JSON string + a boxed checker closure.
     type ParseCase<'a> = (&'a str, Box<dyn Fn(ClientMessage)>);
@@ -371,7 +370,6 @@ mod tests {
             "exactly {MAX_FILTERS_PER_REQ} filters should be accepted"
         );
     }
-
 
     // Type alias to avoid clippy::type_complexity warning on the format test table.
     type FormatCase<'a> = (&'a str, Box<dyn Fn()>);

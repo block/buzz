@@ -1224,7 +1224,6 @@ mod tests {
         );
     }
 
-
     /// Three real x-only pubkeys (valid for `PublicKey::from_hex`). Distinct,
     /// so we can label them clearly in tests.
     fn three_pubkeys() -> (String, String, String) {

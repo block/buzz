@@ -29,7 +29,6 @@ use zeroize::Zeroize;
 
 use super::PairingError;
 
-
 /// Data encoded in the QR code displayed by the source device.
 #[derive(Debug, Clone)]
 pub struct QrPayload {
@@ -55,7 +54,6 @@ impl Drop for QrPayload {
         self.session_secret.zeroize();
     }
 }
-
 
 /// Encode a [`QrPayload`] as a `nostrpair://` URI.
 ///
@@ -93,7 +91,6 @@ pub fn encode_qr(payload: &QrPayload) -> String {
 
     uri
 }
-
 
 /// Decode a `nostrpair://` URI into a [`QrPayload`].
 ///
@@ -222,7 +219,6 @@ pub fn decode_qr(uri: &str) -> Result<QrPayload, PairingError> {
     })
 }
 
-
 /// Percent-encode a relay URL for use as a query parameter value.
 ///
 /// Uses `percent-encoding` crate's `NON_ALPHANUMERIC` set, which encodes
@@ -245,7 +241,6 @@ fn url_decode(s: &str) -> String {
 fn is_lowercase_hex(c: char) -> bool {
     c.is_ascii_digit() || ('a'..='f').contains(&c)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -539,7 +534,6 @@ mod tests {
         assert_eq!(decoded.version, 1, "missing v= should default to version 1");
     }
 
-
     #[test]
     fn reject_all_zeros_session_secret() {
         let keys = Keys::generate();
@@ -556,7 +550,6 @@ mod tests {
             "expected all-zeros rejection, got {err:?}"
         );
     }
-
 
     #[test]
     fn reject_uppercase_hex_in_pubkey() {

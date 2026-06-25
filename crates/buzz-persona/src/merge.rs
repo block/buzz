@@ -7,7 +7,6 @@
 ///
 /// Levels 1–2 (operator env vars, desktop UI) are resolved at runtime.
 
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriggersData {
     pub mentions: bool,
@@ -36,10 +35,8 @@ pub struct ResolvedConfig {
     pub broadcast_replies: bool,
 }
 
-
 const DEFAULT_THREAD_REPLIES: bool = true;
 const DEFAULT_BROADCAST_REPLIES: bool = false;
-
 
 /// Merge pack defaults with per-persona values.
 ///
@@ -83,7 +80,6 @@ pub fn merge_behavioral_config(
 
     Value::Object(merged)
 }
-
 
 /// Resolve a single persona's effective config from raw frontmatter + pack defaults.
 pub fn resolve_persona_config(
@@ -174,7 +170,6 @@ pub fn resolve_persona_config(
     }
 }
 
-
 fn string_field(v: &serde_json::Value, key: &str) -> Option<String> {
     v.get(key).and_then(|v| v.as_str()).map(str::to_owned)
 }
@@ -202,12 +197,10 @@ fn parse_triggers(v: &serde_json::Value) -> Option<TriggersData> {
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
 
     #[test]
     fn persona_value_wins_over_pack_default() {
@@ -280,7 +273,6 @@ mod tests {
         assert_eq!(merged["subscribe"], json!(["chan-x"])); // persona wins
     }
 
-
     #[test]
     fn built_in_defaults_when_no_fields() {
         let persona = json!({});
@@ -331,7 +323,6 @@ mod tests {
         let resolved = resolve_persona_config(&persona, None);
         assert_eq!(resolved.max_context_tokens, Some(8192));
     }
-
 
     #[test]
     fn triggers_shallow_replacement() {
@@ -429,7 +420,6 @@ mod tests {
         assert_eq!(t.keywords, vec!["security", "CVE"]);
         assert!(!t.all_messages);
     }
-
 
     #[test]
     fn subscribe_null_falls_through() {

@@ -22,7 +22,6 @@ use crate::manifest::{self, ManifestError};
 use crate::merge::{resolve_persona_config, HooksData, TriggersData};
 use crate::persona::{self, PersonaConfig};
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum PackError {
     #[error("manifest not found at {0}")]
@@ -59,7 +58,6 @@ impl From<ManifestError> for PackError {
         PackError::ManifestParse(e.to_string())
     }
 }
-
 
 /// A fully loaded persona pack.
 #[derive(Debug)]
@@ -115,7 +113,6 @@ pub struct PackManifestData {
     /// Raw defaults block.
     pub defaults: Option<serde_json::Value>,
 }
-
 
 /// Load a persona pack from a directory.
 ///
@@ -243,7 +240,6 @@ pub fn load_pack(pack_dir: &Path) -> Result<LoadedPack, PackError> {
     })
 }
 
-
 /// Determine which skills go to which persona.
 ///
 /// - Skills listed in a persona's `skills:` array → only that persona
@@ -318,7 +314,6 @@ pub fn resolve_skills(pack_dir: &Path, personas: &[LoadedPersona]) -> HashMap<St
     result
 }
 
-
 /// Verify a path resolves within the pack root.
 ///
 /// Defense-in-depth:
@@ -367,7 +362,6 @@ fn safe_resolve(pack_root: &Path, relative: &str) -> Result<PathBuf, PackError> 
 
     Ok(canonical)
 }
-
 
 fn read_file(path: &Path) -> Result<String, PackError> {
     std::fs::read_to_string(path).map_err(|e| PackError::Io {
@@ -450,13 +444,11 @@ fn parse_persona_file(
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
-
 
     fn make_pack(dir: &TempDir, personas: &[(&str, &str)]) -> PathBuf {
         let root = dir.path();
@@ -495,7 +487,6 @@ description: A fast worker
 ---
 You are Berry, a fast and direct worker.
 "#;
-
 
     #[test]
     fn load_valid_pack() {
@@ -539,7 +530,6 @@ You are Berry, a fast and direct worker.
         assert!(pack.skills_dir.is_some());
     }
 
-
     #[test]
     fn missing_plugin_json_returns_error() {
         let dir = TempDir::new().unwrap();
@@ -567,7 +557,6 @@ You are Berry, a fast and direct worker.
         let err = load_pack(root).unwrap_err();
         assert!(matches!(err, PackError::PersonaNotFound(_)));
     }
-
 
     #[test]
     fn dotdot_component_rejected() {
@@ -615,7 +604,6 @@ You are Berry, a fast and direct worker.
         let err = safe_resolve(&root, "personas/escape.persona.md").unwrap_err();
         assert!(matches!(err, PackError::PathEscape(_)));
     }
-
 
     fn make_loaded_persona(name: &str, skills: Vec<&str>) -> LoadedPersona {
         LoadedPersona {
@@ -707,7 +695,6 @@ You are Berry, a fast and direct worker.
         assert!(map["alpha"].contains(&"web-search".to_owned()));
         assert!(!map["alpha"].iter().any(|s| s.contains('/')));
     }
-
 
     #[test]
     fn pack_defaults_applied_to_persona() {

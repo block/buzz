@@ -18,7 +18,6 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
 ///
 /// Returns the authenticated public key and an event ID for replay detection.
@@ -103,7 +102,6 @@ fn canonical_url(relay_url: &str, path: &str) -> String {
     format!("{base}{path}")
 }
 
-
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
@@ -158,7 +156,6 @@ fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::
         None => true,
     }
 }
-
 
 /// Submit a signed Nostr event via HTTP bridge (NIP-98 auth).
 pub async fn submit_event(
@@ -228,7 +225,6 @@ pub async fn submit_event(
         },
     }
 }
-
 
 /// Query events via HTTP bridge (NIP-98 auth). Returns JSON array of events.
 ///
@@ -482,7 +478,6 @@ pub async fn query_events(
     Ok(Json(Value::Array(events)))
 }
 
-
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
 ///
 /// Enforces channel access: only counts events in channels the user can access.
@@ -641,7 +636,6 @@ pub async fn count_events(
 
     Ok(Json(serde_json::json!({ "count": total })))
 }
-
 
 /// Decide whether a search hit should be returned to the caller.
 ///
@@ -814,7 +808,6 @@ async fn handle_bridge_search(
     Ok(Json(Value::Array(events)))
 }
 
-
 /// Query parameters for the webhook trigger endpoint.
 #[derive(serde::Deserialize)]
 pub struct WebhookQuery {
@@ -958,7 +951,6 @@ pub async fn workflow_webhook(
         })),
     ))
 }
-
 
 /// If all filters target kind:20001 or kind:40902 with authors, synthesize
 /// presence from Redis instead of querying the DB (ephemeral events are never
@@ -1135,7 +1127,6 @@ mod tests {
             "channel-scoped hit must be accepted when caller has access to that channel"
         );
     }
-
 
     #[test]
     fn extract_before_id_valid_hex() {

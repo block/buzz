@@ -9,7 +9,6 @@ pub mod nip05;
 // Re-export imeta helpers used by ingest pipeline.
 pub use crate::handlers::imeta::{validate_imeta_tags, verify_imeta_blobs};
 
-
 use axum::{http::StatusCode, response::Json};
 
 /// Standard error envelope.

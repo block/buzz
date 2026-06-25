@@ -628,7 +628,6 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

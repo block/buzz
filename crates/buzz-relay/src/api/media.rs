@@ -22,7 +22,6 @@ use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
-
 /// Axum extractor that validates Blossom auth + API token scopes from headers
 /// BEFORE the request body is read. This prevents unauthenticated clients from
 /// forcing the server to buffer up to 50MB of body data.
@@ -217,7 +216,6 @@ pub async fn upload_blob(
 
     Ok(Json(descriptor))
 }
-
 
 /// Whether a path-segment extension is a safe token.
 ///
@@ -534,7 +532,6 @@ pub async fn head_blob(
     }
 }
 
-
 /// Resolve the S3 key from a URL path segment.
 ///
 /// - `sha256.ext`       → used as-is (already validated by `validate_media_path`)
@@ -749,7 +746,6 @@ mod tests {
     fn test_validate_media_path_rejects_empty() {
         assert!(validate_media_path("").is_err());
     }
-
 
     #[test]
     fn test_parse_byte_range_basic() {

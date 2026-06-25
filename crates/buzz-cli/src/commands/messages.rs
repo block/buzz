@@ -13,7 +13,6 @@ use buzz_sdk::mentions::{
     MENTION_CAP,
 };
 
-
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Parses `"e"` tags with NIP-10 markers:
@@ -240,7 +239,6 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-
 fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     match format {
         crate::OutputFormat::Compact => {
@@ -357,7 +355,6 @@ pub async fn cmd_search(
     println!("{}", format_events(&normalized, format));
     Ok(())
 }
-
 
 pub struct SendMessageParams {
     pub channel_id: String,
@@ -624,7 +621,6 @@ pub async fn cmd_vote_on_post(
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
-
 
 pub async fn dispatch(
     cmd: crate::MessagesCmd,

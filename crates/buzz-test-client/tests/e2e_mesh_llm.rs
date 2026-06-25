@@ -85,7 +85,6 @@ fn mesh_status_filter() -> Filter {
         .identifier(MESH_STATUS_D_TAG)
 }
 
-
 /// Assertion 1: an authenticated relay member can REQ the relay-signed
 /// kind:30621 status event; its content carries the sanitized projection
 /// (mesh/models/serveTargets with EndpointAddr dial pointers) and NO secrets
@@ -159,7 +158,6 @@ async fn trust_member_reads_mesh_status() {
     client.disconnect().await.ok();
 }
 
-
 /// Assertion 2: a valid Nostr identity that is NOT a relay member gets nothing
 /// back for a kind:30621 REQ — membership gates the read.
 ///
@@ -199,7 +197,6 @@ async fn trust_nonmember_read_denied() {
 
     client.disconnect().await.ok();
 }
-
 
 /// Assertion 4 (the headline demo): with desktop A serving a model and desktop
 /// B running a mesh client + a launched buzz-agent pointed at B's local
@@ -263,7 +260,6 @@ async fn live_agent_completes_chat_over_mesh() {
         "chat completion over the mesh must return non-empty content"
     );
 }
-
 
 /// Assertion 6 (split): a model too large for one node + two serve nodes in the
 /// same mesh → mesh auto-splits → the same chat (assertion 4) completes via the

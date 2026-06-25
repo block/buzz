@@ -997,7 +997,6 @@ mod tests {
         assert_eq!(content[1]["source"]["data"], "aW1n");
     }
 
-
     fn cfg_responses() -> Config {
         let mut c = cfg(Provider::OpenAi);
         c.openai_api = OpenAiApi::Responses;
@@ -1481,7 +1480,6 @@ mod tests {
         let v = serde_json::json!({"usage": {"output_tokens": 5}});
         assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
     }
-
 
     /// A token source whose `bearer()` always hands back the same stale
     /// token and whose `refresh_now()` mints a distinct fresh one, counting
