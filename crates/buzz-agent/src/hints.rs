@@ -150,12 +150,12 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
 /// are treated as separate skills and are not descended into.
 fn collect_supporting_files(skill_dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    collect_supporting_files_impl(skill_dir, skill_dir, &mut result);
+    collect_supporting_files_impl(skill_dir, &mut result);
     result.sort();
     result
 }
 
-fn collect_supporting_files_impl(skill_dir: &Path, current: &Path, out: &mut Vec<PathBuf>) {
+fn collect_supporting_files_impl(current: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
@@ -173,11 +173,9 @@ fn collect_supporting_files_impl(skill_dir: &Path, current: &Path, out: &mut Vec
             if path.join("SKILL.md").is_file() {
                 continue;
             }
-            collect_supporting_files_impl(skill_dir, &path, out);
-        } else if ft.is_file() {
-            if path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
-                out.push(path);
-            }
+            collect_supporting_files_impl(&path, out);
+        } else if ft.is_file() && path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+            out.push(path);
         }
     }
 }
