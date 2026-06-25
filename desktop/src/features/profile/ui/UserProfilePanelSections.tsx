@@ -252,6 +252,19 @@ export function ProfileSummaryView({
       showActivityIngress ||
       showTopLevelAgentInfo ? (
         <section className="space-y-2">
+          {showAgentConfigurationRows ||
+          showRuntimeConfigurationIngress ||
+          showTopLevelAgentInfo ? (
+            <div className="overflow-hidden rounded-2xl bg-muted/20">
+              {showTopLevelAgentInfo ? (
+                <ProfileFieldRows fields={topLevelAgentInfoFields} />
+              ) : null}
+              <AgentDetailsRows fields={summaryAgentDetailFields} />
+              {showRuntimeConfigurationIngress ? (
+                <AdvancedDetailsRow onClick={onOpenAgentConfiguration} />
+              ) : null}
+            </div>
+          ) : null}
           {showMemoriesIngress ? (
             <ProfileIngressRow
               icon={Brain}
@@ -299,19 +312,6 @@ export function ProfileSummaryView({
               testId={`user-profile-view-activity-${pubkey}`}
               trailing="View"
             />
-          ) : null}
-          {showAgentConfigurationRows ||
-          showRuntimeConfigurationIngress ||
-          showTopLevelAgentInfo ? (
-            <div className="overflow-hidden rounded-2xl bg-muted/20">
-              {showTopLevelAgentInfo ? (
-                <ProfileFieldRows fields={topLevelAgentInfoFields} />
-              ) : null}
-              <AgentDetailsRows fields={summaryAgentDetailFields} />
-              {showRuntimeConfigurationIngress ? (
-                <AdvancedDetailsRow onClick={onOpenAgentConfiguration} />
-              ) : null}
-            </div>
           ) : null}
         </section>
       ) : null}
