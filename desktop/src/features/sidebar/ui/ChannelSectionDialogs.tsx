@@ -21,9 +21,6 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 
-// ---------------------------------------------------------------------------
-// SectionNameDialog (internal)
-// ---------------------------------------------------------------------------
 
 type SectionNameDialogProps = {
   open: boolean;
@@ -100,9 +97,6 @@ function SectionNameDialog({
   );
 }
 
-// ---------------------------------------------------------------------------
-// CreateSectionDialog
-// ---------------------------------------------------------------------------
 
 export type CreateSectionDialogProps = {
   open: boolean;
@@ -129,9 +123,6 @@ export function CreateSectionDialog({
   );
 }
 
-// ---------------------------------------------------------------------------
-// RenameSectionDialog
-// ---------------------------------------------------------------------------
 
 export type RenameSectionDialogProps = {
   open: boolean;
@@ -162,9 +153,6 @@ export function RenameSectionDialog({
   );
 }
 
-// ---------------------------------------------------------------------------
-// DeleteSectionAlertDialog
-// ---------------------------------------------------------------------------
 
 export type DeleteSectionAlertDialogProps = {
   open: boolean;

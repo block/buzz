@@ -62,15 +62,12 @@ export async function setupAudioWorklet(
   // Load the worklet processor (must live in public/ for Vite to serve it)
   await audioContext.audioWorklet.addModule("/worklet.js");
 
-  // Create source from the mic track
   const source = audioContext.createMediaStreamSource(
     new MediaStream([audioTrack]),
   );
 
-  // Create gain node for volume control
   const gainNode = audioContext.createGain();
 
-  // Create worklet node
   const workletNode = new AudioWorkletNode(audioContext, "stt-tap-processor");
 
   // Connect: mic → gain → worklet (tap only — no playback)

@@ -45,7 +45,6 @@ fn persona_event_at(keys: &Keys, d_tag: &str, content: &str, created_at: u64) ->
         .unwrap()
 }
 
-// ── Publish and query back ───────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -97,7 +96,6 @@ async fn test_persona_publish_and_query() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── NIP-33 replacement semantics ─────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -192,7 +190,6 @@ async fn test_persona_nip33_older_does_not_replace_newer() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── D-tag validation ─────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
@@ -374,7 +371,6 @@ async fn test_persona_accepts_valid_slugs() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── Multiple personas per author ─────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]

@@ -480,10 +480,6 @@ void main() {
     });
   });
 
-  // ---------------------------------------------------------------------------
-  // Unit tests for extracted helpers
-  // ---------------------------------------------------------------------------
-
   group('findTrigger', () {
     test('finds @ at start of text', () {
       expect(findTrigger('@alice', 6, '@', stopAtSpace: false), 0);

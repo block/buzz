@@ -212,7 +212,6 @@ function applyCachedVars(): string | null {
     root.classList.remove("light", "dark");
     root.classList.add(isDark ? "dark" : "light");
 
-    // Also apply cached accent
     const accent =
       window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
     applyAccentColor(accent);
@@ -272,7 +271,6 @@ export function ThemeProvider({
     return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
 
-  // Load and apply theme
   useEffect(() => {
     if (!isValidThemeName(themeName)) return;
 
@@ -294,7 +292,6 @@ export function ThemeProvider({
     });
   }, [themeName]);
 
-  // Apply accent color changes
   useEffect(() => {
     applyAccentColor(accentColor);
   }, [accentColor]);

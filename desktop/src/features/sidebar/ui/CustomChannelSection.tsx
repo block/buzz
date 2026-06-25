@@ -49,9 +49,6 @@ import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { HashSearch } from "@/shared/ui/icons";
 
-// ---------------------------------------------------------------------------
-// Shared styles
-// ---------------------------------------------------------------------------
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -60,9 +57,6 @@ const SECTION_LABEL_CHEVRON_CLASS =
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
-// ---------------------------------------------------------------------------
-// MoveToSectionSubmenu — internal helper
-// ---------------------------------------------------------------------------
 
 function MoveToSectionSubmenu({
   channelId,
@@ -113,9 +107,6 @@ function MoveToSectionSubmenu({
   );
 }
 
-// ---------------------------------------------------------------------------
-// ChannelContextMenuItems — shared context menu items for channel rows
-// ---------------------------------------------------------------------------
 
 export function ChannelContextMenuItems({
   channel,
@@ -223,9 +214,6 @@ export function ChannelContextMenuItems({
   );
 }
 
-// ---------------------------------------------------------------------------
-// SectionHeaderActions — create and read-state icon buttons for section headers
-// ---------------------------------------------------------------------------
 
 function SectionHeaderActions({
   browseAriaLabel,
@@ -289,9 +277,6 @@ function SectionHeaderActions({
   );
 }
 
-// ---------------------------------------------------------------------------
-// ChannelGroupSection — unified Channels / Forums section (no inline form)
-// ---------------------------------------------------------------------------
 
 export function ChannelGroupSection({
   browseAriaLabel,
@@ -465,9 +450,6 @@ export function ChannelGroupSection({
   );
 }
 
-// ---------------------------------------------------------------------------
-// CustomChannelSection — user-defined channel section with management actions
-// ---------------------------------------------------------------------------
 
 export function CustomChannelSection({
   section,

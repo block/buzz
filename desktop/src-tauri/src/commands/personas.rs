@@ -701,10 +701,6 @@ pub fn set_persona_active(
     Ok(updated)
 }
 
-// ---------------------------------------------------------------------------
-// Import / Export
-// ---------------------------------------------------------------------------
-
 const MAX_PNG_BYTES: usize = 10 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 5 * 1024 * 1024;
 const MAX_ZIP_BYTES: usize = 100 * 1024 * 1024;

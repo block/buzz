@@ -62,7 +62,6 @@ test("persona env_vars round-trip through create_persona + update_persona", asyn
 }) => {
   await gotoApp(page);
 
-  // Create a persona with two env vars.
   const created = await invokeTauri<{
     id: string;
     env_vars?: Record<string, string>;
@@ -184,7 +183,6 @@ test("agent env_vars override persona env_vars on the agent record", async ({
     },
   });
 
-  // Create an agent under that persona with an override.
   const created = await invokeTauri<{
     agent: { pubkey: string; env_vars?: Record<string, string> };
   }>(page, "create_managed_agent", {
@@ -204,7 +202,6 @@ test("agent env_vars override persona env_vars on the agent record", async ({
     AGENT_ONLY: "1",
   });
 
-  // Update to replace the map entirely.
   const updated = await invokeTauri<{
     agent: { env_vars?: Record<string, string> };
   }>(page, "update_managed_agent", {

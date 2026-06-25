@@ -21,10 +21,6 @@ const PRESETS = [
   { text: "Working remotely", emoji: "\uD83C\uDFE0" },
 ] as const;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 type SetStatusDialogProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -34,10 +30,6 @@ type SetStatusDialogProps = {
   onClear: () => void;
   hasExistingStatus: boolean;
 };
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
 
 export function SetStatusDialog({
   open,

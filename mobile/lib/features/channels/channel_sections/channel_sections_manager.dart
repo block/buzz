@@ -95,10 +95,6 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  // -------------------------------------------------------------------------
-  // CRUD
-  // -------------------------------------------------------------------------
-
   void createSection(String name) {
     if (_disposed) return;
     final maxOrder = _store.sections.fold<int>(
@@ -199,10 +195,6 @@ class ChannelSectionsManager {
       unawaited(_publish());
     });
   }
-
-  // -------------------------------------------------------------------------
-  // Remote sync
-  // -------------------------------------------------------------------------
 
   Future<void> _fetchAndMerge() async {
     if (_relaySession == null) return;

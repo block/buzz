@@ -59,7 +59,6 @@ async fn upload(client: &Client, keys: &Keys, body: &[u8]) -> reqwest::Response 
         .expect("upload request")
 }
 
-// ── Minimal test images ─────────────────────────────────────────────────────
 
 fn tiny_jpeg() -> Vec<u8> {
     vec![
@@ -125,7 +124,6 @@ fn tiny_webp() -> Vec<u8> {
     ]
 }
 
-// ── Auth edge case helpers ──────────────────────────────────────────────────
 
 fn sign_custom_auth(keys: &Keys, kind: u16, content: &str, tags: Vec<Tag>) -> nostr::Event {
     EventBuilder::new(Kind::from(kind), content)
@@ -150,9 +148,6 @@ async fn upload_with_auth(
         .expect("upload request")
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MULTI-FORMAT UPLOAD TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]
@@ -218,9 +213,6 @@ async fn test_upload_webp_roundtrip() {
     println!("✅ WebP upload: {}", desc["url"]);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// AUTH EDGE CASE TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]
@@ -382,9 +374,6 @@ async fn test_auth_server_tag_correct() {
     println!("✅ Correct server tag → 200");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CONTENT VALIDATION TESTS
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]
@@ -462,9 +451,6 @@ async fn test_upload_random_bytes_accepted() {
     println!("✅ Random bytes → 200 as octet-stream");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// CONCURRENT UPLOAD TEST
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]
@@ -493,9 +479,6 @@ async fn test_concurrent_upload_same_file() {
     println!("✅ Concurrent upload: both succeeded, same sha256/url");
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// WEBSOCKET IMETA VALIDATION
-// ═══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 #[ignore]

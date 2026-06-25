@@ -40,11 +40,9 @@ use crate::queue::{
 };
 use crate::relay::{ChannelInfo, RestClient};
 
-// ── FlushBatch Clone note ─────────────────────────────────────────────────────
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
@@ -255,7 +253,6 @@ pub struct PromptContext {
     pub memory_enabled: bool,
 }
 
-// ── AgentPool impl ────────────────────────────────────────────────────────────
 
 impl AgentPool {
     /// Create a pool from pre-indexed slots (may contain None for failed startups).
@@ -339,7 +336,6 @@ impl AgentPool {
         idle + checked_out
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────────
 
     pub fn task_map(&self) -> &HashMap<tokio::task::Id, TaskMeta> {
         &self.task_map
@@ -405,7 +401,6 @@ impl AgentPool {
     }
 }
 
-// ── run_prompt_task ───────────────────────────────────────────────────────────
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
 /// Each call gets this budget; with one retry the total worst-case is
@@ -754,7 +749,6 @@ pub async fn run_prompt_task(
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
 ) {
-    // ── Determine source and resolve/create session ───────────────────────
 
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
@@ -786,7 +780,6 @@ pub async fn run_prompt_task(
         }),
     );
 
-    // ── Reaction cleanup guard ────────────────────────────────────────────
     // Collects event IDs up front. On drop (any exit path — normal, early
     // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
@@ -796,7 +789,6 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
-    // ── Turn completion guard ─────────────────────────────────────────────
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult.
     let _turn_guard = TurnCompletionGuard::new(
@@ -806,7 +798,6 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
-    // ── NIP-AE: fetch core engram before session creation ───────────────
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -966,7 +957,6 @@ pub async fn run_prompt_task(
         }),
     );
 
-    // ── Send initial_message on new channel sessions ──────────────────────
 
     if is_new_session {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
@@ -1080,7 +1070,6 @@ pub async fn run_prompt_task(
         }
     }
 
-    // ── Build prompt text (with optional context fetch) ──────────────────
 
     // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
     // `slash_command` holds the bare command. It is sent as the FIRST prompt
@@ -1163,7 +1152,6 @@ pub async fn run_prompt_task(
         });
     }
 
-    // ── Send the actual prompt ────────────────────────────────────────────
 
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
@@ -1177,7 +1165,6 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
-    // ── Control-aware prompt dispatch ─────────────────────────────────────
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -1343,13 +1330,11 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
-            // ── Session rotation on context exhaustion ────────────────
             let should_rotate = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
             );
 
-            // ── Proactive turn-based rotation ─────────────────────────
             let should_rotate = should_rotate || {
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
@@ -1478,7 +1463,6 @@ pub async fn run_prompt_task(
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
 }
 
-// ── Context fetching ──────────────────────────────────────────────────────────
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
 /// on any `None` result. The closure is called twice at most.
@@ -2031,7 +2015,6 @@ fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<Conver
     })
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Return the batch for requeue only in Queue mode; drop it in Drop mode.
 #[inline]
@@ -2067,7 +2050,6 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     }
 }
 
-// ── Reaction indicators ───────────────────────────────────────────────────────
 //
 // Two-phase lifecycle visible to users:
 //   👀  "seen"    — event was queued and an agent will handle it
@@ -2129,7 +2111,6 @@ impl Drop for ReactionGuard {
     }
 }
 
-// ── Turn liveness emission ───────────────────────────────────────────────────
 // Periodically emits a `turn_liveness` observer event while a turn is in-flight,
 // so the desktop can prune turns whose host died without unwinding (kill -9 /
 // crash) far sooner than the no-activity backstop. Runs as a non-resolving
@@ -2172,7 +2153,6 @@ async fn run_turn_liveness(
     }
 }
 
-// ── Turn completion scope guard ──────────────────────────────────────────────
 // Emits a `turn_completed` observer event on drop, covering ALL exit paths
 // (success, error, timeout, cancel, panic) from `run_prompt_task`. Captures
 // observer handle and metadata at creation time so it remains valid even after
@@ -2388,7 +2368,6 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
     }
 }
 
-// ─── Unit Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -2396,7 +2375,6 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use serde_json::json;
 
-    // ── prepend_base_for_legacy regression tests ─────────────────────────────
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
@@ -2425,7 +2403,6 @@ mod tests {
         assert_eq!(composed, "hello channel");
     }
 
-    // ── framed_system_prompt tests ───────────────────────────────────────────
     // Pin the session/new systemPrompt framing: each present prompt carries its
     // own header so the desktop observer can split into labeled sub-sections.
 
@@ -2493,7 +2470,6 @@ mod tests {
         assert!(workspace_section("").is_none());
     }
 
-    // ── with_core tests ──────────────────────────────────────────────────────
 
     #[test]
     fn test_with_core_appends_below_framed() {
@@ -2527,7 +2503,6 @@ mod tests {
         assert!(with_core(None, None).is_none());
     }
 
-    // ── parse_thread_response tests ──────────────────────────────────────────
 
     #[test]
     fn test_parse_thread_response_basic() {
@@ -2618,7 +2593,6 @@ mod tests {
         assert!(parse_thread_response(json).is_none());
     }
 
-    // ── parse_dm_response tests ──────────────────────────────────────────────
 
     #[test]
     fn test_parse_dm_response_basic() {
@@ -2730,7 +2704,6 @@ mod tests {
         assert!(parse_dm_response(json, 12).is_none());
     }
 
-    // ── json_to_context_message tests ────────────────────────────────────────
 
     #[test]
     fn test_json_to_context_message_integer_timestamp() {
@@ -2843,7 +2816,6 @@ mod tests {
         assert_eq!(msg.pubkey, "unknown");
     }
 
-    // ── pct_encode tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_pct_encode_hex_passthrough() {
@@ -2880,7 +2852,6 @@ mod tests {
         assert_eq!(pct_encode(" "), "%20");
     }
 
-    // ── SessionState tests ───────────────────────────────────────────────
 
     fn make_state() -> (SessionState, Uuid, Uuid) {
         let ch_a = Uuid::new_v4();
@@ -3048,7 +3019,6 @@ mod tests {
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
-    // ── turn liveness emission ───────────────────────────────────────────────
     // `run_turn_liveness` is raced against a "prompt" future the same way
     // `run_prompt_task` does it: the prompt wins the select and the liveness
     // future is dropped. We assert what the observer saw.

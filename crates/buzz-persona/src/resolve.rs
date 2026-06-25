@@ -17,7 +17,6 @@ use crate::merge::TriggersData;
 use crate::pack::{self, LoadedPack, LoadedPersona, PackError};
 use crate::persona::split_model;
 
-// ── Public types ──────────────────────────────────────────────────────────────
 
 /// A fully resolved persona — ready for ACP consumption.
 /// All merge, composition, and projection is done.
@@ -99,7 +98,6 @@ pub struct ResolvedPack {
     pub personas: Vec<ResolvedPersona>,
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Load, validate, merge, and resolve a pack directory.
 ///
@@ -193,7 +191,6 @@ pub fn resolve_persona_by_name(pack_dir: &Path, name: &str) -> Result<ResolvedPe
         .ok_or_else(|| PackError::PersonaNotFound(pack_dir.join(name)))
 }
 
-// ── Per-persona resolution ────────────────────────────────────────────────────
 
 fn resolve_one_persona(
     lp: &LoadedPersona,
@@ -250,7 +247,6 @@ fn resolve_one_persona(
     }
 }
 
-// ── Compose prompt ────────────────────────────────────────────────────────────
 
 /// Compose the effective system prompt: persona body + pack instructions.
 fn compose_prompt(persona_prompt: &str, pack_instructions: Option<&str>) -> String {
@@ -262,7 +258,6 @@ fn compose_prompt(persona_prompt: &str, pack_instructions: Option<&str>) -> Stri
     }
 }
 
-// ── Triggers resolution ───────────────────────────────────────────────────────
 
 /// Convert `TriggersData` to `ResolvedTriggers`.
 fn resolve_triggers(rt: Option<&TriggersData>) -> ResolvedTriggers {
@@ -280,7 +275,6 @@ fn resolve_triggers(rt: Option<&TriggersData>) -> ResolvedTriggers {
     }
 }
 
-// ── MCP server merge ──────────────────────────────────────────────────────────
 
 /// Merge pack-level shared MCP servers with per-persona servers.
 ///
@@ -352,7 +346,6 @@ fn parse_mcp_server_config(name: &str, config: &serde_json::Value) -> Option<Res
     })
 }
 
-// ── Hooks resolution ──────────────────────────────────────────────────────────
 
 /// Store hook paths as raw relative strings (no path resolution).
 ///
@@ -373,7 +366,6 @@ fn resolve_hooks(hooks: Option<&crate::merge::HooksData>) -> Option<ResolvedHook
     })
 }
 
-// ── Env var projection ────────────────────────────────────────────────────────
 
 /// Project persona config into agent subprocess env vars.
 ///
@@ -416,7 +408,6 @@ fn runtime_env_vars(persona: &LoadedPersona) -> Vec<(String, String)> {
     vars
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -425,7 +416,6 @@ mod tests {
 
     use crate::merge::{HooksData, TriggersData};
 
-    // ── compose_prompt ────────────────────────────────────────────────────
 
     #[test]
     fn compose_prompt_body_only() {
@@ -447,7 +437,6 @@ mod tests {
         assert_eq!(result, "You are a bot.");
     }
 
-    // ── resolve_triggers ──────────────────────────────────────────────────
 
     #[test]
     fn triggers_from_triggers_data() {
@@ -470,7 +459,6 @@ mod tests {
         assert!(!t.all_messages);
     }
 
-    // ── merge_mcp_servers ─────────────────────────────────────────────────
 
     #[test]
     fn mcp_merge_shared_only() {
@@ -552,7 +540,6 @@ mod tests {
         assert_eq!(env["SECRET"], "${MY_SECRET}");
     }
 
-    // ── resolve_hooks ─────────────────────────────────────────────────────
 
     #[test]
     fn hooks_stored_as_raw_relative_paths() {
@@ -583,7 +570,6 @@ mod tests {
         assert!(resolve_hooks(None).is_none());
     }
 
-    // ── runtime_env_vars ──────────────────────────────────────────────────
 
     #[test]
     fn env_vars_projected_from_model() {
@@ -668,7 +654,6 @@ mod tests {
         assert!(!map.contains_key("BUZZ_AGENT_PROVIDER"));
     }
 
-    // ── Full pipeline (resolve_pack via filesystem) ───────────────────────
 
     #[test]
     fn resolve_minimal_pack() {
@@ -820,7 +805,6 @@ mod tests {
         assert!(lep.thread_replies);
     }
 
-    // ── resolve_persona_by_name ──────────────────────────────────────────
 
     #[test]
     fn resolve_persona_by_name_found() {
@@ -872,7 +856,6 @@ mod tests {
         assert!(matches!(err, PackError::PersonaNotFound(_)));
     }
 
-    // ── model split ───────────────────────────────────────────────────────
 
     #[test]
     fn model_split_provider_and_id() {
@@ -922,7 +905,6 @@ mod tests {
         assert!(p.llm_provider.is_none());
     }
 
-    // ── Test helpers ──────────────────────────────────────────────────────
 
     fn stub_persona(
         model: Option<&str>,

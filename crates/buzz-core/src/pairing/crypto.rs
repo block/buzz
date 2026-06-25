@@ -23,13 +23,11 @@
 use nostr::hashes::Hash as _;
 use nostr::util::hkdf;
 
-// ── HKDF info strings ────────────────────────────────────────────────────────
 
 const INFO_SESSION_ID: &[u8] = b"nostr-pair-session-id";
 const INFO_SAS: &[u8] = b"nostr-pair-sas-v1";
 const INFO_TRANSCRIPT: &[u8] = b"nostr-pair-transcript-v1";
 
-// ── Internal helper ───────────────────────────────────────────────────────────
 
 /// Run HKDF-SHA256(IKM=`ikm`, salt=`salt`, info=`info`) and return 32 bytes.
 ///
@@ -46,7 +44,6 @@ fn hkdf32(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
     out
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
 
 /// Derive the session ID from the session secret.
 ///
@@ -134,13 +131,11 @@ pub fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.ct_eq(b).into()
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Test vector inputs (from NIP-AB spec) ─────────────────────────────────
 
     /// session_secret = 0xa1b2c3d4…
     fn session_secret() -> [u8; 32] {
@@ -166,7 +161,6 @@ mod tests {
         hex::encode(b)
     }
 
-    // ── session_id derivation ─────────────────────────────────────────────────
 
     #[test]
     fn session_id_is_deterministic() {
@@ -199,7 +193,6 @@ mod tests {
         );
     }
 
-    // ── SAS derivation ────────────────────────────────────────────────────────
 
     #[test]
     fn sas_code_is_six_digits() {
@@ -257,7 +250,6 @@ mod tests {
         assert!(code < 1_000_000);
     }
 
-    // ── transcript_hash derivation ────────────────────────────────────────────
 
     #[test]
     fn transcript_hash_is_deterministic() {
@@ -365,7 +357,6 @@ mod tests {
         );
     }
 
-    // ── format_sas ────────────────────────────────────────────────────────────
 
     #[test]
     fn format_sas_zero_padding() {
@@ -385,7 +376,6 @@ mod tests {
         }
     }
 
-    // ── Full round-trip consistency ───────────────────────────────────────────
 
     #[test]
     fn full_derivation_round_trip() {

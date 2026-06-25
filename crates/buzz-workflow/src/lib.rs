@@ -49,7 +49,6 @@ use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
-// ── Configuration ─────────────────────────────────────────────────────────────
 
 /// Runtime configuration for the workflow engine.
 #[derive(Clone, Debug)]
@@ -69,7 +68,6 @@ impl Default for WorkflowConfig {
     }
 }
 
-// ── Engine ────────────────────────────────────────────────────────────────────
 
 /// The workflow engine. Clone is cheap (Arc-backed DB pool + semaphore).
 pub struct WorkflowEngine {
@@ -477,7 +475,6 @@ impl WorkflowEngine {
     }
 }
 
-// ── Cron/interval helpers ─────────────────────────────────────────────────────
 
 /// Check whether a cron expression should fire within the `window_secs`-wide
 /// window ending at `now`.
@@ -538,7 +535,6 @@ fn interval_should_fire(
     }
 }
 
-// ── Pre-trigger filtering ─────────────────────────────────────────────────────
 
 /// Check emoji and filter-expression conditions that determine whether a
 /// matched workflow should actually fire. Extracted from `on_event` to keep
@@ -614,7 +610,6 @@ async fn should_fire_workflow(
     true
 }
 
-// ── Trigger context builder ───────────────────────────────────────────────────
 
 /// Build a [`executor::TriggerContext`] from a [`buzz_core::StoredEvent`].
 ///
@@ -695,7 +690,6 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
     }
 }
 
-// ── Trigger matching ──────────────────────────────────────────────────────────
 
 /// Returns `true` if the trigger type matches the given event kind.
 fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
@@ -709,13 +703,11 @@ fn trigger_matches_event(trigger: &TriggerDef, kind_u32: u32) -> bool {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── cron_should_fire helper ───────────────────────────────────────────────
 
     #[test]
     fn cron_should_fire_matches_within_window() {
@@ -796,7 +788,6 @@ mod tests {
         );
     }
 
-    // ── interval_should_fire helper ───────────────────────────────────────────
 
     #[test]
     fn interval_should_fire_returns_false_on_first_tick() {
@@ -938,7 +929,6 @@ steps:
         assert!(!trigger_matches_event(&trigger, 0));
     }
 
-    // ── Trigger matching edge cases ───────────────────────────────────────────
 
     #[test]
     fn message_posted_matches_kind_9_only() {
@@ -1050,7 +1040,6 @@ steps:
         assert_eq!(cfg.default_timeout_secs, 600);
     }
 
-    // ── build_trigger_context ─────────────────────────────────────────────────
 
     fn make_message_event() -> buzz_core::StoredEvent {
         use nostr::{EventBuilder, Keys, Kind};

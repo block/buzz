@@ -45,7 +45,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 /// NIP-AB event kind (from the kind registry).
 const PAIRING_KIND: u16 = crate::kind::KIND_PAIRING as u16;
 
-// ── Public types ──────────────────────────────────────────────────────────────
 
 /// Which role this device plays in the pairing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +107,6 @@ pub struct PairingSession {
     timeout: Duration,
 }
 
-// ── Source-side constructors and methods ───────────────────────────────────────
 
 impl PairingSession {
     /// Create a new source session. Returns the session and a QR payload
@@ -283,7 +281,6 @@ impl PairingSession {
     }
 }
 
-// ── Target-side constructors and methods ──────────────────────────────────────
 
 impl PairingSession {
     /// Create a new target session from a scanned QR payload.
@@ -427,7 +424,6 @@ impl PairingSession {
     }
 }
 
-// ── Shared methods ────────────────────────────────────────────────────────────
 
 impl PairingSession {
     /// Build an abort event. Returns `None` if no peer is known yet
@@ -535,7 +531,6 @@ impl PairingSession {
     }
 }
 
-// ── Test-only accessors ───────────────────────────────────────────────────────
 
 #[cfg(test)]
 impl PairingSession {
@@ -553,7 +548,6 @@ impl PairingSession {
     }
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
 
 impl PairingSession {
     /// Encrypt a message and wrap it in a signed kind:24134 event.
@@ -765,7 +759,6 @@ fn unexpected(expected: &str, got: &PairingMessage) -> PairingError {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

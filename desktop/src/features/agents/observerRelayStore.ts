@@ -98,7 +98,6 @@ function setConnectionState(
 ) {
   connectionState = nextState;
   errorMessage = nextErrorMessage;
-  // Invalidate all cached snapshots since connectionState changed
   snapshotByAgent.clear();
   notifyListeners();
 }
@@ -142,7 +141,6 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
     transcriptByAgent.set(key, buildTranscriptState(final));
   }
 
-  // Invalidate cached snapshot for this agent
   invalidateSnapshot(key);
 
   notifyListeners();

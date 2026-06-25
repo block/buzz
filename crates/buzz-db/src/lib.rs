@@ -216,7 +216,6 @@ impl Db {
         self.pool.begin().await.map_err(Into::into)
     }
 
-    // ── Events ───────────────────────────────────────────────────────────────
 
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
     pub async fn insert_event(
@@ -339,7 +338,6 @@ impl Db {
         Ok(result)
     }
 
-    // ── Channels ─────────────────────────────────────────────────────────────
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
     pub async fn create_channel(
@@ -539,7 +537,6 @@ impl Db {
         channel::reap_expired_ephemeral_channels(&self.pool).await
     }
 
-    // ── Reminder scheduler ───────────────────────────────────────────────────
 
     /// Query due reminders ready for delivery.
     pub async fn query_due_reminders(
@@ -559,7 +556,6 @@ impl Db {
         event::claim_due_reminder(&self.pool, event_id, event_created_at).await
     }
 
-    // ── Users ────────────────────────────────────────────────────────────────
 
     /// Ensure a user record exists (upsert).
     pub async fn ensure_user(&self, pubkey: &[u8]) -> Result<()> {
@@ -633,7 +629,6 @@ impl Db {
         user::set_channel_add_policy(&self.pool, pubkey, policy).await
     }
 
-    // ── Direct Messages ──────────────────────────────────────────────────────
 
     /// Find an existing DM by its participant hash.
     pub async fn find_dm_by_participants(
@@ -689,7 +684,6 @@ impl Db {
         dm::list_hidden_dms(&self.pool, pubkey).await
     }
 
-    // ── Threads ──────────────────────────────────────────────────────────────
 
     /// Insert thread metadata.
     #[allow(clippy::too_many_arguments)]
@@ -776,7 +770,6 @@ impl Db {
         thread::decrement_reply_count(&self.pool, parent_event_id, root_event_id).await
     }
 
-    // ── Reactions ────────────────────────────────────────────────────────────
 
     /// Add (or re-activate) a reaction.
     pub async fn add_reaction(
@@ -868,7 +861,6 @@ impl Db {
         reaction::get_reactions_bulk(&self.pool, event_ids).await
     }
 
-    // ── Feed ─────────────────────────────────────────────────────────────────
 
     /// Find events that @mention the given pubkey.
     pub async fn query_feed_mentions(
@@ -962,7 +954,6 @@ impl Db {
         feed::query_activity(&self.pool, accessible_channel_ids, since, limit).await
     }
 
-    // ── API Tokens ───────────────────────────────────────────────────────────
 
     /// Create a new API token record.
     pub async fn create_api_token(
@@ -1103,7 +1094,6 @@ impl Db {
         api_token::revoke_all_tokens(&self.pool, owner_pubkey, revoked_by).await
     }
 
-    // ── Workflows ────────────────────────────────────────────────────────────
 
     /// Create a new workflow.
     pub async fn create_workflow(
@@ -1286,7 +1276,6 @@ impl Db {
         .await
     }
 
-    // ── Partitions ──────────────────────────────────────────────────────────
 
     /// Ensures monthly partitions exist for the next N months.
     pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
@@ -1312,7 +1301,6 @@ impl Db {
         Ok(result.rows_affected())
     }
 
-    // ── Pubkey Allowlist ─────────────────────────────────────────────────────
 
     /// Check if a pubkey is in the allowlist.
     pub async fn is_pubkey_allowed(&self, pubkey: &[u8]) -> Result<bool> {
@@ -1381,7 +1369,6 @@ impl Db {
         Ok(out)
     }
 
-    // ── Relay Members (NIP-43) ───────────────────────────────────────────────
 
     /// Returns `true` if `pubkey` (64-char hex) is in the relay member list.
     pub async fn is_relay_member(&self, pubkey: &str) -> Result<bool> {
@@ -1450,7 +1437,6 @@ impl Db {
         relay_members::backfill_from_allowlist(&self.pool).await
     }
 
-    // ── Archived identities (NIP-IA) ──────────────────────────────────────────
 
     /// Returns `true` if `pubkey` (64-char hex) is currently archived.
     pub async fn is_archived(&self, pubkey: &str) -> Result<bool> {
@@ -1489,7 +1475,6 @@ impl Db {
         archived_identities::list_archived(&self.pool).await
     }
 
-    // ── Discovery events ─────────────────────────────────────────────────────
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
     pub async fn soft_delete_discovery_events(
@@ -1508,7 +1493,6 @@ impl Db {
         Ok(result.rows_affected())
     }
 
-    // ── Replaceable events ─────────────────────────────────────────────────
 
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
     /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).

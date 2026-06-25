@@ -19,7 +19,6 @@ use crate::observer::{ObserverContext, ObserverHandle};
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
 
-// ─── Public types ────────────────────────────────────────────────────────────
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -106,7 +105,6 @@ pub enum AcpError {
     AgentError(String),
 }
 
-// ─── AcpClient ───────────────────────────────────────────────────────────────
 
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
@@ -151,7 +149,6 @@ pub struct AcpClient {
 }
 
 impl AcpClient {
-    // ── Lifecycle ─────────────────────────────────────────────────────────
 
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -568,7 +565,6 @@ impl AcpClient {
         self.parse_stop_reason(&result)
     }
 
-    // ── Internal helpers ──────────────────────────────────────────────────
 
     /// Serialize `value` as a single NDJSON line and flush to the agent's stdin.
     ///
@@ -1090,7 +1086,6 @@ impl AcpClient {
     }
 }
 
-// ─── Permission response constructors ────────────────────────────────────────
 
 /// Build `session/prompt` params from one or more text content blocks.
 fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
@@ -1122,7 +1117,6 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-// ─── Session response types ───────────────────────────────────────────────────
 
 /// Full `session/new` response — session ID plus the raw JSON result.
 ///
@@ -1215,7 +1209,6 @@ pub fn resolve_model_switch_method(
     None
 }
 
-// ─── Drop: kill child process ─────────────────────────────────────────────────
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
@@ -1258,13 +1251,11 @@ fn kill_process_group(_pid: u32) -> bool {
     false
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── StopReason parsing ────────────────────────────────────────────────
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -1310,7 +1301,6 @@ mod tests {
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
     }
 
-    // ── Permission option finding ─────────────────────────────────────────
 
     #[test]
     fn find_allow_once_by_kind_not_by_option_id() {
@@ -1371,7 +1361,6 @@ mod tests {
         assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
     }
 
-    // ── JSON-RPC message construction ─────────────────────────────────────
 
     #[test]
     fn request_has_id_field() {
@@ -1563,7 +1552,6 @@ mod tests {
         assert_eq!(msg["params"]["sessionId"].as_str(), Some("sess_xyz789"));
     }
 
-    // ── String ID handling (Fix 1) ────────────────────────────────────────
 
     #[test]
     fn permission_request_with_string_id() {
@@ -1617,7 +1605,6 @@ mod tests {
         assert!(cancelled_numeric["id"].is_number());
     }
 
-    // ── Model extractor tests ─────────────────────────────────────────────
 
     #[test]
     fn extract_model_config_options_finds_model_category() {
@@ -1685,7 +1672,6 @@ mod tests {
         assert!(super::extract_model_state(&result).is_none());
     }
 
-    // ── resolve_model_switch_method tests ─────────────────────────────────
 
     #[test]
     fn resolve_prefers_stable_over_unstable() {
@@ -1783,7 +1769,6 @@ mod tests {
         );
     }
 
-    // ── Error variant display ─────────────────────────────────────────────
 
     #[test]
     fn idle_timeout_error_includes_duration() {
@@ -1805,7 +1790,6 @@ mod tests {
         );
     }
 
-    // ── Async integration tests with real subprocess ──────────────────────
 
     async fn spawn_script(script: &str) -> AcpClient {
         AcpClient::spawn("bash", &["-c".into(), script.into()], &[])
@@ -1977,7 +1961,6 @@ mod tests {
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
     }
 
-    // ── Keepalive / tool-call idle reset tests (PR #935 fix) ─────────────
 
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
@@ -2044,7 +2027,6 @@ mod tests {
         );
     }
 
-    // ── session_new_full systemPrompt serialization ──────────────────────
 
     #[tokio::test]
     async fn session_new_full_includes_system_prompt_when_some() {

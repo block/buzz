@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WorkflowError;
 
-// ── Top-level definition ──────────────────────────────────────────────────────
 
 /// Top-level workflow definition, authored in YAML and stored as canonical JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +31,6 @@ fn default_true() -> bool {
     true
 }
 
-// ── Trigger types ─────────────────────────────────────────────────────────────
 
 /// Trigger definition. The `on` field is the tag.
 ///
@@ -71,7 +69,6 @@ pub enum TriggerDef {
     Webhook,
 }
 
-// ── Step ──────────────────────────────────────────────────────────────────────
 
 /// A single step in a workflow definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,7 +89,6 @@ pub struct Step {
     pub action: ActionDef,
 }
 
-// ── Action types ──────────────────────────────────────────────────────────────
 
 /// Action definition. The `action` field is the tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +150,6 @@ pub enum ActionDef {
     },
 }
 
-// ── Validation ────────────────────────────────────────────────────────────────
 
 impl WorkflowDef {
     /// Validate the workflow definition. Returns `Err` with a descriptive message
@@ -266,7 +261,6 @@ pub(crate) fn normalize_cron(expr: &str) -> String {
     }
 }
 
-// ── Public parse function ─────────────────────────────────────────────────────
 
 /// Parse a YAML workflow definition, validate it, and return the canonical JSON.
 ///
@@ -279,13 +273,11 @@ pub fn parse_yaml(yaml: &str) -> Result<(WorkflowDef, String), WorkflowError> {
     Ok((def, json))
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Parsing ───────────────────────────────────────────────────────────────
 
     #[test]
     fn parse_simple_message_posted_workflow() {
@@ -407,7 +399,6 @@ mod tests {
         assert_eq!(def.steps.len(), 3);
     }
 
-    // ── Validation errors ─────────────────────────────────────────────────────
 
     #[test]
     fn validate_rejects_empty_name() {
@@ -473,7 +464,6 @@ mod tests {
         assert!(!def.enabled);
     }
 
-    // ── YAML parsing edge cases ───────────────────────────────────────────────
 
     #[test]
     fn parse_missing_optional_description_defaults_to_none() {
@@ -690,7 +680,6 @@ mod tests {
         assert_eq!(reparsed.steps[0].if_expr, def.steps[0].if_expr);
     }
 
-    // ── Validation edge cases ─────────────────────────────────────────────────
 
     #[test]
     fn validate_rejects_whitespace_only_name() {
@@ -775,7 +764,6 @@ mod tests {
         assert_eq!(def.steps.len(), 3);
     }
 
-    // ── Step ID validation ────────────────────────────────────────────────────
 
     #[test]
     fn step_id_validation_rejects_dashes() {
@@ -822,7 +810,6 @@ mod tests {
         );
     }
 
-    // ── normalize_cron ────────────────────────────────────────────────────────
 
     #[test]
     fn normalize_cron_5_fields_prepends_sec_appends_year() {
@@ -848,9 +835,7 @@ mod tests {
         assert_eq!(result, "0 * * * * * *");
     }
 
-    // ── DiffPosted trigger ────────────────────────────────────────────────────
 
-    // ── Sub-minute interval validation (Fix 4) ────────────────────────────────
 
     #[test]
     fn validate_rejects_sub_minute_interval() {

@@ -5,10 +5,6 @@ use tauri::Manager;
 
 use crate::templates::ChannelTemplateRecord;
 
-// ---------------------------------------------------------------------------
-// Paths
-// ---------------------------------------------------------------------------
-
 fn channel_templates_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -23,10 +19,6 @@ fn channel_templates_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(channel_templates_base_dir(app)?.join("channel-templates.json"))
 }
 
-// ---------------------------------------------------------------------------
-// Sort
-// ---------------------------------------------------------------------------
-
 pub fn sort_channel_templates(records: &mut [ChannelTemplateRecord]) {
     records.sort_by(|left, right| {
         let left_builtin = if left.is_builtin { 0 } else { 1 };
@@ -37,10 +29,6 @@ pub fn sort_channel_templates(records: &mut [ChannelTemplateRecord]) {
             .then_with(|| left.id.cmp(&right.id))
     });
 }
-
-// ---------------------------------------------------------------------------
-// Load / Save
-// ---------------------------------------------------------------------------
 
 pub fn load_channel_templates(app: &AppHandle) -> Result<Vec<ChannelTemplateRecord>, String> {
     let path = channel_templates_store_path(app)?;
@@ -72,20 +60,12 @@ pub fn save_channel_templates(
         .map_err(|error| format!("failed to write channel templates store: {error}"))
 }
 
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
-
 pub fn validate_channel_template_deletion(template: &ChannelTemplateRecord) -> Result<(), String> {
     if template.is_builtin {
         return Err("Built-in templates cannot be deleted.".to_string());
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -108,10 +88,6 @@ mod tests {
             updated_at: "2026-05-11T00:00:00Z".to_string(),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // sort_channel_templates
-    // -----------------------------------------------------------------------
 
     #[test]
     fn sort_alphabetical_case_insensitive() {
@@ -155,10 +131,6 @@ mod tests {
         sort_channel_templates(&mut templates);
         assert!(templates.is_empty());
     }
-
-    // -----------------------------------------------------------------------
-    // serialization round-trip
-    // -----------------------------------------------------------------------
 
     #[test]
     fn serialization_round_trip() {
@@ -236,10 +208,6 @@ mod tests {
         let team: TemplateTeamEntry = serde_json::from_str(team_json).unwrap();
         assert_eq!(team.runtime.as_deref(), Some("claude"));
     }
-
-    // -----------------------------------------------------------------------
-    // validate_channel_template_deletion
-    // -----------------------------------------------------------------------
 
     #[test]
     fn validate_deletion_rejects_builtin() {

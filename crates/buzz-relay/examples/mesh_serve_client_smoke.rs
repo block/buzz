@@ -54,7 +54,6 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("MeshLLM host runtime init failed: {error}"))?;
     eprintln!("[smoke] MeshLLM host runtime initialized");
 
-    // ── 1. Serve node ────────────────────────────────────────────────────────
     let serve_cfg = serve::EmbeddedServeConfig::builder()
         .model(&model)
         .api_port(SERVE_API_PORT)
@@ -87,7 +86,6 @@ async fn main() -> anyhow::Result<()> {
     let serve_model_id = wait_for_model(&http, &serve_base).await?;
     eprintln!("[smoke] serve model ready: {serve_model_id}");
 
-    // ── 2. Client node, joined to the serve node ─────────────────────────────
     let client_cfg = client::EmbeddedClientConfig::builder()
         .api_port(CLIENT_API_PORT)
         .console_port(CLIENT_CONSOLE_PORT)
@@ -108,7 +106,6 @@ async fn main() -> anyhow::Result<()> {
     let routed_model_id = wait_for_model(&http, &client_base).await?;
     eprintln!("[smoke] client sees routed model: {routed_model_id}");
 
-    // ── 3. One real completion, through the CLIENT (mesh hop) ─────────────────
     let chat_url = format!("{client_base}/chat/completions");
     let req = serde_json::json!({
         "model": routed_model_id,

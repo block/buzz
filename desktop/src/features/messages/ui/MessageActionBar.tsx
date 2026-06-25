@@ -67,9 +67,6 @@ function copyToClipboard(text: string, successMessage: string) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// MoreActionsMenu — dropdown with edit, mark unread, copy, and delete actions
-// ---------------------------------------------------------------------------
 
 function MoreActionsMenu({
   channelId,
@@ -291,9 +288,6 @@ function MoreActionsMenu({
   );
 }
 
-// ---------------------------------------------------------------------------
-// MessageActionBar — reaction picker, reply button, and more-actions menu
-// ---------------------------------------------------------------------------
 
 function QuickReactionButton({
   customEmojiUrl,

@@ -13,7 +13,6 @@ use nostr::types::Url;
 use nostr::{EventBuilder, Keys};
 use zeroize::Zeroize;
 
-// ── helpers ──────────────────────────────────────────────────────────────────
 
 fn git_config(key: &str) -> Option<String> {
     let out = std::process::Command::new("git")
@@ -73,7 +72,6 @@ fn load_key() -> Result<String, String> {
     Ok(raw.trim().to_string())
 }
 
-// ── stdin parsing ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct CredRequest {
@@ -127,7 +125,6 @@ fn parse_method(wwwauth: &str) -> Option<HttpMethod> {
     None
 }
 
-// ── public entry point ────────────────────────────────────────────────────────
 
 /// Run the credential helper. Returns exit code.
 /// Reads from stdin, writes to stdout. Errors go to stderr only.

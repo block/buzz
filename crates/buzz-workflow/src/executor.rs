@@ -20,7 +20,6 @@ use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
 use crate::WorkflowEngine;
 
-// ── Trigger context ───────────────────────────────────────────────────────────
 
 /// Data extracted from the triggering event, passed to every step.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -59,7 +58,6 @@ impl TriggerContext {
     }
 }
 
-// ── Template resolution ───────────────────────────────────────────────────────
 
 /// Resolve `{{trigger.X}}` and `{{steps.ID.output.X}}` placeholders in a string.
 ///
@@ -217,7 +215,6 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
     )))
 }
 
-// ── Condition evaluation ──────────────────────────────────────────────────────
 
 /// Build an `evalexpr::HashMapContext` from trigger context and step outputs.
 ///
@@ -248,7 +245,6 @@ pub fn build_eval_context(
 
     let mut ctx = HashMapContext::new();
 
-    // ── Custom string functions ───────────────────────────────────────────────
     // evalexpr v11 does not ship str_contains / str_starts_with / str_ends_with.
     // Register them as custom functions so workflow YAML can use them.
 
@@ -294,7 +290,6 @@ pub fn build_eval_context(
     )
     .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
 
-    // ── Trigger fields ────────────────────────────────────────────────────────
 
     // Register webhook fields first as `trigger_FIELD` so that standard trigger
     // fields inserted below always take precedence and cannot be spoofed.
@@ -322,7 +317,6 @@ pub fn build_eval_context(
             .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
     }
 
-    // ── Step outputs ──────────────────────────────────────────────────────────
 
     for (step_id, output) in step_outputs {
         if let JsonValue::Object(map) = output {
@@ -408,7 +402,6 @@ pub async fn evaluate_condition(
     Ok(result)
 }
 
-// ── Template resolution for a full Step ──────────────────────────────────────
 
 /// Resolve all template variables in a step's action fields.
 ///
@@ -477,7 +470,6 @@ pub fn resolve_step_templates(
     }
 }
 
-// ── Step output type ──────────────────────────────────────────────────────────
 
 /// Result of dispatching a single step action.
 #[derive(Debug)]
@@ -493,7 +485,6 @@ pub enum StepResult {
     Skipped,
 }
 
-// ── Action dispatch ───────────────────────────────────────────────────────────
 
 fn resolve_send_message_channel(
     explicit_channel: Option<&str>,
@@ -754,7 +745,6 @@ pub(crate) fn parse_duration_secs(duration: &str) -> Result<u64, WorkflowError> 
         .map_err(|_| WorkflowError::InvalidDefinition(format!("invalid duration: {duration}")))
 }
 
-// ── SSRF protection ───────────────────────────────────────────────────────────
 // is_private_ip is provided by buzz_core::network::is_private_ip
 
 /// Resolve `host` to IP addresses and reject if any are private/reserved.
@@ -796,7 +786,6 @@ async fn check_ssrf(host: &str, port: u16) -> Result<std::net::IpAddr, WorkflowE
     Ok(addrs[0])
 }
 
-// ── reqwest implementation (feature-gated) ────────────────────────────────────
 
 /// Maximum response body size for webhook calls (1 MiB).
 #[cfg(feature = "reqwest")]
@@ -812,7 +801,6 @@ async fn call_webhook_impl(
     use reqwest::Client;
     use std::time::Duration;
 
-    // ── SSRF check ────────────────────────────────────────────────────────────
     let parsed_url = reqwest::Url::parse(url)
         .map_err(|e| WorkflowError::WebhookError(format!("invalid URL: {e}")))?;
 
@@ -825,7 +813,6 @@ async fn call_webhook_impl(
 
     let safe_ip = check_ssrf(host, port).await?;
 
-    // ── HTTP client (no redirects, DNS-pinned) ────────────────────────────────
     // Client is built per-request because `resolve()` pins DNS for a specific host.
     // This disables connection pooling but is required for SSRF safety: without
     // pinning, reqwest performs its own DNS resolution which could return a
@@ -860,7 +847,6 @@ async fn call_webhook_impl(
 
     let status = resp.status().as_u16();
 
-    // ── Bounded response body read ────────────────────────────────────────────
     // Read incrementally to prevent OOM from a malicious server returning a
     // multi-GB payload. `resp.bytes()` would buffer the entire body before we
     // could check the size; chunked reading lets us abort early.
@@ -893,7 +879,6 @@ async fn call_webhook_impl(
     }))
 }
 
-// ── HTTP helpers for actions that still use the loopback (AddReaction) ────────
 
 /// Returns a shared `reqwest::Client` reused across all workflow HTTP calls.
 /// Sharing a single client reuses the underlying connection pool.
@@ -958,7 +943,6 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
         "response": body_json,
     }))
 }
-// ── Execution result ──────────────────────────────────────────────────────────
 
 /// Rich return type from `execute_run` / `execute_from_step`.
 ///
@@ -979,7 +963,6 @@ pub struct ExecutionResult {
     pub trace: Vec<JsonValue>,
 }
 
-// ── Main execution loop ───────────────────────────────────────────────────────
 
 /// Execute a workflow run sequentially.
 ///
@@ -1233,7 +1216,6 @@ async fn execute_steps(
     })
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1252,7 +1234,6 @@ mod tests {
         }
     }
 
-    // ── Template resolution ───────────────────────────────────────────────────
 
     #[test]
     fn resolve_trigger_text() {
@@ -1333,7 +1314,6 @@ mod tests {
         assert_eq!(out, "Service: api-gateway");
     }
 
-    // ── Condition evaluation ──────────────────────────────────────────────────
 
     #[tokio::test]
     async fn condition_true_when_text_contains_p1() {
@@ -1419,7 +1399,6 @@ mod tests {
         }
     }
 
-    // ── Duration parsing ──────────────────────────────────────────────────────
 
     #[test]
     fn parse_duration_hours() {
@@ -1449,7 +1428,6 @@ mod tests {
         assert!(parse_duration_secs("not-a-duration").is_err());
     }
 
-    // ── Template resolution edge cases ────────────────────────────────────────
 
     #[test]
     fn resolve_unclosed_template_emits_literally() {
@@ -1614,7 +1592,6 @@ mod tests {
         assert_eq!(out, "abc123def456fire");
     }
 
-    // ── Condition evaluation edge cases ───────────────────────────────────────
 
     #[tokio::test]
     async fn condition_and_expression_both_true() {
@@ -1782,7 +1759,6 @@ mod tests {
         assert!(result);
     }
 
-    // ── TriggerContext ────────────────────────────────────────────────────────
 
     #[test]
     fn trigger_context_get_field_known_fields() {

@@ -7,7 +7,6 @@
 ///
 /// Levels 1–2 (operator env vars, desktop UI) are resolved at runtime.
 
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriggersData {
@@ -37,12 +36,10 @@ pub struct ResolvedConfig {
     pub broadcast_replies: bool,
 }
 
-// ── Built-in defaults ─────────────────────────────────────────────────────────
 
 const DEFAULT_THREAD_REPLIES: bool = true;
 const DEFAULT_BROADCAST_REPLIES: bool = false;
 
-// ── Core merge ────────────────────────────────────────────────────────────────
 
 /// Merge pack defaults with per-persona values.
 ///
@@ -87,7 +84,6 @@ pub fn merge_behavioral_config(
     Value::Object(merged)
 }
 
-// ── High-level resolver ───────────────────────────────────────────────────────
 
 /// Resolve a single persona's effective config from raw frontmatter + pack defaults.
 pub fn resolve_persona_config(
@@ -178,7 +174,6 @@ pub fn resolve_persona_config(
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn string_field(v: &serde_json::Value, key: &str) -> Option<String> {
     v.get(key).and_then(|v| v.as_str()).map(str::to_owned)
@@ -207,14 +202,12 @@ fn parse_triggers(v: &serde_json::Value) -> Option<TriggersData> {
     })
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── merge_behavioral_config ───────────────────────────────────────────────
 
     #[test]
     fn persona_value_wins_over_pack_default() {
@@ -287,7 +280,6 @@ mod tests {
         assert_eq!(merged["subscribe"], json!(["chan-x"])); // persona wins
     }
 
-    // ── resolve_persona_config ────────────────────────────────────────────────
 
     #[test]
     fn built_in_defaults_when_no_fields() {
@@ -340,7 +332,6 @@ mod tests {
         assert_eq!(resolved.max_context_tokens, Some(8192));
     }
 
-    // ── triggers shallow replacement ─────────────────────────────────────────
 
     #[test]
     fn triggers_shallow_replacement() {
@@ -439,7 +430,6 @@ mod tests {
         assert!(!t.all_messages);
     }
 
-    // ── subscribe merge (Option<Vec<String>>) ────────────────────────────────
 
     #[test]
     fn subscribe_null_falls_through() {

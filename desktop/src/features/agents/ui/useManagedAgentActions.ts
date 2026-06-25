@@ -351,18 +351,15 @@ export function useManagedAgentActions() {
     deleteMutation.isPending;
 
   return {
-    // Queries
     relayAgentsQuery,
     managedAgentsQuery,
     managedAgentLogQuery,
     managedPresenceQuery,
-    // Derived state
     managedAgents,
     managedPubkeys,
     channelIdToName,
     channelsByPubkey,
     isPending,
-    // UI state
     isCreateOpen,
     setIsCreateOpen,
     agentToAddToChannel,
@@ -375,7 +372,6 @@ export function useManagedAgentActions() {
     setActionNoticeMessage,
     actionErrorMessage,
     setActionErrorMessage,
-    // Handlers
     handleStart,
     handleStop,
     handleDelete,
@@ -383,7 +379,6 @@ export function useManagedAgentActions() {
     handleAddedToChannel,
     handleBulkStopRunning,
     handleBulkRemoveStopped,
-    // Refetch helpers (for cross-domain use)
     refetchManagedAgents: () => void managedAgentsQuery.refetch(),
     refetchRelayAgents: () => void relayAgentsQuery.refetch(),
   };

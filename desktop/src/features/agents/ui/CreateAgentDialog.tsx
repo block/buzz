@@ -40,8 +40,6 @@ import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 
-// ── Dialog ────────────────────────────────────────────────────────────────────
-
 export function CreateAgentDialog({
   open,
   onCreated,
@@ -82,7 +80,6 @@ export function CreateAgentDialog({
     [],
   );
 
-  // ── Backend provider ("Run on") state ──────────────────────────────────────
   const [runOn, setRunOn] = React.useState<"local" | string>("local");
   const [providerConfig, setProviderConfig] = React.useState<
     Record<string, string>
@@ -91,7 +88,6 @@ export function CreateAgentDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
-  // ── Relay-mesh flow state ──────────────────────────────────────────────────
   // When `useMesh` is on, the agent runs buzz-agent against a member's
   // shared compute. The ACP runtime + backend selectors are hidden; runtime
   // fields are driven by `mesh_agent_preset(meshModelId)` and the submit

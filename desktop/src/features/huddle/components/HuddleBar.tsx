@@ -203,7 +203,6 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
       }
     }
 
-    // Initial fetch
     void fetchState();
 
     // Primary: listen for Rust-emitted state change events

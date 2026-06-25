@@ -536,10 +536,6 @@ class _MessageList extends HookConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// System message row
-// ---------------------------------------------------------------------------
-
 class _SystemMessageRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
@@ -675,10 +671,6 @@ Widget _systemEventAvatar(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Thread summary row (shown below messages that have replies)
-// ---------------------------------------------------------------------------
-
 class _ThreadSummaryRow extends ConsumerWidget {
   final ThreadSummary summary;
   final TimelineMessage message;
@@ -763,10 +755,6 @@ class _ThreadSummaryRow extends ConsumerWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// User message bubble
-// ---------------------------------------------------------------------------
 
 class _MessageBubble extends ConsumerWidget {
   final TimelineMessage message;
@@ -946,10 +934,6 @@ class _UserAvatar extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Channel management
-// ---------------------------------------------------------------------------
-
 IconData channelIcon(Channel channel) {
   if (channel.isDm) return LucideIcons.messagesSquare;
   if (channel.isPrivate) return LucideIcons.lock;
@@ -988,10 +972,6 @@ class _ReadOnlyNotice extends StatelessWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Connection banner (shown inside channel detail during reconnect)
-// ---------------------------------------------------------------------------
 
 class _DetailConnectionBanner extends StatelessWidget {
   final SessionStatus status;
@@ -1035,10 +1015,6 @@ class _DetailConnectionBanner extends StatelessWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Typing indicator
-// ---------------------------------------------------------------------------
 
 class _TypingIndicator extends ConsumerWidget {
   final List<TypingEntry> entries;
@@ -1103,10 +1079,6 @@ class _TypingIndicator extends ConsumerWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Members button with activity dot badge
-// ---------------------------------------------------------------------------
 
 class _MembersButton extends ConsumerWidget {
   final String channelId;

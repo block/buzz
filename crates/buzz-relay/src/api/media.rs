@@ -22,7 +22,6 @@ use sha2::{Digest, Sha256};
 
 use crate::state::AppState;
 
-// ── Upload ────────────────────────────────────────────────────────────────────
 
 /// Axum extractor that validates Blossom auth + API token scopes from headers
 /// BEFORE the request body is read. This prevents unauthenticated clients from
@@ -219,7 +218,6 @@ pub async fn upload_blob(
     Ok(Json(descriptor))
 }
 
-// ── Serve ─────────────────────────────────────────────────────────────────────
 
 /// Whether a path-segment extension is a safe token.
 ///
@@ -536,7 +534,6 @@ pub async fn head_blob(
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Resolve the S3 key from a URL path segment.
 ///
@@ -753,7 +750,6 @@ mod tests {
         assert!(validate_media_path("").is_err());
     }
 
-    // ── Range request parsing ─────────────────────────────────────────────────
 
     #[test]
     fn test_parse_byte_range_basic() {

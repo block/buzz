@@ -189,7 +189,6 @@ test.describe("unread pill & divider screenshots", () => {
     // Pill should be dismissed
     await expect(pill).toHaveCount(0);
 
-    // Divider should still be visible
     const divider = page.getByTestId("message-unread-divider");
     await expect(divider).toBeVisible();
 

@@ -20,7 +20,6 @@ use std::collections::BTreeMap;
 
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind};
 
-// ── Inputs ───────────────────────────────────────────────────────────────────
 
 /// Subset of `Manifest` needed to emit a kind:30618 event.
 ///
@@ -54,7 +53,6 @@ pub enum BuildError {
     Sign(String),
 }
 
-// ── Build helper ─────────────────────────────────────────────────────────────
 
 /// Build & sign a kind:30618 event from the manifest's ref state.
 ///
@@ -117,7 +115,6 @@ pub fn build_ref_state_event(
     Ok(event)
 }
 
-// ── Validators (private) ─────────────────────────────────────────────────────
 
 /// NIP-34 kind:30618 only emits refs under heads/ and tags/.
 fn is_emittable_ref(name: &str) -> bool {
@@ -136,7 +133,6 @@ fn is_valid_oid(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -182,7 +178,6 @@ mod tests {
         tags_with_kind(ev, kind).into_iter().next()
     }
 
-    // ── Empty repo (creation event) ──────────────────────────────────────────
 
     #[test]
     fn empty_repo_emits_d_head_p_only() {
@@ -213,7 +208,6 @@ mod tests {
         assert!(tags_with_kind(&ev, "refs/heads/main").is_empty());
     }
 
-    // ── HEAD wrapping (the gotcha) ───────────────────────────────────────────
 
     #[test]
     fn head_tag_always_wraps_with_ref_prefix() {
@@ -231,7 +225,6 @@ mod tests {
         assert_eq!(first_tag(&ev, "HEAD").unwrap()[1], "ref: refs/heads/dev");
     }
 
-    // ── Branch + tag refs ────────────────────────────────────────────────────
 
     #[test]
     fn emits_branches_and_tags() {
@@ -265,7 +258,6 @@ mod tests {
         );
     }
 
-    // ── Non-heads/tags refs are filtered ─────────────────────────────────────
 
     #[test]
     fn skips_non_heads_or_tags_refs() {
@@ -303,7 +295,6 @@ mod tests {
         assert!(first_tag(&ev, "refs/pull/1/head").is_none());
     }
 
-    // ── OID validation: SHA-1 and SHA-256 ────────────────────────────────────
 
     #[test]
     fn accepts_sha1_and_sha256_oids() {
@@ -351,7 +342,6 @@ mod tests {
         assert!(first_tag(&ev, "refs/heads/ok").is_some());
     }
 
-    // ── Ref name validation ──────────────────────────────────────────────────
 
     #[test]
     fn rejects_malformed_ref_names() {
@@ -385,7 +375,6 @@ mod tests {
         assert_eq!(tags_with_kind(&ev, "refs/heads//double").len(), 0);
     }
 
-    // ── Actor pubkey errors ──────────────────────────────────────────────────
 
     #[test]
     fn rejects_invalid_actor_pubkey() {
@@ -400,7 +389,6 @@ mod tests {
         assert!(matches!(err, BuildError::InvalidActor(_)));
     }
 
-    // ── d-tag matches kind:30617 identifier (NOT <repo>.git) ─────────────────
 
     #[test]
     fn d_tag_is_repo_id_not_repo_dot_git() {

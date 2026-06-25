@@ -10,10 +10,6 @@ import '../channels/emoji_picker.dart';
 import 'user_status.dart';
 import 'user_status_provider.dart';
 
-// ---------------------------------------------------------------------------
-// Curated emoji list — matches desktop SetStatusDialog
-// ---------------------------------------------------------------------------
-
 const _emojiOptions = [
   (emoji: '\u{1F5E3}\u{FE0F}', label: 'In a meeting'),
   (emoji: '\u{1F68C}', label: 'Commuting'),
@@ -33,10 +29,6 @@ const _presets = [
   (text: 'Working remotely', emoji: '\u{1F3E0}'),
 ];
 
-// ---------------------------------------------------------------------------
-// Public helper to show the sheet
-// ---------------------------------------------------------------------------
-
 void showSetStatusSheet(BuildContext context, {UserStatus? currentStatus}) {
   showModalBottomSheet<void>(
     context: context,
@@ -45,10 +37,6 @@ void showSetStatusSheet(BuildContext context, {UserStatus? currentStatus}) {
     builder: (_) => _SetStatusSheet(currentStatus: currentStatus),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Sheet widget
-// ---------------------------------------------------------------------------
 
 class _SetStatusSheet extends HookConsumerWidget {
   final UserStatus? currentStatus;
@@ -155,7 +143,6 @@ class _SetStatusSheet extends HookConsumerWidget {
           ),
           const SizedBox(height: Grid.twelve),
 
-          // Emoji grid
           Wrap(
             spacing: Grid.half,
             runSpacing: Grid.half,
@@ -201,7 +188,6 @@ class _SetStatusSheet extends HookConsumerWidget {
           ),
           const SizedBox(height: Grid.xs),
 
-          // Action buttons
           Row(
             children: [
               if (hasExistingStatus)

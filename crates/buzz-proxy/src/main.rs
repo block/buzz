@@ -14,7 +14,6 @@ use buzz_proxy::shadow_keys::ShadowKeyManager;
 use buzz_proxy::translate::Translator;
 use buzz_proxy::upstream::{UpstreamClient, UpstreamEvent};
 
-// ── Env helpers ───────────────────────────────────────────────────────────────
 
 fn env_required(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
@@ -27,7 +26,6 @@ fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
@@ -39,7 +37,6 @@ async fn main() {
         )
         .init();
 
-    // ── Parse env ─────────────────────────────────────────────────────────────
 
     let upstream_url = env_required("BUZZ_UPSTREAM_URL");
     let bind_addr = env_or("BUZZ_PROXY_BIND_ADDR", "0.0.0.0:4869");
@@ -55,7 +52,6 @@ async fn main() {
     }
     info!(relay_pubkey = %relay_pubkey, "relay pubkey configured for attribution trust");
 
-    // ── Parse server keypair ──────────────────────────────────────────────────
 
     let server_secret = SecretKey::from_hex(&server_key_hex).unwrap_or_else(|e| {
         eprintln!("error: invalid BUZZ_PROXY_SERVER_KEY: {e}");
@@ -64,27 +60,23 @@ async fn main() {
     let server_keys = Keys::new(server_secret);
     info!(pubkey = %server_keys.public_key(), "proxy server keypair loaded");
 
-    // ── Parse salt ────────────────────────────────────────────────────────────
 
     let salt = hex::decode(&salt_hex).unwrap_or_else(|e| {
         eprintln!("error: invalid BUZZ_PROXY_SALT (must be hex): {e}");
         std::process::exit(1);
     });
 
-    // ── Init shadow key manager ───────────────────────────────────────────────
 
     let shadow_keys = Arc::new(ShadowKeyManager::new(&salt).unwrap_or_else(|e| {
         eprintln!("error: shadow key manager init failed: {e}");
         std::process::exit(1);
     }));
 
-    // ── Derive HTTP base URL from WS URL for REST API calls ───────────────────
 
     let api_base = upstream_url
         .replace("wss://", "https://")
         .replace("ws://", "http://");
 
-    // ── Init channel map from REST API ────────────────────────────────────────
 
     info!("initializing channel map from {api_base}/api/channels ...");
     let channel_map = Arc::new(
@@ -97,7 +89,6 @@ async fn main() {
     );
     info!(channels = channel_map.len(), "channel map ready");
 
-    // ── Init translator ───────────────────────────────────────────────────────
 
     let translator = Arc::new(Translator::new(
         shadow_keys,
@@ -107,15 +98,12 @@ async fn main() {
         relay_pubkey,
     ));
 
-    // ── Init guest store (empty — guests registered via POST /admin/guests) ────
 
     let guest_store = Arc::new(GuestStore::new());
 
-    // ── Init invite store (empty — tokens created via POST /admin/invite) ─────
 
     let invite_store = Arc::new(InviteStore::new());
 
-    // ── Init upstream client ──────────────────────────────────────────────────
     //
     // UpstreamClient owns its internal outbound channel. The server calls
     // upstream.send_event() / send_req() / send_close() directly via Arc.
@@ -130,7 +118,6 @@ async fn main() {
         server_keys.clone(),
     ));
 
-    // ── upstream_events broadcast: UpstreamClient → all WebSocket sessions ────
 
     // upstream_events_tx: upstream → server (broadcast of inbound JSON strings)
     let (upstream_events_tx, _) = broadcast::channel::<String>(4096);
@@ -138,7 +125,6 @@ async fn main() {
     // inbound_tx: UpstreamClient → bridge task (UpstreamEvent)
     let (inbound_tx, mut inbound_rx) = mpsc::channel::<UpstreamEvent>(256);
 
-    // ── Bridge task: UpstreamEvent → broadcast String ─────────────────────────
     //
     // The server layer subscribes to `upstream_events_tx` as raw JSON strings.
     // The UpstreamClient emits typed `UpstreamEvent` values.  This task bridges
@@ -162,7 +148,6 @@ async fn main() {
         }
     });
 
-    // ── Read admin secret from env (optional) ─────────────────────────────────
 
     let admin_secret = std::env::var("BUZZ_PROXY_ADMIN_SECRET").ok();
     if admin_secret.is_some() {
@@ -171,7 +156,6 @@ async fn main() {
         info!("admin endpoint running unauthenticated (dev mode) — set BUZZ_PROXY_ADMIN_SECRET to secure it");
     }
 
-    // ── Build proxy state ─────────────────────────────────────────────────────
 
     // Relay URL for NIP-42 relay tag validation. Prefer explicit env var
     // (e.g. "wss://proxy.example.com") over the derived bind address fallback.
@@ -189,11 +173,9 @@ async fn main() {
         relay_url,
     };
 
-    // ── Build router ──────────────────────────────────────────────────────────
 
     let app = server::router(state);
 
-    // ── Bind listener ─────────────────────────────────────────────────────────
 
     info!("buzz-proxy starting on {bind_addr} → upstream {upstream_url}");
 
@@ -204,7 +186,6 @@ async fn main() {
             std::process::exit(1);
         });
 
-    // ── Run server + upstream concurrently ────────────────────────────────────
 
     tokio::select! {
         result = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal()) => {
@@ -220,7 +201,6 @@ async fn main() {
     info!("buzz-proxy shut down");
 }
 
-// ── Graceful shutdown ─────────────────────────────────────────────────────────
 
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()

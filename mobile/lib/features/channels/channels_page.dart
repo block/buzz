@@ -534,10 +534,6 @@ class _SliverChannelsList extends HookConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// User-defined channel sections
-// ---------------------------------------------------------------------------
-
 class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
@@ -714,10 +710,6 @@ class _CustomSectionHeader extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Section name dialog (create / rename)
-// ---------------------------------------------------------------------------
-
 class _SectionNameDialog extends HookWidget {
   final String title;
   final String confirmLabel;
@@ -756,10 +748,6 @@ class _SectionNameDialog extends HookWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Built-in channel sections (Channels / Forums / DMs)
-// ---------------------------------------------------------------------------
 
 class _ChannelSection extends StatelessWidget {
   final String title;

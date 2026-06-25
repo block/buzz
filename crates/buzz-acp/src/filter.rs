@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use tracing::{error, warn};
 
-// ── Errors ────────────────────────────────────────────────────────────────────
 
 /// Errors that can occur during filter expression evaluation.
 #[derive(Debug, thiserror::Error)]
@@ -24,7 +23,6 @@ pub enum FilterError {
     EvalError(String),
 }
 
-// ── FilterContext ─────────────────────────────────────────────────────────────
 
 /// Variables extracted from a Nostr event for use in filter expressions.
 #[derive(Debug, Clone)]
@@ -54,7 +52,6 @@ impl FilterContext {
     }
 }
 
-// ── SubscriptionRule ──────────────────────────────────────────────────────────
 
 /// Scope of channels a subscription rule applies to.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -151,7 +148,6 @@ impl Clone for SubscriptionRule {
     }
 }
 
-// ── MatchedRule ───────────────────────────────────────────────────────────────
 
 /// The result of a successful rule match.
 #[derive(Debug, Clone)]
@@ -163,7 +159,6 @@ pub struct MatchedRule {
     pub prompt_tag: String,
 }
 
-// ── evaluate_filter ───────────────────────────────────────────────────────────
 
 /// Maximum expression length accepted by `evaluate_filter`.
 ///
@@ -276,7 +271,6 @@ fn build_eval_context(ctx: &FilterContext) -> Result<evalexpr::HashMapContext, S
 
     let mut eval_ctx = HashMapContext::new();
 
-    // ── Custom string functions ───────────────────────────────────────────────
     // evalexpr v11 does not ship these helpers; register them manually.
 
     eval_ctx
@@ -325,7 +319,6 @@ fn build_eval_context(ctx: &FilterContext) -> Result<evalexpr::HashMapContext, S
         )
         .map_err(|e| e.to_string())?;
 
-    // ── Event variables ───────────────────────────────────────────────────────
 
     eval_ctx
         .set_value("content".into(), Value::String(ctx.content.clone()))
@@ -346,7 +339,6 @@ fn build_eval_context(ctx: &FilterContext) -> Result<evalexpr::HashMapContext, S
     Ok(eval_ctx)
 }
 
-// ── match_event ───────────────────────────────────────────────────────────────
 
 /// Consecutive timeout threshold before a rule is treated as disabled.
 ///
@@ -474,7 +466,6 @@ pub async fn match_event(
     None
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -525,7 +516,6 @@ mod tests {
         }
     }
 
-    // ── FilterContext ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_filter_context_from_event() {
@@ -540,7 +530,6 @@ mod tests {
         assert_eq!(ctx.timestamp, event.created_at.as_secs());
     }
 
-    // ── evaluate_filter ───────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_evaluate_filter_str_contains() {
@@ -598,7 +587,6 @@ mod tests {
         assert!(result);
     }
 
-    // ── match_event ───────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_match_event_first_match_wins() {
@@ -704,7 +692,6 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ── ChannelScope ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_channel_scope_all() {
@@ -736,7 +723,6 @@ mod tests {
         assert!(!scope.matches(&id_c));
     }
 
-    // ── prompt_tag fallback ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_prompt_tag_falls_back_to_name() {
@@ -756,7 +742,6 @@ mod tests {
         assert_eq!(matched.prompt_tag, "my-rule");
     }
 
-    // ── Fail-closed filter error handling (finding #25) ───────────────────────
 
     #[tokio::test]
     async fn test_filter_error_fails_closed_no_fallthrough() {

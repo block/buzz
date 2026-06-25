@@ -13,7 +13,6 @@ use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 
-// ── Public types ─────────────────────────────────────────────────────────────
 
 /// Messages forwarded from the upstream relay to the server layer.
 #[derive(Debug, Clone)]
@@ -26,7 +25,6 @@ pub enum UpstreamEvent {
     Connected,
 }
 
-// ── UpstreamClient ────────────────────────────────────────────────────────────
 
 /// Inner state shared across the `Arc`.  Kept separate so `Arc<Inner>` can be
 /// moved into `'static` spawned tasks without capturing `&self`.
@@ -111,7 +109,6 @@ impl UpstreamClient {
         }
     }
 
-    // ── Send helpers ──────────────────────────────────────────────────────────
 
     /// Send an event to the upstream relay.
     pub async fn send_event(&self, event: Event) -> Result<(), crate::ProxyError> {
@@ -155,7 +152,6 @@ impl UpstreamClient {
         self.inner.connected.try_read().map(|v| *v).unwrap_or(false)
     }
 
-    // ── Run loop ──────────────────────────────────────────────────────────────
 
     /// Run the upstream connection loop.  Reconnects on disconnect with exponential
     /// backoff (1 → 2 → 4 → … → 30 seconds).
@@ -185,7 +181,6 @@ impl UpstreamClient {
         }
     }
 
-    // ── Internal: single connection attempt ──────────────────────────────────
 
     /// Establish one WebSocket connection, authenticate, and pump messages until
     /// the socket closes or an error occurs.
@@ -255,7 +250,6 @@ impl UpstreamClient {
     }
 }
 
-// ── Free function: read loop ──────────────────────────────────────────────────
 //
 // Extracted as a free function so it does not capture `&self` — it receives
 // only the `Arc<Inner>` it needs, which is `'static`.
@@ -287,7 +281,6 @@ where
                 };
 
                 match relay_msg {
-                    // ── NIP-42 AUTH challenge ────────────────────────────────
                     RelayMessage::Auth { ref challenge } => {
                         debug!("received AUTH challenge: {challenge}");
                         match respond_to_auth_challenge(challenge, &inner, write_tx).await {
@@ -299,7 +292,6 @@ where
                         }
                     }
 
-                    // ── OK response — check if it's for our auth event ───────
                     RelayMessage::Ok {
                         event_id,
                         ref status,
@@ -360,7 +352,6 @@ where
                         }
                     }
 
-                    // ── All other messages → forward downstream ──────────────
                     _other => {
                         if inbound_tx
                             .send(UpstreamEvent::RelayMessage(text_str.to_string()))
@@ -397,7 +388,6 @@ where
     Ok(())
 }
 
-// ── Free function: NIP-42 auth response ──────────────────────────────────────
 
 /// Build and send a NIP-42 kind:22242 auth event in response to a challenge.
 /// Stores the auth event's ID in `inner.auth_event_id` so the read loop can
@@ -435,7 +425,6 @@ async fn respond_to_auth_challenge(
     Ok(())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

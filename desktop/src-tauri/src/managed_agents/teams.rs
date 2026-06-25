@@ -38,10 +38,6 @@ fn sort_teams(records: &mut [TeamRecord]) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Built-in teams
-// ---------------------------------------------------------------------------
-
 struct BuiltInTeam {
     id: &'static str,
     name: &'static str,
@@ -158,9 +154,6 @@ pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String>
     crate::managed_agents::storage::atomic_write_json(&path, &payload)
 }
 
-// ---------------------------------------------------------------------------
-// Directory-backed team operations
-// ---------------------------------------------------------------------------
 /// Teams directory: `<AppDataDir>/agents/teams/`
 pub(super) fn teams_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("teams");
@@ -613,10 +606,6 @@ pub fn sync_team_from_dir(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Team JSON export / import
-// ---------------------------------------------------------------------------
-
 /// Encode a team as a JSON blob for export. The format includes the team's
 /// name, description, and the full persona data for each member (so the
 /// import side can recreate personas that don't exist locally).
@@ -780,10 +769,6 @@ mod tests {
         assert!(teams.is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // encode / parse round-trip tests
-    // -----------------------------------------------------------------------
-
     fn persona(id: &str, name: &str, prompt: &str) -> PersonaRecord {
         PersonaRecord {
             id: id.to_string(),
@@ -911,10 +896,6 @@ mod tests {
         assert!(parsed.personas.is_empty());
         assert_eq!(parsed.name, "Fizz");
     }
-
-    // -----------------------------------------------------------------------
-    // merge_teams + validate_team_deletion tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn merge_teams_adds_missing_built_ins() {

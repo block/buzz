@@ -41,7 +41,6 @@ use crate::state::AppState;
 
 use super::event::dispatch_persistent_event;
 
-// ── Public types ─────────────────────────────────────────────────────────────
 
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
@@ -145,7 +144,6 @@ pub enum IngestError {
     Internal(String),
 }
 
-// ── Per-kind scope allowlist ─────────────────────────────────────────────────
 
 /// Determine the required scope for a given event kind.
 ///
@@ -246,7 +244,6 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     }
 }
 
-// ── Channel resolution helpers ───────────────────────────────────────────────
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
 pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
@@ -441,7 +438,6 @@ pub(crate) async fn check_channel_membership(
     }
 }
 
-// ── Token channel access ─────────────────────────────────────────────────────
 
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
     if let Some(allowed) = auth.channel_ids() {
@@ -452,7 +448,6 @@ fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(),
     Ok(())
 }
 
-// ── NIP-10 thread resolution ─────────────────────────────────────────────────
 
 /// Owned thread metadata for the DB insert.
 pub(crate) struct ThreadMetadataOwned {
@@ -630,7 +625,6 @@ pub(crate) async fn resolve_nip10_thread_meta(
     }))
 }
 
-// ── New validations (Phase 0a additions) ─────────────────────────────────────
 
 /// Count all `e` tags regardless of content validity.
 fn count_e_tags(event: &Event) -> usize {
@@ -1122,7 +1116,6 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     Ok(())
 }
 
-// ── The pipeline ─────────────────────────────────────────────────────────────
 
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
@@ -1138,7 +1131,6 @@ pub async fn ingest_event(
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
 
-    // ── 1. Blocked kinds ─────────────────────────────────────────────────
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
             "invalid: AUTH events cannot be submitted".into(),
@@ -1150,19 +1142,16 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 1b. HTTP-only kind gate ─────────────────────────────────────────
     if auth.is_http() && (kind_u32 == KIND_GIFT_WRAP || kind_u32 == KIND_PRESENCE_UPDATE) {
         return Err(IngestError::Rejected(format!(
             "invalid: kind {kind_u32} is only accepted via WebSocket"
         )));
     }
 
-    // ── 1c. Reject relay-only kinds from external submission ─────────────
     if buzz_core::kind::is_relay_only_kind(kind_u32) {
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
-    // ── 2. Signature verification ────────────────────────────────────────
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
     match verify_result {
@@ -1178,7 +1167,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 2b. Timestamp sanity ─────────────────────────────────────────────
     // Skip for proxy:submit — proxy-translated events preserve upstream
     // created_at timestamps which may be historical (backfill/replay).
     if !auth.has_proxy_scope() {
@@ -1192,7 +1180,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 2c. Content size guard ───────────────────────────────────────────
     const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
     if event.content.len() > MAX_EVENT_CONTENT_BYTES {
         return Err(IngestError::Rejected(format!(
@@ -1202,7 +1189,6 @@ pub async fn ingest_event(
         )));
     }
 
-    // ── 3. Pubkey match ──────────────────────────────────────────────────
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !auth.has_proxy_scope() && !is_gift_wrap {
         return Err(IngestError::AuthFailed(
@@ -1210,7 +1196,6 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 4. Per-kind scope allowlist ──────────────────────────────────────
     let required = match required_scope_for_kind(kind_u32, &event) {
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
@@ -1245,14 +1230,12 @@ pub async fn ingest_event(
         )));
     }
 
-    // ── 4b. Route command kinds to command executor ──────────────────────
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
         return super::command_executor::handle_command(state, event, auth).await;
     }
 
-    // ── 5. Channel resolution ────────────────────────────────────────────
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(&state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
@@ -1314,19 +1297,16 @@ pub async fn ingest_event(
         extract_channel_id(&event)
     };
 
-    // ── 5b. Global-only kinds ignore h-tags ─────────────────────────────
     if is_global_only_kind(kind_u32) {
         channel_id = None;
     }
 
-    // ── 6. h-tag requirement ─────────────────────────────────────────────
     if requires_h_channel_scope(kind_u32) && channel_id.is_none() {
         return Err(IngestError::Rejected(
             "invalid: channel-scoped events must include an h tag".into(),
         ));
     }
 
-    // ── 7. Token channel access ──────────────────────────────────────────
     if let Some(ch_id) = channel_id {
         check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
     } else if auth.channel_ids().is_some() {
@@ -1339,7 +1319,6 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 8. Membership check ──────────────────────────────────────────────
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
     if let Some(ch_id) = channel_id {
         // kind:9021 (join) doesn't require prior membership.
@@ -1354,7 +1333,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 9a. Relay admin commands (kinds 9030–9032) ───────────────────────
     // Handled directly — these mutate relay_members and do NOT get stored.
     if is_relay_admin_kind(event.kind.as_u16() as u32) {
         crate::handlers::relay_admin::handle_relay_admin_event(state, &event)
@@ -1367,7 +1345,6 @@ pub async fn ingest_event(
         });
     }
 
-    // ── 9b. NIP-43 leave request (kind 28936) ────────────────────────────
     // Handled directly — removes the sender from relay_members. NOT stored.
     if kind_u32 == KIND_NIP43_LEAVE_REQUEST {
         if !state.config.require_relay_membership {
@@ -1451,14 +1428,12 @@ pub async fn ingest_event(
         });
     }
 
-    // ── 9. Admin validation (kinds 9000–9022) ────────────────────────────
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(kind_u32, &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 9c. NIP-IA identity archive requests (kinds 9035/9036) ───────────
     // Processed here (verify consent, mutate archived_identities, emit the
     // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
     // NIP-43 admin commands above — the request itself falls through to normal
@@ -1469,14 +1444,12 @@ pub async fn ingest_event(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 10. Standard deletion validation (kind:5) ────────────────────────
     if kind_u32 == KIND_DELETION {
         crate::handlers::side_effects::validate_standard_deletion_event(&event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 11. Archived channel check ───────────────────────────────────────
     if let Some(ch_id) = channel_id {
         // Allow kind:9002 with archived=false (unarchive operation)
         let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
@@ -1494,7 +1467,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 12. Single-target enforcement (kind:9005, kind:5) ────────────────
     // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
     // `a` tag (addressable/parameterized-replaceable events like kind:30620).
     if kind_u32 == KIND_NIP29_DELETE_EVENT || kind_u32 == KIND_DELETION {
@@ -1511,38 +1483,32 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 13. Edit ownership (kind:40003) ──────────────────────────────────
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
         validate_edit_ownership(&event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 14. Forum vote target-kind (kind:45002) ──────────────────────────
     if kind_u32 == KIND_FORUM_VOTE {
         validate_forum_vote_target(&event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 15. Diff validation (kind:40008) ─────────────────────────────────
     if kind_u32 == KIND_STREAM_MESSAGE_DIFF {
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 15a. Agent engram envelope (kind:30174) ──────────────────────────
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 15b. Event reminder schedule tags (kind:30300) ───────────────────
     if kind_u32 == KIND_EVENT_REMINDER {
         validate_event_reminder(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 15c. Persona envelope (kind:30175) ──────────────────────────────
     if kind_u32 == KIND_PERSONA {
         validate_persona_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -1551,7 +1517,6 @@ pub async fn ingest_event(
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
-    // ── 16. kind:9007 UUID dedup (create channel with client UUID) ───────
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
         // Validate name tag is present and non-empty before any DB work.
         let create_name = event.tags.iter().find_map(|t| {
@@ -1643,7 +1608,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 17. kind:9021 open-only check ────────────────────────────────────
     if kind_u32 == KIND_NIP29_JOIN_REQUEST {
         // A join without an h-tag is meaningless — reject early.
         if channel_id.is_none() {
@@ -1666,7 +1630,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 18. imeta tag validation ─────────────────────────────────────────
     let imeta_tags: Vec<Vec<String>> = event
         .tags
         .iter()
@@ -1681,7 +1644,6 @@ pub async fn ingest_event(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 19. NIP-10 thread resolution ─────────────────────────────────────
     let thread_meta = if requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(&event, ch_id, state)
@@ -1694,7 +1656,6 @@ pub async fn ingest_event(
         None
     };
 
-    // ── 20. DB insert ────────────────────────────────────────────────────
 
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.
@@ -1706,7 +1667,6 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 20a. Reaction dedup (kind:7) — before storage ────────────────────
     // Resolve target event, insert the reaction row (dedup via ON CONFLICT),
     // store the event, then backfill the reaction_event_id. If the event insert
     // fails, compensate by removing the reaction row so state stays consistent.
@@ -1894,7 +1854,6 @@ pub async fn ingest_event(
         });
     }
 
-    // ── 20b. Bump ephemeral channel TTL deadline ──────────────────────
     // Any successfully stored channel-scoped event keeps the channel alive.
     // Skip kind:9007 (create) — the deadline was just set during creation.
     if let Some(ch_id) = channel_id {
@@ -1905,7 +1864,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 21. Side effects ─────────────────────────────────────────────────
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(kind_u32, &event, state).await
@@ -1914,7 +1872,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 22. Fan-out ──────────────────────────────────────────────────────
     let pubkey_hex = auth.pubkey().to_hex();
     dispatch_persistent_event(state, &stored_event, kind_u32, &pubkey_hex).await;
 
@@ -2309,7 +2266,6 @@ mod tests {
         assert!(validate_diff_event(&event).is_err());
     }
 
-    // ── Test helpers ─────────────────────────────────────────────────────
 
     fn make_dummy_event() -> Event {
         let keys = nostr::Keys::generate();
@@ -2349,7 +2305,6 @@ mod tests {
         assert_eq!(count_e_tags(&event), 1);
     }
 
-    // ── NIP-AE envelope validation ───────────────────────────────────────
 
     fn make_engram(tags: &[&[&str]], content: &str) -> Event {
         make_event_with_tags(KIND_AGENT_ENGRAM, content, tags)
@@ -2492,7 +2447,6 @@ mod tests {
         assert!(err.contains("base64"), "got: {err}");
     }
 
-    // ── NIP-ER not_before validation ─────────────────────────────────────
 
     #[test]
     fn not_before_accepts_zero() {
@@ -2553,7 +2507,6 @@ mod tests {
         );
     }
 
-    // ── NIP-ER reminder envelope validation ──────────────────────────────
 
     fn make_reminder(tags: &[&[&str]]) -> Event {
         make_event_with_tags(KIND_EVENT_REMINDER, "ciphertext", tags)
@@ -2693,7 +2646,6 @@ mod tests {
         assert_eq!(validate_event_reminder(&ev), Err("duplicate d tag"));
     }
 
-    // ── NIP-AP persona envelope validation ───────────────────────────────
 
     fn make_persona(tags: &[&[&str]]) -> Event {
         make_event_with_tags(

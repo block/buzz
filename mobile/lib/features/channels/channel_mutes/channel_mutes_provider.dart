@@ -85,17 +85,9 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     return ChannelMutesState(isReady: false, store: manager.store, version: 1);
   }
 
-  // -------------------------------------------------------------------------
-  // CRUD delegates
-  // -------------------------------------------------------------------------
-
   void muteChannel(String channelId) => _manager?.muteChannel(channelId);
 
   void unmuteChannel(String channelId) => _manager?.unmuteChannel(channelId);
-
-  // -------------------------------------------------------------------------
-  // Internal
-  // -------------------------------------------------------------------------
 
   void _emitManagerState(ChannelMutesManager manager) {
     if (_manager != manager) return;

@@ -419,7 +419,6 @@ fn openai_image_user_content(content: &[ToolResultContent]) -> Vec<Value> {
         .collect()
 }
 
-// ── OpenAI Responses API ───────────────────────────────────────────────────
 // Spec: https://platform.openai.com/docs/api-reference/responses
 //
 // Replay invariant: each assistant `function_call` input item **must**
@@ -998,7 +997,6 @@ mod tests {
         assert_eq!(content[1]["source"]["data"], "aW1n");
     }
 
-    // ── Responses API unit tests ───────────────────────────────────────
 
     fn cfg_responses() -> Config {
         let mut c = cfg(Provider::OpenAi);
@@ -1484,7 +1482,6 @@ mod tests {
         assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
     }
 
-    // ── one-shot refresh-on-401 in post_openai ─────────────────────────
 
     /// A token source whose `bearer()` always hands back the same stale
     /// token and whose `refresh_now()` mints a distinct fresh one, counting

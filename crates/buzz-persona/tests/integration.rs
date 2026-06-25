@@ -12,7 +12,6 @@ use buzz_persona::persona;
 use buzz_persona::resolve;
 use buzz_persona::validate;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Create a minimal valid pack in a temp directory.
 /// Returns the temp dir (holds the lifetime) and the pack root path.
@@ -117,7 +116,6 @@ When asked to review code, follow these steps...
     .unwrap();
 }
 
-// ── Full pipeline: load → parse → validate ───────────────────────────────────
 
 #[test]
 fn full_pipeline_load_and_validate() {
@@ -220,7 +218,6 @@ fn full_pipeline_load_and_validate() {
     );
 }
 
-// ── Persona parser round-trip ────────────────────────────────────────────────
 
 #[test]
 fn persona_parse_round_trip() {
@@ -266,7 +263,6 @@ You are a test agent. Be precise and thorough.
     assert_eq!(rt.all_messages, Some(false));
 }
 
-// ── Validation catches real errors ───────────────────────────────────────────
 
 #[test]
 fn validation_catches_missing_required_fields() {
@@ -344,7 +340,6 @@ fn validation_catches_unknown_behavioral_keys() {
     );
 }
 
-// ── model string splitting ───────────────────────────────────────────────────
 
 #[test]
 fn model_split_cases() {
@@ -364,7 +359,6 @@ fn model_split_cases() {
     assert_eq!(model, "my:model:v2");
 }
 
-// ── Defaults merge: persona overrides pack defaults ──────────────────────────
 
 #[test]
 fn defaults_merge_persona_overrides() {
@@ -395,7 +389,6 @@ fn defaults_merge_persona_overrides() {
     assert_eq!(lep.max_context_tokens, Some(128000));
 }
 
-// ── Resolve pipeline: full end-to-end ────────────────────────────────────────
 
 /// Build a pack on disk → resolve → verify all fields on each persona.
 #[test]
@@ -590,7 +583,6 @@ fn resolve_persona_by_name_not_found() {
     );
 }
 
-// ── Validation: zero-persona and duplicate-name in full pipeline ─────────────
 
 /// Validation catches zero-persona packs in the full pipeline.
 #[test]

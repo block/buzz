@@ -29,7 +29,6 @@ use crate::invite_store::InviteStore;
 use crate::translate::Translator;
 use crate::upstream::UpstreamClient;
 
-// ─── Shared state ────────────────────────────────────────────────────────────
 
 /// Shared state injected into every axum handler.
 #[derive(Clone)]
@@ -56,7 +55,6 @@ pub struct ProxyState {
     pub relay_url: String,
 }
 
-// ─── Router ──────────────────────────────────────────────────────────────────
 
 /// Query parameters accepted on the root WebSocket endpoint.
 #[derive(Deserialize)]
@@ -88,7 +86,6 @@ pub fn router(state: ProxyState) -> Router {
         .with_state(state)
 }
 
-// ─── Root handler (NIP-11 / WebSocket) ───────────────────────────────────────
 
 /// Content-negotiate between NIP-11 JSON and WebSocket upgrade.
 ///
@@ -142,7 +139,6 @@ fn nip11_response() -> impl IntoResponse {
     )
 }
 
-// ─── Constant-time string comparison ─────────────────────────────────────────
 
 /// Compare two strings in constant time to prevent timing side-channel attacks.
 /// Returns `true` only if both strings are identical.
@@ -161,7 +157,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
-// ─── WebSocket handler ───────────────────────────────────────────────────────
 
 /// Helper: serialize a [`RelayMessage`] and send it over the socket.
 /// Returns `true` if the send succeeded.
@@ -176,7 +171,6 @@ async fn handle_ws(mut socket: WebSocket, state: ProxyState, token: String) {
     // across clients sharing the single upstream connection.
     let conn_prefix = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
 
-    // ── 1. Send NIP-42 AUTH challenge ─────────────────────────────────────
     // Token validation is deferred until after NIP-42 auth completes.
     // Registered guests (in GuestStore) don't need a token at all.
     let challenge = uuid::Uuid::new_v4().to_string();
@@ -184,7 +178,6 @@ async fn handle_ws(mut socket: WebSocket, state: ProxyState, token: String) {
         return;
     }
 
-    // ── 3. Pre-auth loop: reject pre-auth REQs/EVENTs, wait for AUTH ─────
     // Returns `(pubkey, channels)` on successful auth, or drops the connection
     // on timeout / disconnect / invalid auth.
     let auth_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -270,7 +263,6 @@ async fn handle_ws(mut socket: WebSocket, state: ProxyState, token: String) {
                     continue;
                 }
 
-                // ── Resolve channel access ────────────────────────────
                 // Priority: GuestStore (pubkey-based) > invite token.
                 let pubkey = auth_event.pubkey;
                 let event_id = auth_event.id;
@@ -355,10 +347,8 @@ async fn handle_ws(mut socket: WebSocket, state: ProxyState, token: String) {
     let mut pending_oks: HashMap<String, EventId> = HashMap::new();
     let mut active_subs: HashSet<String> = HashSet::new();
 
-    // ── 4. Subscribe to upstream broadcast ────────────────────────────────
     let mut upstream_rx = state.upstream_events.subscribe();
 
-    // ── 5. Main authenticated message loop ────────────────────────────────
     loop {
         tokio::select! {
             // Inbound from client
@@ -491,7 +481,6 @@ async fn handle_ws(mut socket: WebSocket, state: ProxyState, token: String) {
     debug!(pubkey = %client_pubkey, "client disconnected");
 }
 
-// ─── Client message dispatcher ───────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
@@ -602,7 +591,6 @@ async fn handle_client_message(
     }
 }
 
-// ─── Filter splitting (pure, testable) ───────────────────────────────────────
 
 /// Split a list of NIP-28 filters into local (kind:40/41) and upstream groups.
 ///
@@ -751,7 +739,6 @@ fn collect_local_events(
     events
 }
 
-// ─── REQ handler ─────────────────────────────────────────────────────────────
 
 async fn handle_req(
     socket: &mut WebSocket,
@@ -804,7 +791,6 @@ async fn handle_req(
     }
 }
 
-// ─── Admin: create invite token ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct CreateInviteRequest {
@@ -883,7 +869,6 @@ async fn create_invite(
         .into_response()
 }
 
-// ─── Admin: check secret helper ───────────────────────────────────────────────
 
 /// Verify the admin secret from the Authorization header. Returns an error
 /// response if the secret is required but missing/wrong, or `None` if OK.
@@ -910,7 +895,6 @@ fn check_admin_secret(admin_secret: &Option<String>, headers: &HeaderMap) -> Opt
     }
 }
 
-// ─── Admin: guest registration ────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct RegisterGuestRequest {
@@ -1034,7 +1018,6 @@ async fn list_guests(State(state): State<ProxyState>, headers: HeaderMap) -> imp
         .into_response()
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1103,7 +1086,6 @@ mod tests {
         assert!(!constant_time_eq("abc", "abcd"));
     }
 
-    // ── split_filters tests ──────────────────────────────────────────────
 
     #[test]
     fn split_filters_pure_local() {
@@ -1183,7 +1165,6 @@ mod tests {
         assert!(upstream[0].kinds.is_none());
     }
 
-    // ── collect_local_events tests ───────────────────────────────────────
 
     fn make_channel_map_with_channel() -> (Arc<ChannelMap>, Uuid) {
         let keys = Keys::generate();

@@ -628,7 +628,6 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

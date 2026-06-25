@@ -59,7 +59,6 @@ test.describe("channel controls screenshots", () => {
     await expect(
       page.getByTestId("channel-management-private-toggle"),
     ).toBeChecked();
-    // Save button enables once the visibility actually changed.
     await expect(
       page.getByTestId("channel-management-save-changes"),
     ).toBeEnabled();

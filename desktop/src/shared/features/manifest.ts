@@ -2,12 +2,10 @@ import manifestJson from "@features-manifest";
 import { z } from "zod";
 import type { FeatureDefinition, FeaturesManifest } from "./types";
 
-// ---------------------------------------------------------------------------
 // Schema — runtime-validates the bundled preview-features.json at startup.
 //
 // On parse failure we fall back to an empty manifest and log a console warning.
 // The app keeps working; gated UI stays hidden; nothing accidentally leaks.
-// ---------------------------------------------------------------------------
 
 const FeaturePlatformSchema = z.enum(["desktop", "mobile"]);
 

@@ -18,7 +18,6 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-// ── NIP-98 verification ──────────────────────────────────────────────────────
 
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
 ///
@@ -104,7 +103,6 @@ fn canonical_url(relay_url: &str, path: &str) -> String {
     format!("{base}{path}")
 }
 
-// ── Channel access helpers ───────────────────────────────────────────────────
 
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
@@ -118,7 +116,6 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
     })
 }
 
-// ── Custom filter field extractors ──────────────────────────────────────────
 //
 // The CLI injects extension fields (before_id, depth_limit, feed_types) into
 // Nostr filter JSON. nostr::Filter silently drops unknown fields during
@@ -162,7 +159,6 @@ fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::
     }
 }
 
-// ── POST /events ─────────────────────────────────────────────────────────────
 
 /// Submit a signed Nostr event via HTTP bridge (NIP-98 auth).
 pub async fn submit_event(
@@ -233,7 +229,6 @@ pub async fn submit_event(
     }
 }
 
-// ── POST /query ──────────────────────────────────────────────────────────────
 
 /// Query events via HTTP bridge (NIP-98 auth). Returns JSON array of events.
 ///
@@ -295,7 +290,6 @@ pub async fn query_events(
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
 
-    // ── NIP-50 search: route to Typesense if any filter has a `search` field ──
     if filters.iter().any(|f| f.search.is_some()) {
         return handle_bridge_search(
             &state,
@@ -307,7 +301,6 @@ pub async fn query_events(
         .await;
     }
 
-    // ── Presence: synthesize kind:20001 from Redis (ephemeral, never in DB) ──
     if let Some(presence_events) = synthesize_presence(&state, &filters).await {
         return Ok(Json(Value::Array(presence_events)));
     }
@@ -315,7 +308,6 @@ pub async fn query_events(
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-    // ── feed_types: route to dedicated feed query functions ──
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         let feed_types = match extract_feed_types(raw) {
             Some(t) => t,
@@ -380,7 +372,6 @@ pub async fn query_events(
         handled.insert(idx);
     }
 
-    // ── depth_limit: route thread queries to get_thread_replies ──
     let e_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
@@ -432,7 +423,6 @@ pub async fn query_events(
         handled.insert(idx);
     }
 
-    // ── Standard query path (with before_id injection) ──
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -492,7 +482,6 @@ pub async fn query_events(
     Ok(Json(Value::Array(events)))
 }
 
-// ── POST /count ──────────────────────────────────────────────────────────────
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
 ///
@@ -653,7 +642,6 @@ pub async fn count_events(
     Ok(Json(serde_json::json!({ "count": total })))
 }
 
-// ── NIP-50 search via HTTP bridge ────────────────────────────────────────────
 
 /// Decide whether a search hit should be returned to the caller.
 ///
@@ -826,7 +814,6 @@ async fn handle_bridge_search(
     Ok(Json(Value::Array(events)))
 }
 
-// ── POST /hooks/{id} — Webhook trigger ───────────────────────────────────────
 
 /// Query parameters for the webhook trigger endpoint.
 #[derive(serde::Deserialize)]
@@ -972,7 +959,6 @@ pub async fn workflow_webhook(
     ))
 }
 
-// ── Presence synthesis from Redis ────────────────────────────────────────────
 
 /// If all filters target kind:20001 or kind:40902 with authors, synthesize
 /// presence from Redis instead of querying the DB (ephemeral events are never
@@ -1150,7 +1136,6 @@ mod tests {
         );
     }
 
-    // ── Custom filter field extractor tests ──
 
     #[test]
     fn extract_before_id_valid_hex() {

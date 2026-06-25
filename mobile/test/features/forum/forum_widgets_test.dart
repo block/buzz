@@ -13,10 +13,6 @@ import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
-// ---------------------------------------------------------------------------
-// Test fixtures
-// ---------------------------------------------------------------------------
-
 const _channelId = 'forum-channel';
 
 final _forumChannel = Channel(
@@ -57,10 +53,6 @@ void _setSurfaceSize(WidgetTester tester, Size size) {
   tester.view.devicePixelRatio = 1.0;
   tester.view.physicalSize = size;
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 Widget _buildPostCard({
   required ForumPost post,
@@ -143,10 +135,6 @@ Widget _buildThreadPage({
     ),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 void main() {
   group('ForumPostCard', () {
@@ -641,10 +629,6 @@ void main() {
     });
   });
 }
-
-// ---------------------------------------------------------------------------
-// Fakes
-// ---------------------------------------------------------------------------
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {
   final Map<String, UserProfile> _users;

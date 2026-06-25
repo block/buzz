@@ -15,7 +15,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-// ─── Fake LLM that captures requests so we can inspect history ──────────────
 
 struct CapturingLlm {
     url: String,
@@ -86,7 +85,6 @@ async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
     CapturingLlm { url, captured }
 }
 
-// ─── Harness (minimal copy — keeping per-test independence) ─────────────────
 
 struct Harness {
     child: tokio::process::Child,
@@ -237,7 +235,6 @@ async fn init_session(h: &mut Harness, mcp_servers: Value) -> String {
         .to_owned()
 }
 
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 /// After a text-only assistant response, the next prompt's request must
 /// include that assistant text in `messages` history. Round 4 fix.
@@ -524,7 +521,6 @@ fn openai_n_tool_calls(n: usize) -> Value {
     })
 }
 
-// ─── New round-8 regression tests ──────────────────────────────────────────
 
 /// History budget evicts old turns: after many prompts, the LLM request
 /// body stays below a sane bound. Round 7 fix; round 8 test.
@@ -713,7 +709,6 @@ async fn description_clamping_enforced() {
     h.shutdown().await;
 }
 
-// ─── Hook system regression tests ──────────────────────────────────────────
 
 /// Helper: spawn a session with a fake MCP server exposing one regular tool
 /// plus an optional `_Stop` hook controlled by env vars.

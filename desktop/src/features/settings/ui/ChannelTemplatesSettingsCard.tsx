@@ -57,10 +57,6 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 
-// ---------------------------------------------------------------------------
-// ChannelTemplatesSettingsCard
-// ---------------------------------------------------------------------------
-
 export function ChannelTemplatesSettingsCard() {
   const templatesQuery = useChannelTemplatesQuery();
   const deleteMutation = useDeleteChannelTemplateMutation();
@@ -192,10 +188,6 @@ export function ChannelTemplatesSettingsCard() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// TemplateRow
-// ---------------------------------------------------------------------------
-
 function TemplateRow({
   template,
   onEdit,
@@ -276,10 +268,6 @@ function TemplateRow({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// TemplateFormDialog (create + edit)
-// ---------------------------------------------------------------------------
 
 function TemplateFormDialog({
   template,
@@ -584,10 +572,6 @@ function TemplateFormDialog({
   );
 }
 
-// ---------------------------------------------------------------------------
-// TemplateTeamSelector — chip-based team toggle for templates
-// ---------------------------------------------------------------------------
-
 function TemplateTeamSelector({
   isPending,
   isLoading,
@@ -645,10 +629,6 @@ function TemplateTeamSelector({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// RuntimeAssignments — per-entry runtime dropdowns for selected agents
-// ---------------------------------------------------------------------------
 
 function RuntimeAssignments({
   isPending,

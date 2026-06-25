@@ -22,7 +22,6 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 
-// ── URL helpers ───────────────────────────────────────────────────────────────
 
 fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
@@ -35,7 +34,6 @@ fn http_client() -> Client {
         .expect("failed to build HTTP client")
 }
 
-// ── Blossom auth helpers ──────────────────────────────────────────────────────
 
 /// Sign a kind:24242 Blossom upload auth event for the given sha256.
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
@@ -60,7 +58,6 @@ fn blossom_auth_header(event: &nostr::Event) -> String {
     )
 }
 
-// ── Minimal 1×1 JPEG ─────────────────────────────────────────────────────────
 
 /// A valid 1×1 red JPEG (339 bytes). Used for fast upload tests.
 fn tiny_jpeg() -> Vec<u8> {
@@ -92,7 +89,6 @@ fn tiny_jpeg() -> Vec<u8> {
     ]
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Upload a tiny JPEG, then GET it back and verify the bytes match.
 /// Also checks BlobDescriptor fields and thumbnail endpoint.

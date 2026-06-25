@@ -23,8 +23,6 @@ const PRESET = {
   },
 };
 
-// ── meshAgentPresetPatch ──────────────────────────────────────────────
-
 test("patch carries the fields a managed-agent draft needs", () => {
   const patch = meshAgentPresetPatch(PRESET);
   assert.equal(patch.acpCommand, "buzz-acp");
@@ -42,8 +40,6 @@ test("patch returns owned copies — caller cannot mutate the preset", () => {
   assert.deepEqual(PRESET.agentArgs, []);
   assert.equal(PRESET.envVars.DIRTY, undefined);
 });
-
-// ── detectMeshPresetOverrides ─────────────────────────────────────────
 
 test("empty draft has no overrides", () => {
   const overrides = detectMeshPresetOverrides(

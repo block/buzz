@@ -150,7 +150,6 @@ async fn persist_command_event(
     }
 }
 
-// ── Tag extraction helpers ───────────────────────────────────────────────────
 
 /// Extract all `p` tag values (hex pubkeys) from an event.
 fn extract_p_tags(event: &Event) -> Vec<String> {
@@ -228,7 +227,6 @@ fn compute_definition_hash(json_str: &str) -> Vec<u8> {
     Sha256::digest(json_str.as_bytes()).to_vec()
 }
 
-// ── DM commands (41010–41012) ────────────────────────────────────────────────
 
 async fn handle_dm_open(
     state: &Arc<AppState>,
@@ -553,7 +551,6 @@ async fn handle_dm_hide(
     })
 }
 
-// ── Workflow commands ─────────────────────────────────────────────────────────
 
 async fn handle_workflow_def(
     state: &Arc<AppState>,
@@ -792,7 +789,6 @@ async fn handle_workflow_trigger(
     })
 }
 
-// ── Approval commands ────────────────────────────────────────────────────────
 
 /// Enforce the approver_spec field against the requesting pubkey.
 ///
@@ -1067,7 +1063,6 @@ async fn handle_approval_deny(
     })
 }
 
-// ── Approval resume helper ───────────────────────────────────────────────────
 
 /// Resume a suspended workflow run after an approval gate has been granted.
 async fn resume_workflow_after_approval(

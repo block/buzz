@@ -22,7 +22,6 @@ use crate::manifest::{self, ManifestError};
 use crate::merge::{resolve_persona_config, HooksData, TriggersData};
 use crate::persona::{self, PersonaConfig};
 
-// ── Error ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum PackError {
@@ -61,7 +60,6 @@ impl From<ManifestError> for PackError {
     }
 }
 
-// ── Public types ──────────────────────────────────────────────────────────────
 
 /// A fully loaded persona pack.
 #[derive(Debug)]
@@ -118,7 +116,6 @@ pub struct PackManifestData {
     pub defaults: Option<serde_json::Value>,
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Load a persona pack from a directory.
 ///
@@ -246,7 +243,6 @@ pub fn load_pack(pack_dir: &Path) -> Result<LoadedPack, PackError> {
     })
 }
 
-// ── Skill resolution ──────────────────────────────────────────────────────────
 
 /// Determine which skills go to which persona.
 ///
@@ -322,7 +318,6 @@ pub fn resolve_skills(pack_dir: &Path, personas: &[LoadedPersona]) -> HashMap<St
     result
 }
 
-// ── Path safety ───────────────────────────────────────────────────────────────
 
 /// Verify a path resolves within the pack root.
 ///
@@ -373,7 +368,6 @@ fn safe_resolve(pack_root: &Path, relative: &str) -> Result<PathBuf, PackError> 
     Ok(canonical)
 }
 
-// ── Parsing helpers ───────────────────────────────────────────────────────────
 
 fn read_file(path: &Path) -> Result<String, PackError> {
     std::fs::read_to_string(path).map_err(|e| PackError::Io {
@@ -456,7 +450,6 @@ fn parse_persona_file(
     })
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -464,7 +457,6 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    // ── Fixture helpers ───────────────────────────────────────────────────────
 
     fn make_pack(dir: &TempDir, personas: &[(&str, &str)]) -> PathBuf {
         let root = dir.path();
@@ -504,7 +496,6 @@ description: A fast worker
 You are Berry, a fast and direct worker.
 "#;
 
-    // ── load_pack: happy path ─────────────────────────────────────────────────
 
     #[test]
     fn load_valid_pack() {
@@ -548,7 +539,6 @@ You are Berry, a fast and direct worker.
         assert!(pack.skills_dir.is_some());
     }
 
-    // ── load_pack: error cases ────────────────────────────────────────────────
 
     #[test]
     fn missing_plugin_json_returns_error() {
@@ -578,7 +568,6 @@ You are Berry, a fast and direct worker.
         assert!(matches!(err, PackError::PersonaNotFound(_)));
     }
 
-    // ── Path safety ───────────────────────────────────────────────────────────
 
     #[test]
     fn dotdot_component_rejected() {
@@ -627,7 +616,6 @@ You are Berry, a fast and direct worker.
         assert!(matches!(err, PackError::PathEscape(_)));
     }
 
-    // ── Skill resolution ──────────────────────────────────────────────────────
 
     fn make_loaded_persona(name: &str, skills: Vec<&str>) -> LoadedPersona {
         LoadedPersona {
@@ -720,7 +708,6 @@ You are Berry, a fast and direct worker.
         assert!(!map["alpha"].iter().any(|s| s.contains('/')));
     }
 
-    // ── Pack defaults ─────────────────────────────────────────────────────────
 
     #[test]
     fn pack_defaults_applied_to_persona() {

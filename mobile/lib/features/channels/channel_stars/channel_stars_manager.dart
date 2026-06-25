@@ -92,10 +92,6 @@ class ChannelStarsManager {
     _unsubscribe = null;
   }
 
-  // -------------------------------------------------------------------------
-  // CRUD
-  // -------------------------------------------------------------------------
-
   void starChannel(String channelId) {
     if (_disposed) return;
     final entry = ChannelStarEntry(
@@ -126,10 +122,6 @@ class ChannelStarsManager {
       unawaited(_publish());
     });
   }
-
-  // -------------------------------------------------------------------------
-  // Remote sync
-  // -------------------------------------------------------------------------
 
   Future<void> _fetchAndMerge() async {
     if (_relaySession == null) return;

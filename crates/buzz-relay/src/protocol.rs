@@ -229,7 +229,6 @@ mod tests {
             .expect("sign")
     }
 
-    // ── ClientMessage parsing — table-driven ─────────────────────────────
 
     // Type alias to avoid clippy::type_complexity warning on the test case table.
     // The tuple holds: raw JSON string + a boxed checker closure.
@@ -373,7 +372,6 @@ mod tests {
         );
     }
 
-    // ── RelayMessage formatting — table-driven ────────────────────────────
 
     // Type alias to avoid clippy::type_complexity warning on the format test table.
     type FormatCase<'a> = (&'a str, Box<dyn Fn()>);

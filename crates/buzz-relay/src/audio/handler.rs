@@ -52,7 +52,6 @@ const MAX_MISSED_PONGS: u8 = 3;
 /// Auth timeout.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
-// ── Route handler ─────────────────────────────────────────────────────────────
 
 /// WebSocket upgrade handler for `/huddle/:channel_id/audio`.
 pub async fn ws_audio_handler(
@@ -63,7 +62,6 @@ pub async fn ws_audio_handler(
     ws.on_upgrade(move |socket| handle_audio_connection(socket, state, channel_id))
 }
 
-// ── Auth message shape ────────────────────────────────────────────────────────
 
 /// Highest huddle audio protocol version this relay understands. Clients are
 /// allowed to negotiate any version in `1..=CURRENT_PROTOCOL_VERSION`; older
@@ -88,12 +86,10 @@ fn default_protocol_version() -> u8 {
     1
 }
 
-// ── Core connection lifecycle ─────────────────────────────────────────────────
 
 async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channel_id: Uuid) {
     let (mut ws_send, mut ws_recv) = socket.split();
 
-    // ── Step 1: send challenge ────────────────────────────────────────────────
     let challenge = generate_challenge();
     let challenge_msg =
         serde_json::json!({"type": "challenge", "challenge": challenge}).to_string();
@@ -105,7 +101,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
         return;
     }
 
-    // ── Step 2: await auth (5s timeout) ──────────────────────────────────────
     let auth_result = tokio::time::timeout(AUTH_TIMEOUT, async {
         while let Some(Ok(msg)) = ws_recv.next().await {
             if let WsMessage::Text(text) = msg {
@@ -160,7 +155,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
 
-    // ── Relay membership gate (with NIP-OA fallback) ────────────────────────────
     if crate::api::relay_members::enforce_relay_membership(
         &state,
         pubkey.as_bytes(),
@@ -180,7 +174,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
         return;
     }
 
-    // ── Step 3: membership check / auto-add ───────────────────────────────────
     if let Err(e) = ensure_membership(&state, channel_id, &pubkey_bytes, parent_channel_id).await {
         warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership denied: {e}");
         let _ = ws_send
@@ -193,7 +186,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
         return;
     }
 
-    // ── Step 4: join room ─────────────────────────────────────────────────────
     let room = state.audio_rooms.get_or_create(channel_id);
 
     // Re-check archived status after obtaining the room. This closes the
@@ -309,7 +301,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
         "audio peer joined"
     );
 
-    // ── Step 5: broadcast joined + send welcome ───────────────────────────────
     let peers_snapshot: Vec<serde_json::Value> = room
         .peer_pubkeys()
         .into_iter()
@@ -326,7 +317,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
 
     room.broadcast_control(joined_msg);
 
-    // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
     let parent_id_for_event = parent_channel_id.unwrap_or(channel_id);
     emit_participant_event(
         &state,
@@ -337,7 +327,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
     )
     .await;
 
-    // ── Step 7: spawn send + heartbeat loops ──────────────────────────────────
     let cancel = CancellationToken::new();
     let missed_pongs = Arc::new(AtomicU8::new(0));
 
@@ -353,7 +342,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
     let hb_missed = Arc::clone(&missed_pongs);
     let heartbeat_task = tokio::spawn(heartbeat_loop(ctrl_tx.clone(), hb_missed, hb_cancel));
 
-    // ── Step 8: audio forward loop (room channels → WS send channels) ────────
     let fwd_cancel = cancel.child_token();
     let forward_task = tokio::spawn(audio_forward_loop(
         audio_rx,
@@ -363,7 +351,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
         fwd_cancel,
     ));
 
-    // ── Step 9: recv loop (blocks until disconnect) ───────────────────────────
     recv_loop(
         ws_recv,
         Arc::clone(&room),
@@ -375,7 +362,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
     )
     .await;
 
-    // ── Cleanup ───────────────────────────────────────────────────────────────
     cancel.cancel();
     let _ = send_task.await;
     let _ = heartbeat_task.await;
@@ -439,7 +425,6 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
     );
 }
 
-// ── Recv loop ─────────────────────────────────────────────────────────────────
 
 async fn recv_loop(
     mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
@@ -540,7 +525,6 @@ async fn recv_loop(
     }
 }
 
-// ── Send loop ─────────────────────────────────────────────────────────────────
 
 /// Outbound send loop with control-frame priority (matches connection.rs pattern).
 ///
@@ -576,7 +560,6 @@ async fn send_loop(
     }
 }
 
-// ── Audio forward loop ────────────────────────────────────────────────────────
 // Bridges the room's mpsc channel to the WS send channel.
 
 /// Bridges room per-peer channels → WS send channels.
@@ -615,7 +598,6 @@ async fn audio_forward_loop(
     }
 }
 
-// ── Heartbeat loop ────────────────────────────────────────────────────────────
 
 async fn heartbeat_loop(
     ws_tx: mpsc::Sender<WsMessage>,
@@ -643,7 +625,6 @@ async fn heartbeat_loop(
     }
 }
 
-// ── Membership helper ─────────────────────────────────────────────────────────
 
 async fn ensure_membership(
     state: &AppState,
@@ -714,7 +695,6 @@ async fn ensure_membership(
     Err("not a member".into())
 }
 
-// ── Lifecycle event helper ────────────────────────────────────────────────────
 
 async fn emit_participant_event(
     state: &AppState,

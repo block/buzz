@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 
-/// A single item from the home activity feed.
 @immutable
 class FeedItem {
   final String id;

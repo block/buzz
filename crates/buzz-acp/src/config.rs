@@ -13,7 +13,6 @@ use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
@@ -26,7 +25,6 @@ use crate::filter::SubscriptionRule;
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
-// ── Errors ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -40,7 +38,6 @@ pub enum ConfigError {
     ConfigFile(String),
 }
 
-// ── Enums ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
@@ -151,7 +148,6 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
-// ── Models subcommand ─────────────────────────────────────────────────────────
 
 /// CLI args for `buzz-acp models` — query available models from an agent.
 ///
@@ -182,7 +178,6 @@ pub struct ModelsArgs {
     pub json: bool,
 }
 
-// ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Parser)]
 #[command(
@@ -416,7 +411,6 @@ pub struct CliArgs {
     pub relay_observer: bool,
 }
 
-// ── Merged NIP-01 filter ──────────────────────────────────────────────────────
 
 /// Merged NIP-01 subscription filter for a single channel.
 #[derive(Debug, Clone)]
@@ -427,7 +421,6 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
-// ── Resolved config ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct Config {
@@ -744,7 +737,6 @@ impl Config {
             )));
         }
 
-        // ── Inbound author gate validation ──────────────────────────────────
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
             if raw.is_empty() {
@@ -762,7 +754,6 @@ impl Config {
             HashSet::new()
         };
 
-        // ── Persona pack resolution ──────────────────────────────────────────
         //
         // Precedence: CLI/env args > persona values > built-in defaults.
         // Persona fills in what's missing. Explicit flags always win.
@@ -810,7 +801,6 @@ impl Config {
         }
         let model = args.model.or(persona_model);
 
-        // ── Multiple-event-handling validation ──────────────────────────────
         if matches!(
             args.multiple_event_handling,
             MultipleEventHandling::Interrupt | MultipleEventHandling::OwnerInterrupt
@@ -900,7 +890,6 @@ impl Config {
     }
 }
 
-// ── TOML config file ──────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
 struct TomlConfig {
@@ -985,7 +974,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
     Ok(config.rules)
 }
 
-// ── Subscription resolution ───────────────────────────────────────────────────
 
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
@@ -1181,7 +1169,6 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1249,7 +1236,6 @@ mod tests {
         }
     }
 
-    // ── resolve_channel_filters: Mentions mode ───────────────────────────────
 
     #[test]
     fn test_mentions_mode_default_kinds() {
@@ -1386,7 +1372,6 @@ mod tests {
         );
     }
 
-    // ── resolve_channel_filters: All mode ────────────────────────────────────
 
     #[test]
     fn test_all_mode_wildcard() {
@@ -1416,7 +1401,6 @@ mod tests {
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
     }
 
-    // ── resolve_channel_filters: channels_override ───────────────────────────
 
     #[test]
     fn test_channels_override_filters_to_discovered() {
@@ -1437,7 +1421,6 @@ mod tests {
         assert!(!result.contains_key(&ch_unknown));
     }
 
-    // ── resolve_channel_filters: Config mode ─────────────────────────────────
 
     #[test]
     fn test_config_mode_single_rule_all_channels() {
@@ -1543,7 +1526,6 @@ mod tests {
         assert!(!f.require_mention, "most permissive (false) should win");
     }
 
-    // ── rule_applies_to_channel ──────────────────────────────────────────────
 
     #[test]
     fn test_rule_applies_all() {
@@ -1580,7 +1562,6 @@ mod tests {
         assert!(!rule_applies_to_channel(&rule, Uuid::new_v4()));
     }
 
-    // ── load_rules validation ────────────────────────────────────────────────
 
     #[test]
     fn test_load_rules_valid_toml() {
@@ -1726,7 +1707,6 @@ channels = "ALL"
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // ── heartbeat validation ─────────────────────────────────────────────────
 
     fn validate_heartbeat_interval(secs: u64) -> Result<(), ConfigError> {
         if secs > 0 && secs < 10 {
@@ -1770,7 +1750,6 @@ channels = "ALL"
         assert!(err.to_string().contains("heartbeat interval must be 0"));
     }
 
-    // ── turn-liveness validation ─────────────────────────────────────────────
 
     fn validate_turn_liveness(secs: u64) -> Result<(), ConfigError> {
         if secs > 0 && secs < 5 {
@@ -1808,7 +1787,6 @@ channels = "ALL"
         assert!(err.to_string().contains("turn liveness interval must be 0"));
     }
 
-    // ── summary includes agents and heartbeat ────────────────────────────────
 
     #[test]
     fn test_summary_includes_agents_and_heartbeat() {
@@ -1840,7 +1818,6 @@ channels = "ALL"
         );
     }
 
-    // ── memory toggle ───────────────────────────────────────────────────────
 
     #[test]
     fn test_memory_enabled_default_true() {
@@ -1872,7 +1849,6 @@ channels = "ALL"
         );
     }
 
-    // ── permission mode ─────────────────────────────────────────────────────
 
     #[test]
     fn test_permission_mode_wire_strings() {
@@ -1975,7 +1951,6 @@ channels = "ALL"
         }
     }
 
-    // ── Idle timeout config precedence ─────────────────────────────────────
 
     /// Helper: resolve idle_timeout_secs using the same precedence logic as Config::from_args.
     /// Precedence: explicit --idle-timeout > --turn-timeout (deprecated) > `DEFAULT_IDLE_TIMEOUT_SECS`.
@@ -2033,7 +2008,6 @@ channels = "ALL"
         );
     }
 
-    // ── RespondTo tests ────────────────────────────────────────────────────
 
     #[test]
     fn test_respond_to_default_is_owner_only() {
@@ -2091,7 +2065,6 @@ channels = "ALL"
         );
     }
 
-    // ── validate_allowlist tests ───────────────────────────────────────────
 
     #[test]
     fn test_validate_allowlist_valid_entries() {
@@ -2165,7 +2138,6 @@ channels = "ALL"
         assert!(result.is_empty());
     }
 
-    // ── Idle timeout constant + guard (PR #935) ───────────────────────────────
 
     #[test]
     fn default_idle_timeout_is_900_seconds() {

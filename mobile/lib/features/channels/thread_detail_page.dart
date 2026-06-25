@@ -217,10 +217,6 @@ class ThreadDetailPage extends HookConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Nested thread summary helpers
-// ---------------------------------------------------------------------------
-
 /// Build a lightweight summary for a nested thread (reply that has its own
 /// replies). Same logic as the top-level [ThreadSummary] but kept local to
 /// avoid coupling.
@@ -329,10 +325,6 @@ class _NestedThreadSummaryRow extends ConsumerWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Thread message row (reusable for head and replies)
-// ---------------------------------------------------------------------------
 
 class _ThreadMessage extends ConsumerWidget {
   final TimelineMessage message;
@@ -461,10 +453,6 @@ class _ThreadMessage extends ConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Thread-scoped typing indicator
-// ---------------------------------------------------------------------------
-
 class _ThreadTypingIndicator extends ConsumerWidget {
   final List<TypingEntry> entries;
 
@@ -528,10 +516,6 @@ class _ThreadTypingIndicator extends ConsumerWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
 
 class _Avatar extends StatelessWidget {
   final UserProfile? profile;

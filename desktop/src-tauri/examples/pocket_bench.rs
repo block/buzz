@@ -69,7 +69,6 @@ fn main() {
         ..Default::default()
     };
 
-    // Cold synth — first call after engine creation.
     let t0 = Instant::now();
     let cold = engine
         .generate_with_config(TEST_TEXT, &gen(), None::<fn(&[f32], f32) -> bool>)
@@ -81,7 +80,6 @@ fn main() {
         "Cold synth:       {cold_ms:.1} ms  → {cold_audio_ms:.1} ms audio  → {cold_rtf_x:.2}× realtime"
     );
 
-    // Warm synth — second call.
     let t0 = Instant::now();
     let warm = engine
         .generate_with_config(TEST_TEXT, &gen(), None::<fn(&[f32], f32) -> bool>)
@@ -93,7 +91,6 @@ fn main() {
         "Warm synth:       {warm_ms:.1} ms  → {warm_audio_ms:.1} ms audio  → {warm_rtf_x:.2}× realtime"
     );
 
-    // Write warm output for listening.
     let out_path = "/tmp/pocket_bench_out.wav";
     let ok = sherpa_onnx::write(out_path, warm.samples(), SAMPLE_RATE as i32);
     println!(

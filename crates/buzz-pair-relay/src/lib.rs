@@ -55,7 +55,6 @@ use tokio_tungstenite::tungstenite::protocol::{Message, Role, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
 
-// ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Hard per-connection lifetime. `pub(crate)` for test access.
 pub(crate) const CONN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -90,7 +89,6 @@ const ENTRY_TTL: Duration = Duration::from_secs(300);
 /// Freshness window in seconds (±).
 const FRESHNESS_SECS: i64 = 120;
 
-// ── Core types ────────────────────────────────────────────────────────────────
 
 enum OutMsg {
     Text(String),
@@ -220,7 +218,6 @@ impl Relay {
     }
 }
 
-// ── RAII connection guard ─────────────────────────────────────────────────────
 
 struct ConnGuard {
     relay: Arc<Relay>,
@@ -239,7 +236,6 @@ impl Drop for ConnGuard {
     }
 }
 
-// ── Rate limiter ──────────────────────────────────────────────────────────────
 
 struct RateWindow {
     count: u32,
@@ -264,7 +260,6 @@ impl RateWindow {
     }
 }
 
-// ── JSON helpers ──────────────────────────────────────────────────────────────
 
 fn jarr(v: Vec<Value>) -> String {
     Value::Array(v).to_string()
@@ -301,7 +296,6 @@ fn make_notice(msg: &str) -> String {
     ])
 }
 
-// ── Validation ────────────────────────────────────────────────────────────────
 
 fn is_lower_hex(s: &str, len: usize) -> bool {
     s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -604,7 +598,6 @@ fn decode_hex64(s: &str) -> Option<[u8; 64]> {
     Some(out)
 }
 
-// ── Writer task ───────────────────────────────────────────────────────────────
 
 type WsSink = futures_util::stream::SplitSink<WebSocketStream<TokioIo<Upgraded>>, Message>;
 
@@ -631,7 +624,6 @@ async fn writer_task(mut sink: WsSink, mut rx: mpsc::Receiver<OutMsg>, cancel: C
     }
 }
 
-// ── Connection handler ────────────────────────────────────────────────────────
 
 async fn handle_conn(relay: Arc<Relay>, conn_id: u64, stream: WebSocketStream<TokioIo<Upgraded>>) {
     let _guard = ConnGuard {
@@ -926,7 +918,6 @@ async fn handle_conn(relay: Arc<Relay>, conn_id: u64, stream: WebSocketStream<To
     cancel.cancel();
 }
 
-// ── HTTP upgrade ──────────────────────────────────────────────────────────────
 
 async fn http_service(
     relay: Arc<Relay>,
@@ -1012,7 +1003,6 @@ async fn http_service(
     Ok(resp)
 }
 
-// ── Server loop (extracted for testability) ───────────────────────────────────
 
 /// Run the relay accept loop on the given listener.
 /// Public for integration tests that bind to `:0`.

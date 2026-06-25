@@ -11,7 +11,6 @@ use serde::Deserialize;
 use tracing::info;
 use uuid::Uuid;
 
-// ─── DTOs ────────────────────────────────────────────────────────────────────
 
 /// Minimal DTO for deserializing `GET /api/channels` response.
 #[derive(Debug, Deserialize)]
@@ -32,7 +31,6 @@ pub struct ChannelDto {
     pub created_by: String,
 }
 
-// ─── ChannelInfo ─────────────────────────────────────────────────────────────
 
 /// All relevant information about a mapped channel.
 #[derive(Debug, Clone)]
@@ -51,7 +49,6 @@ pub struct ChannelInfo {
     pub created_at_unix: u64,
 }
 
-// ─── ChannelMap ──────────────────────────────────────────────────────────────
 
 /// Bidirectional UUID ↔ kind:40 event ID map.
 ///
@@ -63,7 +60,6 @@ pub struct ChannelMap {
     server_keys: Keys,
 }
 
-// ─── Synthesis helpers ───────────────────────────────────────────────────────
 
 impl ChannelMap {
     /// Synthesize a deterministic NIP-28 kind:40 channel creation event.
@@ -118,7 +114,6 @@ impl ChannelMap {
     }
 }
 
-// ─── Core impl ───────────────────────────────────────────────────────────────
 
 impl ChannelMap {
     /// Create an empty [`ChannelMap`] with the given server signing keys.
@@ -167,7 +162,6 @@ impl ChannelMap {
         Ok(map)
     }
 
-    // ─── Lookups ─────────────────────────────────────────────────────────────
 
     /// Look up channel info by Buzz UUID.
     pub fn lookup_by_uuid(&self, uuid: &Uuid) -> Option<ChannelInfo> {
@@ -186,7 +180,6 @@ impl ChannelMap {
         self.by_uuid.iter().map(|r| r.value().clone()).collect()
     }
 
-    // ─── Mutation ────────────────────────────────────────────────────────────
 
     /// Register a new channel (e.g. from a kind:40099 system message) and
     /// return its [`ChannelInfo`].
@@ -225,7 +218,6 @@ impl ChannelMap {
         Ok(info)
     }
 
-    // ─── Accessors ───────────────────────────────────────────────────────────
 
     /// Number of channels in the map.
     pub fn len(&self) -> usize {
@@ -243,7 +235,6 @@ impl ChannelMap {
     }
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

@@ -12,7 +12,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-// ─── Fake LLM ────────────────────────────────────────────────────────────────
 
 struct CapturingLlm {
     url: String,
@@ -83,7 +82,6 @@ async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
     CapturingLlm { url, captured }
 }
 
-// ─── Harness ─────────────────────────────────────────────────────────────────
 
 struct Harness {
     child: tokio::process::Child,
@@ -192,7 +190,6 @@ async fn init_session(h: &mut Harness, cwd: &str) -> String {
         .to_owned()
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
 
 /// AGENTS.md in cwd is loaded into the system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

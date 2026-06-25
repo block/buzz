@@ -202,10 +202,6 @@ class NostrFilter {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Model converters — parse common Nostr event kinds into typed records.
-// ---------------------------------------------------------------------------
-
 /// Parsed kind:0 user profile metadata.
 @immutable
 class ProfileData {
