@@ -1639,9 +1639,8 @@ fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
         .and_then(|t| t.as_array())
         .is_some_and(|tags| {
             tags.iter().any(|tag| {
-                tag.as_array().is_some_and(|parts| {
-                    parts.len() == 4 && parts[0].as_str() == Some("auth")
-                })
+                tag.as_array()
+                    .is_some_and(|parts| parts.len() == 4 && parts[0].as_str() == Some("auth"))
             })
         })
 }

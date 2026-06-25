@@ -924,10 +924,7 @@ fn turn_is_human_facing(
     if !is_agent(sender_pubkey) {
         return true;
     }
-    thread_tags
-        .mentioned_pubkeys
-        .iter()
-        .any(|pk| !is_agent(pk))
+    thread_tags.mentioned_pubkeys.iter().any(|pk| !is_agent(pk))
 }
 
 /// Resolve the `--reply-to` anchor for a non-DM turn.
