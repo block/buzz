@@ -380,6 +380,75 @@ rule Compromise_Community_Signing_Key:
   [ Out(sk) ]
 
 // ============================================================================
+// NIP-43 community member-npub allowlist admission
+// ============================================================================
+//
+// NIP-43 grounding: a relay-signed member-list event names pubkeys that are
+// admitted to a community. The signed preimage commits to (community id,
+// group id, pubkey), so a B-key-signed member-list event cannot mint an
+// admission into community A even under group-id collision. Acceptance is
+// gated by the same key-binding discipline as Relay_Accepts_System_Event:
+// the signature is verified against `!CommunitySigningKey(comm, sk)`, which
+// binds `comm` to the resolved community at acceptance time, never the
+// claimed one (same confused-deputy discipline as Use_Token's host fence).
+//
+// `!Admitted(pk, comm)` is the persistent fact a downstream layer would
+// consult to decide whether a pubkey is admitted to a community; the TLA+
+// counterpart is `admittedMembers ⊆ (Communities × Actors)` populated by an
+// `AdmitMember(w)` action. The cross-lane claim is one property witnessed in
+// two model worlds: TLA+ proves the in-relay scoping (a B-admitted actor
+// cannot act in A); Tamarin proves the admission event itself is
+// per-community unforgeable (B's key cannot mint an admission into A).
+
+rule Community_Signs_NIP43_MemberList:
+  [ !CommunitySigningKey(comm, sk), Fr(~group), !ClientPublic(pk) ]
+  --[
+      MemberListSigned(comm, ~group, pk)
+    ]->
+  [
+      Out(< 'member_list', comm, ~group, pk,
+            sign(< 'member_list', comm, ~group, pk >, sk) >)
+  ]
+
+rule Relay_Accepts_NIP43_MemberList:
+  [ In(< 'member_list', comm, group, pk,
+         sign(< 'member_list', comm, group, pk >, sk) >),
+    !CommunitySigningKey(comm, sk)
+  ]
+  --[
+      MemberAdmitted(pk, comm)
+    ]->
+  [ !Admitted(pk, comm) ]
+
+// MUTATION_Admit_Ignore_Community (commented red witness):
+// Re-bind the admission community to a fresh variable so a B-signed
+// member-list event mints `!Admitted(pk, ~other_comm)` for a community
+// whose key did not sign it. This is the exact dual of
+// `MUTATION_Use_Token_Ignore_Host` (213-225): the rule fires with
+// `Neq(comm, ~other_comm)` and emits an admission into a community whose
+// signing key never authorized the event. Toggling this rule on (and
+// commenting out `Relay_Accepts_NIP43_MemberList` above) falsifies
+// `nip43_admission_confined_to_signing_community` below: a fresh
+// `~other_comm` cannot have either signed the list (different community)
+// or had its key compromised in a way that authorized this admission, so
+// the lemma's right-hand disjunction is unsatisfiable.
+//
+// rule MUTATION_Admit_Ignore_Community:
+//   [ In(< 'member_list', comm, group, pk,
+//          sign(< 'member_list', comm, group, pk >, sk) >),
+//     !CommunitySigningKey(comm, sk),
+//     Fr(~other_comm)
+//   ]
+//   --[
+//       Neq(comm, ~other_comm),
+//       MemberAdmitted(pk, ~other_comm)
+//     ]->
+//   [ !Admitted(pk, ~other_comm) ]
+//
+// Expected mutation result: `nip43_admission_confined_to_signing_community`
+// goes red.
+
+// ============================================================================
 // Independent per-community audit chains
 // ============================================================================
 //
@@ -406,7 +475,18 @@ rule Probe_Audit_Cross_Community_Splice:
       Neq(commA, commB),
       CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, h(< 'audit', commA, ~seq, prevB, ~entry >))
     ]->
-  [ ]
+  [
+      // Restore both heads unchanged: the probe models an *attempt* that does
+      // not advance either chain. Without restoring, a successful probe firing
+      // would erase both heads from the trace, preventing any further audit
+      // appends in the same execution. Soundness of
+      // `cross_community_audit_splice_attempt_is_not_append` does not depend
+      // on this (no rule emits `AuditAppended` from this attempt), but
+      // tightening the model so the attempt does not consume the chains makes
+      // the trace shape match reality.
+      AuditHead(commA, prevA),
+      AuditHead(commB, prevB)
+  ]
 
 // ============================================================================
 // Draft security lemmas
@@ -530,6 +610,35 @@ lemma other_community_key_compromise_does_not_authorize:
     ==> (Ex #l. SystemEventSigned(commA, kind, group, msg) @ l & #l < #j)
       | (Ex #m. CommunityKeyCompromised(commA) @ m & #m < #j)"
 
+// S5 shape: every NIP-43 admission of `pk` into community A requires either
+// (a) a `MemberListSigned(A, _, pk)` event preceding the admission, or
+// (b) A's signing key was compromised before the admission. Since acceptance
+// in `Relay_Accepts_NIP43_MemberList` re-verifies the signature against
+// `!CommunitySigningKey(comm, sk)` (binding `comm` at acceptance, not at
+// claim), the admission community is forced to be the same community whose
+// key signed the list event. This is the load-bearing cross-community claim
+// for community-scoped member-npub allowlists: B's key cannot mint an
+// admission into A.
+lemma nip43_admission_confined_to_signing_community:
+  "All pk comm #i.
+      MemberAdmitted(pk, comm) @ i
+    ==> (Ex group #j. MemberListSigned(comm, group, pk) @ j & #j < #i)
+      | (Ex #k. CommunityKeyCompromised(comm) @ k & #k < #i)"
+
+// Sibling to `other_community_key_compromise_does_not_authorize`: compromise
+// of community B's signing key never suffices to admit a pubkey into a
+// different community A. The signed preimage of a member-list event binds
+// the community id, so B's compromise yields no admission for A — A must
+// either have signed the list for `pk` itself or had its own key
+// compromised.
+lemma other_community_key_compromise_does_not_admit:
+  "All commA commB pk #i #j #k.
+      CommunityKeyCompromised(commB) @ i
+    & MemberAdmitted(pk, commA) @ j
+    & Neq(commA, commB) @ k
+    ==> (Ex group #l. MemberListSigned(commA, group, pk) @ l & #l < #j)
+      | (Ex #m. CommunityKeyCompromised(commA) @ m & #m < #j)"
+
 // S4 shape: every audit append advances a head for the same community and the
 // next hash binds that community id, so another community's head cannot be used
 // as a splice without changing the hash/preimage.
@@ -592,5 +701,12 @@ lemma executable_host_token_mismatch_attempt:
   exists-trace
   "Ex tok client minted_comm host_comm host #i.
       HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host) @ i"
+
+// Anti-vacuity probe for nip43_admission_confined_to_signing_community: there
+// must be a trace in which a member-list event is signed and accepted into
+// the admitting community, so the lemma's left-hand side is reachable.
+lemma executable_member_admitted:
+  exists-trace
+  "Ex pk comm #i. MemberAdmitted(pk, comm) @ i"
 
 end
