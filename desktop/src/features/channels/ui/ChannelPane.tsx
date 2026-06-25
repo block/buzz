@@ -47,6 +47,7 @@ import {
   isWelcomeSetupSystemMessage,
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
+import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
@@ -612,15 +613,15 @@ export const ChannelPane = React.memo(function ChannelPane({
 
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
-
   const selectedAgent = React.useMemo(
     () =>
-      openAgentSessionPubkey
-        ? (agentSessionAgents.find(
-            (agent) => agent.pubkey === openAgentSessionPubkey,
-          ) ?? null)
-        : null,
-    [agentSessionAgents, openAgentSessionPubkey],
+      agentSessionSelection.resolveSelectedAgentSession({
+        agentSessionAgents,
+        openAgentSessionPubkey,
+        profilePanelPubkey,
+        profiles,
+      }),
+    [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
@@ -914,13 +915,20 @@ export const ChannelPane = React.memo(function ChannelPane({
                 panel
               );
             })()
-          : activeChannel && selectedAgent
+          : selectedAgent
             ? (() => {
                 const panel = (
                   <AgentSessionThreadPanel
                     agent={selectedAgent}
                     canInterruptTurn={selectedAgent.canInterruptTurn}
-                    channel={activeChannel}
+                    channel={
+                      agentSessionSelection.isAgentInActivityList({
+                        activityAgents,
+                        selectedAgent,
+                      })
+                        ? activeChannel
+                        : null
+                    }
                     isWorking={botTypingEntries.some(
                       (entry) =>
                         entry.pubkey.toLowerCase() ===

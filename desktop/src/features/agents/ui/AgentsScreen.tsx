@@ -26,6 +26,17 @@ export function AgentsScreen() {
   const openDmMutation = useOpenDmMutation();
   const { goChannel } = useAppNavigation();
 
+  const handleOpenProfilePanel = React.useCallback((pubkey: string) => {
+    setProfilePanelTarget({ kind: "pubkey", pubkey });
+  }, []);
+
+  const handleOpenPersonaProfilePanel = React.useCallback(
+    (persona: AgentPersona) => {
+      setProfilePanelTarget({ kind: "persona", persona });
+    },
+    [],
+  );
+
   const handleOpenDm = React.useCallback(
     async (pubkeys: string[]) => {
       const dm = await openDmMutation.mutateAsync({ pubkeys });
@@ -36,12 +47,8 @@ export function AgentsScreen() {
 
   return (
     <ProfilePanelProvider
-      onOpenPersonaProfilePanel={(persona) =>
-        setProfilePanelTarget({ kind: "persona", persona })
-      }
-      onOpenProfilePanel={(pubkey) =>
-        setProfilePanelTarget({ kind: "pubkey", pubkey })
-      }
+      onOpenPersonaProfilePanel={handleOpenPersonaProfilePanel}
+      onOpenProfilePanel={handleOpenProfilePanel}
     >
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
@@ -54,6 +61,7 @@ export function AgentsScreen() {
               currentPubkey={identityQuery.data?.pubkey}
               onClose={() => setProfilePanelTarget(null)}
               onOpenDm={handleOpenDm}
+              onOpenProfile={handleOpenProfilePanel}
               onResetWidth={threadPanelWidth.onResetWidth}
               onResizeStart={threadPanelWidth.onResizeStart}
               persona={

@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
+  ArrowUpRight,
   Copy,
   Cpu,
   Ear,
@@ -44,6 +45,7 @@ export type ProfileField = {
   displayNode?: React.ReactNode;
   icon: LucideIcon;
   label: string;
+  onClick?: () => void;
   testId?: string;
 };
 
@@ -86,6 +88,7 @@ export function useProfileFieldBuckets({
   ownerAvatarUrl,
   ownerDisplayName,
   ownerHandle,
+  ownerProfilePubkey,
   ownerPubkey,
   persona,
   presenceLoaded,
@@ -101,6 +104,7 @@ export function useProfileFieldBuckets({
   ownerAvatarUrl: string | null;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
+  ownerProfilePubkey: string | null;
   ownerPubkey: string | null;
   persona: AgentPersona | undefined;
   presenceLoaded: boolean;
@@ -120,6 +124,7 @@ export function useProfileFieldBuckets({
             ownerAvatarUrl,
             ownerDisplayName,
             ownerHandle,
+            ownerProfilePubkey,
             ownerPubkey,
             persona,
             presenceLoaded,
@@ -140,6 +145,7 @@ export function useProfileFieldBuckets({
     ownerAvatarUrl,
     ownerDisplayName,
     ownerHandle,
+    ownerProfilePubkey,
     ownerPubkey,
     persona,
     presenceLoaded,
@@ -224,6 +230,7 @@ export function buildOwnerFields({
   ownerAvatarUrl,
   ownerDisplayName,
   ownerHandle,
+  ownerProfilePubkey,
   ownerPubkey,
   persona,
   presenceLoaded,
@@ -236,6 +243,7 @@ export function buildOwnerFields({
   ownerAvatarUrl: string | null;
   ownerDisplayName: string | null;
   ownerHandle: string | null;
+  ownerProfilePubkey: string | null;
   ownerPubkey: string | null;
   persona?: AgentPersona;
   presenceLoaded: boolean;
@@ -249,7 +257,7 @@ export function buildOwnerFields({
       : managedAgent.respondTo.replace(/-/g, " ")
     : null;
 
-  const ownerClickable = Boolean(onOpenProfile && ownerPubkey);
+  const ownerClickable = Boolean(onOpenProfile && ownerProfilePubkey);
   const ownerContent = (
     <>
       <UserAvatar
@@ -267,29 +275,19 @@ export function buildOwnerFields({
     fields.push({
       copyValue: ownerClickable
         ? undefined
-        : (ownerPubkey ?? ownerHandle ?? undefined),
+        : (ownerProfilePubkey ?? ownerPubkey ?? ownerHandle ?? undefined),
       displayValue: ownerDisplayName,
-      displayNode: ownerClickable ? (
-        <button
-          className="inline-flex max-w-full items-center gap-2 rounded text-left text-sm text-muted-foreground transition-colors hover:text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={(event) => {
-            event.stopPropagation();
-            if (ownerPubkey) {
-              onOpenProfile?.(ownerPubkey);
-            }
-          }}
-          title={ownerDisplayName}
-          type="button"
-        >
-          {ownerContent}
-        </button>
-      ) : (
+      displayNode: (
         <span className="inline-flex max-w-full items-center gap-2">
           {ownerContent}
         </span>
       ),
       icon: UserRound,
       label: "Owned by",
+      onClick:
+        ownerClickable && ownerProfilePubkey
+          ? () => onOpenProfile?.(ownerProfilePubkey)
+          : undefined,
       testId: "user-profile-owned-by",
     });
   }
@@ -471,6 +469,7 @@ export function ProfileFieldGroup({ fields }: { fields: ProfileField[] }) {
 function ProfileFieldRow({ field }: { field: ProfileField }) {
   const Icon = field.icon;
   const isCopyable = Boolean(field.copyValue);
+  const isActionable = Boolean(field.onClick);
 
   const content = (
     <>
@@ -488,11 +487,28 @@ function ProfileFieldRow({ field }: { field: ProfileField }) {
           {field.displayNode ?? field.displayValue}
         </span>
       </span>
-      {isCopyable ? (
+      {isActionable ? (
+        <ArrowUpRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : isCopyable ? (
         <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
       ) : null}
     </>
   );
+
+  if (isActionable) {
+    return (
+      <button
+        aria-label={`Open ${field.label}`}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        data-testid={field.testId}
+        onClick={field.onClick}
+        title={`Open ${field.label}`}
+        type="button"
+      >
+        {content}
+      </button>
+    );
+  }
 
   if (isCopyable && field.copyValue) {
     return (

@@ -660,9 +660,8 @@ export function UserProfilePanel({
 
   const handleOpenActivity = React.useCallback(() => {
     if (!effectivePubkey) return;
-    onClose();
     onOpenAgentSession?.(effectivePubkey);
-  }, [effectivePubkey, onClose, onOpenAgentSession]);
+  }, [effectivePubkey, onOpenAgentSession]);
 
   const handleOpenChannel = React.useCallback(
     (channelId: string) => {
@@ -708,6 +707,8 @@ export function UserProfilePanel({
       ? `${ownerHandle} (you)`
       : ownerHandle
     : null;
+  const ownerProfilePubkey =
+    ownerPubkey ?? (isOwner === true ? (currentPubkey ?? null) : null);
   const ownerAvatarProfile = ownerPubkey
     ? ownerProfileQuery.data
     : currentProfileQuery.data;
@@ -759,6 +760,7 @@ export function UserProfilePanel({
     ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,
     ownerDisplayName,
     ownerHandle,
+    ownerProfilePubkey,
     ownerPubkey,
     persona: resolvedPersona,
     presenceLoaded: presenceQuery.isSuccess,

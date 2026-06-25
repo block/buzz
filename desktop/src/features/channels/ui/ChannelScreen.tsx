@@ -318,8 +318,8 @@ export function ChannelScreen({
     return pubkeys;
   }, [channelMembers, managedAgents, relayAgents]);
   const {
+    agentSessionCandidates,
     botTypingEntries,
-    channelAgentSessionAgents: activeChannelAgentSessionAgents,
     humanTypingPubkeys,
     threadTypingPubkeys,
   } = useChannelActivityTyping({
@@ -331,7 +331,29 @@ export function ChannelScreen({
     relayAgents,
     typingEntries,
   });
-  useManagedAgentObserverBridge(activeChannelAgentSessionAgents);
+  const observerBridgeAgents = React.useMemo(() => {
+    if (
+      !profilePanelPubkey ||
+      !openAgentSessionPubkey ||
+      normalizePubkey(profilePanelPubkey) !==
+        normalizePubkey(openAgentSessionPubkey) ||
+      managedAgents.some(
+        (agent) =>
+          normalizePubkey(agent.pubkey) === normalizePubkey(profilePanelPubkey),
+      )
+    ) {
+      return managedAgents;
+    }
+
+    return [
+      ...managedAgents,
+      {
+        pubkey: profilePanelPubkey,
+        status: "deployed" as const,
+      },
+    ];
+  }, [managedAgents, openAgentSessionPubkey, profilePanelPubkey]);
+  useManagedAgentObserverBridge(observerBridgeAgents);
   const messageProfiles = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(
@@ -494,6 +516,7 @@ export function ChannelScreen({
       ? handleSendVideoReviewComment
       : undefined;
   const {
+    agentSessionAgents,
     channelAgentSessionAgents,
     closeAgentSession: handleCloseAgentSession,
     openAgentSession: handleOpenAgentSession,
@@ -511,8 +534,9 @@ export function ChannelScreen({
       !relayAgentsQuery.isLoading,
     channelMembers,
     handleOpenThread,
-    managedAgents: activeChannelAgentSessionAgents,
+    managedAgents: agentSessionCandidates,
     openAgentSessionPubkey,
+    profilePanelPubkey,
     setExpandedThreadReplyIds,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
@@ -713,8 +737,9 @@ export function ChannelScreen({
               >
                 <ChannelPane
                   activeChannel={activeChannel}
+                  activityAgents={channelAgentSessionAgents}
                   agentPubkeys={agentPubkeys}
-                  agentSessionAgents={channelAgentSessionAgents}
+                  agentSessionAgents={agentSessionAgents}
                   botTypingEntries={botTypingEntries}
                   channelFind={channelFind}
                   currentPubkey={currentPubkey}

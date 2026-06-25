@@ -257,38 +257,23 @@ export function ProfileTabBar({
 
 export function ProfileInfoTabContent({
   agentInfoFields,
-  agentInstruction,
   onOpenActivity,
-  onOpenInstructions,
   pubkey,
   showActivityIngress,
-  showInstructionBlock,
 }: {
   agentInfoFields: ProfileField[];
-  agentInstruction: string | null;
   onOpenActivity: () => void;
-  onOpenInstructions: () => void;
   pubkey: string | null;
   showActivityIngress: boolean;
-  showInstructionBlock: boolean;
 }) {
   const hasInfoFields = agentInfoFields.length > 0;
 
-  if (!showInstructionBlock && !hasInfoFields && !showActivityIngress) {
+  if (!hasInfoFields && !showActivityIngress) {
     return null;
   }
 
   return (
     <div className="space-y-2">
-      {showInstructionBlock ? (
-        <div className="overflow-hidden rounded-2xl bg-muted/20">
-          <AgentInstructionRow
-            instruction={agentInstruction}
-            onOpenInstructions={onOpenInstructions}
-          />
-        </div>
-      ) : null}
-      {hasInfoFields ? <ProfileFieldGroup fields={agentInfoFields} /> : null}
       {showActivityIngress ? (
         <ProfileIngressRow
           icon={Wrench}
@@ -298,28 +283,35 @@ export function ProfileInfoTabContent({
           trailing="View"
         />
       ) : null}
+      {hasInfoFields ? <ProfileFieldGroup fields={agentInfoFields} /> : null}
     </div>
   );
 }
 
 export function ProfileRuntimeTabContent({
+  agentInstruction,
   diagnosticsFields,
   diagnosticsSummary,
   managedAgent,
   modelLabel,
   onOpenDiagnostics,
+  onOpenInstructions,
   runtimeConfigurationFields,
   runtimeSettingsFields,
   showDiagnosticsIngress,
+  showInstructionBlock,
 }: {
+  agentInstruction: string | null;
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: React.ReactNode;
   managedAgent: ManagedAgent | undefined;
   modelLabel: string;
   onOpenDiagnostics: () => void;
+  onOpenInstructions: () => void;
   runtimeConfigurationFields: ProfileField[];
   runtimeSettingsFields: ProfileField[];
   showDiagnosticsIngress: boolean;
+  showInstructionBlock: boolean;
 }) {
   const statusDiagnosticsFields = diagnosticsFields.filter(
     (field) => field.label === "Status",
@@ -337,7 +329,8 @@ export function ProfileRuntimeTabContent({
     !hasRuntimeRows &&
     statusDiagnosticsFields.length === 0 &&
     detailDiagnosticsFields.length === 0 &&
-    !showDiagnosticsIngress
+    !showDiagnosticsIngress &&
+    !showInstructionBlock
   ) {
     return null;
   }
@@ -346,6 +339,23 @@ export function ProfileRuntimeTabContent({
     <div className="space-y-2">
       {statusDiagnosticsFields.length > 0 ? (
         <ProfileFieldGroup fields={statusDiagnosticsFields} />
+      ) : null}
+      {showDiagnosticsIngress ? (
+        <ProfileIngressRow
+          icon={Activity}
+          label="Harness Log"
+          onClick={onOpenDiagnostics}
+          testId="user-profile-diagnostics-ingress"
+          trailing={diagnosticsSummary}
+        />
+      ) : null}
+      {showInstructionBlock ? (
+        <div className="overflow-hidden rounded-2xl bg-muted/20">
+          <AgentInstructionRow
+            instruction={agentInstruction}
+            onOpenInstructions={onOpenInstructions}
+          />
+        </div>
       ) : null}
       {hasRuntimeRows ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
@@ -362,15 +372,6 @@ export function ProfileRuntimeTabContent({
       ) : null}
       {detailDiagnosticsFields.length > 0 ? (
         <ProfileFieldGroup fields={detailDiagnosticsFields} />
-      ) : null}
-      {showDiagnosticsIngress ? (
-        <ProfileIngressRow
-          icon={Activity}
-          label="Harness Log"
-          onClick={onOpenDiagnostics}
-          testId="user-profile-diagnostics-ingress"
-          trailing={diagnosticsSummary}
-        />
       ) : null}
     </div>
   );

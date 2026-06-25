@@ -211,16 +211,14 @@ export function ProfileSummaryView({
       managedAgent !== undefined ||
       modelLabel.trim().length > 0 ||
       diagnosticsFields.length > 0 ||
-      canOpenAgentLogs);
+      canOpenAgentLogs ||
+      showInstructionBlock);
   const showDiagnosticsIngress =
     diagnosticsFields.some((field) => field.label !== "Status") ||
     canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
   const showInfoTab =
-    showInstructionBlock ||
-    agentInfoFields.length > 0 ||
-    showActivityIngress ||
-    !showRuntimeTab;
+    agentInfoFields.length > 0 || showActivityIngress || !showRuntimeTab;
 
   const diagnosticsErrorField = diagnosticsFields.find(
     (field) => field.label === "Last error",
@@ -371,24 +369,24 @@ export function ProfileSummaryView({
           {activeTab === "info" ? (
             <ProfileInfoTabContent
               agentInfoFields={agentInfoFields}
-              agentInstruction={agentInstruction}
               onOpenActivity={onOpenActivity}
-              onOpenInstructions={onOpenInstructions}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
-              showInstructionBlock={showInstructionBlock}
             />
           ) : null}
           {activeTab === "runtime" ? (
             <ProfileRuntimeTabContent
+              agentInstruction={agentInstruction}
               diagnosticsFields={diagnosticsFields}
               diagnosticsSummary={diagnosticsTrailing}
               managedAgent={managedAgent}
               modelLabel={modelLabel}
               onOpenDiagnostics={onOpenDiagnostics}
+              onOpenInstructions={onOpenInstructions}
               runtimeConfigurationFields={runtimeConfigurationFields}
               runtimeSettingsFields={runtimeSettingsFields}
               showDiagnosticsIngress={showDiagnosticsIngress}
+              showInstructionBlock={showInstructionBlock}
             />
           ) : null}
           {activeTab === "channels" ? (

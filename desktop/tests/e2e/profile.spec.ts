@@ -690,6 +690,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
     "data-status",
     "running",
   );
+  await page.getByTestId("user-profile-tab-runtime").click();
   const instructionPane = page.getByTestId("user-profile-agent-instruction");
   await expect(instructionPane).toContainText(
     "Watch the channel and help when asked.",
@@ -724,6 +725,15 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("user-profile-agent-status")).toHaveCount(0);
   await expect(page.getByTestId("managed-agent-log-content")).toBeVisible();
   await page.getByTestId("user-profile-panel-back").click();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Profile" }),
+  ).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-info").click();
+  await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
+  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
+  await page.getByTestId("agent-session-close").click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await expect(
     page.getByRole("heading", { level: 2, name: "Profile" }),
   ).toBeVisible();
