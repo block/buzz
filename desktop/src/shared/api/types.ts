@@ -505,7 +505,8 @@ export type ConfigOrigin =
   | "envVar"
   | "configFile"
   | "personaDefault"
-  | "runtimeOverride";
+  | "runtimeOverride"
+  | "harnessConstraint";
 
 export type ConfigWriteMechanism =
   | { type: "respawnWithEnvVar"; envKey: string }

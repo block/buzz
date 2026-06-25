@@ -31,6 +31,8 @@ function provenanceSentence(
       return "Inherited from persona";
     case "runtimeOverride":
       return "Live override (this session only)";
+    case "harnessConstraint":
+      return "Locked by harness";
     case "envVar": {
       if (writeVia.type === "respawnWithEnvVar") {
         return `From environment variable (${writeVia.envKey})`;
