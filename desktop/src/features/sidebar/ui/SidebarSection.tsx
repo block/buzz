@@ -234,9 +234,7 @@ export function ChannelMenuButton({
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
-      <span className="min-w-0 flex-1 select-none truncate">
-        {resolvedLabel}
-      </span>
+      <span className="min-w-0 flex-1 truncate">{resolvedLabel}</span>
       {ephemeralDisplay ? (
         <EphemeralChannelBadge
           display={ephemeralDisplay}
@@ -325,7 +323,7 @@ export function SidebarSection({
   const canToggle = Boolean(onToggleCollapsed);
 
   return (
-    <SidebarGroup className="group/sidebar-section">
+    <SidebarGroup className="group/sidebar-section select-none">
       <div className="relative">
         <SidebarGroupLabel asChild={canToggle}>
           {canToggle ? (

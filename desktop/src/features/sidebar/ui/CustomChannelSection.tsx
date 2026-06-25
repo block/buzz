@@ -452,7 +452,9 @@ export function ChannelGroupSection({
     ) : null;
 
   const sectionContent = (
-    <SidebarGroup className={cn("group/sidebar-section", groupClassName)}>
+    <SidebarGroup
+      className={cn("group/sidebar-section select-none", groupClassName)}
+    >
       <div className="relative">
         <SidebarGroupLabel asChild>
           <button
@@ -570,7 +572,10 @@ export function CustomChannelSection({
       {({ dragHandleProps, isDragging }) => (
         <DroppableSectionBody sectionId={section.id}>
           <SidebarGroup
-            className={cn("group/sidebar-section", isDragging && "opacity-30")}
+            className={cn(
+              "group/sidebar-section select-none",
+              isDragging && "opacity-30",
+            )}
           >
             <ContextMenu>
               <ContextMenuTrigger asChild>
