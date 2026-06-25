@@ -34,7 +34,9 @@ const overrides = new Map([
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the
   // rebase, queued to split with the rest of this list.
-  ["src-tauri/src/commands/agents.rs", 1350],
+  // persona-refresh-on-spawn: re-snapshot + retain_managed_agent_pending call
+  // in start_local_agent_with_preflight adds ~23 lines. Queued to split.
+  ["src-tauri/src/commands/agents.rs", 1380],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
