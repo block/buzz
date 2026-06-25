@@ -1113,13 +1113,11 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         match build_ref_state_event(&inputs, &state.relay_keypair) {
             Ok(event) => match state.db.insert_event(&event, None).await {
                 Ok((stored, true)) => {
-                    let matches = state.sub_registry.fan_out(&stored);
-                    for (conn_id, sub_id) in matches {
-                        let _ = state.conn_manager.send_to(
-                            conn_id,
-                            crate::protocol::RelayMessage::event(&sub_id, &stored.event),
-                        );
-                    }
+                    // Routed through the guarded send path for uniformity; the
+                    // access gate no-ops for this globally-scoped
+                    // (channel_id = None) ref-state event.
+                    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored)
+                        .await;
                     info!(
                         owner = %ctx.owner,
                         repo = %ctx.repo_id,

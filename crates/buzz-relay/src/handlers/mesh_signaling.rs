@@ -316,14 +316,9 @@ async fn publish_channelless_ephemeral(state: &Arc<AppState>, event: &nostr::Eve
         tracing::warn!(event_id = %event.id, "mesh call-me-now global publish failed: {e}");
     }
     let stored = StoredEvent::new(event.clone(), None);
-    let matches = state.sub_registry.fan_out(&stored);
-    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
-    if let Ok(event_json) = serde_json::to_string(event) {
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{sub_id}",{event_json}]"#);
-            let _ = state.conn_manager.send_to(*target_conn_id, msg);
-        }
-    }
+    // Routed through the guarded send path for uniformity; the access gate
+    // no-ops for this globally-scoped (channel_id = None) call-me-now event.
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 }
 
 /// Handle a verified KIND_MESH_STATUS_REPORT (24620) from an authenticated relay
