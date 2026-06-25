@@ -224,4 +224,51 @@ test.describe("config bridge screenshots", () => {
       .getByTestId("managed-agent-log-row")
       .screenshot({ path: `${SHOTS}/05-advanced-expanded.png` });
   });
+
+  test("06 — profile side panel — Configuration section", async ({ page }) => {
+    // charlie (554cef…) is the well-known test pubkey that the mock bridge
+    // seeds as a bot owned by the test viewer, so isBot + isOwner + managedAgent
+    // are all true — the Configuration section renders in the profile panel.
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey:
+            "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea",
+          name: "Charlie",
+          status: "running" as const,
+          channelNames: ["agents"],
+        },
+      ],
+    });
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await waitForInvokeBridge(page);
+    await page.getByTestId("channel-agents").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+    // Click the agent avatar in the message row to open the profile side panel.
+    await page
+      .getByTestId("message-row")
+      .last()
+      .getByRole("button")
+      .first()
+      .click();
+
+    const panel = page.getByTestId("user-profile-panel");
+    await expect(panel).toBeVisible({ timeout: 10_000 });
+
+    // Wait for the Configuration section to render and scroll it into view so
+    // it is fully visible before capture.
+    const configHeading = panel.getByText("Configuration");
+    await expect(configHeading).toBeVisible({ timeout: 10_000 });
+    await configHeading.scrollIntoViewIfNeeded();
+
+    // Settle any in-flight animations before capture.
+    await panel.evaluate((el) =>
+      Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)),
+    );
+
+    await panel.screenshot({
+      path: `${SHOTS}/06-profile-side-panel-config.png`,
+    });
+  });
 });

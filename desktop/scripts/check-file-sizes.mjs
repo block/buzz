@@ -56,7 +56,9 @@ const overrides = new Map([
   // rebase, queued to split with the rest of this list.
   // persona-refresh-on-spawn: re-snapshot + retain_managed_agent_pending call
   // in start_local_agent_with_preflight adds ~23 lines. Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1380],
+  // rebase onto main (2026-06-25): main's agents.rs grew by ~17 lines since
+  // branch cut; override bumped to cover the merged total. Queued to split.
+  ["src-tauri/src/commands/agents.rs", 1397],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
