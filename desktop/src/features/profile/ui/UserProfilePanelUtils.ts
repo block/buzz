@@ -92,7 +92,7 @@ export type UserProfilePanelProps = {
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
   onClose: () => void;
-  onOpenDm?: (pubkeys: string[]) => void;
+  onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenProfile?: (pubkey: string) => void;
   onResetWidth?: () => void;
   onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;

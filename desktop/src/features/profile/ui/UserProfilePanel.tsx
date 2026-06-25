@@ -76,6 +76,7 @@ import {
   type UserProfilePanelProps,
   useRetainedPersona,
 } from "@/features/profile/ui/UserProfilePanelUtils";
+import { useProfileDmAction } from "@/features/profile/ui/useProfileDmAction";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
@@ -368,11 +369,11 @@ export function UserProfilePanel({
     setView("summary", { replace: true });
     setTab("info", { replace: true });
   }, [setTab, setView, targetKey]);
-  const handleMessage = React.useCallback(() => {
-    if (!effectivePubkey) return;
-    onOpenDm?.([effectivePubkey]);
-    onClose();
-  }, [effectivePubkey, onClose, onOpenDm]);
+  const { handleMessage, isOpeningDm } = useProfileDmAction({
+    effectivePubkey,
+    onClose,
+    onOpenDm,
+  });
 
   const handleEditAgent = React.useCallback(() => {
     if (resolvedPersona && !resolvedPersona.isBuiltIn) {
@@ -813,7 +814,7 @@ export function UserProfilePanel({
           ? "flex flex-col overflow-hidden"
           : "overflow-y-auto",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
+        !isSplitLayout && !isFloatingOverlay && "pt-13",
       )}
     >
       {view === "summary" ? (
@@ -835,6 +836,7 @@ export function UserProfilePanel({
           handleEditPersona={canEditPersona ? handleEditPersona : undefined}
           handleInstantiateAgent={handleInstantiateAgent}
           handleMessage={handleMessage}
+          isMessagePending={isOpeningDm}
           isBot={isBot}
           isAgentActionPending={isAgentActionPending}
           isFollowing={isFollowing}

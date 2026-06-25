@@ -41,6 +41,7 @@ import { ProfilePanelSurface } from "@/features/profile/ui/ProfilePanelPrimitive
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
+import { Spinner } from "@/shared/ui/spinner";
 import type {
   ProfileChannelLink,
   ProfilePanelTab,
@@ -73,6 +74,7 @@ export type ProfileSummaryViewProps = {
   handleEditPersona?: () => void;
   handleInstantiateAgent: () => void;
   handleMessage: () => void;
+  isMessagePending: boolean;
   isBot: boolean;
   isAgentActionPending: boolean;
   isFollowing: boolean;
@@ -91,7 +93,7 @@ export type ProfileSummaryViewProps = {
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
   onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
-  onOpenDm?: (pubkeys: string[]) => void;
+  onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
@@ -165,6 +167,7 @@ export function ProfileSummaryView({
   handleEditPersona,
   handleInstantiateAgent,
   handleMessage,
+  isMessagePending,
   isBot,
   isAgentActionPending,
   isFollowing,
@@ -337,6 +340,7 @@ export function ProfileSummaryView({
               : undefined
           }
           isFollowing={isFollowing}
+          messagePending={isMessagePending}
           onMessage={onOpenDm ? handleMessage : undefined}
           pubkey={pubkey}
           unfollowMutation={unfollowMutation}
@@ -565,6 +569,7 @@ function ProfilePrimaryActions({
   canEditAgent,
   followMutation,
   isFollowing,
+  messagePending,
   onAgentPrimaryAction,
   onEditAgent,
   onMessage,
@@ -577,6 +582,7 @@ function ProfilePrimaryActions({
   canEditAgent: boolean;
   followMutation: ReturnType<typeof useFollowMutation>;
   isFollowing: boolean;
+  messagePending?: boolean;
   onAgentPrimaryAction?: () => void;
   onEditAgent: () => void;
   onMessage?: () => void;
@@ -608,7 +614,9 @@ function ProfilePrimaryActions({
       ) : null}
       {onMessage ? (
         <ProfileQuickAction
+          disabled={messagePending}
           icon={MessageSquare}
+          isLoading={messagePending}
           label="Message"
           onClick={onMessage}
           testId="user-profile-message"
@@ -673,6 +681,7 @@ function ProfileQuickAction({
   active,
   disabled,
   icon: Icon,
+  isLoading,
   label,
   onClick,
   testId,
@@ -680,6 +689,7 @@ function ProfileQuickAction({
   active?: boolean;
   disabled?: boolean;
   icon: LucideIcon;
+  isLoading?: boolean;
   label: string;
   onClick: () => void;
   testId?: string;
@@ -700,7 +710,11 @@ function ProfileQuickAction({
           onClick={onClick}
           type="button"
         >
-          <Icon className="h-4 w-4" />
+          {isLoading ? (
+            <Spinner aria-hidden="true" className="h-4 w-4 border-2" />
+          ) : (
+            <Icon className="h-4 w-4" />
+          )}
         </button>
       </TooltipTrigger>
       <TooltipContent align="center" side="top">
