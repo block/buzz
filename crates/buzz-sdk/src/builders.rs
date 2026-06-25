@@ -7,9 +7,9 @@ use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
-        KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_OPEN, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1226,6 +1226,164 @@ pub fn build_git_status(
     }
 
     Ok(EventBuilder::new(Kind::Custom(status.kind()), content).tags(tags))
+}
+
+/// Metadata for a git pull-request event (kind:1618, NIP-34).
+///
+/// A PR points reviewers at a branch tip they can fetch — `commit` (the tip)
+/// plus at least one `clone_urls` entry where that commit is reachable. Unlike
+/// a [`build_git_patch`], the change is *not* inlined; the diff is whatever the
+/// tip introduces over its merge base. Per NIP-34 the tip SHOULD already be
+/// pushed to `refs/nostr/<pr-event-id>` (or otherwise reachable) in the clone
+/// repos before the event is signed — this builder does no network work and
+/// does not verify reachability, mirroring [`build_git_patch`]'s philosophy.
+#[derive(Default)]
+pub struct GitPullRequestMeta {
+    /// Earliest-unique-commit of the repo (`r` tag) — lets clients subscribe
+    /// to all PRs against a local repo.
+    pub euc: Option<String>,
+    /// Additional pubkeys to `p`-tag besides the repo owner.
+    pub recipients: Vec<String>,
+    /// PR subject line (`subject` tag) — required, used as the header.
+    pub subject: String,
+    /// Labels (`t` tags).
+    pub labels: Vec<String>,
+    /// Tip commit id of the PR branch (`c` tag) — required.
+    pub commit: String,
+    /// Clone URL(s) where the tip can be fetched (`clone` tag) — at least one.
+    pub clone_urls: Vec<String>,
+    /// Recommended branch name (`branch-name` tag).
+    pub branch_name: Option<String>,
+    /// Most recent common ancestor with the target branch (`merge-base` tag).
+    pub merge_base: Option<String>,
+    /// Root patch event this PR revises, which should then be closed
+    /// (`e` tag) — optional.
+    pub revision_of: Option<String>,
+}
+
+/// Build a git pull-request event (kind:1618, NIP-34). `content` is the
+/// markdown PR description.
+pub fn build_git_pull_request(
+    repo: &GitRepoCoord,
+    content: &str,
+    meta: &GitPullRequestMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    if meta.subject.is_empty() {
+        return Err(SdkError::InvalidInput("subject must not be empty".into()));
+    }
+    if meta.subject.len() > 256 {
+        return Err(SdkError::InvalidInput(format!(
+            "subject exceeds 256 characters (got {})",
+            meta.subject.len()
+        )));
+    }
+    check_commit_hex(&meta.commit, "commit")?;
+    if meta.clone_urls.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "a pull request needs at least one --clone url where the tip commit can be fetched"
+                .into(),
+        ));
+    }
+    let a_value = repo.to_a_tag_value()?;
+    let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
+
+    let mut tags = vec![tag(&["a", &a_value])?];
+    if let Some(ref euc) = meta.euc {
+        check_commit_hex(euc, "euc")?;
+        tags.push(tag(&["r", euc])?);
+    }
+    tags.push(tag(&["p", &owner])?);
+    for recipient in &meta.recipients {
+        let pk = check_pubkey_hex(recipient, "recipient")?;
+        tags.push(tag(&["p", &pk])?);
+    }
+    tags.push(tag(&["subject", &meta.subject])?);
+    for label in &meta.labels {
+        tags.push(tag(&["t", label])?);
+    }
+    tags.push(tag(&["c", &meta.commit])?);
+    let mut clone_tag = vec!["clone"];
+    clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
+    tags.push(tag(&clone_tag)?);
+    if let Some(ref branch) = meta.branch_name {
+        tags.push(tag(&["branch-name", branch])?);
+    }
+    if let Some(ref base) = meta.merge_base {
+        check_commit_hex(base, "merge_base")?;
+        tags.push(tag(&["merge-base", base])?);
+    }
+    if let Some(ref patch) = meta.revision_of {
+        let patch_id = check_hex_exact(patch, 64, "revision_of")?;
+        tags.push(tag(&["e", &patch_id])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GIT_PULL_REQUEST as u16), content).tags(tags))
+}
+
+/// Metadata for a git pull-request update event (kind:1619, NIP-34). A PR
+/// update changes the tip commit of an existing PR; it references the PR via
+/// NIP-22 uppercase root tags (`E`/`P`).
+#[derive(Default)]
+pub struct GitPrUpdateMeta {
+    /// Earliest-unique-commit of the repo (`r` tag).
+    pub euc: Option<String>,
+    /// Additional pubkeys to `p`-tag besides the repo owner.
+    pub recipients: Vec<String>,
+    /// The pull-request event being updated (`E` tag, NIP-22 root) — required.
+    pub pr_event: String,
+    /// The pull-request author (`P` tag, NIP-22 root) — required.
+    pub pr_author: String,
+    /// Updated tip commit id (`c` tag) — required.
+    pub commit: String,
+    /// Clone URL(s) where the new tip can be fetched (`clone` tag) — at least one.
+    pub clone_urls: Vec<String>,
+    /// Most recent common ancestor with the target branch (`merge-base` tag).
+    pub merge_base: Option<String>,
+}
+
+/// Build a git pull-request update event (kind:1619, NIP-34). `content` is
+/// optional markdown context for the update.
+pub fn build_git_pr_update(
+    repo: &GitRepoCoord,
+    content: &str,
+    meta: &GitPrUpdateMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let pr_event = check_hex_exact(&meta.pr_event, 64, "pr_event")?;
+    let pr_author = check_pubkey_hex(&meta.pr_author, "pr_author")?;
+    check_commit_hex(&meta.commit, "commit")?;
+    if meta.clone_urls.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "a pull request update needs at least one --clone url where the tip commit can be fetched"
+                .into(),
+        ));
+    }
+    let a_value = repo.to_a_tag_value()?;
+    let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
+
+    let mut tags = vec![tag(&["a", &a_value])?];
+    if let Some(ref euc) = meta.euc {
+        check_commit_hex(euc, "euc")?;
+        tags.push(tag(&["r", euc])?);
+    }
+    tags.push(tag(&["p", &owner])?);
+    for recipient in &meta.recipients {
+        let pk = check_pubkey_hex(recipient, "recipient")?;
+        tags.push(tag(&["p", &pk])?);
+    }
+    tags.push(tag(&["E", &pr_event])?);
+    tags.push(tag(&["P", &pr_author])?);
+    tags.push(tag(&["c", &meta.commit])?);
+    let mut clone_tag = vec!["clone"];
+    clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
+    tags.push(tag(&clone_tag)?);
+    if let Some(ref base) = meta.merge_base {
+        check_commit_hex(base, "merge_base")?;
+        tags.push(tag(&["merge-base", base])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GIT_PR_UPDATE as u16), content).tags(tags))
 }
 
 /// Build a workflow definition event (kind 30620).
@@ -2820,6 +2978,160 @@ mod tests {
     #[test]
     fn presence_update_rejects_invalid_status() {
         let err = build_presence_update("dnd").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── build_git_pull_request / build_git_pr_update ──────────────────────────
+
+    fn pr_repo() -> GitRepoCoord {
+        GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        }
+    }
+
+    fn full_clone_tag(event: &nostr::Event) -> Vec<String> {
+        event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|v| v.as_str()) == Some("clone"))
+            .map(|t| t.as_slice()[1..].iter().map(|v| v.to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn git_pr_happy_path() {
+        let meta = GitPullRequestMeta {
+            subject: "Add feature X".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            branch_name: Some("feat/x".to_string()),
+            labels: vec!["enhancement".to_string()],
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "PR body", &meta).unwrap());
+        assert_eq!(ev.kind.as_u16(), 1618);
+        assert_eq!(ev.content, "PR body");
+        assert!(has_tag(&ev, "a", &format!("30617:{}:repo", "a".repeat(64))));
+        assert!(has_tag(&ev, "p", &"a".repeat(64)));
+        assert!(has_tag(&ev, "subject", "Add feature X"));
+        assert!(has_tag(&ev, "c", &"c".repeat(40)));
+        assert!(has_tag(&ev, "t", "enhancement"));
+        assert!(has_tag(&ev, "branch-name", "feat/x"));
+        assert_eq!(
+            full_clone_tag(&ev),
+            vec!["https://example.com/repo.git".to_string()]
+        );
+    }
+
+    #[test]
+    fn git_pr_emits_multi_url_clone_tag() {
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec![
+                "https://a.example/repo.git".to_string(),
+                "https://b.example/repo.git".to_string(),
+            ],
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "", &meta).unwrap());
+        assert_eq!(full_clone_tag(&ev).len(), 2);
+    }
+
+    #[test]
+    fn git_pr_rejects_empty_subject() {
+        let meta = GitPullRequestMeta {
+            subject: String::new(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            ..Default::default()
+        };
+        let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_rejects_missing_clone_url() {
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec![],
+            ..Default::default()
+        };
+        let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_rejects_short_commit() {
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "abc".to_string(),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            ..Default::default()
+        };
+        let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_revision_of_emits_e_tag() {
+        let patch = event_id().to_hex();
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            revision_of: Some(patch.clone()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "", &meta).unwrap());
+        assert!(has_tag(&ev, "e", &patch));
+    }
+
+    #[test]
+    fn git_pr_update_happy_path() {
+        let pr = event_id().to_hex();
+        let meta = GitPrUpdateMeta {
+            pr_event: pr.clone(),
+            pr_author: "b".repeat(64),
+            commit: "d".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            merge_base: Some("e".repeat(40)),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pr_update(&pr_repo(), "rebased", &meta).unwrap());
+        assert_eq!(ev.kind.as_u16(), 1619);
+        assert!(has_tag(&ev, "E", &pr));
+        assert!(has_tag(&ev, "P", &"b".repeat(64)));
+        assert!(has_tag(&ev, "c", &"d".repeat(40)));
+        assert!(has_tag(&ev, "merge-base", &"e".repeat(40)));
+        assert_eq!(full_clone_tag(&ev).len(), 1);
+    }
+
+    #[test]
+    fn git_pr_update_rejects_bad_pr_event() {
+        let meta = GitPrUpdateMeta {
+            pr_event: "not-hex".to_string(),
+            pr_author: "b".repeat(64),
+            commit: "d".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            ..Default::default()
+        };
+        let err = build_git_pr_update(&pr_repo(), "", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_update_rejects_missing_clone_url() {
+        let meta = GitPrUpdateMeta {
+            pr_event: event_id().to_hex(),
+            pr_author: "b".repeat(64),
+            commit: "d".repeat(40),
+            clone_urls: vec![],
+            ..Default::default()
+        };
+        let err = build_git_pr_update(&pr_repo(), "", &meta).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 }
