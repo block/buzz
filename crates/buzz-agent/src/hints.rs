@@ -381,7 +381,11 @@ mod tests {
             "first wins (.agents/)"
         );
         // Path should point to the .agents/ version (first wins).
-        assert!(skills[0].path.to_str().unwrap().contains(".agents/skills/shared"));
+        assert!(skills[0]
+            .path
+            .to_str()
+            .unwrap()
+            .contains(".agents/skills/shared"));
     }
 
     #[test]
@@ -599,10 +603,22 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"foo.md".to_owned()), "missing foo.md: {names:?}");
-        assert!(names.contains(&"bar.md".to_owned()), "missing bar.md: {names:?}");
-        assert!(names.contains(&"setup.sh".to_owned()), "missing setup.sh: {names:?}");
-        assert!(!names.contains(&"SKILL.md".to_owned()), "SKILL.md should be excluded: {names:?}");
+        assert!(
+            names.contains(&"foo.md".to_owned()),
+            "missing foo.md: {names:?}"
+        );
+        assert!(
+            names.contains(&"bar.md".to_owned()),
+            "missing bar.md: {names:?}"
+        );
+        assert!(
+            names.contains(&"setup.sh".to_owned()),
+            "missing setup.sh: {names:?}"
+        );
+        assert!(
+            !names.contains(&"SKILL.md".to_owned()),
+            "SKILL.md should be excluded: {names:?}"
+        );
     }
 
     #[test]
@@ -623,7 +639,10 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
-        assert!(names.contains(&"helper.sh".to_owned()), "missing helper.sh: {names:?}");
+        assert!(
+            names.contains(&"helper.sh".to_owned()),
+            "missing helper.sh: {names:?}"
+        );
         assert!(
             !names.contains(&"secret.md".to_owned()),
             "nested skill's files should not appear: {names:?}"

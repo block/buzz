@@ -494,67 +494,8 @@ async fn load_skill_tool_returns_body() {
     });
     let end_turn = openai_text("done");
 
-    let (url, captures) = {
-        use std::collections::VecDeque;
-        use tokio::net::TcpListener;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let queue = Arc::new(Mutex::new(VecDeque::from(vec![load_skill_call, end_turn])));
-        let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-        let cap2 = captures.clone();
-        tokio::spawn(async move {
-            loop {
-                let (mut sock, _) = match listener.accept().await {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
-                let queue = queue.clone();
-                let captured = cap2.clone();
-                tokio::spawn(async move {
-                    let mut buf = Vec::new();
-                    let mut tmp = [0u8; 8192];
-                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                        match sock.read(&mut tmp).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                        }
-                    }
-                    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-                    let headers = &buf[..header_end];
-                    let mut body_len = 0usize;
-                    for line in headers.split(|b| *b == b'\n') {
-                        let line = std::str::from_utf8(line).unwrap_or("");
-                        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                            body_len = rest.trim().trim_end_matches('\r').parse().unwrap_or(0);
-                        }
-                    }
-                    while buf.len() < header_end + body_len {
-                        match sock.read(&mut tmp).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                        }
-                    }
-                    if let Ok(req) = serde_json::from_slice::<Value>(&buf[header_end..]) {
-                        captured.lock().await.push(req);
-                    }
-                    let body = queue.lock().await.pop_front()
-                        .unwrap_or_else(|| json!({"error": "no response"}));
-                    let body_s = serde_json::to_string(&body).unwrap();
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body_s.len(), body_s,
-                    );
-                    let _ = sock.write_all(resp.as_bytes()).await;
-                    let _ = sock.shutdown().await;
-                });
-            }
-        });
-        (url, captures)
-    };
-
-    let mut h = Harness::spawn_with_env(&url, &[]).await;
+    let llm = spawn_capturing_llm(vec![load_skill_call, end_turn]).await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[]).await;
     let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
 
     let p = h
@@ -566,23 +507,16 @@ async fn load_skill_tool_returns_body() {
     let _ = h.recv_until(|v| v["id"] == json!(p)).await;
 
     // The second LLM request (round 2) should contain the skill body in tool results.
-    let reqs = captures.lock().await;
-    assert!(reqs.len() >= 2, "expected at least 2 LLM requests, got {}", reqs.len());
-    let round2 = &reqs[1];
-    let messages = round2["messages"].as_array().expect("messages array");
-    let tool_result_msg = messages.iter().find(|m| {
-        m["role"] == "tool"
-            || (m["role"] == "user"
-                && m["content"].as_array().map_or(false, |arr| {
-                    arr.iter().any(|c| c["type"] == "tool_result")
-                }))
-    });
-    // The body must appear somewhere in the second request's messages.
-    let round2_str = serde_json::to_string(round2).unwrap();
+    let reqs = llm.captured.lock().await;
+    assert!(
+        reqs.len() >= 2,
+        "expected at least 2 LLM requests, got {}",
+        reqs.len()
+    );
+    let round2_str = serde_json::to_string(&reqs[1]).unwrap();
     assert!(
         round2_str.contains("SKILL_BODY_CONTENT_99"),
         "load_skill result must contain skill body in round 2 request.\nGot: {round2_str}"
     );
-    drop(tool_result_msg); // suppress unused warning
     h.shutdown().await;
 }

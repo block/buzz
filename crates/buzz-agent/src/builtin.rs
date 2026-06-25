@@ -67,21 +67,13 @@ pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
     let raw = match std::fs::read_to_string(&entry.path) {
         Ok(s) => s,
         Err(e) => {
-            return error_result(&format!(
-                "load_skill: could not read {:?}: {e}",
-                entry.path
-            ));
+            return error_result(&format!("load_skill: could not read {:?}: {e}", entry.path));
         }
     };
 
     // Strip the YAML frontmatter — the agent already knows name/description
     // from the system prompt; return only the body.
     let body = strip_frontmatter(&raw);
-    let body = if body.len() > MAX_SKILL_BODY_BYTES {
-        truncate_at_boundary(body, MAX_SKILL_BODY_BYTES)
-    } else {
-        body
-    };
 
     let mut output = body.to_owned();
 
@@ -100,6 +92,14 @@ pub fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolResult {
             }
         }
     }
+
+    // Apply the size cap to the full output (body + Supporting Files section)
+    // so the total tool result stays within MAX_SKILL_BODY_BYTES.
+    let output = if output.len() > MAX_SKILL_BODY_BYTES {
+        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
+    } else {
+        output
+    };
 
     ToolResult {
         provider_id: String::new(),
@@ -165,10 +165,16 @@ fn load_supporting_file(skill_name: &str, rel_path: &str, skills: &[SkillEntry])
     };
 
     // Traversal guard: canonicalize both paths and verify the file stays inside
-    // the skill directory.
-    let canonical_skill_dir = skill_dir
-        .canonicalize()
-        .unwrap_or_else(|_| skill_dir.to_path_buf());
+    // the skill directory. Fail hard if the skill directory itself can't be
+    // canonicalized — a degraded guard is worse than no guard.
+    let canonical_skill_dir = match skill_dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return error_result(&format!(
+                "load_skill: could not canonicalize skill directory for {skill_name:?}: {e}"
+            ));
+        }
+    };
 
     match file_path.canonicalize() {
         Ok(canonical_file) if canonical_file.starts_with(&canonical_skill_dir) => {
@@ -281,7 +287,10 @@ mod tests {
         assert!(!result.is_error);
         let text = text_content(&result);
         assert!(text.contains("Skill body here."), "got: {text}");
-        assert!(!text.contains("---"), "frontmatter should be stripped: {text}");
+        assert!(
+            !text.contains("---"),
+            "frontmatter should be stripped: {text}"
+        );
     }
 
     #[test]
@@ -363,8 +372,10 @@ mod tests {
             skill_md,
             vec![ref_file],
         )];
-        let result =
-            call_load_skill(&serde_json::json!({"name": "my-skill/references/foo.md"}), &skills);
+        let result = call_load_skill(
+            &serde_json::json!({"name": "my-skill/references/foo.md"}),
+            &skills,
+        );
         assert!(!result.is_error, "expected success, got error");
         let text = text_content(&result);
         assert!(
@@ -405,7 +416,10 @@ mod tests {
         assert!(result.is_error);
         let text = text_content(&result);
         assert!(text.contains("not found"), "got: {text}");
-        assert!(text.contains("references/foo.md"), "should list available: {text}");
+        assert!(
+            text.contains("references/foo.md"),
+            "should list available: {text}"
+        );
     }
 
     #[test]
@@ -418,8 +432,7 @@ mod tests {
         )
         .unwrap();
         let skills = vec![make_skill("bare", "desc", skill_md)];
-        let result =
-            call_load_skill(&serde_json::json!({"name": "bare/anything.md"}), &skills);
+        let result = call_load_skill(&serde_json::json!({"name": "bare/anything.md"}), &skills);
         assert!(result.is_error);
         let text = text_content(&result);
         assert!(text.contains("no supporting files"), "got: {text}");
