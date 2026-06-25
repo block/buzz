@@ -9,6 +9,9 @@ import type {
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { truncatePubkey } from "@/features/profile/lib/identity";
+
+export { truncatePubkey };
 
 export type ProfileChannelLink = {
   id: string;
@@ -108,14 +111,6 @@ export type UserProfilePanelProps = {
   view?: ProfilePanelView;
   widthPx: number;
 };
-
-export function truncatePubkey(pubkey: string) {
-  if (pubkey.length <= 16) {
-    return pubkey;
-  }
-
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
-}
 
 export function deriveProfileChannels(
   pubkeyLower: string,
