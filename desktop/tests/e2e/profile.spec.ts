@@ -759,7 +759,7 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expectHashSearchParam(page, "profileTab", null);
   await page.getByTestId(`user-profile-view-activity-${agentPubkey}`).click();
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
-  await page.getByTestId("agent-session-close").click();
+  await page.getByTestId("agent-session-back").click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await expect(
     page.getByRole("heading", { level: 2, name: "Profile" }),
