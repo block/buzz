@@ -64,7 +64,9 @@ fn name_matches_known_binary(name: &str) -> bool {
 /// a managed agent wrapper (e.g. `node` running an npm shim for `codex-acp`).
 /// Callers must additionally verify `BUZZ_MANAGED_AGENT` ownership.
 fn name_matches_interpreter(name: &str) -> bool {
-    KNOWN_SCRIPT_INTERPRETERS.iter().any(|&interp| name == interp)
+    KNOWN_SCRIPT_INTERPRETERS
+        .iter()
+        .any(|&interp| name == interp)
 }
 
 #[cfg(unix)]
@@ -1292,7 +1294,10 @@ pub fn sync_managed_agent_processes(
             continue;
         };
 
-        if process_is_running(pid) && process_belongs_to_us(pid) && process_has_buzz_marker(pid, instance_id) {
+        if process_is_running(pid)
+            && process_belongs_to_us(pid)
+            && process_has_buzz_marker(pid, instance_id)
+        {
             continue;
         }
 
