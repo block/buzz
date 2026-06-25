@@ -4,16 +4,16 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, discover_provider_candidates, ensure_persona_is_active,
-        find_managed_agent_mut, invoke_provider, load_managed_agents, load_personas,
-        managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
-        normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, spawn_key_refusal, start_managed_agent_process,
-        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, BackendProviderInfo, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentLogResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        build_managed_agent_summary, current_instance_id, discover_provider_candidates,
+        ensure_persona_is_active, find_managed_agent_mut, invoke_provider, load_managed_agents,
+        load_personas, managed_agent_avatar_url, managed_agent_log_path,
+        managed_agents_base_dir, normalize_agent_args, provider_deploy, read_log_tail,
+        resolve_provider_binary, save_managed_agents, spawn_key_refusal,
+        start_managed_agent_process, stop_managed_agent_process, sync_managed_agent_processes,
+        try_regenerate_nest, validate_provider_config, BackendKind, BackendProviderInfo,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
+        ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -433,7 +433,7 @@ pub fn list_managed_agents(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes) {
+    if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
         save_managed_agents(&app, &records)?;
     }
 
@@ -497,7 +497,7 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
             save_managed_agents(&app, &records)?;
         }
         if let Some(persona_id) = requested_persona_id.as_deref() {
@@ -563,7 +563,7 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
             save_managed_agents(&app, &records)?;
         }
 
@@ -949,7 +949,7 @@ pub async fn start_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
             save_managed_agents(&app, &records)?;
         }
 
@@ -1205,7 +1205,7 @@ pub fn stop_managed_agent(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes) {
+    if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
         save_managed_agents(&app, &records)?;
     }
 
@@ -1247,7 +1247,7 @@ pub fn delete_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
             save_managed_agents(&app, &records)?;
         }
 

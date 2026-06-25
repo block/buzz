@@ -133,8 +133,8 @@ fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
         .managed_agent_processes
         .lock()
         .map_err(|error| error.to_string())?;
-    let mut changed = sync_managed_agent_processes(&mut records, &mut runtimes);
-    changed |= kill_stale_tracked_processes(&mut records, &runtimes);
+    let mut changed = sync_managed_agent_processes(&mut records, &mut runtimes, &managed_agents::current_instance_id(app));
+    changed |= kill_stale_tracked_processes(&mut records, &runtimes, &managed_agents::current_instance_id(app));
 
     // Stop all tracked agents. Send SIGTERM to all process
     // groups first, then wait for exits in parallel to avoid serial 1s waits.

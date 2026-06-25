@@ -107,8 +107,8 @@ pub async fn restore_managed_agents_on_launch(
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
-        let mut changed = sync_managed_agent_processes(&mut records, &mut runtimes);
-        changed |= kill_stale_tracked_processes(&mut records, &runtimes);
+        let mut changed = sync_managed_agent_processes(&mut records, &mut runtimes, &super::current_instance_id(app));
+        changed |= kill_stale_tracked_processes(&mut records, &runtimes, &super::current_instance_id(app));
 
         let tracked_pids: Vec<u32> = records
             .iter()

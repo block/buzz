@@ -1210,6 +1210,7 @@ pub(crate) fn reap_dead_instance_agents(_our_instance_id: &str, _skip_pids: &[u3
 pub fn kill_stale_tracked_processes(
     records: &mut [ManagedAgentRecord],
     runtimes: &HashMap<String, ManagedAgentProcess>,
+    instance_id: &str,
 ) -> bool {
     use crate::managed_agents::BackendKind;
 
@@ -1222,7 +1223,7 @@ pub fn kill_stale_tracked_processes(
             continue;
         };
         if !runtimes.contains_key(&record.pubkey) {
-            if process_belongs_to_us(pid) {
+            if process_belongs_to_us(pid) && process_has_buzz_marker(pid, instance_id) {
                 let _ = terminate_process(pid);
             }
             record.runtime_pid = None;
@@ -1237,6 +1238,7 @@ pub fn kill_stale_tracked_processes(
 pub fn sync_managed_agent_processes(
     records: &mut [ManagedAgentRecord],
     runtimes: &mut HashMap<String, ManagedAgentProcess>,
+    instance_id: &str,
 ) -> bool {
     let mut changed = false;
     let mut exited = Vec::new();
@@ -1290,7 +1292,7 @@ pub fn sync_managed_agent_processes(
             continue;
         };
 
-        if process_is_running(pid) && process_belongs_to_us(pid) {
+        if process_is_running(pid) && process_belongs_to_us(pid) && process_has_buzz_marker(pid, instance_id) {
             continue;
         }
 
@@ -1900,7 +1902,10 @@ pub fn start_managed_agent_process(
     }
 
     if let Some(pid) = record.runtime_pid {
-        if process_is_running(pid) && process_belongs_to_us(pid) {
+        if process_is_running(pid)
+            && process_belongs_to_us(pid)
+            && process_has_buzz_marker(pid, &current_instance_id(app))
+        {
             record.updated_at = now_iso();
             record.last_error = None;
             return Ok(());
