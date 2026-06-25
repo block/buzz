@@ -1,8 +1,12 @@
 import * as React from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 
-import { deriveShellRoute } from "@/app/AppShell.helpers";
+import {
+  deriveShellRoute,
+  isWindowDragHandleEvent,
+} from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
   AppShellOverlays,
@@ -16,7 +20,6 @@ import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
-import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import {
   channelsQueryKey,
@@ -85,7 +88,6 @@ const LazySettingsScreen = React.lazy(async () => {
 
 export function AppShell() {
   useWebviewZoomShortcuts();
-  useTauriWindowDrag();
 
   const workspacesHook = useWorkspaces();
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
@@ -206,6 +208,36 @@ export function AppShell() {
     openSearchHit,
     pubkey: identityQuery.data?.pubkey,
   });
+
+  React.useEffect(() => {
+    function handlePointerDown(event: PointerEvent) {
+      if (event.button !== 0 || event.detail > 1) {
+        return;
+      }
+
+      if (!isWindowDragHandleEvent(event)) {
+        return;
+      }
+
+      void getCurrentWindow().startDragging();
+    }
+
+    function handleDoubleClick(event: MouseEvent) {
+      if (event.button !== 0 || !isWindowDragHandleEvent(event)) {
+        return;
+      }
+
+      event.preventDefault();
+      void getCurrentWindow().toggleMaximize();
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("dblclick", handleDoubleClick, true);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+      window.removeEventListener("dblclick", handleDoubleClick, true);
+    };
+  }, []);
 
   const {
     followedRootIds,
