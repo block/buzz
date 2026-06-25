@@ -269,6 +269,26 @@ pub async fn validate_admin_event(
                 return Ok(());
             }
 
+            // When agent sharing is disabled relay-wide, only the agent's owner may add it.
+            if state.config.agent_sharing_disabled {
+                if let Some((_policy, owner)) =
+                    state.db.get_agent_channel_policy(&target_pubkey).await?
+                {
+                    let owner_bytes = owner.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "agent sharing disabled — agent has no owner set"
+                        )
+                    })?;
+                    if actor_bytes != owner_bytes {
+                        return Err(anyhow::anyhow!(
+                            "agent sharing is disabled on this relay — only the agent owner can add this agent"
+                        ));
+                    }
+                    // Owner is adding their own agent — allow, skip the per-policy check below.
+                    return Ok(());
+                }
+            }
+
             // Third-party add: check channel_add_policy on the target.
             if let Some((policy, owner)) = state.db.get_agent_channel_policy(&target_pubkey).await?
             {
@@ -816,6 +836,12 @@ async fn handle_agent_profile(event: &Event, state: &Arc<AppState>) -> anyhow::R
         .get("channel_add_policy")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
+
+    if state.config.agent_sharing_disabled && policy == "anyone" {
+        return Err(anyhow::anyhow!(
+            "agent sharing is disabled on this relay — channel_add_policy 'anyone' is not permitted"
+        ));
+    }
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
     state.db.ensure_user(&pubkey_bytes).await?;

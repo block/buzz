@@ -366,6 +366,20 @@ pub async fn set_channel_add_policy(pool: &PgPool, pubkey: &[u8], policy: &str) 
     Ok(())
 }
 
+/// Clamp all `channel_add_policy = 'anyone'` rows to `'owner_only'`.
+///
+/// Used on startup when `BUZZ_AGENT_SHARING_DISABLED` is set to retroactively
+/// enforce the restriction on agents configured before the flag existed.
+/// Returns the number of rows updated. Safe to call repeatedly (idempotent).
+pub async fn clamp_anyone_channel_add_policy(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"UPDATE users SET channel_add_policy = 'owner_only' WHERE channel_add_policy = 'anyone'"#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,6 +567,66 @@ mod tests {
         ensure_user(&db.pool, &pubkey).await.unwrap();
         let result = set_channel_add_policy(&db.pool, &pubkey, "invalid_policy").await;
         assert!(result.is_err(), "should reject invalid policy value");
+    }
+
+    /// clamp_anyone_channel_add_policy should flip 'anyone' rows to 'owner_only'
+    /// and leave 'owner_only' and 'nobody' rows untouched.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_clamp_anyone_channel_add_policy() {
+        let db = setup_db().await;
+
+        let pk_anyone = random_pubkey();
+        let pk_owner_only = random_pubkey();
+        let pk_nobody = random_pubkey();
+
+        ensure_user(&db.pool, &pk_anyone).await.expect("ensure anyone");
+        ensure_user(&db.pool, &pk_owner_only).await.expect("ensure owner_only");
+        ensure_user(&db.pool, &pk_nobody).await.expect("ensure nobody");
+
+        set_channel_add_policy(&db.pool, &pk_anyone, "anyone")
+            .await
+            .expect("set anyone");
+        set_channel_add_policy(&db.pool, &pk_owner_only, "owner_only")
+            .await
+            .expect("set owner_only");
+        set_channel_add_policy(&db.pool, &pk_nobody, "nobody")
+            .await
+            .expect("set nobody");
+
+        let clamped = clamp_anyone_channel_add_policy(&db.pool)
+            .await
+            .expect("clamp");
+        assert!(clamped >= 1, "at least one row should be clamped");
+
+        // 'anyone' → 'owner_only'
+        let (policy, _) = get_agent_channel_policy(&db.pool, &pk_anyone)
+            .await
+            .expect("get policy")
+            .expect("should be Some");
+        assert_eq!(policy, "owner_only", "'anyone' should be clamped to 'owner_only'");
+
+        // 'owner_only' unchanged
+        let (policy, _) = get_agent_channel_policy(&db.pool, &pk_owner_only)
+            .await
+            .expect("get policy")
+            .expect("should be Some");
+        assert_eq!(policy, "owner_only", "'owner_only' should be unchanged");
+
+        // 'nobody' unchanged
+        let (policy, _) = get_agent_channel_policy(&db.pool, &pk_nobody)
+            .await
+            .expect("get policy")
+            .expect("should be Some");
+        assert_eq!(policy, "nobody", "'nobody' should be unchanged");
+
+        // Idempotent: second call returns 0 (no more 'anyone' rows for these pubkeys)
+        let clamped_again = clamp_anyone_channel_add_policy(&db.pool)
+            .await
+            .expect("clamp again");
+        // Can't assert == 0 globally since other tests may have 'anyone' rows,
+        // but the three test rows are already clamped so they won't be counted again.
+        let _ = clamped_again; // just verify it doesn't error
     }
 
     // Use the production `escape_like` function directly — no local mirror.

@@ -127,6 +127,15 @@ pub struct Config {
     /// When set, the relay serves the SPA from this directory for browser requests.
     /// When unset, no static file serving happens (relay behaves as before).
     pub web_dir: Option<std::path::PathBuf>,
+
+    /// When true, agent sharing is disabled relay-wide:
+    /// - `kind:10100` events setting `channel_add_policy = 'anyone'` are rejected.
+    /// - Third-party `kind:9000` PUT_USER events targeting agents are rejected.
+    /// - On startup, all existing `channel_add_policy = 'anyone'` rows are clamped
+    ///   to `'owner_only'`.
+    ///
+    /// Default: `false`. Set via `BUZZ_AGENT_SHARING_DISABLED=true`.
+    pub agent_sharing_disabled: bool,
 }
 
 impl Config {
@@ -191,6 +200,10 @@ impl Config {
             .unwrap_or(false);
 
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let agent_sharing_disabled = std::env::var("BUZZ_AGENT_SHARING_DISABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -400,6 +413,7 @@ impl Config {
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             web_dir,
+            agent_sharing_disabled,
         })
     }
 }
@@ -440,6 +454,10 @@ mod tests {
             !config.allow_nip_oa_auth,
             "allow_nip_oa_auth should default to false"
         );
+        assert!(
+            !config.agent_sharing_disabled,
+            "agent_sharing_disabled should default to false"
+        );
     }
 
     #[test]
@@ -458,6 +476,24 @@ mod tests {
         let config = Config::from_env().expect("config");
         std::env::remove_var("BUZZ_MAX_FRAME_BYTES");
         assert_eq!(config.max_frame_bytes, 262_144);
+    }
+
+    #[test]
+    fn agent_sharing_disabled_can_be_enabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_AGENT_SHARING_DISABLED", "true");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_AGENT_SHARING_DISABLED");
+        assert!(config.agent_sharing_disabled);
+    }
+
+    #[test]
+    fn agent_sharing_disabled_accepts_numeric_one() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_AGENT_SHARING_DISABLED", "1");
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("BUZZ_AGENT_SHARING_DISABLED");
+        assert!(config.agent_sharing_disabled);
     }
 
     #[test]

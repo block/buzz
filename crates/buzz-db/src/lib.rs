@@ -625,6 +625,15 @@ impl Db {
         user::set_channel_add_policy(&self.pool, pubkey, policy).await
     }
 
+    /// Clamp all `channel_add_policy = 'anyone'` rows to `'owner_only'`.
+    ///
+    /// Used on startup when `BUZZ_AGENT_SHARING_DISABLED` is set to retroactively
+    /// enforce the restriction on agents that were configured before the flag existed.
+    /// Returns the number of rows updated.
+    pub async fn clamp_anyone_channel_add_policy(&self) -> Result<u64> {
+        user::clamp_anyone_channel_add_policy(&self.pool).await
+    }
+
     /// Find an existing DM by its participant hash.
     pub async fn find_dm_by_participants(
         &self,

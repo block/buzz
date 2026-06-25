@@ -155,6 +155,19 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => error!("Failed to backfill d_tags: {e}"),
     }
 
+    // BUZZ_AGENT_SHARING_DISABLED: retroactively clamp any existing 'anyone'
+    // channel_add_policy rows to 'owner_only'. Idempotent — no-ops when already clamped.
+    if config.agent_sharing_disabled {
+        match db.clamp_anyone_channel_add_policy().await {
+            Ok(0) => info!("BUZZ_AGENT_SHARING_DISABLED: no 'anyone' channel_add_policy rows to clamp"),
+            Ok(n) => tracing::warn!(
+                count = n,
+                "BUZZ_AGENT_SHARING_DISABLED: clamped existing 'anyone' channel_add_policy rows to 'owner_only'"
+            ),
+            Err(e) => error!("BUZZ_AGENT_SHARING_DISABLED: failed to clamp channel_add_policy rows: {e}"),
+        }
+    }
+
     let audit_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .min_connections(1)

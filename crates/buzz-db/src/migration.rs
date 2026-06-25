@@ -128,7 +128,7 @@ mod tests {
     fn embedded_migrator_contains_all_schema_migrations() {
         let migrations: Vec<_> = MIGRATOR.iter().collect();
 
-        assert_eq!(migrations.len(), 3);
+        assert_eq!(migrations.len(), 4);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(
@@ -159,6 +159,19 @@ mod tests {
                 .contains("ADD COLUMN not_before BIGINT")
                 && migrations[2].sql.as_str().contains("idx_events_not_before"),
             "third migration should add the NIP-ER reminder columns and index"
+        );
+
+        assert_eq!(migrations[3].version, 5);
+        assert_eq!(
+            &*migrations[3].description,
+            "default channel add policy owner only"
+        );
+        assert!(
+            migrations[3]
+                .sql
+                .as_str()
+                .contains("channel_add_policy SET DEFAULT"),
+            "fifth migration should tighten the channel_add_policy default"
         );
     }
 
