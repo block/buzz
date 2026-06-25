@@ -6,12 +6,12 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_databricks_defaults, build_managed_agent_summary, current_instance_id,
-        default_agent_workdir, find_managed_agent_mut, known_acp_runtime, load_managed_agents,
-        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
-        resolve_command, resolve_effective_prompt_model_provider, runtime_metadata_env_vars,
-        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
-        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        build_managed_agent_summary, current_instance_id, default_agent_workdir,
+        find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
+        try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
+        UpdateManagedAgentResponse,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -27,16 +27,7 @@ pub async fn get_agent_models(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
-    let (
-        resolved_acp,
-        agent_command,
-        agent_args,
-        persisted_model,
-        runtime_default_env,
-        runtime_metadata_env,
-        databricks_defaults,
-        merged_env,
-    ) = {
+    let (resolved_acp, agent_command, agent_args, persisted_model, merged_env) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -84,51 +75,14 @@ pub async fn get_agent_models(
 
         // Resolve the effective model from the linked persona so the ModelPicker
         // dropdown shows the current persona model as selected.
-        let (_prompt, effective_model, effective_provider) =
-            resolve_effective_prompt_model_provider(
-                record.persona_id.as_deref(),
-                &personas,
-                record.system_prompt.clone(),
-                record.model.clone(),
-            );
-        let runtime = known_acp_runtime(&record.agent_command);
-        let runtime_default_env: Vec<(String, String)> = runtime
-            .map(|meta| {
-                meta.default_env
-                    .iter()
-                    .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let runtime_metadata_env: Vec<(String, String)> = runtime
-            .map(|meta| {
-                runtime_metadata_env_vars(
-                    meta.model_env_var,
-                    meta.provider_env_var,
-                    meta.provider_locked,
-                    effective_model.as_deref(),
-                    effective_provider.as_deref(),
-                )
-                .into_iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect()
-            })
-            .unwrap_or_default();
-        let databricks_defaults: Vec<(String, String)> = build_databricks_defaults()
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
+        let (_prompt, effective_model, _provider) = resolve_effective_prompt_model_provider(
+            record.persona_id.as_deref(),
+            &personas,
+            record.system_prompt.clone(),
+            record.model.clone(),
+        );
 
-        (
-            resolved,
-            resolved_agent,
-            args,
-            effective_model,
-            runtime_default_env,
-            runtime_metadata_env,
-            databricks_defaults,
-            env,
-        )
+        (resolved, resolved_agent, args, effective_model, env)
     }; // store lock released — subprocess runs without holding the lock
 
     // Clone the env map for redaction below — `merged_env` is moved
@@ -151,16 +105,12 @@ pub async fn get_agent_models(
             .arg("--json")
             .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
             .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
-        for (key, value) in &runtime_default_env {
-            if std::env::var(key).is_err() {
-                cmd.env(key, value);
+        if let Some(meta) = known_acp_runtime(&agent_command) {
+            for (key, value) in meta.default_env {
+                if std::env::var(key).is_err() {
+                    cmd.env(key, value);
+                }
             }
-        }
-        for (key, value) in &runtime_metadata_env {
-            cmd.env(key, value);
-        }
-        for (key, value) in &databricks_defaults {
-            cmd.env(key, value);
         }
         // User env layering — written LAST so it overrides any Buzz-set env above.
         for (k, v) in &merged_env {
@@ -182,12 +132,6 @@ pub async fn get_agent_models(
         // a failing child process echoed back.
         let stderr_redacted =
             crate::managed_agents::redact_env_values_in(stderr.as_ref(), &env_for_redaction);
-        if let Some(configuration_error) = model_configuration_error(&stderr_redacted) {
-            return Ok(unavailable_agent_models(
-                persisted_model,
-                configuration_error,
-            ));
-        }
         return Err(format!(
             "buzz-acp models failed (exit {}): {stderr_redacted}",
             output.status.code().unwrap_or(-1)
@@ -469,53 +413,5 @@ fn normalize_agent_models(
         agent_default_model,
         selected_model: persisted_model,
         supports_switching,
-        configuration_error: None,
     }
-}
-
-fn unavailable_agent_models(
-    persisted_model: Option<String>,
-    configuration_error: String,
-) -> AgentModelsResponse {
-    AgentModelsResponse {
-        agent_name: "unknown".to_string(),
-        agent_version: "unknown".to_string(),
-        models: Vec::new(),
-        agent_default_model: None,
-        selected_model: persisted_model,
-        supports_switching: false,
-        configuration_error: Some(configuration_error),
-    }
-}
-
-fn model_configuration_error(stderr: &str) -> Option<String> {
-    let normalized = stderr.to_ascii_lowercase();
-
-    if normalized.contains("buzz_agent_provider required") {
-        return Some(
-            "This agent does not have an LLM provider configured. Set a provider and model on the persona or agent, then retry."
-                .to_string(),
-        );
-    }
-
-    if normalized.contains("anthropic_model required")
-        || normalized.contains("openai_compat_model required")
-        || normalized.contains("databricks_model required")
-    {
-        return Some(
-            "This agent does not have an LLM model configured. Set a model on the persona or agent, then retry."
-                .to_string(),
-        );
-    }
-
-    if normalized.contains("anthropic_api_key required")
-        || normalized.contains("openai_compat_api_key required")
-    {
-        return Some(
-            "This agent is missing credentials for its configured LLM provider. Add the provider credentials, then retry."
-                .to_string(),
-        );
-    }
-
-    None
 }

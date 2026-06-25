@@ -470,7 +470,6 @@ export type AgentModelsResponse = {
   agentDefaultModel: string | null;
   selectedModel: string | null;
   supportsSwitching: boolean;
-  configurationError: string | null;
 };
 export type AgentModelInfo = {
   id: string;

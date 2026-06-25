@@ -535,8 +535,6 @@ pub struct AgentModelsResponse {
     pub selected_model: Option<String>,
     /// Whether this agent supports model switching.
     pub supports_switching: bool,
-    /// Human-readable setup issue that prevents model discovery.
-    pub configuration_error: Option<String>,
 }
 
 /// A single model available from an agent.
