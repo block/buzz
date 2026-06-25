@@ -489,10 +489,7 @@ mod tests {
 
         // Old per-key entry should be cleaned up.
         let entry = keyring_entry(svc, key).unwrap();
-        assert!(matches!(
-            entry.get_password(),
-            Err(keyring::Error::NoEntry)
-        ));
+        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
 
         // Key is now in the blob — probe confirms.
         let store2 = SecretStore::keyring(svc);
