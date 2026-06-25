@@ -22,6 +22,7 @@ import type {
   AcpRuntime,
   AgentPersona,
   CreateManagedAgentInput,
+  CreateManagedAgentResponse,
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -68,6 +69,8 @@ export function usePersonaActions() {
   >(null);
   const [personaFeedbackSurface, setPersonaFeedbackSurface] =
     React.useState<PersonaFeedbackSurface>("library");
+  const [createdAgent, setCreatedAgent] =
+    React.useState<CreateManagedAgentResponse | null>(null);
 
   const personas = personasQuery.data ?? [];
   const availableRuntimes = React.useMemo(
@@ -138,6 +141,7 @@ export function usePersonaActions() {
 
         try {
           const created = await createAgentMutation.mutateAsync(agentInput);
+          setCreatedAgent(created);
           if (created.spawnError) {
             setPersonaErrorMessage(
               `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
@@ -311,6 +315,8 @@ export function usePersonaActions() {
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
+    createdAgent,
+    setCreatedAgent,
     personaImportActions,
     handleSubmit,
     handleDelete,
