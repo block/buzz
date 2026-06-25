@@ -199,6 +199,19 @@ interface, not as distinct C2 mechanisms. The C2 list is the index of *distinct
 closure mechanisms* — A_HASH, the Σ_err alphabet, the rebuild behavioral
 invariant, and the C2.4 typed-input fence — not the index of channels.
 
+**(C3) Historical writes after revocation — declared, out of scope.** The
+admission fence (I5, `Inv_AdmissionFence`) governs **current** capability: it
+proves that no membership or channel-less read capability survives for an actor
+not currently admitted to that community. Revocation (`RevokeMember`) removes the
+current `admittedMembers` row and therefore the capability, but it does *not*
+relabel or delete rows the actor wrote while admitted — those historical writes
+retain their original community label and remain present. This is sound and
+intended: the property we mechanize is "current membership and read capability
+track current admission," not "writes are retroactively un-admitted." We declare
+this as C1 declares physical timing: named, with retroactive-write redaction left
+to an operator data-lifecycle surface outside the isolation model. **We do not
+claim historical writes are revoked when a member is revoked.**
+
 ### The typed observational interface
 
 The non-interference theorem is stated *over an interface*: the exclusive set of
@@ -364,9 +377,9 @@ predicate fail closed rather than leak (Theorem I4).
   reassigned: `channels.community_id` is immutable after insert.** Both mechanized
   models encode this — Tamarin as the persistent `!ChannelCommunity` fact
   (`MultiTenantAuth.spthy:51`, once-true-always-true), TLA+ as the
-  `ChannelCommunity` CONSTANT function (`MultiTenantRelay.tla:85`). Any future
+  `ChannelCommunity` CONSTANT function (`MultiTenantRelay.tla:107`). Any future
   re-tenanting would be a separate axiomatic admission with its own audit
-  discipline and re-verification of S1/S2 (and I1–I4).
+  discipline and re-verification of S1/S2 (and I1–I5).
 - **(P-RESOLVE-HOST)** `resolve_host : host → community_id ∪ {⊥}` is the upstream
   binding for **every** connection, lifting today's per-relay URL identity one
   level up to the community. A connection's community is `resolve_host(host)`,
@@ -426,7 +439,7 @@ load-bearing *backstop*.
 
 - **NI (Non-interference, master).** For every reachable state and every B-scoped
   observation, the observed value is a function only of B-labeled state — no
-  high-labeled value flows into a low-labeled observation. I1–I4 are the specific
+  high-labeled value flows into a low-labeled observation. I1–I5 are the specific
   flows it rules out, each independently mutation-tested non-vacuous.
 - **I1 (Read confinement).** Every row a `Serve` returns — including direct-id and
   `#e`/`#a` lookups — is `ctx.community`-labeled.
@@ -448,6 +461,18 @@ load-bearing *backstop*.
 - **I4 (Fail-closed backstop).** A dropped application predicate yields ∅ under
   A-RLS, and NI still holds; removing the RLS guard makes the dropped predicate
   produce a cross-label row — proving RLS load-bearing, not decorative.
+- **I5 (Admission fence).** Channel membership and channel-less read capability
+  exist only for actors admitted to *that* community. The NIP-43 allowlist is the
+  `admittedMembers` relation keyed on `(community, actor)`; `AddMembership` and
+  every channel-less read are gated on `IsAdmitted(c, a)`, and `Inv_AdmissionFence`
+  quantifies over every membership *and* every recorded channel-less read,
+  requiring same-community admission on both — the channel-less branch additionally
+  binding `HostCommunity[host] = community`, so the host axis is fenced here too.
+  The fence is about **current** capability: it is mutation-tested non-vacuous by
+  M9 (re-keying the gate to any-community admission), which goes red on both a
+  membership trace and a channel-less-read trace, proving an admit-into-A then
+  act-in-B escape is caught rather than invisible. (See C3 for the explicit
+  historical-write carve-out.)
 
 ### Authorization soundness (mechanized in Tamarin, Dolev-Yao adversary)
 
@@ -489,13 +514,29 @@ load-bearing *backstop*.
   mapping alone would have been authoritative. Mechanized as
   `channelbearing_use_agrees_with_host` (the single-witness `ChannelBearingResolved`
   fact asserting `used_comm = host_comm`).
+- **S7 (NIP-43 admission confinement).** A community's member-list (NIP-43)
+  admission is confined to the community whose signing key signed it: B's signing
+  key can never admit a pubkey into A. Modeled as a parallel rule pair —
+  `Community_Signs_NIP43_MemberList` mints the signed list and
+  `Relay_Accepts_NIP43_MemberList` re-verifies the signature against
+  `!CommunitySigningKey(comm, sk)`, so `comm` is bound by unification to the
+  resolved community (the same confused-deputy discipline as the S5/S6 host
+  fence), emitting persistent `!Admitted(pk, comm)`.
+  `nip43_admission_confined_to_signing_community` proves the confinement; the
+  commented `MUTATION_Admit_Ignore_Community` (the dual of S6's
+  `MUTATION_Use_Token_Ignore_Host`) falsifies it, confirming the green is
+  non-vacuous. This is the authorization-world half of the same admission property
+  TLA+'s I5 proves in the in-relay world: `!Admitted(pk, comm)` /
+  `MemberAdmitted(pk, comm)` ⇔ `admittedMembers`/`IsAdmitted(c, a)` — one property,
+  two worlds (Tamarin proves the admission *event* per-community unforgeable, TLA+
+  proves the resulting capability in-relay scoped).
 
 Each Tamarin lemma is paired with an exists-trace sanity lemma (the honest
 protocol can run), the Tamarin analog of the mutation test.
 
-**Verification status.** S1–S6 are **machine-verified green** on
-Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 27 lemmas in
-~8s with zero `analyzed` failures. S1/S2: `token_confinement`,
+**Verification status.** S1–S7 are **machine-verified green** on
+Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 30 lemmas in
+~18s with zero `analyzed` failures. S1/S2: `token_confinement`,
 `cross_community_use_attempts_are_not_authorized`, the two
 `minted_*_channels_match_stamp` lemmas, `token_stamp_matches_mint`,
 `cross_community_mint_yields_no_token_for_that_request`, and the
@@ -523,7 +564,16 @@ lemma (8 steps). S6 (channel-bearing host/channel agreement):
 `MUTATION_Use_Token_Ignore_Host` mutation (the relay resolving a channel-bearing
 op from the channel mapping while ignoring the host binding — the A-host-on-a-
 B-channel confused deputy) confirmed red: it falsifies
-`channelbearing_use_agrees_with_host` in 2.6s with a 14-step trace.
+`channelbearing_use_agrees_with_host` in 2.6s with a 14-step trace. S7 (NIP-43
+admission confinement): `nip43_admission_confined_to_signing_community` (19 steps)
+and `other_community_key_compromise_does_not_admit` (79 steps), with the
+exists-trace probe `executable_member_admitted` (7 steps) proving a legitimate
+admission is producible — so the confinement lemma is non-vacuous, not trivially
+true over an unreachable premise. The S7 mutation `MUTATION_Admit_Ignore_Community`
+(the relay minting `!Admitted` for a community other than the one whose key
+signed — the admission-side confused deputy, the dual of S6's
+`MUTATION_Use_Token_Ignore_Host`) is confirmed red: it falsifies
+`nip43_admission_confined_to_signing_community` in 1.57s with a 7-step trace.
 
 The S5 confinement lemma was deliberately framed to keep its mutation
 *cheaply* refutable. An earlier framing joined two action facts
@@ -644,17 +694,23 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   On the core finite harness (2 communities × 4 channels, 2 message ids, 1 actor,
   1 worker, 2 audit values, bounded observation set, symmetry over the permutable
   model-value sets) TLC **completes exhaustively**: *Model checking completed. No
-  error has been found.* — 138,717,188 states generated, 5,621,760 distinct, 0 left
-  on queue, depth 13 (16 workers, ~40 s). The distinct-state count grew from the
+  error has been found.* — 265,122,788 states generated, 9,232,992 distinct, 0 left
+  on queue, depth 17 (16 workers, ~1m23). The distinct-state count grew from the
   pre-host-binding baseline (4,350,464 → 5,091,328 with channel-less host binding →
-  5,621,760 with channel-bearing host/channel agreement) precisely because the
-  channel-less write path, the fail-closed unmapped-host path, and the
-  channel-bearing host/channel-agreement (and its fail-closed disagreement) path
+  5,621,760 with channel-bearing host/channel agreement → 9,232,992 with the
+  `admittedMembers` allowlist, `channelLessReads` capability rows, and the
+  `AdmitMember`/`RevokeMember` actions) precisely because the
+  channel-less write path, the fail-closed unmapped-host path, the
+  channel-bearing host/channel-agreement (and its fail-closed disagreement) path,
+  and now the admit/revoke/gated-membership/gated-read paths
   are genuinely reachable — new behavior, not dead code. Threading the host through
   the duplicate/no-op path adds reachable fail-closed transitions (138.7M generated,
   up from 136.3M) without new distinct states: only the agreeing host can produce a
-  recorded duplicate, so the host on that path is fully determined. Non-vacuity is
-  shown by six mutations, each
+  recorded duplicate, so the host on that path is fully determined; layering the
+  admission gate on top is the +91% generated / +64% distinct growth to the figures
+  above (admit-then-act, revoke-then-act-fails, and gated reads/joins multiply the
+  reachable space). Non-vacuity is
+  shown by seven mutations, each
   confirmed to produce a counterexample: substituting the unscoped direct-by-id
   lookup (`UnscopedDirectIdRows`, the `get_accessible_channel_ids` landmine) →
   `Safety` violated at depth 4; widening the sanitized-error label to all
@@ -673,7 +729,17 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   can probe a B-channel id-conflict) → `Inv_HostBindingFence` violated by a 3-state
   trace (`Init → WriteInsert → WriteDuplicate`), the counterexample exhibiting a
   foreign-host duplicate record whose stored community ≠ its host's mapping (the
-  existence oracle the duplicate path would otherwise reopen). The two host-fence
+  existence oracle the duplicate path would otherwise reopen); and the **M9**
+  global-allowlist mutation (re-keying the admission gate from same-community
+  `IsAdmitted(c, a)` to any-community `AdmittedInAnyCommunity(a)`) →
+  `Inv_AdmissionFence` violated in two surfaces: a 5-state membership trace
+  (`Init → WriteInsert → WriteInsert → AdmitMember(commA, alice) →
+  AddMembership(commB/chanB1, alice)`) where alice, admitted to A, joins B's
+  channel through the global hole; and a 4-state channel-less-read trace
+  (`Init → WriteInsert → AdmitMember(commB, alice) →
+  ReadMessageRows(commA, NoChannel, hostA)`). The two M9 variants prove both the
+  `AddMembership` gate and the channel-less-read gate are independently
+  load-bearing, not just one. The two host-fence
   figures above are counterexample **trace lengths** (the error-trace state count),
   which unlike TLC's run-dependent "depth of complete graph search" total are
   reproducible from the printed error trace. The
@@ -682,17 +748,18 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   actors, and ids explodes the space; symmetry + bounded observations keep the
   core isolation surface exhaustively checkable.
 - **`docs/spec/MultiTenantAuth.spthy`** — the Tamarin authorization model. Run:
-  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 27 lemmas (S1–S6)
-  verify green (Tamarin 1.12.0 / Maude 3.5.1, ~8 s) — each safety lemma paired with
+  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 30 lemmas (S1–S7)
+  verify green (Tamarin 1.12.0 / Maude 3.5.1, ~18 s) — each safety lemma paired with
   a verified exists-trace sanity lemma, and the documented mutations
   (`MUTATION_Use_Token_Claimed_Community` for S1, the S3 bad-accept and S4
   splice-as-append mutations, `MUTATION_Use_Token_ChannelLess_Ignore_Host`
-  for S5's host fence, and `MUTATION_Use_Token_Ignore_Host` for S6's channel-bearing
-  host/channel-agreement fence) confirmed red. See §Authorization soundness for the
+  for S5's host fence, `MUTATION_Use_Token_Ignore_Host` for S6's channel-bearing
+  host/channel-agreement fence, and `MUTATION_Admit_Ignore_Community` for S7's
+  NIP-43 admission confinement) confirmed red. See §Authorization soundness for the
   full lemma list, the S5/S6 single-witness framing, and the corrected
   `other_community_key_compromise_does_not_authorize` vacuity fix.
 
-  **Machine-check hygiene.** S1–S6 lemmas close by two distinct shapes.
+  **Machine-check hygiene.** S1–S7 lemmas close by two distinct shapes.
   **Rule-shape closure** means the lemma's conclusion follows by unification on a
   single rule's action multiset: `token_confinement`,
   `audit_append_advances_same_community_head`,
@@ -828,7 +895,22 @@ The model's obligations map to concrete code seams:
   and archived identities are community-global admission facts. The portable
   value is the pubkey; the stored membership/archive fact is
   `(community_id, pubkey, ...)`. No deployment-global user gate is
-  tenant-observable unless it is modeled as a separate operator surface.
+  tenant-observable unless it is modeled as a separate operator surface. This is
+  no longer asserted-only: the `(community_id, pubkey)` admission key and the
+  *absence* of a deployment-global gate are both mechanized. TLA+ carries the
+  allowlist as the `admittedMembers` relation
+  (`MultiTenantRelay.tla:149`), keyed on `[community, actor]`; `IsAdmitted(c, a)`
+  (`:317`) gates `AddMembership` and every channel-less read, and
+  `Inv_AdmissionFence` proves no membership or channel-less read capability
+  survives that is not same-community-admitted (Theorem I5). The
+  deployment-global gate is exactly mutation M9: replacing `IsAdmitted(c, a)`
+  with the any-community `AdmittedInAnyCommunity(a)` (`:324`) makes the model go
+  red — so admit-into-A-then-act-in-B is a *caught* escape, not an invisible one.
+  On the authorization side, NIP-43 member-list events are signed and accepted
+  per-community in Tamarin (`Community_Signs_NIP43_MemberList` /
+  `Relay_Accepts_NIP43_MemberList`, `MultiTenantAuth.spthy:403`/`:413`), and
+  `nip43_admission_confined_to_signing_community` proves B's signing key can
+  never admit a pubkey into A (Theorem S7).
 
 ### Subscription-pipeline abstraction
 
