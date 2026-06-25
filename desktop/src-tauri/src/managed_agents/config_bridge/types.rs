@@ -26,6 +26,10 @@ pub enum ConfigOrigin {
     /// the user picked a different model on the running instance. Runtime-only —
     /// never persisted; reverts to the persona model on restart/respawn.
     RuntimeOverride,
+    /// Value is fixed by the harness itself — not from any user-set config or
+    /// env var. E.g. Claude Code only supports Anthropic as a provider; the
+    /// "locked" display is synthesized by the config bridge, not read from disk.
+    HarnessConstraint,
 }
 
 /// How a config field can be written back to the runtime.

@@ -151,17 +151,21 @@ mod tests {
     #[test]
     fn parse_permissions_and_hooks() {
         let cfg = parse_settings(
-            r#"{"permissions": {"default": "bypassPermissions"}, "hooks": {"pre-commit": {}}}"#,
+            r#"{"permissions": {"default": "bypassPermissions"}, "hooks": {"pre-commit": {"command": "lint"}}}"#,
         );
         // permissions is an object — flattened as permissions.default
         assert_eq!(
             cfg.extra.get("permissions.default").map(|s| s.as_str()),
             Some("bypassPermissions")
         );
-        // hooks is an object — flattened one level
+        // hooks.pre-commit is an object — two-level flattening produces hooks.pre-commit.command
         assert!(
-            cfg.extra.contains_key("hooks.pre-commit"),
-            "hooks.pre-commit should appear in extra"
+            cfg.extra.contains_key("hooks.pre-commit.command"),
+            "hooks.pre-commit.command should appear in extra"
+        );
+        assert_eq!(
+            cfg.extra.get("hooks.pre-commit.command").map(|s| s.as_str()),
+            Some("lint")
         );
     }
 

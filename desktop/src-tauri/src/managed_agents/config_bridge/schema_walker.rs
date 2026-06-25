@@ -9,10 +9,11 @@ use std::collections::BTreeMap;
 /// Value formatting:
 /// - Scalar values (string, number, bool) → their string representation
 /// - Arrays → "[N items]"
-/// - Objects → flatten one level deep as "key.subkey = value"; deeper nesting → "{...}".
-///   Subkeys are iterated from the config value directly — all subkeys the user
-///   has set are surfaced regardless of whether any schema defines them (intentional:
-///   supports arbitrary keys like env vars and custom plugin entries).
+/// - Objects → flatten up to two levels deep as "key.subkey" or
+///   "key.subkey.subsubkey = value"; deeper nesting → "{...}".
+///   Note: object subkeys are iterated from the config value, not filtered against the
+///   schema's nested properties — so all subkeys the user has set are surfaced regardless
+///   of whether the schema defines them (intentional: supports arbitrary keys like env vars).
 pub(super) fn extract_config_fields(
     config: &serde_json::Value,
     skip: &[&str],
@@ -30,10 +31,24 @@ pub(super) fn extract_config_fields(
         }
         match value {
             serde_json::Value::Object(obj) => {
-                // Flatten one level: "key.subkey" = scalar_value
+                // Flatten up to two levels: "key.subkey" and "key.subkey.subsubkey"
                 for (subkey, subval) in obj {
                     let flat_key = format!("{key}.{subkey}");
-                    out.insert(flat_key, format_scalar(subval));
+                    match subval {
+                        serde_json::Value::Object(subobj) => {
+                            // Second level: "key.subkey.subsubkey"
+                            for (subsubkey, subsubval) in subobj {
+                                let deep_key = format!("{flat_key}.{subsubkey}");
+                                out.insert(deep_key, format_scalar(subsubval));
+                            }
+                        }
+                        serde_json::Value::Array(arr) => {
+                            out.insert(flat_key, format!("[{} items]", arr.len()));
+                        }
+                        other => {
+                            out.insert(flat_key, format_scalar(other));
+                        }
+                    }
                 }
             }
             serde_json::Value::Array(arr) => {
@@ -102,14 +117,72 @@ mod tests {
     }
 
     #[test]
-    fn nested_object_beyond_one_level_is_placeholder() {
-        let config = json!({ "nested": { "deep": { "deeper": 1 } } });
+    fn nested_object_at_two_levels_is_flattened() {
+        let config = json!({ "nested": { "deep": { "value": 42 } } });
         let result = extract_config_fields(&config, &[]);
-        // "nested.deep" should be "{...}" because the value is an object
+        // Two levels deep: "nested.deep.value" = "42"
         assert_eq!(
-            result.get("nested.deep").map(|s| s.as_str()),
-            Some("{...}")
+            result.get("nested.deep.value").map(|s| s.as_str()),
+            Some("42")
         );
+        assert!(!result.contains_key("nested.deep"));
+    }
+
+    #[test]
+    fn nested_object_beyond_two_levels_is_placeholder() {
+        let config = json!({ "a": { "b": { "c": { "d": 1 } } } });
+        let result = extract_config_fields(&config, &[]);
+        // "a.b.c" is depth 3 — value is an object → "{...}"
+        assert_eq!(result.get("a.b.c").map(|s| s.as_str()), Some("{...}"));
+    }
+
+    #[test]
+    fn projects_table_flattens_to_trust_level() {
+        // Mirrors codex [projects."<path>"] { trust_level = "trusted" }
+        let config = json!({
+            "projects": {
+                "/Users/foo/dev/buzz": { "trust_level": "trusted" },
+                "/Users/foo/dev/other": { "trust_level": "untrusted" }
+            }
+        });
+        let result = extract_config_fields(&config, &[]);
+        assert_eq!(
+            result
+                .get("projects./Users/foo/dev/buzz.trust_level")
+                .map(|s| s.as_str()),
+            Some("trusted")
+        );
+        assert_eq!(
+            result
+                .get("projects./Users/foo/dev/other.trust_level")
+                .map(|s| s.as_str()),
+            Some("untrusted")
+        );
+    }
+
+    #[test]
+    fn tui_model_availability_nux_flattens_to_model_keys() {
+        // Mirrors codex [tui.model_availability_nux] { "gpt-5.5" = 1 }
+        let config = json!({
+            "tui": {
+                "status_line": ["model-with-reasoning", "git-branch"],
+                "model_availability_nux": { "gpt-5.5": 1 }
+            }
+        });
+        let result = extract_config_fields(&config, &[]);
+        assert_eq!(
+            result
+                .get("tui.status_line")
+                .map(|s| s.as_str()),
+            Some("[2 items]")
+        );
+        assert_eq!(
+            result
+                .get("tui.model_availability_nux.gpt-5.5")
+                .map(|s| s.as_str()),
+            Some("1")
+        );
+        assert!(!result.contains_key("tui.model_availability_nux"));
     }
 
     #[test]

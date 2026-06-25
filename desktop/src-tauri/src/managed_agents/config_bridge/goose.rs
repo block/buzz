@@ -33,7 +33,17 @@ fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
         .as_deref()
         .and_then(|ap| nested_provider_fields(&map, ap));
 
-    let provider = goose_provider.or_else(|| active_provider.clone());
+    let provider = goose_provider.or_else(|| active_provider.clone()).or_else(|| {
+        // Databricks OAuth path: DATABRICKS_HOST is set but no explicit provider.
+        // The goose runtime uses Databricks implicitly in this case.
+        if yaml_string(&map, "DATABRICKS_HOST").is_some()
+            || nested.as_ref().and_then(|n| n.host.clone()).is_some()
+        {
+            Some("databricks".to_string())
+        } else {
+            None
+        }
+    });
     let model = goose_model.or_else(|| nested.as_ref().and_then(|n| n.model.clone()));
     let mode = goose_mode;
 
@@ -247,5 +257,25 @@ extensions:
         let cfg = parse_goose_config("{}").unwrap();
         assert!(cfg.model.is_none());
         assert!(cfg.provider.is_none());
+    }
+
+    #[test]
+    fn databricks_host_without_explicit_provider_infers_databricks() {
+        let yaml = r#"
+DATABRICKS_HOST: https://block-lakehouse-production.cloud.databricks.com/
+GOOSE_TELEMETRY_ENABLED: false
+"#;
+        let cfg = parse_goose_config(yaml).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("databricks"));
+    }
+
+    #[test]
+    fn explicit_provider_wins_over_databricks_inference() {
+        let yaml = r#"
+GOOSE_PROVIDER: anthropic
+DATABRICKS_HOST: https://block-lakehouse-production.cloud.databricks.com/
+"#;
+        let cfg = parse_goose_config(yaml).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("anthropic"));
     }
 }

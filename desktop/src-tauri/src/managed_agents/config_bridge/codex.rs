@@ -54,7 +54,9 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
 
     Some(RuntimeFileConfig {
         model,
-        provider: model_provider,
+        // Default to OpenAI when no provider is configured — that is Codex's
+        // implicit provider when model_provider is absent.
+        provider: model_provider.or_else(|| Some("openai".to_string())),
         mode,
         thinking_effort: reasoning_effort,
         max_output_tokens: None,
@@ -198,8 +200,16 @@ base_url = "http://localhost:8080"
     fn empty_config() {
         let cfg = parse_codex_config("").unwrap();
         assert!(cfg.model.is_none());
-        assert!(cfg.provider.is_none());
+        // No model_provider → defaults to openai
+        assert_eq!(cfg.provider.as_deref(), Some("openai"));
         assert!(cfg.mode.is_none());
+    }
+
+    #[test]
+    fn explicit_provider_wins_over_default() {
+        let toml = r#"model_provider = "azure""#;
+        let cfg = parse_codex_config(toml).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("azure"));
     }
 
     #[test]

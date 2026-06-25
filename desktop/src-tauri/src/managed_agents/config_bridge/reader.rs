@@ -348,7 +348,7 @@ fn build_provider_field(
     if provider_locked {
         return Some(NormalizedField {
             value: Some("Anthropic (locked)".to_string()),
-            origin: ConfigOrigin::EnvVar,
+            origin: ConfigOrigin::HarnessConstraint,
             is_writable: false,
             write_via: ConfigWriteMechanism::ReadOnly,
             overridden_value: None,
@@ -635,6 +635,7 @@ mod tests {
         let provider = surface.normalized.provider.unwrap();
         assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
         assert!(!provider.is_writable);
+        assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
     }
 
     #[test]
