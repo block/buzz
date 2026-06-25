@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
-
 use super::types::{ExtensionEntry, RuntimeFileConfig};
+
+const CODEX_SCHEMA: &str = include_str!("schemas/codex.config.schema.json");
+const VERSIONS_JSON: &str = include_str!("schemas/versions.json");
 
 /// Read Codex config from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
@@ -27,23 +28,33 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
         (None, None) => None,
     };
 
-    let mut extra = BTreeMap::new();
-    if let Some(ref ap) = approval_policy {
-        extra.insert("approval_policy".to_string(), ap.clone());
-    }
-    if let Some(ref sm) = sandbox_mode {
-        extra.insert("sandbox_mode".to_string(), sm.clone());
-    }
-
     // MCP servers from [mcp_servers.<id>] tables
     let extensions = parse_mcp_servers(&table);
 
-    // Custom model providers from [model_providers.<id>]
-    if let Some(providers) = table.get("model_providers").and_then(|v| v.as_table()) {
+    // Schema-driven extra fields — skip normalized keys to avoid double-counting.
+    let config_json = toml_to_json(&toml::Value::Table(table));
+    let skip = &[
+        "model",
+        "model_provider",
+        "approval_policy",
+        "sandbox_mode",
+        "model_reasoning_effort",
+        "model_context_window",
+        "instructions",
+        "mcp_servers",
+        "model_providers",
+    ];
+    let mut extra = super::schema_walker::extract_schema_fields(CODEX_SCHEMA, &config_json, skip);
+
+    // Custom model providers from [model_providers.<id>] — not in the schema's
+    // top-level properties as individual keys, so surface them explicitly.
+    if let Some(serde_json::Value::Object(providers)) = config_json.get("model_providers") {
         for (name, _) in providers {
             extra.insert(format!("model_providers.{name}"), "configured".to_string());
         }
     }
+
+    let schema_version = parse_codex_schema_version();
 
     Some(RuntimeFileConfig {
         model,
@@ -52,10 +63,21 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
         thinking_effort: reasoning_effort,
         max_output_tokens: None,
         context_limit: context_window,
-        system_prompt: toml_string(&table, "instructions"),
+        system_prompt: toml_to_json_string(&config_json, "instructions"),
         extensions,
         extra,
+        schema_version,
     })
+}
+
+/// Extract the codex schema version from the embedded versions.json.
+fn parse_codex_schema_version() -> Option<String> {
+    let versions: serde_json::Value = serde_json::from_str(VERSIONS_JSON).ok()?;
+    versions
+        .get("codex")
+        .and_then(|v| v.get("fetched_at"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 fn parse_mcp_servers(table: &toml::Table) -> Vec<ExtensionEntry> {
@@ -72,6 +94,38 @@ fn parse_mcp_servers(table: &toml::Table) -> Vec<ExtensionEntry> {
             enabled: true,
         })
         .collect()
+}
+
+/// Convert a TOML value to a serde_json Value.
+fn toml_to_json(val: &toml::Value) -> serde_json::Value {
+    match val {
+        toml::Value::String(s) => serde_json::Value::String(s.clone()),
+        toml::Value::Integer(i) => serde_json::Value::Number((*i).into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
+        toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(tbl) => {
+            let map = tbl
+                .iter()
+                .map(|(k, v)| (k.clone(), toml_to_json(v)))
+                .collect();
+            serde_json::Value::Object(map)
+        }
+    }
+}
+
+/// Extract a string value from a JSON object by key (mirrors toml_string).
+fn toml_to_json_string(val: &serde_json::Value, key: &str) -> Option<String> {
+    val.get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn toml_string(table: &toml::Table, key: &str) -> Option<String> {
@@ -166,5 +220,96 @@ base_url = "http://localhost:8080"
     #[test]
     fn invalid_toml_returns_none() {
         assert!(parse_codex_config("{{{{not valid").is_none());
+    }
+
+    #[test]
+    fn schema_version_is_populated() {
+        let toml = r#"model = "o3""#;
+        let cfg = parse_codex_config(toml).unwrap();
+        // schema_version is the fetched_at timestamp from versions.json
+        assert!(cfg.schema_version.is_some());
+    }
+
+    #[test]
+    fn extra_contains_fast_mode_from_features() {
+        // features.fast_mode is a nested field — walker flattens to features.fast_mode
+        let toml = r#"
+model = "o3"
+
+[features]
+fast_mode = true
+"#;
+        let cfg = parse_codex_config(toml).unwrap();
+        assert_eq!(
+            cfg.extra.get("features.fast_mode").map(|s| s.as_str()),
+            Some("true"),
+            "features.fast_mode should appear in extra as 'true'"
+        );
+    }
+
+    #[test]
+    fn extra_contains_service_tier() {
+        let toml = r#"service_tier = "flex""#;
+        let cfg = parse_codex_config(toml).unwrap();
+        assert_eq!(
+            cfg.extra.get("service_tier").map(|s| s.as_str()),
+            Some("flex"),
+            "service_tier should appear in extra"
+        );
+    }
+
+    #[test]
+    fn extra_contains_plan_mode_reasoning_effort() {
+        let toml = r#"plan_mode_reasoning_effort = "medium""#;
+        let cfg = parse_codex_config(toml).unwrap();
+        assert_eq!(
+            cfg.extra
+                .get("plan_mode_reasoning_effort")
+                .map(|s| s.as_str()),
+            Some("medium"),
+            "plan_mode_reasoning_effort should appear in extra"
+        );
+    }
+
+    #[test]
+    fn extra_contains_model_reasoning_summary() {
+        let toml = r#"model_reasoning_summary = "auto""#;
+        let cfg = parse_codex_config(toml).unwrap();
+        assert_eq!(
+            cfg.extra
+                .get("model_reasoning_summary")
+                .map(|s| s.as_str()),
+            Some("auto"),
+            "model_reasoning_summary should appear in extra"
+        );
+    }
+
+    #[test]
+    fn normalized_fields_not_duplicated_in_extra() {
+        let toml = r#"
+model = "o3"
+model_provider = "openai"
+approval_policy = "unless-allow-listed"
+sandbox_mode = "permissive"
+model_reasoning_effort = "high"
+model_context_window = "128000"
+instructions = "You are helpful."
+"#;
+        let cfg = parse_codex_config(toml).unwrap();
+        // None of the normalized/skip fields should appear in extra
+        for key in &[
+            "model",
+            "model_provider",
+            "approval_policy",
+            "sandbox_mode",
+            "model_reasoning_effort",
+            "model_context_window",
+            "instructions",
+        ] {
+            assert!(
+                !cfg.extra.contains_key(*key),
+                "normalized field '{key}' should not appear in extra"
+            );
+        }
     }
 }

@@ -169,6 +169,7 @@ pub(crate) fn read_config_surface(
             ConfigTierStatus::NotApplicable
         },
         config_file_path,
+        config_schema_version: file_config.schema_version,
     };
 
     RuntimeConfigSurface {

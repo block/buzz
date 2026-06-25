@@ -1,0 +1,12 @@
+{
+  "codex": {
+    "source_url": "https://raw.githubusercontent.com/openai/codex/main/codex-rs/core/config.schema.json",
+    "fetched_at": "2026-06-25T20:16:42Z",
+    "sha256": "dad7ddb531094ba7e5237ce1a437af0caad712003c5f1ee5178f29ea7121643d"
+  },
+  "claude": {
+    "source_url": "https://www.schemastore.org/claude-code-settings.json",
+    "fetched_at": "2026-06-25T20:16:42Z",
+    "sha256": "22ffdfc7013b40b9fefdfd9df4af889a096ed0c5bf23607484526f291439b8f8"
+  }
+}

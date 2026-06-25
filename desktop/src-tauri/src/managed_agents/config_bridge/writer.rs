@@ -102,6 +102,7 @@ mod tests {
                 env_vars: ConfigTierStatus::Available,
                 config_file: ConfigTierStatus::NotApplicable,
                 config_file_path: None,
+                config_schema_version: None,
             },
         }
     }

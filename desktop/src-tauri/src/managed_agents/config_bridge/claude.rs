@@ -1,5 +1,8 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
+const CLAUDE_SCHEMA: &str = include_str!("schemas/claude-code-settings.schema.json");
+const VERSIONS_JSON: &str = include_str!("schemas/versions.json");
+
 /// Read Claude Code config from `~/.claude/settings.json` and `~/.claude.json`.
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     let home = dirs::home_dir()?;
@@ -18,21 +21,14 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     if let Some(ref s) = settings {
         cfg.model = json_string(s, "model");
 
-        if let Some(permissions) = s.get("permissions") {
-            if let Some(mode) = permissions.get("default").and_then(|v| v.as_str()) {
-                cfg.extra
-                    .insert("permissions.default".to_string(), mode.to_string());
-            }
-        }
+        // effortLevel → thinking_effort (direct mapping per spec)
+        cfg.thinking_effort = json_string(s, "effortLevel");
 
-        if s.get("hooks").is_some() {
-            cfg.extra
-                .insert("hooks".to_string(), "configured".to_string());
-        }
+        // Schema-driven extra fields — skip normalized keys.
+        let skip = &["model", "effortLevel"];
+        cfg.extra = super::schema_walker::extract_schema_fields(CLAUDE_SCHEMA, s, skip);
 
-        if let Some(style) = json_string(s, "outputStyle") {
-            cfg.extra.insert("outputStyle".to_string(), style);
-        }
+        cfg.schema_version = parse_claude_schema_version();
     }
 
     // MCP servers from ~/.claude.json
@@ -57,6 +53,16 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     Some(cfg)
 }
 
+/// Extract the claude schema version from the embedded versions.json.
+fn parse_claude_schema_version() -> Option<String> {
+    let versions: serde_json::Value = serde_json::from_str(VERSIONS_JSON).ok()?;
+    versions
+        .get("claude")
+        .and_then(|v| v.get("fetched_at"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 fn read_json_file(path: &std::path::Path) -> Option<serde_json::Value> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
@@ -74,27 +80,19 @@ fn json_string(val: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Parse a settings JSON string into a RuntimeFileConfig using the same
+    /// logic as read_config_file but without touching the filesystem.
     fn parse_settings(json: &str) -> RuntimeFileConfig {
-        use std::collections::BTreeMap;
         let val: serde_json::Value = serde_json::from_str(json).unwrap();
-        let mut extra = BTreeMap::new();
-        if let Some(permissions) = val.get("permissions") {
-            if let Some(mode) = permissions.get("default").and_then(|v| v.as_str()) {
-                extra.insert("permissions.default".to_string(), mode.to_string());
-            }
-        }
-        if val.get("hooks").is_some() {
-            extra.insert("hooks".to_string(), "configured".to_string());
-        }
-        if let Some(style) = json_string(&val, "outputStyle") {
-            extra.insert("outputStyle".to_string(), style);
-        }
-        RuntimeFileConfig {
-            model: json_string(&val, "model"),
-            system_prompt: None,
-            extra,
-            ..Default::default()
-        }
+        let mut cfg = RuntimeFileConfig::default();
+        cfg.model = json_string(&val, "model");
+        cfg.thinking_effort = json_string(&val, "effortLevel");
+        let skip = &["model", "effortLevel"];
+        cfg.extra = super::super::schema_walker::extract_schema_fields(CLAUDE_SCHEMA, &val, skip);
+        // provider_locked is always added by read_config_file; add here for parity.
+        cfg.extra
+            .insert("provider_locked".to_string(), "true".to_string());
+        cfg
     }
 
     #[test]
@@ -104,28 +102,72 @@ mod tests {
     }
 
     #[test]
-    fn parse_permissions_and_hooks() {
-        let cfg = parse_settings(
-            r#"{"permissions": {"default": "bypassPermissions"}, "hooks": {"pre-commit": {}}}"#,
-        );
+    fn effort_level_maps_to_thinking_effort() {
+        let cfg = parse_settings(r#"{"effortLevel": "high"}"#);
+        assert_eq!(cfg.thinking_effort.as_deref(), Some("high"));
+        // effortLevel must NOT appear in extra (it's in the skip list)
+        assert!(!cfg.extra.contains_key("effortLevel"));
+    }
+
+    #[test]
+    fn always_thinking_enabled_appears_in_extra() {
+        let cfg = parse_settings(r#"{"alwaysThinkingEnabled": true}"#);
         assert_eq!(
-            cfg.extra.get("permissions.default").map(|s| s.as_str()),
-            Some("bypassPermissions")
-        );
-        assert_eq!(
-            cfg.extra.get("hooks").map(|s| s.as_str()),
-            Some("configured")
+            cfg.extra.get("alwaysThinkingEnabled").map(|s| s.as_str()),
+            Some("true"),
+            "alwaysThinkingEnabled should appear in extra"
         );
     }
 
     #[test]
-    fn parse_output_style_in_extra() {
-        let cfg = parse_settings(r#"{"outputStyle": "Be concise and technical"}"#);
-        assert_eq!(
-            cfg.extra.get("outputStyle").map(|s| s.as_str()),
-            Some("Be concise and technical")
+    fn env_vars_flattened_in_extra() {
+        let cfg = parse_settings(
+            r#"{"env": {"CLAUDE_CODE_EFFORT_LEVEL": "high", "ANTHROPIC_MODEL": "claude-opus-4"}}"#,
         );
-        assert!(cfg.system_prompt.is_none());
+        assert_eq!(
+            cfg.extra
+                .get("env.CLAUDE_CODE_EFFORT_LEVEL")
+                .map(|s| s.as_str()),
+            Some("high"),
+            "env.CLAUDE_CODE_EFFORT_LEVEL should appear in extra"
+        );
+        assert_eq!(
+            cfg.extra.get("env.ANTHROPIC_MODEL").map(|s| s.as_str()),
+            Some("claude-opus-4"),
+            "env.ANTHROPIC_MODEL should appear in extra"
+        );
+    }
+
+    #[test]
+    fn enabled_plugins_formats_as_item_count() {
+        // enabledPlugins is an object in the schema — walker flattens one level.
+        // Each plugin entry is a value (bool or array), so they appear as subkeys.
+        let cfg = parse_settings(
+            r#"{"enabledPlugins": {"plugin-a": true, "plugin-b": true}}"#,
+        );
+        // The walker flattens one level: enabledPlugins.plugin-a = "true"
+        assert!(
+            cfg.extra.contains_key("enabledPlugins.plugin-a")
+                || cfg.extra.contains_key("enabledPlugins.plugin-b"),
+            "enabledPlugins entries should appear as enabledPlugins.<name> in extra"
+        );
+    }
+
+    #[test]
+    fn parse_permissions_and_hooks() {
+        let cfg = parse_settings(
+            r#"{"permissions": {"default": "bypassPermissions"}, "hooks": {"pre-commit": {}}}"#,
+        );
+        // permissions is an object — flattened as permissions.default
+        assert_eq!(
+            cfg.extra.get("permissions.default").map(|s| s.as_str()),
+            Some("bypassPermissions")
+        );
+        // hooks is an object — flattened one level
+        assert!(
+            cfg.extra.contains_key("hooks.pre-commit"),
+            "hooks.pre-commit should appear in extra"
+        );
     }
 
     #[test]
@@ -150,6 +192,14 @@ mod tests {
     fn empty_settings_returns_defaults() {
         let cfg = parse_settings("{}");
         assert!(cfg.model.is_none());
+        assert!(cfg.thinking_effort.is_none());
         assert!(cfg.system_prompt.is_none());
+    }
+
+    #[test]
+    fn model_not_duplicated_in_extra() {
+        let cfg = parse_settings(r#"{"model": "claude-opus-4", "effortLevel": "high"}"#);
+        assert!(!cfg.extra.contains_key("model"));
+        assert!(!cfg.extra.contains_key("effortLevel"));
     }
 }

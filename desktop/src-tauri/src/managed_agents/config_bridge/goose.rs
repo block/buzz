@@ -14,6 +14,8 @@ fn read_config_from_path(path: &std::path::Path) -> Option<RuntimeFileConfig> {
 }
 
 fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
+    // TODO: replace hardcoded field extraction with schema_walker once goose publishes
+    // a JSON Schema. Tracked separately.
     let map: std::collections::HashMap<String, serde_yaml::Value> =
         serde_yaml::from_str(yaml_str).ok()?;
 
@@ -62,6 +64,7 @@ fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
         system_prompt: None,
         extensions,
         extra,
+        schema_version: None,
     })
 }
 
