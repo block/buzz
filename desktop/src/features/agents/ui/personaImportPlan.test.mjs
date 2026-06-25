@@ -87,6 +87,17 @@ test("buildPersonaImportPlan detects avatar change", () => {
   assert.equal(plan.fields[0]?.field, "avatarUrl");
 });
 
+test("buildPersonaImportPlan detects avatar ref changes", () => {
+  const plan = buildPersonaImportPlan({
+    persona: createPersona({ avatarUrl: null }),
+    preview: createPreview({ avatarRef: "app-avatar:gloopies-19" }),
+  });
+
+  assert.equal(plan.fields.length, 1);
+  assert.equal(plan.fields[0]?.field, "avatarUrl");
+  assert.equal(plan.fields[0]?.importedValue, "app-avatar:gloopies-19");
+});
+
 test("buildPersonaImportPlan detects runtime change", () => {
   const plan = buildPersonaImportPlan({
     persona: createPersona({ runtime: "goose" }),

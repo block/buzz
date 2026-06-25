@@ -32,6 +32,7 @@ import {
   importPersonaDialogState,
   type PersonaDialogState,
 } from "./personaDialogState";
+import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import { usePersonaImportActions } from "./usePersonaImportActions";
 
 type PersonaFeedbackSurface = "catalog" | "library";
@@ -115,6 +116,7 @@ export function usePersonaActions() {
         }
 
         const persona = await createPersonaMutation.mutateAsync(input);
+        const avatarUrl = await resolveManagedAgentAvatarUrl(persona.avatarUrl);
         const agentInput: CreateManagedAgentInput = {
           name: persona.displayName,
           acpCommand: "buzz-acp",
@@ -123,9 +125,8 @@ export function usePersonaActions() {
           mcpCommand: runtime.mcpCommand ?? "",
           personaId: persona.id,
           systemPrompt: persona.systemPrompt,
-          avatarUrl: persona.avatarUrl ?? undefined,
+          avatarUrl,
           model: persona.model ?? undefined,
-          envVars: persona.envVars,
           spawnAfterCreate: true,
           startOnAppLaunch: true,
           backend: { type: "local" },

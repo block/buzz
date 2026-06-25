@@ -104,7 +104,7 @@ export function importPersonaDialogState(
     submitLabel: "Create agent",
     initialValues: {
       displayName: persona.displayName,
-      avatarUrl: persona.avatarDataUrl ?? "",
+      avatarUrl: persona.avatarDataUrl ?? persona.avatarRef ?? "",
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,

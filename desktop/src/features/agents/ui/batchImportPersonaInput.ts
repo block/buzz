@@ -6,7 +6,7 @@ export function buildBatchImportPersonaInput(
 ): CreatePersonaInput {
   return {
     displayName: persona.displayName,
-    avatarUrl: persona.avatarDataUrl ?? undefined,
+    avatarUrl: persona.avatarDataUrl ?? persona.avatarRef ?? undefined,
     systemPrompt: persona.systemPrompt,
     runtime: persona.runtime ?? undefined,
     model: persona.model ?? undefined,

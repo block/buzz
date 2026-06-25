@@ -173,7 +173,7 @@ export function BatchImportDialog({
                         onClick={(e: React.MouseEvent) => e.stopPropagation()}
                       />
                       <ProfileAvatar
-                        avatarUrl={persona.avatarDataUrl}
+                        avatarUrl={persona.avatarDataUrl ?? persona.avatarRef}
                         className="h-8 w-8 rounded-lg text-xs"
                         label={persona.displayName}
                       />

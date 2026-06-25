@@ -23,7 +23,7 @@ export function buildPersonaImportUpdateInput({
       ? preview.systemPrompt
       : existing.systemPrompt,
     avatarUrl: selectedFieldSet.has("avatarUrl")
-      ? (preview.avatarDataUrl ?? undefined)
+      ? (preview.avatarDataUrl ?? preview.avatarRef ?? undefined)
       : (existing.avatarUrl ?? undefined),
     runtime: selectedFieldSet.has("runtime")
       ? (preview.runtime ?? undefined)
