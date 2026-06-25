@@ -201,6 +201,9 @@ enum Cmd {
     /// Create, get, list, and set status on git issues (NIP-34)
     #[command(subcommand)]
     Issues(IssuesCmd),
+    /// Open, update, list, and set status on git pull requests (NIP-34)
+    #[command(subcommand)]
+    Pr(PrCmd),
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -1082,6 +1085,147 @@ pub enum PatchesCmd {
 }
 
 #[derive(Subcommand)]
+pub enum PrCmd {
+    /// Open a git pull request (NIP-34 kind:1618)
+    #[command(
+        after_help = "Examples:\n  buzz pr open --repo-owner <hex> --repo-id myrepo --subject 'Fix bug' --body-file - --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo --branch-name fix-bug\n  buzz pr update --repo-owner <hex> --repo-id myrepo --pr <event> --pr-author <hex> --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo"
+    )]
+    Open {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pull request subject/header
+        #[arg(long, alias = "title")]
+        subject: String,
+        /// Pull request body markdown. Use '-' to read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to pull request body markdown, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Tip commit of the PR branch
+        #[arg(long)]
+        commit: String,
+        /// Clone URL where the tip commit can be fetched — can be specified multiple times
+        #[arg(long = "clone", required = true)]
+        clone: Vec<String>,
+        /// Recommended branch name
+        #[arg(long)]
+        branch_name: Option<String>,
+        /// Most recent common ancestor with the target branch
+        #[arg(long)]
+        merge_base: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Label — can be specified multiple times
+        #[arg(long = "label")]
+        label: Vec<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Root patch event id this PR revises
+        #[arg(long)]
+        revision_of: Option<String>,
+    },
+    /// Update a git pull request tip (NIP-34 kind:1619)
+    Update {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pull request event id being updated
+        #[arg(long)]
+        pr: String,
+        /// Pull request author's pubkey
+        #[arg(long)]
+        pr_author: String,
+        /// Updated tip commit of the PR branch
+        #[arg(long)]
+        commit: String,
+        /// Clone URL where the updated tip commit can be fetched — can be specified multiple times
+        #[arg(long = "clone", required = true)]
+        clone: Vec<String>,
+        /// Markdown context for the update. Use '-' to read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to markdown context for the update, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Most recent common ancestor with the target branch
+        #[arg(long)]
+        merge_base: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+    /// Get a PR by event id
+    Get {
+        /// PR event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// List PRs for a repo
+    List {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Filter by PR author pubkey
+        #[arg(long)]
+        author: Option<String>,
+        /// Filter by label
+        #[arg(long)]
+        label: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Set status on a PR (open/merged/closed/draft — NIP-34 kind:1630-1633)
+    Status {
+        /// Pull request event id
+        #[arg(long)]
+        pr: String,
+        /// New status
+        #[arg(long, value_parser = ["open", "merged", "closed", "draft"])]
+        status: String,
+        /// Markdown context for the status change. Use '-' to read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to markdown context for the status change, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Repo owner pubkey — requires --repo-id
+        #[arg(long, requires = "repo_id")]
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag) — requires --repo-owner
+        #[arg(long, requires = "repo_owner")]
+        repo_id: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. PR author/reviewers. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Merge commit id (status=merged only)
+        #[arg(long)]
+        merge_commit: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
     Create {
@@ -1316,6 +1460,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
+        Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
@@ -1347,6 +1492,7 @@ mod tests {
             "notes",
             "pack",
             "patches",
+            "pr",
             "reactions",
             "repos",
             "social",
@@ -1461,6 +1607,10 @@ mod tests {
         );
         assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
         assert_eq!(
+            names(&cmd, "pr"),
+            vec!["get", "list", "open", "status", "update"]
+        );
+        assert_eq!(
             names(&cmd, "patches"),
             vec!["get", "list", "send", "status"]
         );
@@ -1484,6 +1634,7 @@ mod tests {
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),
+            ("pr", 5),
             ("reactions", 3),
             ("repos", 3),
             ("social", 7),
