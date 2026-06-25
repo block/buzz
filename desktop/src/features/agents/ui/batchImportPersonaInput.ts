@@ -1,12 +1,13 @@
 import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type { CreatePersonaInput } from "@/shared/api/types";
+import { importedAvatarUrl } from "./personaDialogState";
 
 export function buildBatchImportPersonaInput(
   persona: ParsedPersonaPreview,
 ): CreatePersonaInput {
   return {
     displayName: persona.displayName,
-    avatarUrl: persona.avatarDataUrl ?? persona.avatarRef ?? undefined,
+    avatarUrl: importedAvatarUrl(persona) || undefined,
     systemPrompt: persona.systemPrompt,
     runtime: persona.runtime ?? undefined,
     model: persona.model ?? undefined,

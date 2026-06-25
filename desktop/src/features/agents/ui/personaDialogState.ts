@@ -1,4 +1,4 @@
-import type { ParsePersonaFilesResult } from "@/shared/api/tauriPersonas";
+import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type {
   AgentPersona,
   CreatePersonaInput,
@@ -12,7 +12,10 @@ export type PersonaDialogState = {
   title: string;
 };
 
-type ParsedPersonaDraft = ParsePersonaFilesResult["personas"][number];
+type ImportedPersonaAvatarPreview = Pick<
+  ParsedPersonaPreview,
+  "avatarDataUrl" | "avatarRef"
+>;
 
 /**
  * Whether the persona dialog's save action should be enabled.
@@ -49,7 +52,7 @@ function isSafeImportedAvatarRef(
   }
 }
 
-function importedAvatarUrl(persona: ParsedPersonaDraft) {
+export function importedAvatarUrl(persona: ImportedPersonaAvatarPreview) {
   if (persona.avatarDataUrl) return persona.avatarDataUrl;
   return isSafeImportedAvatarRef(persona.avatarRef) ? persona.avatarRef : "";
 }
@@ -122,7 +125,7 @@ export function editPersonaDialogState(
 }
 
 export function importPersonaDialogState(
-  persona: ParsedPersonaDraft,
+  persona: ParsedPersonaPreview,
 ): PersonaDialogState {
   return {
     title: `Import ${persona.displayName}`,

@@ -98,6 +98,18 @@ test("buildPersonaImportPlan detects avatar ref changes", () => {
   assert.equal(plan.fields[0]?.importedValue, "app-avatar:gloopies-19");
 });
 
+test("buildPersonaImportPlan ignores raw relative avatar refs", () => {
+  const plan = buildPersonaImportPlan({
+    persona: createPersona({ avatarUrl: null }),
+    preview: createPreview({ avatarRef: "./avatars/lep.png" }),
+  });
+
+  assert.equal(
+    plan.fields.some((field) => field.field === "avatarUrl"),
+    false,
+  );
+});
+
 test("buildPersonaImportPlan detects runtime change", () => {
   const plan = buildPersonaImportPlan({
     persona: createPersona({ runtime: "goose" }),
