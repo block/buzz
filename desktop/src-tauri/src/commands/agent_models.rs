@@ -6,9 +6,9 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
-        known_acp_runtime, load_managed_agents, load_personas, managed_agent_avatar_url,
-        missing_command_message, normalize_agent_args, resolve_command,
+        build_managed_agent_summary, current_instance_id, default_agent_workdir,
+        find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
         UpdateManagedAgentResponse,
@@ -37,7 +37,7 @@ pub async fn get_agent_models(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
             save_managed_agents(&app, &records)?;
         }
 
@@ -49,11 +49,21 @@ pub async fn get_agent_models(
         let resolved = resolve_command(&record.acp_command)
             .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
 
-        let args = normalize_agent_args(&record.agent_command, record.agent_args.clone());
+        // Resolve the effective harness from the linked persona (mirrors spawn),
+        // so model discovery runs against the persona's current harness, not the
+        // frozen record snapshot. An explicit per-agent override wins.
+        let personas = load_personas(&app).unwrap_or_default();
+        let effective_command = crate::managed_agents::effective_agent_command(
+            record.persona_id.as_deref(),
+            &personas,
+            record.agent_command_override.as_deref(),
+        );
 
-        let resolved_agent = resolve_command(&record.agent_command)
+        let args = normalize_agent_args(&effective_command, record.agent_args.clone());
+
+        let resolved_agent = resolve_command(&effective_command)
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| record.agent_command.clone());
+            .unwrap_or_else(|| effective_command.clone());
 
         // Same env layering as runtime spawn: persona env < agent env.
         // Model discovery needs the user's credentials. Fail closed on
@@ -65,7 +75,6 @@ pub async fn get_agent_models(
 
         // Resolve the effective model from the linked persona so the ModelPicker
         // dropdown shows the current persona model as selected.
-        let personas = load_personas(&app).unwrap_or_default();
         let (_prompt, effective_model, _provider) = resolve_effective_prompt_model_provider(
             record.persona_id.as_deref(),
             &personas,
@@ -157,7 +166,7 @@ pub async fn update_managed_agent(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        sync_managed_agent_processes(&mut records, &mut runtimes);
+        sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
 
@@ -188,19 +197,27 @@ pub async fn update_managed_agent(
         if let Some(turn_timeout_seconds) = input.turn_timeout_seconds {
             record.turn_timeout_seconds = turn_timeout_seconds;
         }
+        // Store the relay override exactly as supplied (trimmed). An explicit
+        // value pins the agent; empty falls back to the workspace relay at
+        // read-time. A name-only edit (relay_url == None) leaves the pin intact.
         if let Some(relay_url) = input.relay_url {
-            let trimmed = relay_url.trim();
-            record.relay_url = if trimmed.is_empty() {
-                relay_ws_url_with_override(&state)
-            } else {
-                trimmed.to_string()
-            };
+            record.relay_url = relay_url.trim().to_string();
         }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
         }
+        // Harness edit: the persona's runtime is authoritative, so we persist an
+        // explicit `agent_command_override` ONLY when the user picks a command
+        // that diverges from the persona. An empty/whitespace value (the
+        // "Inherit from persona" sentinel) clears the pin back to `None`. A
+        // name-only edit (`agent_command == None`) leaves the pin intact.
         if let Some(agent_command) = input.agent_command {
-            record.agent_command = agent_command;
+            let personas = load_personas(&app).unwrap_or_default();
+            record.agent_command_override = crate::managed_agents::divergent_agent_command_override(
+                record.persona_id.as_deref(),
+                &personas,
+                Some(&agent_command),
+            );
         }
         if let Some(agent_args) = input.agent_args {
             record.agent_args = agent_args;
@@ -245,15 +262,34 @@ pub async fn update_managed_agent(
             .find(|r| r.pubkey == input.pubkey)
             .ok_or_else(|| format!("agent {} not found", input.pubkey))?;
 
+        // Publish the edit to the relay. After-save, inside the lock, before
+        // any .await. The retention upsert hashes the opt-IN projection, so an
+        // update that touched only runtime/local fields is a no-op publish.
+        super::agents::retain_managed_agent_pending(&app, &state, record);
+
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            let relay_url = record.relay_url.clone();
+            // Re-publish the renamed profile to the agent's effective relay:
+            // an explicit per-agent relay wins; empty falls back to workspace.
+            let relay_url = crate::relay::effective_agent_relay_url(
+                &record.relay_url,
+                &relay_ws_url_with_override(&state),
+            );
             let display_name = record.name.clone();
+            // Avatar fallback derives from the EFFECTIVE harness (persona-wins),
+            // not the frozen snapshot, so an inherited harness picks the right
+            // default avatar.
+            let personas = load_personas(&app).unwrap_or_default();
+            let effective_command = crate::managed_agents::effective_agent_command(
+                record.persona_id.as_deref(),
+                &personas,
+                record.agent_command_override.as_deref(),
+            );
             let avatar_url = record
                 .avatar_url
                 .clone()
-                .or_else(|| managed_agent_avatar_url(&record.agent_command));
+                .or_else(|| managed_agent_avatar_url(&effective_command));
             let auth_tag = record.auth_tag.clone();
             Some((agent_keys, relay_url, display_name, avatar_url, auth_tag))
         } else {

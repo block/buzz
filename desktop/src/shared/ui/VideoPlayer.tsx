@@ -21,10 +21,20 @@ import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 import { Spinner } from "./spinner";
+import {
+  getInlinePlaybackPosition,
+  getReviewPlaybackPosition,
+  isVideoReviewOpen,
+  saveInlinePlaybackPosition,
+  saveReviewPlaybackPosition,
+  setVideoReviewOpen,
+} from "./videoPlayerState";
 
 type VideoReviewReaction = {
   emoji: string;
@@ -93,11 +103,13 @@ type TimecodedComment = {
 const TIMECODE_RE =
   /^\s*\[((?:(?:\d{1,2}:)?\d{1,2}:)?\d{2}(?:\.\d{1,3})?)\]\s*/;
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
-// Review open state and playback positions survive player remounts (e.g. the
-// optimistic→acked message row swap) so an open review dialog doesn't snap
-// shut or lose its place mid-session.
-const openReviewKeys = new Set<string>();
-const reviewPlaybackPositions = new Map<string, number>();
+const DEFAULT_PLAYBACK_SPEED = 1;
+const INLINE_SPEED_CONTROL_MIN_WIDTH = 220;
+const PLAYBACK_SPEEDS = [2, 1.75, 1.5, 1.25, 1, 0.75, 0.5, 0.25];
+const TIMECODE_ACCENT_CLASS =
+  "bg-[hsl(var(--buzz-video-review-accent,var(--primary))/0.15)] text-[hsl(var(--buzz-video-review-accent-foreground,var(--buzz-video-review-accent,var(--primary))))]";
+const TIMECODE_ACCENT_HOVER_CLASS =
+  "hover:bg-[hsl(var(--buzz-video-review-accent,var(--primary))/0.3)]";
 
 /**
  * Frosted-glass backing layer for floating media controls. The parent must
@@ -157,6 +169,14 @@ function formatCommentTimecode(seconds: number): string {
     fractionalDigits: 1,
     trimZeroFraction: true,
   });
+}
+
+function formatPlaybackSpeed(speed: number): string {
+  return `${speed}x`;
+}
+
+function isPlaybackSpeedOption(speed: number): boolean {
+  return PLAYBACK_SPEEDS.some((option) => option === speed);
 }
 
 function parseTimecode(value: string): number | null {
@@ -531,7 +551,7 @@ function VideoScrubber({
           style={{ left: `${hoverRatio * 100}%` }}
         >
           <div className="h-5 w-0.5 rounded-full bg-white shadow-[0_0_0_0.5px_rgba(0,0,0,0.25)]" />
-          <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-[11px] font-medium tabular-nums text-white/90">
+          <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-2xs font-medium tabular-nums text-white/90">
             {formatTimecode(hoverRatio * duration)} / {formatTimecode(duration)}
           </span>
         </div>
@@ -599,6 +619,82 @@ function VolumeControl({
   );
 }
 
+function PlaybackSpeedControl({
+  playbackSpeed,
+  onPlaybackSpeedChange,
+  size = "inline",
+  testId,
+}: {
+  playbackSpeed: number;
+  onPlaybackSpeedChange: (speed: number) => void;
+  size?: "inline" | "review";
+  testId: string;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const label = formatPlaybackSpeed(playbackSpeed);
+  const triggerSizeClass =
+    size === "review"
+      ? "h-8 min-w-11 rounded-lg px-2 text-xs"
+      : "h-7 min-w-10 rounded-md px-1.5 text-2xs";
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          aria-label={`Playback speed: ${label}`}
+          className={cn(
+            "flex shrink-0 items-center justify-center font-semibold tabular-nums text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60",
+            triggerSizeClass,
+            open && "bg-white/15",
+          )}
+          data-testid={testId}
+          type="button"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {label}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className="w-28 border-white/10 bg-black/85 p-1 text-white backdrop-blur-xl"
+        data-testid={`${testId}-menu`}
+        side="top"
+        sideOffset={8}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="px-2 pb-1 pt-1 text-2xs font-medium text-white/55">
+          Speed
+        </div>
+        <div className="grid gap-0.5">
+          {PLAYBACK_SPEEDS.map((speed) => {
+            const speedLabel = formatPlaybackSpeed(speed);
+            const selected = speed === playbackSpeed;
+            return (
+              <button
+                aria-pressed={selected}
+                className={cn(
+                  "flex h-8 w-full items-center justify-between rounded-lg px-2 text-left text-xs font-medium tabular-nums text-white transition-colors hover:bg-white/15 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60",
+                  selected && "bg-white/15",
+                )}
+                key={speed}
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onPlaybackSpeedChange(speed);
+                  setOpen(false);
+                }}
+              >
+                <span>{speedLabel}</span>
+                {selected ? <Check className="h-3.5 w-3.5" /> : null}
+              </button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function VideoPlayer({
   src,
   poster,
@@ -609,25 +705,35 @@ export function VideoPlayer({
 }: VideoPlayerProps) {
   const persistedReviewKey = reviewKey ?? src;
   const videoRef = React.useRef<HTMLVideoElement>(null);
+  const inlineSurfaceRef = React.useRef<HTMLDivElement | null>(null);
   const reviewVideoRef = React.useRef<HTMLVideoElement>(null);
   const [started, setStarted] = React.useState(false);
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isBuffering, setIsBuffering] = React.useState(false);
   const [hasError, setHasError] = React.useState(false);
-  const [currentTime, setCurrentTime] = React.useState(0);
+  const [currentTime, setCurrentTimeState] = React.useState(
+    () => getInlinePlaybackPosition(persistedReviewKey) ?? 0,
+  );
+  const currentTimeRef = React.useRef(currentTime);
   const [duration, setDuration] = React.useState(durationSeconds ?? 0);
   const [volume, setVolume] = React.useState(1);
   const [muted, setMuted] = React.useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = React.useState(
+    DEFAULT_PLAYBACK_SPEED,
+  );
   const [naturalAspectRatio, setNaturalAspectRatio] = React.useState<
     number | null
   >(null);
   const [reviewOpen, setReviewOpenState] = React.useState(() =>
-    openReviewKeys.has(persistedReviewKey),
+    isVideoReviewOpen(persistedReviewKey),
   );
   const [reviewCurrentTime, setReviewCurrentTimeState] = React.useState(
-    () => reviewPlaybackPositions.get(persistedReviewKey) ?? 0,
+    () => getReviewPlaybackPosition(persistedReviewKey) ?? 0,
   );
   const [pendingSeekSeconds, setPendingSeekSeconds] = React.useState<
+    number | null
+  >(null);
+  const [inlineRenderedWidth, setInlineRenderedWidth] = React.useState<
     number | null
   >(null);
 
@@ -642,16 +748,50 @@ export function VideoPlayer({
   }, [durationSeconds]);
 
   React.useEffect(() => {
-    setReviewOpenState(openReviewKeys.has(persistedReviewKey));
+    const savedCurrentTime = getInlinePlaybackPosition(persistedReviewKey) ?? 0;
+    currentTimeRef.current = savedCurrentTime;
+    setStarted(false);
+    setCurrentTimeState(savedCurrentTime);
+    setIsPlaying(false);
+    setIsBuffering(false);
+    setHasError(false);
+    setPlaybackSpeed(DEFAULT_PLAYBACK_SPEED);
+    setReviewOpenState(isVideoReviewOpen(persistedReviewKey));
     setReviewCurrentTimeState(
-      reviewPlaybackPositions.get(persistedReviewKey) ?? 0,
+      getReviewPlaybackPosition(persistedReviewKey) ?? 0,
     );
   }, [persistedReviewKey]);
 
-  const setReviewCurrentTime = React.useCallback(
+  React.useEffect(() => {
+    return () => {
+      const video = videoRef.current;
+      if (!video || !Number.isFinite(video.currentTime)) {
+        return;
+      }
+      saveInlinePlaybackPosition(
+        persistedReviewKey,
+        Math.max(video.currentTime, currentTimeRef.current),
+        { ignoreResetToZero: true },
+      );
+    };
+  }, [persistedReviewKey]);
+
+  const setCurrentTime = React.useCallback(
     (seconds: number) => {
       const nextSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
-      reviewPlaybackPositions.set(persistedReviewKey, nextSeconds);
+      currentTimeRef.current = nextSeconds;
+      saveInlinePlaybackPosition(persistedReviewKey, nextSeconds);
+      setCurrentTimeState(nextSeconds);
+    },
+    [persistedReviewKey],
+  );
+
+  const setReviewCurrentTime = React.useCallback(
+    (seconds: number) => {
+      const nextSeconds = saveReviewPlaybackPosition(
+        persistedReviewKey,
+        seconds,
+      );
       setReviewCurrentTimeState(nextSeconds);
     },
     [persistedReviewKey],
@@ -659,15 +799,58 @@ export function VideoPlayer({
 
   const setReviewOpen = React.useCallback(
     (open: boolean) => {
-      if (open) {
-        openReviewKeys.add(persistedReviewKey);
-      } else {
-        openReviewKeys.delete(persistedReviewKey);
-      }
+      setVideoReviewOpen(persistedReviewKey, open);
       setReviewOpenState(open);
     },
     [persistedReviewKey],
   );
+
+  const applyPlaybackSpeed = React.useCallback(
+    (video: HTMLVideoElement | null) => {
+      if (!video) return;
+      video.playbackRate = playbackSpeed;
+    },
+    [playbackSpeed],
+  );
+
+  React.useEffect(() => {
+    applyPlaybackSpeed(videoRef.current);
+    applyPlaybackSpeed(reviewVideoRef.current);
+  }, [applyPlaybackSpeed]);
+
+  React.useLayoutEffect(() => {
+    const element = inlineSurfaceRef.current;
+    if (!element) {
+      setInlineRenderedWidth(null);
+      return;
+    }
+
+    const updateWidth = () => {
+      const width = element.getBoundingClientRect().width;
+      setInlineRenderedWidth((currentWidth) =>
+        currentWidth !== null && Math.abs(currentWidth - width) < 0.5
+          ? currentWidth
+          : width,
+      );
+    };
+
+    updateWidth();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateWidth);
+      return () => window.removeEventListener("resize", updateWidth);
+    }
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const handlePlaybackSpeedChange = React.useCallback((speed: number) => {
+    if (isPlaybackSpeedOption(speed)) {
+      setPlaybackSpeed(speed);
+    }
+  }, []);
 
   useSmoothPlaybackTime(videoRef, isPlaying && !reviewOpen, setCurrentTime);
   const inlineSeek = useThrottledVideoSeek(videoRef);
@@ -714,7 +897,7 @@ export function VideoPlayer({
       inlineSeek.requestSeek(bounded);
       setCurrentTime(bounded);
     },
-    [duration, inlineSeek],
+    [duration, inlineSeek, setCurrentTime],
   );
 
   const handleToggleMute = React.useCallback(() => {
@@ -752,7 +935,7 @@ export function VideoPlayer({
         // Hand the review position back to the inline player so playback
         // resumes where the review left off.
         const video = videoRef.current;
-        const reviewSeconds = reviewPlaybackPositions.get(persistedReviewKey);
+        const reviewSeconds = getReviewPlaybackPosition(persistedReviewKey);
         if (
           video &&
           reviewSeconds !== undefined &&
@@ -767,7 +950,7 @@ export function VideoPlayer({
       }
       setReviewOpen(open);
     },
-    [persistedReviewKey, setReviewOpen],
+    [persistedReviewKey, setCurrentTime, setReviewOpen],
   );
 
   const handlePendingSeekConsumed = React.useCallback(() => {
@@ -782,10 +965,14 @@ export function VideoPlayer({
     [reviewContext?.comments],
   );
   const inlineAspectRatio = aspectRatio ?? naturalAspectRatio ?? 16 / 9;
+  const inlineSurfaceWidth = getInlineSurfaceWidth(inlineAspectRatio);
+  const showInlineSpeedControl =
+    inlineRenderedWidth !== null &&
+    inlineRenderedWidth >= INLINE_SPEED_CONTROL_MIN_WIDTH;
   const inlineSurfaceStyle: React.CSSProperties = {
     aspectRatio: String(inlineAspectRatio),
     maxHeight: 256,
-    width: getInlineSurfaceWidth(inlineAspectRatio),
+    width: inlineSurfaceWidth,
   };
   const showControls = started && !hasError;
 
@@ -796,6 +983,7 @@ export function VideoPlayer({
         data-testid="video-player"
       >
         <div
+          ref={inlineSurfaceRef}
           className="group/video relative isolate max-w-full overflow-hidden rounded-2xl border border-border/70 bg-black"
           style={inlineSurfaceStyle}
         >
@@ -829,7 +1017,24 @@ export function VideoPlayer({
                 videoHeight,
                 videoWidth,
               } = event.currentTarget;
+              applyPlaybackSpeed(event.currentTarget);
               handleMediaDuration(mediaDuration);
+              const savedSeconds =
+                getInlinePlaybackPosition(persistedReviewKey);
+              if (
+                savedSeconds !== undefined &&
+                savedSeconds > 0 &&
+                Number.isFinite(savedSeconds)
+              ) {
+                const restoredSeconds = Math.min(
+                  savedSeconds,
+                  Number.isFinite(mediaDuration) && mediaDuration > 0
+                    ? mediaDuration
+                    : savedSeconds,
+                );
+                event.currentTarget.currentTime = restoredSeconds;
+                setCurrentTime(restoredSeconds);
+              }
               if (videoWidth > 0 && videoHeight > 0) {
                 setNaturalAspectRatio(videoWidth / videoHeight);
               }
@@ -918,7 +1123,7 @@ export function VideoPlayer({
                   )}
                 </button>
                 <span
-                  className="shrink-0 text-[10px] font-medium tabular-nums leading-none text-white"
+                  className="shrink-0 text-2xs font-medium tabular-nums leading-none text-white"
                   data-testid="video-inline-time"
                 >
                   {formatTimecode(currentTime)}
@@ -932,11 +1137,18 @@ export function VideoPlayer({
                   testIdPrefix="video-inline"
                 />
                 <span
-                  className="shrink-0 text-[10px] font-medium tabular-nums leading-none text-white/70"
+                  className="shrink-0 text-2xs font-medium tabular-nums leading-none text-white/70"
                   data-testid="video-inline-duration"
                 >
                   {formatTimecode(duration)}
                 </span>
+                {showInlineSpeedControl ? (
+                  <PlaybackSpeedControl
+                    playbackSpeed={playbackSpeed}
+                    testId="video-inline-speed"
+                    onPlaybackSpeedChange={handlePlaybackSpeedChange}
+                  />
+                ) : null}
                 <VolumeControl
                   muted={muted}
                   volume={volume}
@@ -971,8 +1183,10 @@ export function VideoPlayer({
         onDurationChange={handleMediaDuration}
         onOpenChange={handleReviewOpenChange}
         onPendingSeekConsumed={handlePendingSeekConsumed}
+        onPlaybackSpeedChange={handlePlaybackSpeedChange}
         open={reviewOpen}
         pendingSeekSeconds={pendingSeekSeconds}
+        playbackSpeed={playbackSpeed}
         poster={poster}
         reviewContext={reviewContext}
         src={src}
@@ -991,8 +1205,10 @@ function VideoReviewDialog({
   onDurationChange,
   onOpenChange,
   onPendingSeekConsumed,
+  onPlaybackSpeedChange,
   open,
   pendingSeekSeconds,
+  playbackSpeed,
   poster,
   reviewContext,
   src,
@@ -1006,8 +1222,10 @@ function VideoReviewDialog({
   onDurationChange: (seconds: number) => void;
   onOpenChange: (open: boolean) => void;
   onPendingSeekConsumed: () => void;
+  onPlaybackSpeedChange: (speed: number) => void;
   open: boolean;
   pendingSeekSeconds: number | null;
+  playbackSpeed: number;
   poster?: string;
   reviewContext?: VideoReviewContext;
   src: string;
@@ -1248,6 +1466,13 @@ function VideoReviewDialog({
     [videoRef],
   );
 
+  React.useEffect(() => {
+    if (!open) return;
+    const video = videoRef.current;
+    if (!video) return;
+    video.playbackRate = playbackSpeed;
+  }, [open, playbackSpeed, videoRef]);
+
   const postContent = React.useCallback(
     async (
       content: string,
@@ -1394,7 +1619,12 @@ function VideoReviewDialog({
   if (!open) return null;
 
   return createPortal(
-    <div className="dark video-review-theme fixed inset-0 z-50 flex min-h-0 min-w-0 items-center justify-center bg-black/75 p-4 text-foreground backdrop-blur-sm sm:p-8 lg:p-10">
+    <div
+      className={cn(
+        "dark video-review-theme fixed inset-0 z-50 flex min-h-0 min-w-0 items-center justify-center bg-black/75 p-4 text-foreground sm:p-8 lg:p-10",
+        MODAL_BACKDROP_BLUR_CLASS,
+      )}
+    >
       <button
         aria-label="Close video review"
         className="absolute inset-0 cursor-default"
@@ -1481,6 +1711,7 @@ function VideoReviewDialog({
                       setIsPlaying(false);
                     }}
                     onLoadedMetadata={(event) => {
+                      event.currentTarget.playbackRate = playbackSpeed;
                       onDurationChange(event.currentTarget.duration);
                       const { videoHeight, videoWidth } = event.currentTarget;
                       if (videoWidth > 0 && videoHeight > 0) {
@@ -1578,6 +1809,12 @@ function VideoReviewDialog({
                     >
                       {formatTimecode(visibleDuration)}
                     </span>
+                    <PlaybackSpeedControl
+                      playbackSpeed={playbackSpeed}
+                      size="review"
+                      testId="video-review-speed"
+                      onPlaybackSpeedChange={onPlaybackSpeedChange}
+                    />
                     <VolumeControl
                       expanded
                       muted={muted}
@@ -1627,7 +1864,7 @@ function VideoReviewDialog({
                           type="button"
                           onClick={() => setIsEmojiPickerOpen((open) => !open)}
                         >
-                          <SmilePlus className="pointer-events-none h-5 w-5" />
+                          <SmilePlus className="pointer-events-none h-4 w-4" />
                         </button>
                       </TooltipTrigger>
                       <TooltipContent>More reactions</TooltipContent>
@@ -1708,7 +1945,7 @@ function VideoReviewDialog({
                       className={cn(
                         "rounded-md px-2 py-1 font-mono text-xs font-semibold transition-colors",
                         !replyTarget && postAtCurrentFrame
-                          ? "bg-amber-400/15 text-amber-300"
+                          ? TIMECODE_ACCENT_CLASS
                           : "bg-muted text-muted-foreground/70",
                       )}
                       data-testid="video-review-composer-timecode"
@@ -1716,12 +1953,12 @@ function VideoReviewDialog({
                       {formatTimecode(currentTime)}
                     </span>
                     {replyTarget ? (
-                      <span className="text-[11px] text-muted-foreground">
+                      <span className="text-2xs text-muted-foreground">
                         Replying to {replyTarget.comment.author}
                       </span>
                     ) : (
                       <label
-                        className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground"
+                        className="flex cursor-pointer select-none items-center gap-1.5 text-2xs text-muted-foreground"
                         htmlFor="video-review-frame-toggle"
                       >
                         <Checkbox
@@ -1825,7 +2062,7 @@ function VideoReviewCommentCard({
   replies: TimecodedComment[];
 }) {
   return (
-    <article className="rounded-lg bg-muted/40 p-3 text-sm text-foreground/90">
+    <article className="rounded-lg bg-muted/40 p-3 text-sm text-foreground">
       <VideoReviewCommentBody
         canReply={canReply}
         item={item}
@@ -1874,7 +2111,11 @@ function VideoReviewCommentBody({
     item.seconds !== null && item.timecode ? (
       <button
         aria-label={`Jump to ${item.timecode}`}
-        className="inline-flex h-5 shrink-0 items-center rounded bg-amber-400/15 px-1.5 align-middle font-mono text-[11px] font-semibold text-amber-300 outline-hidden transition-colors hover:bg-amber-400/30 focus-visible:ring-2 focus-visible:ring-white/60"
+        className={cn(
+          "inline-flex h-5 shrink-0 items-center rounded px-1.5 align-middle font-mono text-2xs font-semibold outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-white/60",
+          TIMECODE_ACCENT_CLASS,
+          TIMECODE_ACCENT_HOVER_CLASS,
+        )}
         data-testid="video-review-comment-timecode"
         type="button"
         onClick={() => onSeek(item.seconds ?? 0)}
@@ -1892,7 +2133,7 @@ function VideoReviewCommentBody({
           displayName={item.comment.author}
           size="xs"
         />
-        <p className="truncate text-[13px] font-semibold text-foreground">
+        <p className="truncate text-sm font-semibold text-foreground">
           {item.comment.author}
         </p>
         <p className="shrink-0 text-xs text-muted-foreground">
@@ -1900,7 +2141,7 @@ function VideoReviewCommentBody({
         </p>
         {reactions.some((reaction) => reaction.reactedByCurrentUser) ? (
           <Check
-            className="ml-auto h-3.5 w-3.5 shrink-0 text-primary"
+            className="ml-auto h-4 w-4 shrink-0 text-primary"
             aria-hidden
           />
         ) : null}

@@ -9,6 +9,10 @@ pub enum DbError {
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
+    /// A SQLx migration error.
+    #[error("migration error: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
+
     /// Attempted to store an AUTH event (kind 22242), which is forbidden.
     #[error("AUTH events (kind 22242) must not be stored")]
     AuthEventRejected,

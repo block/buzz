@@ -40,11 +40,8 @@ use crate::queue::{
 };
 use crate::relay::{ChannelInfo, RestClient};
 
-// ── FlushBatch Clone note ─────────────────────────────────────────────────────
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
@@ -255,8 +252,6 @@ pub struct PromptContext {
     pub memory_enabled: bool,
 }
 
-// ── AgentPool impl ────────────────────────────────────────────────────────────
-
 impl AgentPool {
     /// Create a pool from pre-indexed slots (may contain None for failed startups).
     ///
@@ -339,8 +334,6 @@ impl AgentPool {
         idle + checked_out
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────────
-
     pub fn task_map(&self) -> &HashMap<tokio::task::Id, TaskMeta> {
         &self.task_map
     }
@@ -405,8 +398,6 @@ impl AgentPool {
     }
 }
 
-// ── run_prompt_task ───────────────────────────────────────────────────────────
-
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
 /// Each call gets this budget; with one retry the total worst-case is
 /// 2 × CONTEXT_FETCH_TIMEOUT + CONTEXT_FETCH_RETRY_DELAY ≈ 6.5 s.
@@ -430,17 +421,19 @@ const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    agent_core: Option<&str>,
 ) -> Result<String, AcpError> {
-    // Combine base_prompt + system_prompt into a single systemPrompt value
-    // for the session/new request. Only sent when the agent declares protocol
-    // version >= 2 (supports systemPrompt); legacy agents ignore it.
+    // Combine base_prompt + system_prompt + agent core into a single
+    // systemPrompt value for the session/new request. Only sent when the agent
+    // declares protocol version >= 2 (supports systemPrompt); legacy agents
+    // ignore it and receive the same content as user-message sections via
+    // `format_prompt`. Core already carries its own `[Agent Memory — core]`
+    // header from `engram_fetch::build_core_section`, so we just append it.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
-        match (ctx.base_prompt, ctx.system_prompt.as_deref()) {
-            (Some(bp), Some(sp)) => Some(format!("{}\n\n{sp}", bp.trim_end())),
-            (Some(bp), None) => Some(bp.trim_end().to_string()),
-            (None, Some(sp)) => Some(sp.to_string()),
-            (None, None) => None,
-        }
+        with_core(
+            framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+            agent_core,
+        )
     } else {
         None
     };
@@ -660,6 +653,78 @@ pub(crate) fn prepend_base_for_legacy(
     }
 }
 
+/// Frame the `session/new` `systemPrompt` so each present prompt carries its own
+/// header, keeping the base/persona boundary recoverable downstream.
+///
+/// The header framing matches the legacy per-turn path (`queue::base_section`
+/// for `[Base]`, `[System]\n{...}` for the persona) so the desktop observer can
+/// split the combined value into labeled sub-sections. Each prompt is wrapped
+/// only when present, so a persona-only agent yields `[System]\n{persona}`
+/// rather than an unlabeled blob that would be mislabeled as `[Base]`.
+///
+/// Prepends a `[Workspace]` section naming the agent's absolute working
+/// directory. The base prompt describes the workspace layout but never its
+/// absolute root, so without this anchor a model fills the gap by searching
+/// `$HOME` (triggering macOS TCC prompts) or by inventing its own workspace
+/// directory. The line is emitted only when a real base prompt is present and
+/// `cwd` is an absolute path other than the `/` fallback — naming `/` as the
+/// workspace would itself invite a `$HOME`-wide scan.
+fn framed_system_prompt(
+    cwd: &str,
+    base_prompt: Option<&str>,
+    system_prompt: Option<&str>,
+) -> Option<String> {
+    let body = match (base_prompt, system_prompt) {
+        (Some(bp), Some(sp)) => Some(format!(
+            "{}\n\n[System]\n{sp}",
+            crate::queue::base_section(bp)
+        )),
+        (Some(bp), None) => Some(crate::queue::base_section(bp)),
+        (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+        (None, None) => None,
+    }?;
+    // Anchor the workspace only when a base prompt is present — the workspace
+    // section grounds the base prompt's layout description, so it is meaningless
+    // for a persona-only (`[System]`-only) agent that never received that layout.
+    match (base_prompt, workspace_section(cwd)) {
+        (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
+        _ => Some(body),
+    }
+}
+
+/// Render the `[Workspace]` grounding section, or `None` when `cwd` is unusable.
+///
+/// Skips relative paths and the `/` fallback (`std::env::current_dir()` resolves
+/// to `/` on failure): a `/`-rooted workspace line would actively encourage the
+/// `$HOME`-wide scan this section exists to prevent.
+fn workspace_section(cwd: &str) -> Option<String> {
+    if cwd != "/" && cwd.starts_with('/') {
+        Some(format!(
+            "[Workspace]\nYour absolute working directory is `{cwd}`. All workspace \
+             files — `AGENTS.md`, `RESEARCH/`, `PLANS/`, `GUIDES/`, `WORK_LOGS/`, \
+             `OUTBOX/` — and any repositories you clone (under `{cwd}/REPOS/`) live \
+             here. This is where you already are; do not search `$HOME` or other \
+             directories for them."
+        ))
+    } else {
+        None
+    }
+}
+
+/// Append the agent's core memory section onto the framed system prompt.
+///
+/// Core already carries its own `[Agent Memory — core]` header from
+/// `engram_fetch::build_core_section`, so it is joined with a blank-line
+/// separator and never re-labeled. Either side may be absent.
+fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
+    match (framed, core) {
+        (Some(framed), Some(core)) => Some(format!("{framed}\n\n{core}")),
+        (Some(framed), None) => Some(framed),
+        (None, Some(core)) => Some(core.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -680,8 +745,6 @@ pub async fn run_prompt_task(
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
 ) {
-    // ── Determine source and resolve/create session ───────────────────────
-
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
@@ -712,7 +775,6 @@ pub async fn run_prompt_task(
         }),
     );
 
-    // ── Reaction cleanup guard ────────────────────────────────────────────
     // Collects event IDs up front. On drop (any exit path — normal, early
     // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
@@ -722,7 +784,6 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
-    // ── Turn completion guard ─────────────────────────────────────────────
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult.
     let _turn_guard = TurnCompletionGuard::new(
@@ -732,13 +793,85 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
+    //
+    // Core memory is delivered inside the system prompt the harness already
+    // builds (system role for protocol >= 2, the `[System]` user-message
+    // section for legacy agents). To put it on the wire at `session/new` for
+    // modern agents, the fetch must run *before* the session is created — so
+    // we do it here and cache the rendered section in `state.core_sections`.
+    //
+    // Core is keyed by (agent_keys, owner) — both fixed for the process — so
+    // it is identical across channels; the per-channel cache just avoids a
+    // re-fetch on each new session and is cleared on session invalidation.
+    //
+    // Failure modes (all fail open — no crash, no block):
+    //   * no owner configured → skip (no NIP-AE namespace exists)
+    //   * confirmed absence → cache the onboarding nudge so the agent
+    //     learns how to bootstrap itself.
+    //   * transport / decrypt / parse error → inject nothing. We never
+    //     mistake "relay slow or broken" for "no core" — that would invite
+    //     the agent to overwrite real, just-unreachable memory.
+    //   * fetch exceeds CORE_FETCH_TIMEOUT → inject nothing, same reason.
+    //
+    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only
+    // happens when a session is invalidated and recreated (see
+    // `SessionState::invalidate_channel`).
+    //
+    // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
+    if ctx.memory_enabled {
+        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+            (&source, ctx.agent_owner_pubkey.as_ref())
+        {
+            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
+            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+                // Bounded — we'd rather start the session with no core hint
+                // than block session creation on a stalled relay.
+                const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                let fetch = crate::engram_fetch::build_core_section(
+                    &ctx.rest_client,
+                    &ctx.agent_keys,
+                    owner_pk,
+                );
+                let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "engram::core",
+                            channel = %cid,
+                            timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
+                            "core fetch timed out — emitting no section"
+                        );
+                        None
+                    }
+                };
+                if let Some(rendered) = section {
+                    tracing::info!(
+                        target: "engram::core",
+                        channel = %cid,
+                        section_len = rendered.len(),
+                        "injected NIP-AE core section into system prompt"
+                    );
+                    agent.state.core_sections.insert(*cid, rendered);
+                }
+            }
+        }
+    }
+
+    // The core section to fold into the system prompt for this turn's session.
+    // Channel-scoped; heartbeats carry no owner core.
+    let agent_core: Option<String> = match &source {
+        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Heartbeat => None,
+    };
+
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx).await {
+                match create_session_and_apply_model(&mut agent, &ctx, agent_core.as_deref()).await
+                {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -773,7 +906,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx).await {
+                match create_session_and_apply_model(&mut agent, &ctx, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -818,70 +951,6 @@ pub async fn run_prompt_task(
             "isNewSession": is_new_session,
         }),
     );
-
-    // ── NIP-AE: fetch core engram on new channel sessions ────────────────
-    //
-    // Fire one synchronous fetch + decrypt + render right after the session
-    // is born; cache the rendered section in `state.core_sections` keyed by
-    // channel id. Subsequent turns in the same session reuse the cached
-    // section. `format_prompt` reads it from the per-channel cache.
-    //
-    // Failure modes (all fail open — no crash, no block):
-    //   * no owner configured → skip (no NIP-AE namespace exists)
-    //   * confirmed absence → cache the onboarding nudge so the agent
-    //     learns how to bootstrap itself.
-    //   * transport / decrypt / parse error → inject nothing. We never
-    //     mistake "relay slow or broken" for "no core" — that would invite
-    //     the agent to overwrite real, just-unreachable memory.
-    //   * fetch exceeds CORE_FETCH_TIMEOUT → inject nothing, same reason.
-    //
-    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only
-    // happens when a session is invalidated and recreated (see
-    // `SessionState::invalidate_channel`).
-    //
-    // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` disables the
-    // NIP-AE injection path. By default we run the fetch and populate
-    // `state.core_sections`, so `format_prompt` renders the core section.
-    // When disabled we skip the fetch outright and leave `core_sections`
-    // empty. The `buzz mem` CLI and the relay's acceptance of
-    // kind:30174 engrams are unaffected.
-    if is_new_session && ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
-            (&source, ctx.agent_owner_pubkey.as_ref())
-        {
-            // Bounded — we'd rather start the session with no core hint
-            // than block prompt formatting on a stalled relay.
-            const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-            let fetch = crate::engram_fetch::build_core_section(
-                &ctx.rest_client,
-                &ctx.agent_keys,
-                owner_pk,
-            );
-            let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
-                Ok(s) => s,
-                Err(_) => {
-                    tracing::warn!(
-                        target: "engram::core",
-                        channel = %cid,
-                        timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
-                        "core fetch timed out — emitting no section"
-                    );
-                    None
-                }
-            };
-            if let Some(rendered) = section {
-                tracing::info!(
-                    target: "engram::core",
-                    channel = %cid,
-                    section_len = rendered.len(),
-                    "injected NIP-AE core section"
-                );
-                agent.state.core_sections.insert(*cid, rendered);
-            }
-        }
-    }
-
-    // ── Send initial_message on new channel sessions ──────────────────────
 
     if is_new_session {
         if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
@@ -995,17 +1064,15 @@ pub async fn run_prompt_task(
         }
     }
 
-    // ── Build prompt text (with optional context fetch) ──────────────────
-
     // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
     // `slash_command` holds the bare command. It is sent as the FIRST prompt
     // content block so ACP connectors' slash-command detection
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
-    let prompt_text = if let Some(text) = prompt_text {
-        // Pre-built prompt (heartbeat or legacy path).
-        text
+    let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+        // Pre-built prompt (heartbeat or legacy path) — a single block.
+        vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
@@ -1042,11 +1109,10 @@ pub async fn run_prompt_task(
             );
         }
 
-        let agent_core_section = agent.state.core_sections.get(&b.channel_id).cloned();
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
-                agent_core: agent_core_section.as_deref(),
+                agent_core: agent_core.as_deref(),
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
@@ -1079,16 +1145,18 @@ pub async fn run_prompt_task(
         });
     }
 
-    // ── Send the actual prompt ────────────────────────────────────────────
-
-    // Slash-command pass-through sends two text blocks: the bare command
-    // first (so connector detection fires), then the wrapped Buzz context.
+    // Slash-command pass-through sends the bare command as the first text
+    // block (so connector detection fires), then each prompt section as its
+    // own block. Per-section blocks let the observer size trimmer elide a
+    // section body in place while every `[Header]` line survives at the head
+    // of its own leaf — so the "Prompt context" panel counts every section.
     let prompt_blocks: Vec<&str> = match slash_command {
-        Some(ref cmd) => vec![cmd.as_str(), prompt_text.as_str()],
-        None => vec![prompt_text.as_str()],
+        Some(ref cmd) => std::iter::once(cmd.as_str())
+            .chain(prompt_sections.iter().map(String::as_str))
+            .collect(),
+        None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
-    // ── Control-aware prompt dispatch ─────────────────────────────────────
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -1254,13 +1322,11 @@ pub async fn run_prompt_task(
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
 
-            // ── Session rotation on context exhaustion ────────────────
             let should_rotate = matches!(
                 stop_reason,
                 StopReason::MaxTokens | StopReason::MaxTurnRequests
             );
 
-            // ── Proactive turn-based rotation ─────────────────────────
             let should_rotate = should_rotate || {
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
@@ -1388,8 +1454,6 @@ pub async fn run_prompt_task(
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
 }
-
-// ── Context fetching ──────────────────────────────────────────────────────────
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
 /// on any `None` result. The closure is called twice at most.
@@ -1563,6 +1627,24 @@ fn collect_prompt_pubkeys(
     pubkeys
 }
 
+/// Detect whether a kind:0 profile event belongs to an owned agent.
+///
+/// Agents carry a NIP-OA `["auth", owner_pk, conditions, sig]` tag in their
+/// profile; humans do not. This checks for the tag's presence/shape only — a
+/// cheap routing heuristic for reply anchoring, not a verified security gate
+/// (the signing path in `lib.rs::check_sibling_via_profile` does full
+/// verification where it matters).
+fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
+    ev.get("tags")
+        .and_then(|t| t.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array()
+                    .is_some_and(|parts| parts.len() == 4 && parts[0].as_str() == Some("auth"))
+            })
+        })
+}
+
 /// Parse kind:0 profile events into a `PromptProfileLookup`.
 ///
 /// Each kind:0 event has `pubkey` and JSON `content` with optional fields:
@@ -1585,11 +1667,13 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
                     .get("nip05")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let is_agent = profile_event_is_agent(ev);
                 lookup.insert(
                     pk.to_ascii_lowercase(),
                     PromptProfile {
                         display_name,
                         nip05_handle,
+                        is_agent,
                     },
                 );
             }
@@ -1942,8 +2026,6 @@ fn parse_nostr_dm_response(json: serde_json::Value, limit: u32) -> Option<Conver
     })
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
 /// Return the batch for requeue only in Queue mode; drop it in Drop mode.
 #[inline]
 fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Option<FlushBatch> {
@@ -1978,7 +2060,6 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     }
 }
 
-// ── Reaction indicators ───────────────────────────────────────────────────────
 //
 // Two-phase lifecycle visible to users:
 //   👀  "seen"    — event was queued and an agent will handle it
@@ -2040,7 +2121,6 @@ impl Drop for ReactionGuard {
     }
 }
 
-// ── Turn liveness emission ───────────────────────────────────────────────────
 // Periodically emits a `turn_liveness` observer event while a turn is in-flight,
 // so the desktop can prune turns whose host died without unwinding (kill -9 /
 // crash) far sooner than the no-activity backstop. Runs as a non-resolving
@@ -2083,7 +2163,6 @@ async fn run_turn_liveness(
     }
 }
 
-// ── Turn completion scope guard ──────────────────────────────────────────────
 // Emits a `turn_completed` observer event on drop, covering ALL exit paths
 // (success, error, timeout, cancel, panic) from `run_prompt_task`. Captures
 // observer handle and metadata at creation time so it remains valid even after
@@ -2299,15 +2378,12 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
     }
 }
 
-// ─── Unit Tests ──────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use serde_json::json;
 
-    // ── prepend_base_for_legacy regression tests ─────────────────────────────
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
     // message. This is the exact regression that shipped in the round-2 bug.
@@ -2336,7 +2412,104 @@ mod tests {
         assert_eq!(composed, "hello channel");
     }
 
-    // ── parse_thread_response tests ──────────────────────────────────────────
+    // Pin the session/new systemPrompt framing: each present prompt carries its
+    // own header so the desktop observer can split into labeled sub-sections.
+
+    #[test]
+    fn test_framed_system_prompt_both_present_carries_both_headers() {
+        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
+            .expect("both present yields Some");
+        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_base_only_labels_base() {
+        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
+        assert_eq!(framed, "[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_persona_only_labels_system() {
+        // A bare persona would be mislabeled "Base" downstream — it must carry
+        // its own [System] header even when no base prompt exists.
+        let framed =
+            framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
+        assert_eq!(framed, "[System]\npersona text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_neither_is_none() {
+        assert!(framed_system_prompt("/", None, None).is_none());
+    }
+
+    #[test]
+    fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
+        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
+            .expect("base yields Some");
+        assert!(
+            framed.starts_with("[Workspace]\n"),
+            "workspace section must lead: {framed}"
+        );
+        assert!(framed.contains("`/Users/me/.buzz`"));
+        assert!(
+            framed.contains("\n\n[Base]\nbase text"),
+            "base must follow the workspace section: {framed}"
+        );
+    }
+
+    #[test]
+    fn test_framed_system_prompt_persona_only_omits_workspace() {
+        // The workspace section grounds the base prompt's layout; a persona-only
+        // agent never received that layout, so no [Workspace] anchor is emitted.
+        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
+            .expect("persona yields Some");
+        assert_eq!(framed, "[System]\npersona text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_root_cwd_omits_workspace() {
+        // The "/" fallback must never be named — it would invite a $HOME scan.
+        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
+        assert_eq!(framed, "[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_workspace_section_relative_cwd_is_none() {
+        assert!(workspace_section("relative/path").is_none());
+        assert!(workspace_section("").is_none());
+    }
+
+    #[test]
+    fn test_with_core_appends_below_framed() {
+        let framed = with_core(
+            Some("[System]\npersona".to_string()),
+            Some("[Agent Memory — core]\nbe helpful"),
+        )
+        .expect("both present yields Some");
+        assert_eq!(
+            framed,
+            "[System]\npersona\n\n[Agent Memory — core]\nbe helpful"
+        );
+    }
+
+    #[test]
+    fn test_with_core_framed_only_passes_through() {
+        let framed = with_core(Some("[System]\npersona".to_string()), None)
+            .expect("framed-only yields Some");
+        assert_eq!(framed, "[System]\npersona");
+    }
+
+    #[test]
+    fn test_with_core_core_only_is_just_core() {
+        let framed = with_core(None, Some("[Agent Memory — core]\nbe helpful"))
+            .expect("core-only yields Some");
+        assert_eq!(framed, "[Agent Memory — core]\nbe helpful");
+    }
+
+    #[test]
+    fn test_with_core_neither_is_none() {
+        assert!(with_core(None, None).is_none());
+    }
 
     #[test]
     fn test_parse_thread_response_basic() {
@@ -2426,8 +2599,6 @@ mod tests {
         let json = json!({ "something": "else" });
         assert!(parse_thread_response(json).is_none());
     }
-
-    // ── parse_dm_response tests ──────────────────────────────────────────────
 
     #[test]
     fn test_parse_dm_response_basic() {
@@ -2539,8 +2710,6 @@ mod tests {
         assert!(parse_dm_response(json, 12).is_none());
     }
 
-    // ── json_to_context_message tests ────────────────────────────────────────
-
     #[test]
     fn test_json_to_context_message_integer_timestamp() {
         let obj = json!({
@@ -2635,8 +2804,31 @@ mod tests {
             Some(&PromptProfile {
                 display_name: Some("Wes".into()),
                 nip05_handle: Some("wes@example.com".into()),
+                is_agent: false,
             })
         );
+    }
+
+    #[test]
+    fn test_profile_event_is_agent_detects_nip_oa_auth_tag() {
+        // Agent profile carries a 4-element NIP-OA ["auth", owner, cond, sig] tag.
+        let agent_ev = json!({
+            "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "tags": [["auth", "owner_pk", "conditions", "sig"]],
+        });
+        assert!(profile_event_is_agent(&agent_ev));
+
+        // Human profile: no auth tag.
+        let human_ev = json!({ "pubkey": "bbbb", "tags": [["t", "topic"]] });
+        assert!(!profile_event_is_agent(&human_ev));
+
+        // Empty / missing tags → not an agent.
+        assert!(!profile_event_is_agent(&json!({ "tags": [] })));
+        assert!(!profile_event_is_agent(&json!({})));
+
+        // Malformed auth tag (wrong arity) → not treated as an agent.
+        let malformed = json!({ "tags": [["auth", "owner_pk"]] });
+        assert!(!profile_event_is_agent(&malformed));
     }
 
     #[test]
@@ -2651,8 +2843,6 @@ mod tests {
         let msg = json_to_context_message(&obj).expect("should parse");
         assert_eq!(msg.pubkey, "unknown");
     }
-
-    // ── pct_encode tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_pct_encode_hex_passthrough() {
@@ -2688,8 +2878,6 @@ mod tests {
         assert_eq!(pct_encode("+"), "%2B");
         assert_eq!(pct_encode(" "), "%20");
     }
-
-    // ── SessionState tests ───────────────────────────────────────────────
 
     fn make_state() -> (SessionState, Uuid, Uuid) {
         let ch_a = Uuid::new_v4();
@@ -2857,7 +3045,6 @@ mod tests {
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
-    // ── turn liveness emission ───────────────────────────────────────────────
     // `run_turn_liveness` is raced against a "prompt" future the same way
     // `run_prompt_task` does it: the prompt wins the select and the liveness
     // future is dropped. We assert what the observer saw.

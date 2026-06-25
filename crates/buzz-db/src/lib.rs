@@ -23,6 +23,8 @@ pub mod error;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// Embedded database migrations.
+pub mod migration;
 /// Monthly table partition management.
 pub mod partition;
 /// Reaction persistence.
@@ -196,6 +198,11 @@ impl Db {
         Self { pool }
     }
 
+    /// Run pending database migrations.
+    pub async fn migrate(&self) -> Result<()> {
+        migration::run_migrations(&self.pool).await
+    }
+
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
@@ -208,8 +215,6 @@ impl Db {
     pub async fn begin_transaction(&self) -> Result<sqlx::Transaction<'static, sqlx::Postgres>> {
         self.pool.begin().await.map_err(Into::into)
     }
-
-    // ── Events ───────────────────────────────────────────────────────────────
 
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
     pub async fn insert_event(
@@ -331,8 +336,6 @@ impl Db {
         }
         Ok(result)
     }
-
-    // ── Channels ─────────────────────────────────────────────────────────────
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
     pub async fn create_channel(
@@ -532,7 +535,23 @@ impl Db {
         channel::reap_expired_ephemeral_channels(&self.pool).await
     }
 
-    // ── Users ────────────────────────────────────────────────────────────────
+    /// Query due reminders ready for delivery.
+    pub async fn query_due_reminders(
+        &self,
+        now_secs: i64,
+        batch_limit: i64,
+    ) -> Result<Vec<event::DueReminder>> {
+        event::query_due_reminders(&self.pool, now_secs, batch_limit).await
+    }
+
+    /// Atomically claim a due reminder for delivery (cross-pod dedup).
+    pub async fn claim_due_reminder(
+        &self,
+        event_id: &[u8],
+        event_created_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        event::claim_due_reminder(&self.pool, event_id, event_created_at).await
+    }
 
     /// Ensure a user record exists (upsert).
     pub async fn ensure_user(&self, pubkey: &[u8]) -> Result<()> {
@@ -606,8 +625,6 @@ impl Db {
         user::set_channel_add_policy(&self.pool, pubkey, policy).await
     }
 
-    // ── Direct Messages ──────────────────────────────────────────────────────
-
     /// Find an existing DM by its participant hash.
     pub async fn find_dm_by_participants(
         &self,
@@ -661,8 +678,6 @@ impl Db {
     pub async fn list_hidden_dms(&self, pubkey: &[u8]) -> Result<Vec<Uuid>> {
         dm::list_hidden_dms(&self.pool, pubkey).await
     }
-
-    // ── Threads ──────────────────────────────────────────────────────────────
 
     /// Insert thread metadata.
     #[allow(clippy::too_many_arguments)]
@@ -748,8 +763,6 @@ impl Db {
     ) -> Result<()> {
         thread::decrement_reply_count(&self.pool, parent_event_id, root_event_id).await
     }
-
-    // ── Reactions ────────────────────────────────────────────────────────────
 
     /// Add (or re-activate) a reaction.
     pub async fn add_reaction(
@@ -840,8 +853,6 @@ impl Db {
     ) -> Result<Vec<reaction::BulkReactionEntry>> {
         reaction::get_reactions_bulk(&self.pool, event_ids).await
     }
-
-    // ── Feed ─────────────────────────────────────────────────────────────────
 
     /// Find events that @mention the given pubkey.
     pub async fn query_feed_mentions(
@@ -934,8 +945,6 @@ impl Db {
     ) -> Result<Vec<StoredEvent>> {
         feed::query_activity(&self.pool, accessible_channel_ids, since, limit).await
     }
-
-    // ── API Tokens ───────────────────────────────────────────────────────────
 
     /// Create a new API token record.
     pub async fn create_api_token(
@@ -1075,8 +1084,6 @@ impl Db {
     pub async fn revoke_all_tokens(&self, owner_pubkey: &[u8], revoked_by: &[u8]) -> Result<u64> {
         api_token::revoke_all_tokens(&self.pool, owner_pubkey, revoked_by).await
     }
-
-    // ── Workflows ────────────────────────────────────────────────────────────
 
     /// Create a new workflow.
     pub async fn create_workflow(
@@ -1259,8 +1266,6 @@ impl Db {
         .await
     }
 
-    // ── Partitions ──────────────────────────────────────────────────────────
-
     /// Ensures monthly partitions exist for the next N months.
     pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
         partition::ensure_future_partitions(&self.pool, months_ahead).await
@@ -1284,8 +1289,6 @@ impl Db {
         .await?;
         Ok(result.rows_affected())
     }
-
-    // ── Pubkey Allowlist ─────────────────────────────────────────────────────
 
     /// Check if a pubkey is in the allowlist.
     pub async fn is_pubkey_allowed(&self, pubkey: &[u8]) -> Result<bool> {
@@ -1354,8 +1357,6 @@ impl Db {
         Ok(out)
     }
 
-    // ── Relay Members (NIP-43) ───────────────────────────────────────────────
-
     /// Returns `true` if `pubkey` (64-char hex) is in the relay member list.
     pub async fn is_relay_member(&self, pubkey: &str) -> Result<bool> {
         relay_members::is_relay_member(&self.pool, pubkey).await
@@ -1423,8 +1424,6 @@ impl Db {
         relay_members::backfill_from_allowlist(&self.pool).await
     }
 
-    // ── Archived identities (NIP-IA) ──────────────────────────────────────────
-
     /// Returns `true` if `pubkey` (64-char hex) is currently archived.
     pub async fn is_archived(&self, pubkey: &str) -> Result<bool> {
         archived_identities::is_archived(&self.pool, pubkey).await
@@ -1462,8 +1461,6 @@ impl Db {
         archived_identities::list_archived(&self.pool).await
     }
 
-    // ── Discovery events ─────────────────────────────────────────────────────
-
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
     pub async fn soft_delete_discovery_events(
         &self,
@@ -1480,8 +1477,6 @@ impl Db {
         .await?;
         Ok(result.rows_affected())
     }
-
-    // ── Replaceable events ─────────────────────────────────────────────────
 
     /// Atomically replace a replaceable event: NIP-16 kinds (0, 3, 41, 10000–19999)
     /// and NIP-29 discovery state (39000–39002, called from side_effects.rs).
@@ -1725,8 +1720,8 @@ impl Db {
         let received_at = chrono::Utc::now();
 
         let insert_result = sqlx::query(
-            "INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+            "INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
              ON CONFLICT DO NOTHING",
         )
         .bind(event.id.as_bytes().as_slice())
@@ -1739,6 +1734,7 @@ impl Db {
         .bind(received_at)
         .bind(channel_id)
         .bind(d_tag)
+        .bind(event::extract_not_before(event))
         .execute(&mut *tx)
         .await?;
 

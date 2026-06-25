@@ -20,8 +20,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-// ─── Named constants ──────────────────────────────────────────────────────────
-
 /// Default capacity of the event channel from background task to harness.
 /// Override with `BUZZ_ACP_EVENT_BUFFER` env var at startup.
 const EVENT_CHANNEL_CAPACITY_DEFAULT: usize = 256;
@@ -76,13 +74,86 @@ use uuid::Uuid;
 
 use crate::config::ChannelFilter;
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
 /// Metadata about a channel, populated at discovery time.
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+}
+
+/// Build the discovered-channel subscribe set from the membership UUIDs and the
+/// kind:39000 metadata events, **skipping any channel flagged `archived=true`**.
+///
+/// Archived channels (e.g. auto-archived by the ephemeral-channel reaper) are
+/// unusable: re-offering one on reconnect draws a `CLOSED restricted` and would
+/// re-form the reconnect loop. Dropping them here is the defense-in-depth
+/// backstop to the relay-side live-subscription eviction — it covers a client
+/// that was offline when the channel was reaped and so missed the CLOSED.
+/// A channel with no metadata event defaults to a `stream` named `unknown`,
+/// preserving prior behavior for non-archived channels.
+fn merge_discovered_channels(
+    channel_uuids: Vec<Uuid>,
+    meta_events: &serde_json::Value,
+) -> HashMap<Uuid, ChannelInfo> {
+    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    if let Some(arr) = meta_events.as_array() {
+        for ev in arr {
+            let tags = match ev.get("tags").and_then(|t| t.as_array()) {
+                Some(t) => t,
+                None => continue,
+            };
+            let mut d_val = None;
+            let mut name = None;
+            let mut is_hidden = false;
+            let mut is_private = false;
+            let mut is_archived = false;
+            for tag in tags {
+                if let Some(arr) = tag.as_array() {
+                    match arr.first().and_then(|v| v.as_str()) {
+                        Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
+                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("hidden") => is_hidden = true,
+                        Some("private") => is_private = true,
+                        Some("archived") => {
+                            is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(d) = d_val {
+                if let Ok(uuid) = d.parse::<Uuid>() {
+                    if is_archived {
+                        archived.insert(uuid);
+                        continue;
+                    }
+                    let ch_name = name.unwrap_or("unknown").to_string();
+                    // DMs have the "hidden" tag; private channels have "private".
+                    let ch_type = if is_hidden {
+                        "dm".to_string()
+                    } else if is_private {
+                        "private".to_string()
+                    } else {
+                        "stream".to_string()
+                    };
+                    meta_map.insert(uuid, (ch_name, ch_type));
+                }
+            }
+        }
+    }
+
+    let mut map = HashMap::with_capacity(channel_uuids.len());
+    for uuid in channel_uuids {
+        if archived.contains(&uuid) {
+            continue;
+        }
+        let (name, channel_type) = meta_map
+            .remove(&uuid)
+            .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
+        map.insert(uuid, ChannelInfo { name, channel_type });
+    }
+    map
 }
 
 /// Lightweight HTTP client for pre-prompt context fetches via the Nostr HTTP bridge.
@@ -122,8 +193,6 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
-    // ── NIP-98 signing ────────────────────────────────────────────────────
-
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -171,8 +240,6 @@ impl RestClient {
     ) -> Result<String, RelayError> {
         Ok(format!("Nostr {}", self.sign_nip98(method, url, body)?))
     }
-
-    // ── Retry helper ──────────────────────────────────────────────────────
 
     /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
     /// on transient failures (429, 502, 503, 504, timeout, connect errors).
@@ -230,8 +297,6 @@ impl RestClient {
         Err(last_err
             .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries"))))
     }
-
-    // ── Bridge methods ────────────────────────────────────────────────────
 
     /// POST with NIP-98 auth and retry. Re-signs on each attempt.
     async fn bridge_post(
@@ -335,8 +400,6 @@ impl From<nostr::event::builder::Error> for RelayError {
     }
 }
 
-// ── Internal relay message types ──────────────────────────────────────────────
-
 /// A parsed NIP-01 relay message.
 #[derive(Debug, Clone)]
 enum RelayMessage {
@@ -363,8 +426,6 @@ enum RelayMessage {
         challenge: String,
     },
 }
-
-// ── Commands sent from HarnessRelay to the background task ───────────────────
 
 /// Subscription ID for the global membership notification subscription.
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
@@ -397,11 +458,7 @@ enum RelayCommand {
     SetStartupWatermark { ts: u64 },
 }
 
-// ── WebSocket stream type alias ───────────────────────────────────────────────
-
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
-// ── HarnessRelay ──────────────────────────────────────────────────────────────
 
 /// Harness-side relay client.
 ///
@@ -450,8 +507,6 @@ impl RelayEventPublisher {
 }
 
 impl HarnessRelay {
-    // ── Public API ────────────────────────────────────────────────────────────
-
     /// Connect to relay and authenticate via NIP-42.
     ///
     /// `auth_tag` is an optional NIP-OA owner attestation included in the AUTH
@@ -565,54 +620,8 @@ impl HarnessRelay {
             .custom_tags(d_tag, d_values);
         let meta_events = rest.query(&[meta_filter]).await?;
 
-        // Build UUID → (name, channel_type) from metadata events.
-        let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
-        if let Some(arr) = meta_events.as_array() {
-            for ev in arr {
-                let tags = match ev.get("tags").and_then(|t| t.as_array()) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                let mut d_val = None;
-                let mut name = None;
-                let mut is_hidden = false;
-                let mut is_private = false;
-                for tag in tags {
-                    if let Some(arr) = tag.as_array() {
-                        match arr.first().and_then(|v| v.as_str()) {
-                            Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
-                            Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                            Some("hidden") => is_hidden = true,
-                            Some("private") => is_private = true,
-                            _ => {}
-                        }
-                    }
-                }
-                if let Some(d) = d_val {
-                    if let Ok(uuid) = d.parse::<Uuid>() {
-                        let ch_name = name.unwrap_or("unknown").to_string();
-                        // DMs have the "hidden" tag; private channels have "private".
-                        let ch_type = if is_hidden {
-                            "dm".to_string()
-                        } else if is_private {
-                            "private".to_string()
-                        } else {
-                            "stream".to_string()
-                        };
-                        meta_map.insert(uuid, (ch_name, ch_type));
-                    }
-                }
-            }
-        }
-
-        // Step 3: Merge into final map.
-        let mut map = HashMap::with_capacity(channel_uuids.len());
-        for uuid in channel_uuids {
-            let (name, channel_type) = meta_map
-                .remove(&uuid)
-                .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
-            map.insert(uuid, ChannelInfo { name, channel_type });
-        }
+        // Step 3: Build the final subscribe set, skipping archived channels.
+        let map = merge_discovered_channels(channel_uuids, &meta_events);
 
         debug!("discovered {} channel(s)", map.len());
         Ok(map)
@@ -828,8 +837,6 @@ impl Drop for HarnessRelay {
         }
     }
 }
-
-// ── Background task ───────────────────────────────────────────────────────────
 
 /// Two-generation dedup set with bounded memory.
 ///
@@ -1342,7 +1349,6 @@ async fn run_background_task(
         }
 
         tokio::select! {
-                   // ── Incoming WebSocket message ────────────────────────────────────
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -1425,7 +1431,6 @@ async fn run_background_task(
                        }
                    }
 
-                   // ── Command from HarnessRelay ─────────────────────────────────────
                    cmd = cmd_rx.recv() => {
                        match cmd {
                            Some(RelayCommand::Reconnect) => {
@@ -1497,7 +1502,6 @@ async fn run_background_task(
                        }
                    }
 
-                   // ── Finding #31: client-initiated ping ────────────────────────────
                    _ = ping_interval.tick() => {
                        if ping_sent && last_pong.elapsed() > PONG_TIMEOUT {
                            // No pong received after our last ping — connection is dead.
@@ -1748,6 +1752,15 @@ async fn handle_ws_message(
                     subscription_id,
                     message,
                 } => {
+                    // A per-channel membership denial means THIS channel is
+                    // forbidden, not the whole connection. Drop just this
+                    // channel's subscription and keep the socket — otherwise the
+                    // socket is torn down, the forbidden channel is resubscribed,
+                    // and the same CLOSED arrives again: a tight reconnect loop.
+                    if drop_channel_on_access_denied(state, &subscription_id, &message) {
+                        return true;
+                    }
+
                     // Finding #15: CLOSED needs cleanup and resubscribe, not just logging.
                     // Classify the error to decide how to respond.
                     let is_auth_error = message.starts_with("auth-required")
@@ -2538,8 +2551,6 @@ async fn send_auth_response(
     Ok(())
 }
 
-// ── Free functions ────────────────────────────────────────────────────────────
-
 /// Convert a WebSocket URL to its HTTP equivalent.
 ///
 /// `ws://host:port` → `http://host:port`
@@ -2563,6 +2574,46 @@ fn channel_id_from_sub_id(sub_id: &str) -> Option<Uuid> {
     sub_id
         .strip_prefix("ch-")
         .and_then(|s| s.parse::<Uuid>().ok())
+}
+
+/// Per-channel CLOSED denials: the channel is forbidden but the connection is
+/// fine. Match these EXACT strings, never a `starts_with("restricted")` prefix —
+/// a prefix would also swallow connection-level `restricted: insufficient scope`,
+/// dropping a channel instead of reconnecting. The only CLOSED senders of these
+/// strings are `req.rs:153` (not a channel member) and `side_effects.rs:71`
+/// (channel access revoked, via member eviction / open→private flip).
+/// `ingest.rs` returns these as EVENT-publish `OK(false)`, never as a
+/// subscription CLOSED, so it is not a source here.
+const CHANNEL_ACCESS_DENIED_REASONS: &[&str] = &[
+    "restricted: not a channel member",
+    "restricted: channel access revoked",
+];
+
+/// Handle a CLOSED that denies access to a single channel: drop just that
+/// channel's subscription (the proven Unsubscribe cleanup) and keep the socket.
+///
+/// Returns `true` when the CLOSED was an exact per-channel denial on a `ch-`
+/// subscription and the channel was dropped — the caller keeps the connection
+/// with no reconnect. Returns `false` for everything else (connection-level
+/// `restricted: insufficient scope`, `auth-required`, non-channel subs), which
+/// falls through to the existing reconnect path.
+///
+/// An already-removed channel is a harmless no-op: the remove/clear simply
+/// affect nothing, and the dropped channel is never re-subscribed, so the loop
+/// cannot re-form.
+fn drop_channel_on_access_denied(state: &mut BgState, sub_id: &str, message: &str) -> bool {
+    if !CHANNEL_ACCESS_DENIED_REASONS.contains(&message) {
+        return false;
+    }
+    let Some(channel_id) = channel_id_from_sub_id(sub_id) else {
+        return false;
+    };
+    warn!(
+        "channel {channel_id} access denied by relay: {message} — dropping subscription, keeping connection"
+    );
+    state.active_subscriptions.remove(&channel_id);
+    state.clear_channel_state(&channel_id);
+    true
 }
 
 /// Apply the appropriate auth header to a reqwest request builder.
@@ -2659,8 +2710,6 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
     }
 }
 
-// ── Connection helpers ────────────────────────────────────────────────────────
-
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
 ///
 /// Returns `(ws, buffer)` on success.
@@ -2682,13 +2731,10 @@ async fn do_connect(
     let mut ws = ws;
     let mut buffer: VecDeque<RelayMessage> = VecDeque::new();
 
-    // ── Step 1: Wait for AUTH challenge ───────────────────────────────────
     let challenge = wait_for_auth_challenge(&mut ws, &mut buffer, AUTH_TIMEOUT).await?;
 
-    // ── Step 2: Build and send kind:22242 auth event ──────────────────────
     send_auth_response(&mut ws, &challenge, relay_url, keys, auth_tag).await?;
 
-    // ── Step 3: Wait for OK ───────────────────────────────────────────────
     let event_id = {
         // We need the event_id that was just sent. Re-derive it by signing again
         // just to get the ID — but that's wasteful. Instead, parse the last sent
@@ -2836,13 +2882,9 @@ async fn wait_for_any_ok(
     }
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── relay_ws_to_http ──────────────────────────────────────────────────────
 
     #[test]
     fn relay_ws_to_http_plain() {
@@ -2884,8 +2926,6 @@ mod tests {
         );
     }
 
-    // ── channel_sub_id ────────────────────────────────────────────────────────
-
     #[test]
     fn channel_sub_id_format() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -2918,7 +2958,70 @@ mod tests {
         assert!(channel_id_from_sub_id("").is_none());
     }
 
-    // ── parse_relay_message ───────────────────────────────────────────────────
+    fn meta_event(uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
+        let mut tags = vec![
+            serde_json::json!(["d", uuid.to_string()]),
+            serde_json::json!(["name", name]),
+        ];
+        // `extra` is a flat list of single-value tag names (e.g. archived=true).
+        for pair in extra.chunks(2) {
+            match pair {
+                [k, v] => tags.push(serde_json::json!([k, v])),
+                [k] => tags.push(serde_json::json!([k])),
+                _ => {}
+            }
+        }
+        serde_json::json!({ "tags": tags })
+    }
+
+    #[test]
+    fn merge_discovered_channels_skips_archived_metadata() {
+        let live = Uuid::new_v4();
+        let archived = Uuid::new_v4();
+        let meta = serde_json::json!([
+            meta_event(live, "live", &[]),
+            meta_event(archived, "dead", &["archived", "true"]),
+        ]);
+
+        let map = merge_discovered_channels(vec![live, archived], &meta);
+
+        assert!(map.contains_key(&live), "non-archived channel is kept");
+        assert!(
+            !map.contains_key(&archived),
+            "archived=true channel is skipped from the subscribe set"
+        );
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn merge_discovered_channels_skips_archived_even_when_still_a_member() {
+        // The offline feeder: the agent is still listed as a member
+        // (uuid present in channel_uuids, the kind:39002 membership set), but the
+        // channel was reaped while the agent was offline. Even though the agent
+        // missed the eviction CLOSED, the archived=true kind:39000 makes the
+        // client skip re-subscribing on reconnect — proving (b) closes the loop
+        // independently of the relay-side eviction.
+        let reaped = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(reaped, "reaped", &["archived", "true"])]);
+
+        let map = merge_discovered_channels(vec![reaped], &meta);
+
+        assert!(
+            map.is_empty(),
+            "a still-member but archived channel is not re-subscribed"
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_archived_false_is_kept() {
+        // An explicit archived=false (e.g. after unarchive) must NOT be skipped.
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(ch, "back", &["archived", "false"])]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert!(map.contains_key(&ch), "archived=false is treated as live");
+    }
 
     #[test]
     fn parse_ok_accepted() {
@@ -3082,8 +3185,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── channel_sub_id subscription format ───────────────────────────────────
-
     #[test]
     fn subscription_id_starts_with_ch_prefix() {
         let uuid = Uuid::new_v4();
@@ -3097,8 +3198,6 @@ mod tests {
         let sub_id = channel_sub_id(uuid);
         assert_eq!(sub_id, "ch-12345678-1234-5678-1234-567812345678");
     }
-
-    // ── BgState: seen_ids deduplication ──────────────────────────────────────
 
     /// Build a real signed Nostr event for testing BgState.
     ///
@@ -3154,8 +3253,6 @@ mod tests {
         assert!(state.record_event(channel_id, &event1));
         assert!(state.record_event(channel_id, &event2));
     }
-
-    // ── BgState: last_seen tracking ───────────────────────────────────────────
 
     #[test]
     fn bg_state_last_seen_set_on_first_event() {
@@ -3299,8 +3396,6 @@ mod tests {
         );
     }
 
-    // ── Bug 5: channel_dropped_since tracking ─────────────────────────────────
-
     /// Test 8: channel_dropped_since records the OLDEST dropped timestamp.
     ///
     /// Simulates the backpressure path directly on BgState:
@@ -3419,8 +3514,6 @@ mod tests {
         );
     }
 
-    // ── Membership dedup regression tests (M4) ───────────────────────────
-
     /// Membership dedup must NOT contaminate per-channel `last_seen`.
     /// Using `record_event()` for membership notifications would update
     /// `last_seen[channel_uuid]`, causing channel resubscribe to use a
@@ -3476,6 +3569,147 @@ mod tests {
         assert!(
             state.seen_ids.insert(event_id_hex),
             "after backpressure removal, replay must be accepted"
+        );
+    }
+
+    /// Subscribe a channel via the production command path so the test exercises
+    /// real subscription state (active_subscriptions + active_filters + since).
+    fn subscribe_channel(state: &mut BgState, channel_id: Uuid) {
+        apply_command_to_state(
+            state,
+            RelayCommand::Subscribe {
+                channel_id,
+                filter: ChannelFilter {
+                    kinds: Some(vec![9]),
+                    require_mention: false,
+                },
+                replay_since: Some(1_000),
+            },
+        );
+    }
+
+    #[test]
+    fn not_a_channel_member_drops_channel_without_reconnect() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        assert!(handled, "per-channel denial must be handled (no reconnect)");
+        assert!(
+            !state.active_subscriptions.contains_key(&channel_id),
+            "the forbidden channel's subscription must be dropped"
+        );
+        assert!(
+            !state.active_filters.contains_key(&channel_id),
+            "channel state must be cleared (Unsubscribe cleanup)"
+        );
+    }
+
+    #[test]
+    fn channel_access_revoked_drops_channel_without_reconnect() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: channel access revoked",
+        );
+
+        assert!(handled, "per-channel denial must be handled (no reconnect)");
+        assert!(!state.active_subscriptions.contains_key(&channel_id));
+        assert!(!state.active_filters.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn insufficient_scope_is_not_dropped_and_reconnects() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: insufficient scope",
+        );
+
+        assert!(
+            !handled,
+            "connection-level insufficient-scope must fall through to reconnect, not drop the channel"
+        );
+        assert!(
+            state.active_subscriptions.contains_key(&channel_id),
+            "the channel must survive so reconnect can restore it"
+        );
+    }
+
+    #[test]
+    fn auth_required_is_not_dropped_and_reconnects() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "auth-required: not authenticated",
+        );
+
+        assert!(
+            !handled,
+            "auth-required must fall through to reconnect, not drop the channel"
+        );
+        assert!(state.active_subscriptions.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn already_removed_channel_is_a_no_op() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        // Channel was never subscribed (or already dropped) — a delayed CLOSED.
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        assert!(
+            handled,
+            "an exact per-channel denial is still handled (keep socket) even if the channel is gone"
+        );
+        assert!(
+            !state.active_subscriptions.contains_key(&channel_id),
+            "no-op: nothing to remove and nothing resurrected"
+        );
+    }
+
+    #[test]
+    fn dropped_channel_is_not_resubscribed_so_loop_cannot_re_form() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        // Simulate a reconnect: only channels still in active_subscriptions are
+        // restored. The dropped channel must not be among them — otherwise the
+        // forbidden channel would be resubscribed and earn the same CLOSED again.
+        let resubscribed: Vec<Uuid> = state.active_subscriptions.keys().copied().collect();
+        assert!(
+            !resubscribed.contains(&channel_id),
+            "the dropped channel must not be resubscribed — the loop cannot re-form"
         );
     }
 }

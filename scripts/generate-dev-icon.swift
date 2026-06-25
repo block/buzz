@@ -34,7 +34,6 @@ func sanitizedPathComponent(_ value: String) -> String {
     return trimmed.isEmpty ? "dev" : trimmed
 }
 
-// Load the icns file
 guard let iconImage = NSImage(contentsOfFile: inputPath) else {
     fputs("Failed to load image: \(inputPath)\n", stderr)
     exit(1)
@@ -48,7 +47,6 @@ guard let rep = iconImage.representations.max(by: { $0.pixelsWide < $1.pixelsWid
 
 let size = NSSize(width: rep.pixelsWide, height: rep.pixelsHigh)
 
-// Create a new image with the badge
 let newImage = NSImage(size: size)
 newImage.lockFocus()
 
@@ -139,7 +137,6 @@ for (index, line) in lines.reversed().enumerated() {
 
 newImage.unlockFocus()
 
-// Convert to icns format
 // First, create PNG data at multiple sizes for icns
 guard let tiffData = newImage.tiffRepresentation,
       let bitmapRep = NSBitmapImageRep(data: tiffData) else {
@@ -202,7 +199,6 @@ if outputPath.hasSuffix(".icns") {
     try! process.run()
     process.waitUntilExit()
     
-    // Cleanup
     try? FileManager.default.removeItem(at: iconsetParent)
     
     if process.terminationStatus != 0 {

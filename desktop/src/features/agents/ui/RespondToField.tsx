@@ -211,7 +211,7 @@ function AllowlistPicker({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-sm font-medium">Allowed pubkeys</span>
-        <span className="rounded-full bg-background px-2 py-1 text-[11px] font-medium leading-none text-muted-foreground">
+        <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
           {allowlist.length} selected
         </span>
       </div>
@@ -241,7 +241,7 @@ function AllowlistPicker({
           <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
             {allowlist.map((pubkey) => (
               <div
-                className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] leading-none"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
                 data-testid={`agent-respond-to-chip-${pubkey}`}
                 key={pubkey}
               >
@@ -258,7 +258,7 @@ function AllowlistPicker({
                   onClick={() => onRemove(pubkey)}
                   type="button"
                 >
-                  <X className="h-3 w-3" />
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             ))}

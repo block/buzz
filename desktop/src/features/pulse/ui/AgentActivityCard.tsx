@@ -66,7 +66,7 @@ export function AgentActivityCard({
             type="button"
           >
             <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           </button>
         </UserProfilePopover>
         <div className="min-w-0 flex-1">
@@ -75,7 +75,7 @@ export function AgentActivityCard({
               {displayName}
             </span>
             {agentStatus ? <StatusDot status={agentStatus} /> : null}
-            <span className="shrink-0 text-[11px] text-muted-foreground">
+            <span className="shrink-0 text-2xs text-muted-foreground">
               {formatRelativeTime(group.latestAt)}
             </span>
           </div>
@@ -87,9 +87,9 @@ export function AgentActivityCard({
             type="button"
           >
             {expanded ? (
-              <ChevronDown className="h-3.5 w-3.5" />
+              <ChevronDown className="h-4 w-4" />
             ) : (
-              <ChevronRight className="h-3.5 w-3.5" />
+              <ChevronRight className="h-4 w-4" />
             )}
             {group.notes.length} updates
           </button>
@@ -113,7 +113,7 @@ export function AgentActivityCard({
               </span>
               <div className="min-w-0 flex-1 text-sm">
                 <Markdown content={note.content} />
-                <p className="mt-1 text-[10px] text-muted-foreground">
+                <p className="mt-1 text-2xs text-muted-foreground">
                   {formatRelativeTime(note.createdAt)}
                 </p>
               </div>

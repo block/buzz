@@ -1,4 +1,4 @@
-import { EllipsisVertical, Plus, Settings2, Users } from "lucide-react";
+import { EllipsisVertical, Settings2, Users } from "lucide-react";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
@@ -81,7 +81,7 @@ export function ChannelMembersBar({
     members.find(
       (member) => normalizePubkey(member.pubkey) === normalizedCurrentPubkey,
     ) ?? null;
-  const canAddAgents =
+  const canStartHuddle =
     channel.channelType !== "dm" &&
     channel.archivedAt === null &&
     (channel.visibility === "open" || selfMember !== null);
@@ -119,7 +119,7 @@ export function ChannelMembersBar({
         }
       }}
       renderMode={variant === "compact" ? "menu-item" : "button"}
-      startDisabled={!canAddAgents || isStartingHuddle}
+      startDisabled={!canStartHuddle || isStartingHuddle}
     />
   );
 
@@ -138,16 +138,6 @@ export function ChannelMembersBar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48" forceMount>
-          <DropdownMenuItem
-            data-testid="channel-add-bot-trigger"
-            disabled={!canAddAgents}
-            onSelect={() => {
-              setIsAddBotOpen(true);
-            }}
-          >
-            <Plus />
-            <span>Add agent</span>
-          </DropdownMenuItem>
           <DropdownMenuItem
             data-testid="channel-members-trigger"
             onSelect={onToggleMembers}
@@ -170,20 +160,6 @@ export function ChannelMembersBar({
       </DropdownMenu>
     ) : (
       <div className="flex items-center gap-[6px]">
-        <Button
-          aria-label="Add agent"
-          data-testid="channel-add-bot-trigger"
-          disabled={!canAddAgents}
-          onClick={() => {
-            setIsAddBotOpen(true);
-          }}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <Plus />
-        </Button>
-
         <Button
           aria-label={`View channel members (${memberCount})`}
           className="h-8 px-2.5"

@@ -1,10 +1,7 @@
 import * as React from "react";
 import { AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
 
-import {
-  useAgentMemoryGraph,
-  useIsManagedAgent,
-} from "@/features/agent-memory/hooks";
+import { useAgentMemoryGraph } from "@/features/agent-memory/hooks";
 import type { MemoryTreeNode } from "@/features/agent-memory/lib/buildMemoryGraph";
 import type { EngramEntry } from "@/shared/api/tauriEngrams";
 import { cn } from "@/shared/lib/cn";
@@ -23,9 +20,11 @@ const MEMORY_DANGLING_REF_TOOLTIP =
 /**
  * Memory section — IXI-7 phase 1 read-only viewer.
  *
- * Owner-gated: returns `null` for non-owners (and while the managed-agent
- * list is still loading, to avoid a one-frame flash of the section before
- * we know the viewer's owner status).
+ * Owner-gated by the caller: the parent passes `viewerIsOwner` (the
+ * `isCurrentUserOwner || isOwner` signal computed in the profile panel from
+ * the agent's declared NIP-OA owner OR local key custody). We return `null`
+ * for non-owners. Engrams decrypt with the viewer's OWN key, so a declared
+ * owner whose agent runs elsewhere sees this section just the same.
  *
  * The whole thing is contained: skeleton/error/empty live *inside* this
  * section so the rest of the profile panel stays interactive while we
@@ -42,35 +41,35 @@ const MEMORY_DANGLING_REF_TOOLTIP =
  */
 export function MemorySection({
   agentPubkey,
+  viewerIsOwner,
 }: {
   agentPubkey: string;
+  viewerIsOwner: boolean;
 }): React.ReactElement | null {
-  const isOwner = useIsManagedAgent(agentPubkey);
-
-  // Hide entirely for non-owners. Defer (`null`) while the managed-agent
-  // list is still loading rather than render a placeholder we'll yank.
-  if (isOwner !== true) return null;
+  // Hide entirely for non-owners.
+  if (!viewerIsOwner) return null;
 
   return <MemorySectionForOwner agentPubkey={agentPubkey} />;
 }
 
 export function MemoryRefreshButton({
   agentPubkey,
+  viewerIsOwner,
   className,
   iconClassName,
   variant = "ghost",
 }: {
   agentPubkey: string;
+  viewerIsOwner: boolean;
   className?: string;
   iconClassName?: string;
   variant?: ButtonProps["variant"];
 }): React.ReactElement | null {
-  const isOwner = useIsManagedAgent(agentPubkey);
   const { query } = useAgentMemoryGraph(agentPubkey, {
-    enabled: isOwner === true,
+    enabled: viewerIsOwner,
   });
 
-  if (isOwner !== true || !query.data) return null;
+  if (!viewerIsOwner || !query.data) return null;
 
   return (
     <Button
@@ -85,7 +84,7 @@ export function MemoryRefreshButton({
     >
       <RefreshCw
         className={cn(
-          iconClassName ?? "h-3.5 w-3.5",
+          iconClassName ?? "h-4 w-4",
           query.isFetching && "animate-spin",
         )}
       />
@@ -169,7 +168,7 @@ function MemoryErrorState({
       role="alert"
     >
       <div className="flex items-start gap-2">
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <div className="space-y-1">
           <div className="font-medium text-destructive">
             Couldn't load memory
@@ -196,7 +195,7 @@ function MemoryStaleErrorBanner({ onRetry }: { onRetry: () => void }) {
       className="mb-2 flex items-center gap-2 rounded-md border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
       data-testid="agent-memory-stale-error"
     >
-      <AlertTriangle className="h-3 w-3 shrink-0 text-warning" />
+      <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
       <span className="flex-1 text-muted-foreground">Refresh failed.</span>
       <button
         className="font-medium text-warning hover:underline"
@@ -253,8 +252,8 @@ function MemoryGraphView({
           className="text-xs italic text-muted-foreground"
           data-testid="agent-memory-no-core"
         >
-          No <code className="font-mono text-[10px]">core</code> memory yet —
-          agent identity is unrooted.
+          No <code className="font-mono text-2xs">core</code> memory yet — agent
+          identity is unrooted.
         </p>
       ) : null}
 
@@ -511,7 +510,7 @@ function MemoryEntryAccordion({
           ref={titleRef}
         >
           {hasDanglingRefs ? (
-            <AlertTriangle className="mr-1 inline-block h-3.5 w-3.5 align-[-2px] text-warning" />
+            <AlertTriangle className="mr-1 inline-block h-4 w-4 align-[-2px] text-warning" />
           ) : null}
           <MemorySlugTitle slug={entry.slug} />
         </div>

@@ -3,7 +3,7 @@ import * as React from "react";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { HomeFeedResponse } from "@/shared/api/types";
+import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
@@ -24,6 +24,11 @@ import {
   useFeedDesktopNotifications,
   writeStoredSeenFeedIds,
 } from "./use-feed-desktop-notifications";
+import {
+  buildHomeBadgeFeedItems,
+  isHomeBadgeFeedItemUnread,
+  shouldCountTowardHomeBadgeSubtotal,
+} from "./lib/homeBadge";
 
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
 
@@ -31,6 +36,7 @@ export type { DesktopNotificationPermissionState } from "./lib/desktop";
 // slotAlertsEnabled, no singleSound/soundEnabled) — v1 values are abandoned.
 const NOTIFICATION_SETTINGS_STORAGE_KEY = "buzz-notification-settings.v2";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
+const EMPTY_FEED_ID_SET: ReadonlySet<string> = new Set();
 
 export type NotificationSettings = {
   desktopEnabled: boolean;
@@ -359,6 +365,17 @@ export function useHomeFeedNotificationState(
   highPriorityChannelIds: ReadonlySet<string>,
   profiles?: UserProfileLookup,
   mutedChannelIds?: ReadonlySet<string>,
+  localUnreadFeedIds: ReadonlySet<string> = EMPTY_FEED_ID_SET,
+  extraInboxItems: readonly FeedItem[] = [],
+  getThreadReadAt: (
+    rootId: string,
+    channelId?: string | null,
+  ) => number | null = () => null,
+  // Per-message read marker lookup, shared with channel thread badges. When
+  // provided, a thread activity row is treated as read if the specific reply
+  // has been revealed in-channel, even if the aggregate `thread:<root>` marker
+  // has not been advanced by opening Home.
+  getMessageReadAt: (messageId: string) => number | null = () => null,
 ) {
   useFeedDesktopNotifications(
     feed,
@@ -372,10 +389,9 @@ export function useHomeFeedNotificationState(
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>
     readStoredSeenFeedIds(normalizedPubkey),
   );
-  const currentFeedItems = React.useMemo(
-    () => (feed ? [...feed.feed.mentions, ...feed.feed.needsAction] : []),
-    [feed],
-  );
+  const currentFeedItems = React.useMemo(() => {
+    return buildHomeBadgeFeedItems(feed, extraInboxItems, localUnreadFeedIds);
+  }, [extraInboxItems, feed, localUnreadFeedIds]);
   const currentFeedIds = React.useMemo(
     () => currentFeedItems.map((item) => item.id),
     [currentFeedItems],
@@ -405,7 +421,7 @@ export function useHomeFeedNotificationState(
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getChannelReadAt
   return React.useMemo(() => {
     const zero = { homeBadgeCount: 0, homeBadgeCountExcludingHighPriority: 0 };
-    if (!settings.homeBadgeEnabled || isHomeActive) {
+    if (!settings.homeBadgeEnabled) {
       return zero;
     }
 
@@ -417,6 +433,10 @@ export function useHomeFeedNotificationState(
     let total = 0;
     let excludingHighPriority = 0;
     for (const item of currentFeedItems) {
+      const isLocallyUnread = localUnreadFeedIds.has(item.id);
+      if (isHomeActive && !isLocallyUnread) {
+        continue;
+      }
       if (
         item.channelId &&
         mutedChannelIds?.has(item.channelId) &&
@@ -424,19 +444,22 @@ export function useHomeFeedNotificationState(
       ) {
         continue;
       }
-      let isUnread: boolean;
-      if (item.channelId) {
-        const readAt = getChannelReadAt(item.channelId);
-        isUnread =
-          readAt !== null
-            ? item.createdAt > readAt
-            : !seenFeedIdSet.has(item.id);
-      } else {
-        isUnread = !seenFeedIdSet.has(item.id);
-      }
+      const isUnread = isHomeBadgeFeedItemUnread(item, {
+        getChannelReadAt,
+        getMessageReadAt,
+        getThreadReadAt,
+        isLocallyUnread,
+        seenFeedIdSet,
+      });
       if (!isUnread) continue;
       total++;
-      if (!(item.channelId && highPriorityChannelIds.has(item.channelId))) {
+      if (
+        shouldCountTowardHomeBadgeSubtotal(
+          item,
+          highPriorityChannelIds,
+          isLocallyUnread,
+        )
+      ) {
         excludingHighPriority++;
       }
     }
@@ -447,8 +470,11 @@ export function useHomeFeedNotificationState(
   }, [
     currentFeedItems,
     getChannelReadAt,
+    getMessageReadAt,
+    getThreadReadAt,
     highPriorityChannelIds,
     isHomeActive,
+    localUnreadFeedIds,
     mutedChannelIds,
     readStateVersion,
     seenFeedIds,

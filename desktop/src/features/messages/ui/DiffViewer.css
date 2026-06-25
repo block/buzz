@@ -52,7 +52,7 @@
 }
 
 .buzz-diff-theme .diff {
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .buzz-diff-theme .diff td {
@@ -68,7 +68,7 @@
   padding: 0.125rem 0.5rem;
   border-right: 1px solid hsl(var(--border) / 0.65);
   color: hsl(var(--muted-foreground));
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .buzz-diff-theme .buzz-diff-code {
@@ -86,7 +86,7 @@
   padding: 0.2rem 0.75rem;
   background: hsl(var(--muted) / 0.35);
   color: hsl(var(--muted-foreground));
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .buzz-diff-theme .diff-gutter-omit::before {

@@ -10,8 +10,6 @@ import { Button } from "@/shared/ui/button";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
-import { useHeadphonesGate } from "../lib/useHeadphonesGate";
-import { HeadphonesGate } from "./HeadphonesGate";
 
 /** Huddle lifecycle event kinds */
 const KIND_HUDDLE_STARTED = 48100;
@@ -52,13 +50,6 @@ export function HuddleIndicator({
     null,
   );
   const [isJoining, setIsJoining] = React.useState(false);
-
-  // Pre-join "use headphones" confirmation while echo cancellation is
-  // missing. Mirrors the `aecMissing` constant in HuddleBar — both flip
-  // to false in the AEC follow-up PR, after which this hook is a no-op
-  // and the gate UI/components are mechanically deletable.
-  const aecMissing = true;
-  const headphonesGate = useHeadphonesGate(aecMissing);
 
   React.useEffect(() => {
     if (!channelId) return;
@@ -215,53 +206,36 @@ export function HuddleIndicator({
     };
   }, []);
 
-  // Pre-join headphones confirmation. The same dialog instance serves
-  // both the start and the join paths — `gate` decides which deferred
-  // action to fire on Continue.
-  const gateDialog = (
-    <HeadphonesGate
-      open={headphonesGate.dialogOpen}
-      onContinue={headphonesGate.onContinue}
-      onCancel={headphonesGate.onCancel}
-    />
-  );
-
   // No active huddle — render the start button (if onStart provided).
   if (!activeHuddle) {
     if (!onStart) return null;
     if (renderMode === "menu-item") {
       return (
-        <>
-          <DropdownMenuItem
-            className={className}
-            data-testid="channel-start-huddle-trigger"
-            disabled={startDisabled || isStarting}
-            onSelect={() => headphonesGate.gate(() => onStart())}
-          >
-            <Headphones />
-            <span>Start huddle</span>
-          </DropdownMenuItem>
-          {gateDialog}
-        </>
+        <DropdownMenuItem
+          className={className}
+          data-testid="channel-start-huddle-trigger"
+          disabled={startDisabled || isStarting}
+          onSelect={() => onStart()}
+        >
+          <Headphones />
+          <span>Start huddle</span>
+        </DropdownMenuItem>
       );
     }
 
     return (
-      <>
-        <Button
-          aria-label="Start huddle"
-          className={className}
-          data-testid="channel-start-huddle-trigger"
-          disabled={startDisabled || isStarting}
-          onClick={() => headphonesGate.gate(() => onStart())}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <Headphones />
-        </Button>
-        {gateDialog}
-      </>
+      <Button
+        aria-label="Start huddle"
+        className={className}
+        data-testid="channel-start-huddle-trigger"
+        disabled={startDisabled || isStarting}
+        onClick={() => onStart()}
+        size="icon"
+        type="button"
+        variant="outline"
+      >
+        <Headphones />
+      </Button>
     );
   }
 
@@ -286,52 +260,46 @@ export function HuddleIndicator({
 
   if (renderMode === "menu-item") {
     return (
-      <>
-        <DropdownMenuItem
-          className={className}
-          data-testid="channel-start-huddle-trigger"
-          disabled={isJoining || isStarting}
-          onSelect={() => headphonesGate.gate(() => void doJoin())}
-        >
-          <Headphones />
-          <span>Join huddle</span>
-          <span className="ml-auto text-xs text-muted-foreground">
-            {participantCount}
-          </span>
-        </DropdownMenuItem>
-        {gateDialog}
-      </>
+      <DropdownMenuItem
+        className={className}
+        data-testid="channel-start-huddle-trigger"
+        disabled={isJoining || isStarting}
+        onSelect={() => void doJoin()}
+      >
+        <Headphones />
+        <span>Join huddle</span>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {participantCount}
+        </span>
+      </DropdownMenuItem>
     );
   }
 
   return (
-    <>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            aria-label={`Join active huddle (${participantCount} participant${participantCount !== 1 ? "s" : ""})`}
-            className={cn("relative", className)}
-            disabled={isJoining || isStarting}
-            onClick={() => headphonesGate.gate(() => void doJoin())}
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <Headphones />
-            <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />
-            {/* Participant count badge */}
-            {participantCount > 0 && (
-              <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-[9px] font-bold text-muted-foreground">
-                {participantCount}
-              </span>
-            )}
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>
-          {`Huddle active — ${participantCount} participant${participantCount !== 1 ? "s" : ""}`}
-        </TooltipContent>
-      </Tooltip>
-      {gateDialog}
-    </>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          aria-label={`Join active huddle (${participantCount} participant${participantCount !== 1 ? "s" : ""})`}
+          className={cn("relative", className)}
+          disabled={isJoining || isStarting}
+          onClick={() => void doJoin()}
+          size="icon"
+          type="button"
+          variant="outline"
+        >
+          <Headphones />
+          <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />
+          {/* Participant count badge */}
+          {participantCount > 0 && (
+            <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-2xs font-bold text-muted-foreground">
+              {participantCount}
+            </span>
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>
+        {`Huddle active — ${participantCount} participant${participantCount !== 1 ? "s" : ""}`}
+      </TooltipContent>
+    </Tooltip>
   );
 }

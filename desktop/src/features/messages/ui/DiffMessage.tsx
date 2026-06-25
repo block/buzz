@@ -41,7 +41,6 @@ export default function DiffMessage({
 
   return (
     <div className="rounded-xl border border-border/70 bg-card/60 overflow-hidden text-sm">
-      {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-muted/40">
         <FileDiff className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="flex-1 truncate font-mono text-xs text-foreground/80">
@@ -86,7 +85,7 @@ export default function DiffMessage({
                 type="button"
                 variant="ghost"
               >
-                <Maximize2 className="h-3.5 w-3.5" />
+                <Maximize2 className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>Expand diff</TooltipContent>
@@ -94,7 +93,6 @@ export default function DiffMessage({
         )}
       </div>
 
-      {/* Description */}
       {description && (
         <div className="px-3 py-1.5 text-xs text-muted-foreground border-b border-border/40 bg-muted/20">
           {description}

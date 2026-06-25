@@ -92,10 +92,6 @@ class ChannelMutesManager {
     _unsubscribe = null;
   }
 
-  // -------------------------------------------------------------------------
-  // CRUD
-  // -------------------------------------------------------------------------
-
   void muteChannel(String channelId) {
     if (_disposed) return;
     final entry = ChannelMuteEntry(
@@ -126,10 +122,6 @@ class ChannelMutesManager {
       unawaited(_publish());
     });
   }
-
-  // -------------------------------------------------------------------------
-  // Remote sync
-  // -------------------------------------------------------------------------
 
   Future<void> _fetchAndMerge() async {
     if (_relaySession == null) return;

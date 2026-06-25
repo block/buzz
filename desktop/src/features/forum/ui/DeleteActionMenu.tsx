@@ -16,13 +16,9 @@ type DeleteActionMenuProps = {
   iconSize?: "sm" | "md";
 };
 
-export function DeleteActionMenu({
-  label,
-  onConfirm,
-  iconSize = "md",
-}: DeleteActionMenuProps) {
+export function DeleteActionMenu({ label, onConfirm }: DeleteActionMenuProps) {
   const [isOpen, setIsOpen] = React.useState(false);
-  const iconClass = iconSize === "sm" ? "h-3.5 w-3.5" : "h-4 w-4";
+  const iconClass = "h-4 w-4";
 
   return (
     <div className="ml-auto opacity-0 transition-opacity group-hover:opacity-100">

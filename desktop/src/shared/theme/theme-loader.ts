@@ -182,6 +182,76 @@ export function isLightTheme(name: string): boolean {
   return LIGHT_THEMES.has(name as SyntaxThemeName);
 }
 
+/**
+ * Theme pairs: maps a light theme to its dark counterpart and vice versa.
+ * Used by the "Follow system" feature to auto-switch themes.
+ */
+export const THEME_PAIRS: ReadonlyMap<SyntaxThemeName, SyntaxThemeName> =
+  new Map([
+    // Light → Dark
+    ["catppuccin-latte", "catppuccin-mocha"],
+    ["everforest-light", "everforest-dark"],
+    ["github-light", "github-dark"],
+    ["github-light-default", "github-dark-default"],
+    ["github-light-high-contrast", "github-dark-high-contrast"],
+    ["gruvbox-light-hard", "gruvbox-dark-hard"],
+    ["gruvbox-light-medium", "gruvbox-dark-medium"],
+    ["gruvbox-light-soft", "gruvbox-dark-soft"],
+    ["kanagawa-lotus", "kanagawa-wave"],
+    ["light-plus", "dark-plus"],
+    ["material-theme-lighter", "material-theme"],
+    ["min-light", "min-dark"],
+    ["one-light", "one-dark-pro"],
+    ["rose-pine-dawn", "rose-pine"],
+    ["slack-ochin", "slack-dark"],
+    ["solarized-light", "solarized-dark"],
+    ["vitesse-light", "vitesse-dark"],
+    // Dark → Light (reverse mappings)
+    ["catppuccin-mocha", "catppuccin-latte"],
+    ["everforest-dark", "everforest-light"],
+    ["github-dark", "github-light"],
+    ["github-dark-default", "github-light-default"],
+    ["github-dark-high-contrast", "github-light-high-contrast"],
+    ["gruvbox-dark-hard", "gruvbox-light-hard"],
+    ["gruvbox-dark-medium", "gruvbox-light-medium"],
+    ["gruvbox-dark-soft", "gruvbox-light-soft"],
+    ["kanagawa-wave", "kanagawa-lotus"],
+    ["dark-plus", "light-plus"],
+    ["material-theme", "material-theme-lighter"],
+    ["min-dark", "min-light"],
+    ["one-dark-pro", "one-light"],
+    ["rose-pine", "rose-pine-dawn"],
+    ["slack-dark", "slack-ochin"],
+    ["solarized-dark", "solarized-light"],
+    ["vitesse-dark", "vitesse-light"],
+  ]);
+
+/**
+ * Get the counterpart theme for system theme switching.
+ * Returns the paired theme if one exists, or null if the theme has no pair.
+ */
+export function getThemePair(name: SyntaxThemeName): SyntaxThemeName | null {
+  return THEME_PAIRS.get(name) ?? null;
+}
+
+/**
+ * Given a user-selected theme and the current system color scheme,
+ * returns the theme that should actually be applied.
+ */
+export function resolveSystemTheme(
+  selectedTheme: SyntaxThemeName,
+  systemIsDark: boolean,
+): SyntaxThemeName {
+  const selectedIsLight = isLightTheme(selectedTheme);
+  const needsSwitch =
+    (systemIsDark && selectedIsLight) || (!systemIsDark && !selectedIsLight);
+
+  if (!needsSwitch) return selectedTheme;
+
+  const pair = getThemePair(selectedTheme);
+  return pair ?? selectedTheme;
+}
+
 // Theme settings type from Shiki
 interface ThemeSetting {
   scope?: string | string[];

@@ -39,7 +39,7 @@ fn relay_http_url() -> String {
         .to_string()
 }
 
-/// Create a real channel via a signed kind:9007 event submitted to POST /api/events.
+/// Create a real channel via a signed kind:9007 event submitted to POST /events.
 async fn create_test_channel(keys: &Keys) -> String {
     let client = reqwest::Client::new();
     let pubkey_hex = keys.public_key().to_hex();
@@ -57,7 +57,7 @@ async fn create_test_channel(keys: &Keys) -> String {
         .unwrap();
 
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&event).unwrap())
@@ -149,6 +149,56 @@ async fn test_send_event_and_receive_via_subscription() {
 
     client_a.disconnect().await.expect("disconnect A");
     client_b.disconnect().await.expect("disconnect B");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_large_event_frame_below_configured_limit_is_accepted() {
+    let url = relay_url();
+    let kind: u16 = 9;
+
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    let h_tag = Tag::parse(["h", channel.as_str()]).expect("h tag");
+    let content = "x".repeat(70_000);
+    let event = EventBuilder::new(Kind::Custom(kind), content)
+        .tags([h_tag])
+        .sign_with_keys(&keys)
+        .expect("sign large event");
+
+    let frame = serde_json::to_string(&serde_json::json!(["EVENT", &event])).expect("frame JSON");
+    assert!(
+        frame.len() > 65_536,
+        "test frame must exceed the old 64 KiB cap; got {} bytes",
+        frame.len()
+    );
+    assert!(
+        frame.len() < 512 * 1024,
+        "test frame should fit under the new default cap; got {} bytes",
+        frame.len()
+    );
+
+    let ok = client.send_event(event).await.expect("send large event");
+    assert!(ok.accepted, "large event rejected: {}", ok.message);
+
+    let ok_after = client
+        .send_text_message(
+            &keys,
+            &channel,
+            "socket still usable after large frame",
+            kind,
+        )
+        .await
+        .expect("send follow-up event");
+    assert!(
+        ok_after.accepted,
+        "follow-up event rejected: {}",
+        ok_after.message
+    );
+
+    client.disconnect().await.expect("disconnect");
 }
 
 #[tokio::test]
@@ -714,24 +764,38 @@ async fn test_kind0_nip05_sync() {
     // Give the relay a moment to process the side effect.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Step 2: Verify the profile has the NIP-05 handle via REST GET.
+    // Step 2: Verify the kind:0 content was stored via POST /query.
     let http_client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [0],
+        "authors": [&pubkey_hex],
+        "limit": 1,
+    }]);
     let profile_resp = http_client
-        .get(format!("{}/api/users/{}/profile", http, pubkey_hex))
+        .post(format!("{}/query", http))
         .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
         .send()
         .await
-        .expect("GET profile");
-    assert_eq!(
-        profile_resp.status(),
-        200,
-        "profile should exist after kind:0"
+        .expect("query kind:0");
+    assert!(
+        profile_resp.status().is_success(),
+        "kind:0 query failed: {}",
+        profile_resp.status()
     );
-    let profile: serde_json::Value = profile_resp.json().await.expect("profile json");
+    let events: Vec<serde_json::Value> = profile_resp.json().await.expect("kind:0 json");
+    assert!(
+        !events.is_empty(),
+        "kind:0 event should exist after publishing"
+    );
+    let kind0_stored: serde_json::Value =
+        serde_json::from_str(events[0]["content"].as_str().unwrap_or("{}"))
+            .expect("parse kind:0 content");
     assert_eq!(
-        profile["nip05_handle"].as_str(),
+        kind0_stored["nip05"].as_str(),
         Some(valid_handle.as_str()),
-        "nip05_handle should be synced from kind:0"
+        "nip05 should be stored in kind:0 content"
     );
 
     // Step 3: Verify NIP-05 resolves via /.well-known/nostr.json.
@@ -753,6 +817,8 @@ async fn test_kind0_nip05_sync() {
     );
 
     // Step 4: Publish another kind:0 with an off-domain nip05 (should be cleared).
+    // Sleep to ensure a strictly newer created_at (second-level granularity).
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let off_domain_content = serde_json::json!({
         "display_name": "Kind0 Test User",
         "nip05": format!("{}@evil.com", unique_name),
@@ -775,23 +841,9 @@ async fn test_kind0_nip05_sync() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Step 5: Verify the handle was CLEARED (not set to the off-domain value).
-    let profile_resp2 = http_client
-        .get(format!("{}/api/users/{}/profile", http, pubkey_hex))
-        .header("X-Pubkey", &pubkey_hex)
-        .send()
-        .await
-        .expect("GET profile after off-domain kind:0");
-    assert_eq!(profile_resp2.status(), 200);
-    let profile2: serde_json::Value = profile_resp2.json().await.expect("profile json");
-    let handle_after = profile2["nip05_handle"].as_str().unwrap_or("");
-    assert!(
-        handle_after.is_empty() || handle_after == "null",
-        "nip05_handle should be cleared after off-domain kind:0, got: {:?}",
-        profile2["nip05_handle"]
-    );
-
-    // Step 6: Confirm NIP-05 no longer resolves.
+    // Step 5: Verify the handle was CLEARED — NIP-05 should no longer resolve
+    // after the off-domain kind:0 was accepted. The relay's side effect clears
+    // the nip05_handle in the users table when the domain doesn't match.
     let nip05_resp2 = http_client
         .get(format!(
             "{}/.well-known/nostr.json?name={}",
@@ -846,6 +898,79 @@ async fn test_nip29_put_user_default_policy_allows() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// Restoring an archived channel must re-signal connected members so their
+/// agents resubscribe. Archive evicts live channel subscriptions; unarchive
+/// emits a kind:44100 member_added notification per member on the always-live
+/// global membership feed, which is the resubscribe trigger remove/re-add uses.
+#[tokio::test]
+#[ignore]
+async fn test_unarchive_emits_member_added_notification() {
+    let url = relay_url();
+
+    let owner_keys = Keys::generate();
+    let owner_pubkey_hex = owner_keys.public_key().to_hex();
+
+    // Creating the channel makes the owner its sole member.
+    let channel_id = create_test_channel(&owner_keys).await;
+
+    let mut ws = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+
+    // Subscribe to the global membership feed (kind:44100 addressed to the owner).
+    // This is a global, non-channel-scoped subscription, so archive's
+    // channel-scoped eviction leaves it intact across the archive→unarchive cycle.
+    let sid = sub_id("membership-feed");
+    let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::P),
+        [owner_pubkey_hex.as_str()],
+    );
+    ws.subscribe(&sid, vec![membership_filter])
+        .await
+        .expect("subscribe to membership feed");
+    ws.collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("membership feed EOSE");
+
+    // Archive, then unarchive, the channel via kind:9002 edit-metadata.
+    for archived in ["true", "false"] {
+        let event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).unwrap(),
+                Tag::parse(["archived", archived]).unwrap(),
+            ])
+            .sign_with_keys(&owner_keys)
+            .unwrap();
+        let ok = ws.send_event(event).await.expect("send kind 9002");
+        assert!(ok.accepted, "edit-metadata rejected: {}", ok.message);
+    }
+
+    // The unarchive must fan out a 44100 to the owner. Loop past any other
+    // events delivered on the connection until we see it (or time out).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|d| !d.is_zero())
+            .expect("timed out waiting for member_added notification");
+        if let RelayMessage::Event { event, .. } = ws
+            .recv_event(remaining)
+            .await
+            .expect("recv membership notification")
+        {
+            if event.kind == Kind::Custom(44100) {
+                let content: serde_json::Value =
+                    serde_json::from_str(&event.content).expect("parse notification content");
+                assert_eq!(content["type"], "member_added");
+                assert_eq!(content["channel_id"], channel_id);
+                break;
+            }
+        }
+    }
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// NIP-29 kind 9000 (PUT_USER): "nobody" policy blocks a third party from adding the agent.
 #[tokio::test]
 #[ignore]
@@ -856,19 +981,27 @@ async fn test_nip29_put_user_nobody_blocks() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "nobody" via REST.
+    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
     let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
     let resp = http_client
-        .put(format!(
-            "{}/api/users/me/channel-add-policy",
-            relay_http_url()
-        ))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
-        .json(&serde_json::json!({ "channel_add_policy": "nobody" }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
         .send()
         .await
         .expect("set policy request");
-    assert_eq!(resp.status(), 200, "set policy failed");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
 
     // Create a channel owned by channel_owner (not the agent).
     let channel_id = create_test_channel(&channel_owner_keys).await;
@@ -910,19 +1043,27 @@ async fn test_nip29_put_user_self_add_bypasses_policy() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "nobody" via REST.
+    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
     let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
     let resp = http_client
-        .put(format!(
-            "{}/api/users/me/channel-add-policy",
-            relay_http_url()
-        ))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
-        .json(&serde_json::json!({ "channel_add_policy": "nobody" }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
         .send()
         .await
         .expect("set policy request");
-    assert_eq!(resp.status(), 200, "set policy failed");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
 
     // Create a channel where the agent is the owner.
     let channel_id = create_test_channel(&agent_keys).await;
@@ -936,6 +1077,7 @@ async fn test_nip29_put_user_self_add_bypasses_policy() {
     let h_tag = nostr::Tag::parse(["h", &channel_id]).expect("h tag");
     let p_tag = nostr::Tag::parse(["p", &agent_pubkey_hex]).expect("p tag");
     let event = nostr::EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
         .tags([h_tag, p_tag])
         .sign_with_keys(&agent_keys)
         .expect("sign kind 9000");
@@ -961,19 +1103,27 @@ async fn test_nip29_put_user_owner_only_blocks() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "owner_only" via REST.
+    // Set agent's channel_add_policy to "owner_only" via kind:10100 event.
     let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "owner_only" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
     let resp = http_client
-        .put(format!(
-            "{}/api/users/me/channel-add-policy",
-            relay_http_url()
-        ))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
-        .json(&serde_json::json!({ "channel_add_policy": "owner_only" }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
         .send()
         .await
         .expect("set policy request");
-    assert_eq!(resp.status(), 200, "set policy failed");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
 
     // Create a channel owned by channel_owner (not the agent).
     let channel_id = create_test_channel(&channel_owner_keys).await;
@@ -1274,7 +1424,7 @@ async fn test_membership_notification_emitted_on_add() {
         .sign_with_keys(&owner_keys)
         .unwrap();
     let resp = http_client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &owner_keys.public_key().to_hex())
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&add_event).unwrap())
@@ -1546,7 +1696,7 @@ async fn test_membership_notification_emitted_on_remove() {
         .sign_with_keys(&owner_keys)
         .unwrap();
     let resp = http_client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &owner_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&add_event).unwrap())
@@ -1585,7 +1735,7 @@ async fn test_membership_notification_emitted_on_remove() {
         .sign_with_keys(&owner_keys)
         .unwrap();
     let resp = http_client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &owner_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&remove_event).unwrap())
@@ -1765,8 +1915,6 @@ async fn test_membership_notification_mixed_filter_rejected() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ─── Private channel membership permission tests ───────────────────────────────
 
 /// Create a private channel over WebSocket and return the channel UUID.
 async fn create_private_channel_ws(client: &mut BuzzTestClient, keys: &Keys) -> String {

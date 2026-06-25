@@ -29,6 +29,7 @@ import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
 import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
 export type PulseTab =
   | "search"
@@ -73,6 +74,7 @@ function TimelineSkeleton() {
 export function PulseView({ currentPubkey }: PulseViewProps) {
   const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
   const [searchQuery, setSearchQuery] = React.useState("");
+  const scrollRef = React.useRef<HTMLDivElement>(null);
   const contactListQuery = useContactListQuery(currentPubkey);
   const contacts = contactListQuery.data?.contacts ?? [];
   const contactPubkeys = React.useMemo(
@@ -109,6 +111,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
               ? "online"
               : "offline",
           respondTo: agent.respondTo,
+          respondToAllowlist: agent.respondToAllowlist,
         });
       }
     }
@@ -268,43 +271,57 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       return agentNoteGroups.length === 0 ? (
         <EmptyState message={emptyMessages.agents} />
       ) : (
-        agentNoteGroups.map((group) => (
-          <AgentActivityCard
-            agentStatus={agentStatusMap[group.pubkey]}
-            group={group}
-            key={`${group.pubkey}-${group.latestAt}`}
-            profile={profiles[group.pubkey.toLowerCase()] ?? null}
-          />
-        ))
+        <VirtualizedList
+          estimateSize={160}
+          getItemKey={(group) => `${group.pubkey}-${group.latestAt}`}
+          items={agentNoteGroups}
+          renderItem={(group) => (
+            <div className="pb-4">
+              <AgentActivityCard
+                agentStatus={agentStatusMap[group.pubkey]}
+                group={group}
+                profile={profiles[group.pubkey.toLowerCase()] ?? null}
+              />
+            </div>
+          )}
+          scrollRef={scrollRef}
+        />
       );
     }
 
     return visibleNotes.length === 0 ? (
       <EmptyState message={emptyMessages[activeTab]} />
     ) : (
-      visibleNotes.map((note) => (
-        <NoteCard
-          actions={{
-            reply: noteActions.reply,
-            share: noteActions.share,
-            startDm: noteActions.startDm,
-            toggleUpvote: noteActions.toggleUpvote,
-          }}
-          composerProfiles={mentionProfiles}
-          currentUserDisplayName={currentDisplayName}
-          currentUserProfile={currentProfile}
-          isAgent={agentPubkeySet.has(note.pubkey)}
-          isOwnNote={note.pubkey === currentPubkey}
-          isReplySending={noteActions.isReplySending}
-          isUpvotePending={noteActions.isUpvotePending(note.id)}
-          isUpvoted={noteActions.isUpvoted(note.id)}
-          reactionCount={noteActions.reactionCount(note.id)}
-          key={note.id}
-          members={pulseMentionMembers}
-          note={note}
-          profile={profiles[note.pubkey.toLowerCase()] ?? null}
-        />
-      ))
+      <VirtualizedList
+        estimateSize={140}
+        getItemKey={(note) => note.id}
+        items={visibleNotes}
+        renderItem={(note) => (
+          <div className="pb-4">
+            <NoteCard
+              actions={{
+                reply: noteActions.reply,
+                share: noteActions.share,
+                startDm: noteActions.startDm,
+                toggleUpvote: noteActions.toggleUpvote,
+              }}
+              composerProfiles={mentionProfiles}
+              currentUserDisplayName={currentDisplayName}
+              currentUserProfile={currentProfile}
+              isAgent={agentPubkeySet.has(note.pubkey)}
+              isOwnNote={note.pubkey === currentPubkey}
+              isReplySending={noteActions.isReplySending}
+              isUpvotePending={noteActions.isUpvotePending(note.id)}
+              isUpvoted={noteActions.isUpvoted(note.id)}
+              reactionCount={noteActions.reactionCount(note.id)}
+              members={pulseMentionMembers}
+              note={note}
+              profile={profiles[note.pubkey.toLowerCase()] ?? null}
+            />
+          </div>
+        )}
+        scrollRef={scrollRef}
+      />
     );
   }
 
@@ -318,7 +335,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
         relayAgents={relayAgents}
       />
 
-      <div className="mt-0 min-h-0 flex-1 overflow-y-auto">
+      <div className="mt-0 min-h-0 flex-1 overflow-y-auto" ref={scrollRef}>
         <div
           aria-labelledby={pulseTabId(activeTab)}
           className={`mx-auto flex w-full max-w-2xl flex-col px-4 pb-10 sm:px-6 ${
@@ -349,7 +366,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                       className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-foreground/10 text-foreground transition-colors hover:bg-foreground/15 dark:bg-white/85 dark:text-black dark:hover:bg-white"
                       type="button"
                     >
-                      <Search className="h-3.5 w-3.5" />
+                      <Search className="h-4 w-4" />
                     </button>
                   </div>
                 </div>
@@ -399,9 +416,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
             </div>
           ) : null}
 
-          {activeTab !== "search" ? (
-            <div className="space-y-4">{renderTimeline()}</div>
-          ) : null}
+          {activeTab !== "search" ? <div>{renderTimeline()}</div> : null}
         </div>
       </div>
     </div>

@@ -1,0 +1,5 @@
+[profile.dev]
+# Full file/line backtraces, no per-variable debug info. ~20-30% faster
+# builds and much faster macOS link. Need lldb locals? Override per-shell:
+# CARGO_PROFILE_DEV_DEBUG=2
+debug = "line-tables-only"

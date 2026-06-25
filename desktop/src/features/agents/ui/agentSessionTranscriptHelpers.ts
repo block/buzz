@@ -49,6 +49,46 @@ export function parsePromptText(text: string): {
   };
 }
 
+/**
+ * Split the framed `session/new` `systemPrompt` into its `Base`/`System`
+ * sub-sections deterministically.
+ *
+ * The harness frames the value as `[Base]\n{base}\n\n[System]\n{persona}`, with
+ * either prompt omitted when absent: base-only is `[Base]\n{base}`, persona-only
+ * is `[System]\n{persona}`. We partition on the FIRST `\n[System]\n` boundary and
+ * read each labeled body literally. Unlike the generic `parsePromptSections`,
+ * embedded `[...]` lines inside a body never start a new section — so a persona
+ * containing a bracketed line, or a mid-string-elided header on an oversize
+ * prompt, can never drop a label or inflate the section count.
+ */
+export function parseSystemPromptSections(
+  systemPrompt: string,
+): PromptSection[] {
+  const sections: PromptSection[] = [];
+
+  // Persona-only frame: no [Base], starts directly with [System].
+  if (systemPrompt.startsWith("[System]\n")) {
+    const body = systemPrompt.slice("[System]\n".length).trim();
+    if (body) sections.push({ title: "System", body });
+    return sections;
+  }
+
+  // Otherwise the head (up to the first [System] boundary, or the whole string)
+  // is the [Base] body.
+  const marker = "\n[System]\n";
+  const at = systemPrompt.indexOf(marker);
+  const head = at === -1 ? systemPrompt : systemPrompt.slice(0, at);
+  const baseBody = head.replace(/^\[Base]\n/, "").trim();
+  if (baseBody) sections.push({ title: "Base", body: baseBody });
+
+  if (at !== -1) {
+    const systemBody = systemPrompt.slice(at + marker.length).trim();
+    sections.push({ title: "System", body: systemBody });
+  }
+
+  return sections;
+}
+
 function parsePromptSections(text: string): PromptSection[] {
   const sections: PromptSection[] = [];
   let current: PromptSection | null = null;
@@ -148,11 +188,9 @@ export function extractToolIdentity(update: Record<string, unknown>): {
   buzzToolName: string | null;
 } {
   const candidates = collectToolNameCandidates(update);
-  const knownName =
-    candidates
-      .map((candidate) => findBuzzToolName(candidate, true))
-      .find((candidate): candidate is string => Boolean(candidate)) ??
-    findBuzzToolName(JSON.stringify(update), false);
+  const knownName = candidates
+    .map((candidate) => findBuzzToolName(candidate, true))
+    .find((candidate): candidate is string => Boolean(candidate));
   const firstSpecific = candidates.find(
     (candidate) => !isGenericToolTitle(candidate),
   );
@@ -161,7 +199,7 @@ export function extractToolIdentity(update: Record<string, unknown>): {
   return {
     title,
     toolName: knownName ?? normalizeToolName(firstSpecific ?? title),
-    buzzToolName: knownName,
+    buzzToolName: knownName ?? null,
   };
 }
 

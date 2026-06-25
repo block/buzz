@@ -1,14 +1,9 @@
 import { useCallback, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import {
-  channelMessagesKey,
-  sortMessages,
-} from "@/features/messages/lib/messageQueryKeys";
-import { relayClient } from "@/shared/api/relayClient";
+import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
+import { pageOlderMessagesUntilRowFloor } from "@/features/messages/lib/pageOlderMessages";
 import type { Channel, RelayEvent } from "@/shared/api/types";
-
-const OLDER_MESSAGES_BATCH_SIZE = 100;
 
 export function useFetchOlderMessages(channel: Channel | null) {
   const queryClient = useQueryClient();
@@ -43,39 +38,17 @@ export function useFetchOlderMessages(channel: Channel | null) {
       return;
     }
 
-    // Use the oldest timestamp directly — `until` is inclusive so the relay will
-    // return the boundary message again, but `sortMessages` deduplicates by id.
-    // Subtracting 1 risks skipping messages that share the same second.
-    const oldestTimestamp = currentMessages[0].created_at;
     isFetchingOlderRef.current = true;
     setIsFetchingOlder(true);
-
     try {
-      const olderMessages = await relayClient.fetchChannelHistoryBefore(
+      const { hasOlderMessages: more } = await pageOlderMessagesUntilRowFloor(
+        queryClient,
         channelId,
-        oldestTimestamp,
-        OLDER_MESSAGES_BATCH_SIZE,
+        () => previousChannelIdRef.current === channelId,
       );
-
-      if (olderMessages.length < OLDER_MESSAGES_BATCH_SIZE) {
+      if (!more) {
         hasOlderMessagesRef.current = false;
         setHasOlderMessages(false);
-      }
-
-      if (olderMessages.length > 0) {
-        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          sortMessages([...current, ...olderMessages]),
-        );
-
-        const updatedMessages =
-          queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-        if (
-          updatedMessages.length > 0 &&
-          updatedMessages[0].created_at === oldestTimestamp
-        ) {
-          hasOlderMessagesRef.current = false;
-          setHasOlderMessages(false);
-        }
       }
     } catch (error) {
       console.error("Failed to fetch older messages", channelId, error);

@@ -18,6 +18,7 @@ import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSl
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import type { Workspace } from "@/features/workspaces/types";
 import { useWorkspaceInit } from "@/features/workspaces/useWorkspaceInit";
+import { useNestNotifications } from "@/features/workspaces/useNestNotifications";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { WelcomeSetup } from "@/features/workspaces/ui/WelcomeSetup";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
@@ -128,6 +129,23 @@ function OnboardingLoadingGate() {
 function WorkspaceQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
+  useEffect(() => {
+    const e2eWindow = window as Window & {
+      __BUZZ_E2E__?: unknown;
+      __BUZZ_E2E_QUERY_CLIENT__?: typeof queryClient;
+    };
+    if (!e2eWindow.__BUZZ_E2E__) {
+      return;
+    }
+
+    e2eWindow.__BUZZ_E2E_QUERY_CLIENT__ = queryClient;
+    return () => {
+      if (e2eWindow.__BUZZ_E2E_QUERY_CLIENT__ === queryClient) {
+        delete e2eWindow.__BUZZ_E2E_QUERY_CLIENT__;
+      }
+    };
+  }, [queryClient]);
+
   return (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
@@ -225,6 +243,11 @@ export function App() {
       void unlisten.then((fn) => fn());
     };
   }, [addWorkspace, switchWorkspace, reconnectWorkspace]);
+  // Surface nest-related backend events (repos-dir errors, legacy migration)
+  // as toasts. Mounted before useWorkspaceInit so the listeners are registered
+  // ahead of the first apply_workspace call.
+  useNestNotifications();
+
   // Composite key: changes when workspace ID changes OR when
   // the active workspace's config is updated (relayUrl/token).
   const workspaceKey = `${activeWorkspace?.id ?? "none"}-${reinitKey}`;

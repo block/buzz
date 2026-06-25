@@ -1,0 +1,57 @@
+suite: production render
+# Multi-template scope: needed so $.Template.BasePath lookups in deployment.yaml
+# (e.g. checksum/secret include of secret-chart.yaml) resolve at render time.
+templates:
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+  - templates/serviceaccount.yaml
+  - templates/service.yaml
+  - templates/pvc-git.yaml
+tests:
+  - it: renders cleanly in production profile (external pg/redis/typesense)
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - equal:
+          path: kind
+          value: Deployment
+        template: templates/deployment.yaml
+      - equal:
+          path: kind
+          value: ServiceAccount
+        template: templates/serviceaccount.yaml
+      - equal:
+          path: kind
+          value: Service
+        template: templates/service.yaml
+
+  - it: renders HA cleanly with replicaCount=3 + RWX + Redis
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 3
+      persistence.git.accessMode: ReadWriteMany
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.accessModes[0]
+          value: ReadWriteMany
+        template: templates/pvc-git.yaml

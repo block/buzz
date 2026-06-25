@@ -119,59 +119,20 @@ log "Starting services and waiting for health..."
 # ---- Run migrations ---------------------------------------------------------
 
 log "Running database migrations..."
-
-PGSCHEMA="${REPO_ROOT}/bin/pgschema"
-SCHEMA_FILE="${REPO_ROOT}/schema/schema.sql"
-
-if [[ ! -f "${SCHEMA_FILE}" ]]; then
-  warn "No schema.sql found at ${SCHEMA_FILE}. Skipping."
-else
-  if [[ -x "${PGSCHEMA}" ]]; then
-    # pgschema uses CREATE INDEX CONCURRENTLY for new indexes, which Postgres
-    # does not support on partitioned tables. Pre-create any such indexes here
-    # so pgschema sees them as already existing and skips the CONCURRENTLY path.
-    log "Pre-creating indexes on partitioned tables (if needed)..."
-    docker exec buzz-postgres psql -U "${PGUSER}" -d "${PGDATABASE}" -q -c \
-      "CREATE INDEX IF NOT EXISTS idx_events_parameterized ON events (kind, pubkey, d_tag, deleted_at) WHERE d_tag IS NOT NULL;" \
-      2>/dev/null || true
-
-    log "Using pgschema for migrations..."
-    attempts=0
-    max_attempts=10
-    pgschema_output="$(mktemp)"
-    trap 'rm -f "${pgschema_output}"' EXIT
-    until "${PGSCHEMA}" apply --file "${SCHEMA_FILE}" --auto-approve >"${pgschema_output}" 2>&1; do
-      attempts=$((attempts + 1))
-      if postgres_accepting_connections; then
-        error "pgschema failed even though Postgres is accepting connections"
-        cat "${pgschema_output}" >&2
-        exit 1
-      fi
-      if [[ ${attempts} -ge ${max_attempts} ]]; then
-        error "Failed to run migrations after ${max_attempts} attempts"
-        cat "${pgschema_output}" >&2
-        exit 1
-      fi
-      log "Postgres not ready for connections yet, retrying in 2s... (${attempts}/${max_attempts})"
-      sleep 2
-    done
-    success "Migrations applied via pgschema"
-
-    # Run data backfills (idempotent — safe to re-run).
-    BACKFILL_DIR="${REPO_ROOT}/scripts"
-    if [[ -f "${BACKFILL_DIR}/backfill-d-tag.sql" ]]; then
-      log "Running d_tag backfill for NIP-33 events..."
-      if psql "${DATABASE_URL}" -f "${BACKFILL_DIR}/backfill-d-tag.sql" 2>/dev/null; then
-        success "d_tag backfill complete"
-      else
-        warn "d_tag backfill failed (relay startup will retry automatically)"
-      fi
-    fi
-  else
-    error "pgschema not found at ${PGSCHEMA}. Run: ./bin/hermit install pgschema"
+attempts=0
+max_attempts=10
+until postgres_accepting_connections; do
+  attempts=$((attempts + 1))
+  if [[ ${attempts} -ge ${max_attempts} ]]; then
+    error "Postgres did not accept connections after ${max_attempts} attempts"
     exit 1
   fi
-fi
+  log "Postgres not ready for connections yet, retrying in 2s... (${attempts}/${max_attempts})"
+  sleep 2
+done
+
+"${REPO_ROOT}/bin/cargo" run -p buzz-admin -- migrate
+success "Database migrations complete"
 
 # ---- Install desktop dependencies -------------------------------------------
 

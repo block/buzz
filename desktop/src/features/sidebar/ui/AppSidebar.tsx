@@ -1,24 +1,18 @@
 // biome-ignore format: keep compact to stay within file size limit
 import {
   Activity,
-  ArrowDown,
-  ArrowUp,
   Bot,
   FolderGit2,
-  Home,
-  PenSquare,
+  Inbox,
+  MessageCirclePlus,
   Zap,
 } from "lucide-react";
-import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
-import {
-  isRelayUnreachableError,
-  RELAY_UNREACHABLE_SHORT,
-} from "@/shared/lib/relayError";
 import * as React from "react";
+import { AnimatePresence } from "motion/react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
+import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { Workspace } from "@/features/workspaces/types";
 import { AddWorkspaceDialog } from "@/features/workspaces/ui/AddWorkspaceDialog";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
@@ -27,12 +21,14 @@ import {
   type ChannelSection,
 } from "@/features/sidebar/lib/useChannelSections";
 import { useDmSidebarMetadata } from "@/features/sidebar/useDmSidebarMetadata";
+import { sortDmChannelsByLabel } from "@/features/sidebar/lib/dmSidebarSort";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 import {
   CreateSectionDialog,
   DeleteSectionAlertDialog,
   RenameSectionDialog,
+  useLeaveChannelDialog,
 } from "@/features/sidebar/ui/ChannelSectionDialogs";
 import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
@@ -43,30 +39,39 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
-import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import {
+  SidebarLoadingContent,
+  useSidebarLoadingShape,
+} from "@/features/sidebar/ui/sidebarLoadingSkeleton";
+import {
+  SECTION_ACTION_VISIBILITY_CLASS,
+  SECTION_ICON_BUTTON_CLASS,
+} from "@/features/sidebar/ui/sidebarSectionStyles";
+import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
+import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
+import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
+import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
 import type {
   Channel,
   ChannelVisibility,
   PresenceStatus,
   Profile,
+  SearchHit,
   UserStatus,
 } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarGroup,
-  SidebarGroupAction,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSkeleton,
   SidebarRail,
+  useSidebar,
 } from "@/shared/ui/sidebar";
 
 type CollapsibleSidebarGroup =
@@ -74,10 +79,6 @@ type CollapsibleSidebarGroup =
   | "channels"
   | "forums"
   | "directMessages";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 type CreateChannelKind = "stream" | "forum";
 
@@ -103,6 +104,7 @@ type AppSidebarProps = {
     | "workflows"
     | "pulse"
     | "projects";
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   workspaces: Workspace[];
   onAddWorkspace: (workspace: Workspace) => void;
@@ -122,8 +124,6 @@ type AppSidebarProps = {
     templateId?: string;
   }) => Promise<void>;
   onOpenAddWorkspace: () => void;
-  onOpenBrowseChannels: () => void;
-  onOpenBrowseForums: () => void;
   onHideDm: (channelId: string) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkChannelRead: (
@@ -131,18 +131,28 @@ type AppSidebarProps = {
     lastMessageAt: string | null | undefined,
   ) => void;
   onMarkAllChannelsRead: () => void;
+  onBrowseChannels?: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateWorkspace: (
     id: string,
     updates: Partial<Pick<Workspace, "name" | "relayUrl" | "token">>,
   ) => void;
   onRemoveWorkspace: (id: string) => void;
+  onCreateAgent: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
+  onOpenSearchResult: (hit: SearchHit) => void;
+  /**
+   * Full channel set used for global search. Unlike `channels` (which is
+   * scoped to the viewer's joined sidebar list), this includes open channels
+   * the viewer hasn't joined, so search can surface them.
+   */
+  searchChannels: Channel[];
+  searchFocusRequest: number;
   onSelectSettings: (section?: "profile" | "appearance") => void;
   onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
   onSetUserStatus: (text: string, emoji: string) => void;
@@ -162,10 +172,6 @@ type AppSidebarProps = {
   onUnstarChannel?: (channelId: string) => void;
 };
 
-// ---------------------------------------------------------------------------
-// AppSidebar
-// ---------------------------------------------------------------------------
-
 export function AppSidebar({
   activeWorkspace,
   channels,
@@ -182,6 +188,7 @@ export function AppSidebar({
   errorMessage,
   selectedChannelId,
   selectedView,
+  unreadChannelCounts,
   unreadChannelIds,
   workspaces,
   onAddWorkspace,
@@ -189,21 +196,24 @@ export function AppSidebar({
   onCreateChannel,
   onCreateForum,
   onOpenAddWorkspace,
-  onOpenBrowseChannels,
-  onOpenBrowseForums,
   onHideDm,
   onMarkChannelUnread,
   onMarkChannelRead,
   onMarkAllChannelsRead,
+  onBrowseChannels,
   onOpenDm,
   onUpdateWorkspace,
   onRemoveWorkspace,
+  onCreateAgent,
   onSelectAgents,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
   onSelectHome,
   onSelectChannel,
+  onOpenSearchResult,
+  searchChannels,
+  searchFocusRequest,
   onSelectSettings,
   onSetPresenceStatus,
   onSetUserStatus,
@@ -222,14 +232,94 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
-  const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
+  const { status: updateStatus } = useUpdaterContext();
+  const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
+  const sidebarRelayConnectionCard = useSidebarRelayConnectionCard(
+    errorMessage,
+    activeWorkspace?.relayUrl,
+  );
+  const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
+    React.useState(false);
+  const showSidebarUpdateCard =
+    canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
+
+  // Search lives in the sidebar's pinned header, so a ⌘K focus request must
+  // first reveal the sidebar. When collapsed (offcanvas) on desktop the input
+  // is mounted but translated off-screen; on mobile it is unmounted entirely.
+  // Open the sidebar on each focus-request bump so the input the shortcut
+  // focuses is actually visible. Skips the initial mount (request === 0).
+  const { isMobile, setOpen, setOpenMobile } = useSidebar();
+  React.useEffect(() => {
+    if (searchFocusRequest === 0) {
+      return;
+    }
+
+    if (isMobile) {
+      setOpenMobile(true);
+    } else {
+      setOpen(true);
+    }
+  }, [searchFocusRequest, isMobile, setOpen, setOpenMobile]);
+
+  React.useEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0) return;
+
+      const maxScrollTop =
+        scrollElement.scrollHeight - scrollElement.clientHeight;
+      if (maxScrollTop <= 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      const atTop = scrollElement.scrollTop <= 0;
+      const atBottom = scrollElement.scrollTop >= maxScrollTop - 1;
+      const scrollingPastTop = event.deltaY < 0 && atTop;
+      const scrollingPastBottom = event.deltaY > 0 && atBottom;
+
+      if (scrollingPastTop || scrollingPastBottom) {
+        event.preventDefault();
+        event.stopPropagation();
+        scrollElement.scrollTop = scrollingPastTop ? 0 : maxScrollTop;
+      }
+    };
+
+    scrollElement.addEventListener("wheel", handleWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => {
+      scrollElement.removeEventListener("wheel", handleWheel, {
+        capture: true,
+      });
+    };
+  }, []);
+
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
+  const { openNextFrame: openModalNextFrame } = useDeferredModalOpen();
+  const openCreateDialog = React.useCallback(
+    (kind: CreateChannelKind) => {
+      setCreateDialogKind(null);
+      openModalNextFrame(() => setCreateDialogKind(kind));
+    },
+    [openModalNextFrame],
+  );
+
+  React.useEffect(() => {
+    if (!canShowSidebarUpdateCard) {
+      setIsSidebarUpdateCardDismissed(false);
+    }
+  }, [canShowSidebarUpdateCard]);
 
   // Allow the create-channel dialog to be opened from outside (e.g. the
   // ⌘⇧N global shortcut in AppShell), mirroring the controlled new-DM lift.
@@ -238,9 +328,9 @@ export function AppSidebar({
   // dialog's `onOpenChange` below.
   React.useEffect(() => {
     if (isCreateChannelOpenProp) {
-      setCreateDialogKind("stream");
+      openCreateDialog("stream");
     }
-  }, [isCreateChannelOpenProp]);
+  }, [isCreateChannelOpenProp, openCreateDialog]);
   const [collapsedGroups, setCollapsedGroups] = React.useState<
     Record<CollapsibleSidebarGroup, boolean>
   >({
@@ -283,8 +373,6 @@ export function AppSidebar({
     unassignChannel,
   } = useChannelSections(currentPubkey);
 
-  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
-
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
     pendingChannelId: string | null;
@@ -293,6 +381,8 @@ export function AppSidebar({
     React.useState<ChannelSection | null>(null);
   const [deleteSectionTarget, setDeleteSectionTarget] =
     React.useState<ChannelSection | null>(null);
+  const { requestLeaveChannel, dialog: leaveChannelDialog } =
+    useLeaveChannelDialog();
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
@@ -375,16 +465,18 @@ export function AppSidebar({
       fallbackDisplayName,
       profileDisplayName: profile?.displayName,
     });
-  const shouldLoadAgentCount = useDeferredLoad({
-    immediate: selectedView === "agents",
-    timeoutMs: 250,
+  const sortedDirectMessages = React.useMemo(
+    () => sortDmChannelsByLabel(directMessages, dmChannelLabels),
+    [directMessages, dmChannelLabels],
+  );
+  const sidebarLoadingShape = useSidebarLoadingShape({
+    activeWorkspaceId: activeWorkspace?.id,
+    currentPubkey,
+    directMessages,
+    dmChannelLabels,
+    isLoading,
+    streamChannels,
   });
-  const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: shouldLoadAgentCount,
-  });
-  const totalAgentCount = managedAgentsQuery.data?.length ?? 0;
-  const shouldShowAgentCount =
-    totalAgentCount > 0 || managedAgentsQuery.isFetched;
   const resolvedDisplayName =
     profile?.displayName?.trim() ||
     fallbackDisplayName?.trim() ||
@@ -420,6 +512,15 @@ export function AppSidebar({
     [createDialogKind, onCreateChannel, onCreateForum],
   );
 
+  const handleOpenCreateChannel = React.useCallback(() => {
+    if (onCreateChannelOpenChange) {
+      onCreateChannelOpenChange(true);
+      return;
+    }
+
+    openCreateDialog("stream");
+  }, [onCreateChannelOpenChange, openCreateDialog]);
+
   return (
     <Sidebar
       className="!border-r-0"
@@ -427,124 +528,128 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <SidebarHeader
-        className="cursor-default select-none pt-11"
-        data-tauri-drag-region
+      <div
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-testid="app-sidebar-scroll-anchor"
       >
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={selectedView === "home"}
-              onClick={onSelectHome}
-              tooltip="Home"
-              type="button"
-            >
-              <Home className="h-4 w-4" />
-              <span>Home</span>
-            </SidebarMenuButton>
-            {homeBadgeCount > 0 ? (
-              <SidebarMenuBadge
-                className="right-2 rounded-full bg-primary/15 px-1.5 text-[11px] text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
-                data-testid="sidebar-home-count"
-              >
-                {Math.min(homeBadgeCount, 99)}
-              </SidebarMenuBadge>
-            ) : null}
-          </SidebarMenuItem>
-          <FeatureGate feature="pulse">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-pulse-view"
-                isActive={selectedView === "pulse"}
-                onClick={onSelectPulse}
-                tooltip="Pulse"
-                type="button"
-              >
-                <Activity className="h-4 w-4" />
-                <span>Pulse</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <FeatureGate feature="projects">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-projects-view"
-                isActive={selectedView === "projects"}
-                onClick={onSelectProjects}
-                tooltip="Projects"
-                type="button"
-              >
-                <FolderGit2 className="h-4 w-4" />
-                <span>Projects</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-agents-view"
-              isActive={selectedView === "agents"}
-              onClick={onSelectAgents}
-              tooltip="Agents"
-              type="button"
-            >
-              <Bot className="h-4 w-4" />
-              <span>Agents</span>
-            </SidebarMenuButton>
-            {shouldShowAgentCount ? (
-              <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
-                data-testid="sidebar-agents-count"
-              >
-                {totalAgentCount}
-              </SidebarMenuBadge>
-            ) : null}
-          </SidebarMenuItem>
-          <FeatureGate feature="workflows">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-workflows-view"
-                isActive={selectedView === "workflows"}
-                onClick={onSelectWorkflows}
-                tooltip="Workflows"
-                type="button"
-              >
-                <Zap className="h-4 w-4" />
-                <span>Workflows</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-        </SidebarMenu>
-      </SidebarHeader>
-
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
-            icon={<ArrowUp />}
             onClick={scrollToNextAbove}
             position="top"
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent className="pb-32" ref={scrollRef}>
+        <div
+          className="shrink-0 px-2 pt-2.5"
+          data-testid="sidebar-pinned-header"
+        >
+          <TopbarSearch
+            channelLabels={dmChannelLabels}
+            channels={searchChannels}
+            currentPubkey={currentPubkey}
+            focusRequest={searchFocusRequest}
+            onOpenChannel={onSelectChannel}
+            onOpenResult={onOpenSearchResult}
+            onOpenUser={(user) => onOpenDm({ pubkeys: [user.pubkey] })}
+            onCreateAgent={onCreateAgent}
+            onCreateChannel={handleOpenCreateChannel}
+            suggestionChannels={channels}
+          />
+          <SidebarHeader
+            className="cursor-default select-none px-0 pb-0 pt-2.5"
+            data-tauri-drag-region
+          >
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={selectedView === "home"}
+                  onClick={onSelectHome}
+                  tooltip="Inbox"
+                  type="button"
+                >
+                  <Inbox className="h-4 w-4" />
+                  <span>Inbox</span>
+                </SidebarMenuButton>
+                {homeBadgeCount > 0 ? (
+                  <SidebarMenuBadge
+                    className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                    data-testid="sidebar-home-count"
+                  >
+                    {Math.min(homeBadgeCount, 99)}
+                  </SidebarMenuBadge>
+                ) : null}
+              </SidebarMenuItem>
+              <FeatureGate feature="pulse">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-pulse-view"
+                    isActive={selectedView === "pulse"}
+                    onClick={onSelectPulse}
+                    tooltip="Pulse"
+                    type="button"
+                  >
+                    <Activity className="h-4 w-4" />
+                    <span>Pulse</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+              <FeatureGate feature="projects">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-projects-view"
+                    isActive={selectedView === "projects"}
+                    onClick={onSelectProjects}
+                    tooltip="Projects"
+                    type="button"
+                  >
+                    <FolderGit2 className="h-4 w-4" />
+                    <span>Projects</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-agents-view"
+                  isActive={selectedView === "agents"}
+                  onClick={onSelectAgents}
+                  tooltip="Agents"
+                  type="button"
+                >
+                  <Bot className="h-4 w-4" />
+                  <span>Agents</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <FeatureGate feature="workflows">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-workflows-view"
+                    isActive={selectedView === "workflows"}
+                    onClick={onSelectWorkflows}
+                    tooltip="Workflows"
+                    type="button"
+                  >
+                    <Zap className="h-4 w-4" />
+                    <span>Workflows</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+            </SidebarMenu>
+          </SidebarHeader>
+        </div>
+
+        <SidebarContent
+          className="buzz-sidebar-scrollbar overscroll-none pt-4"
+          ref={scrollRef}
+        >
           {isLoading ? (
-            <SidebarGroup>
-              <SidebarGroupLabel>Channels</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu data-testid="sidebar-loading">
-                  {skeletonRows.map((row) => (
-                    <SidebarMenuSkeleton key={row} showIcon />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
 
           {!isLoading ? (
             <>
               {starredChannels.length > 0 ? (
                 <ChannelGroupSection
-                  browseAriaLabel="Starred channels"
                   createAriaLabel="Starred channels"
                   hasUnread={starredChannels.some((c) =>
                     unreadChannelIds.has(c.id),
@@ -564,6 +669,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("starred")}
                   selectedChannelId={selectedChannelId}
                   title="Starred"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={onMuteChannel}
@@ -571,6 +677,7 @@ export function AppSidebar({
                   starredChannelIds={starredChannelIds}
                   onStarChannel={onStarChannel}
                   onUnstarChannel={onUnstarChannel}
+                  onLeaveChannel={requestLeaveChannel}
                 />
               ) : null}
               <SidebarDndContext
@@ -594,6 +701,7 @@ export function AppSidebar({
                     isCollapsed={collapsedSections[section.id] ?? false}
                     isActiveChannel={selectedView === "channel"}
                     selectedChannelId={selectedChannelId}
+                    unreadChannelCounts={unreadChannelCounts}
                     unreadChannelIds={unreadChannelIds}
                     sections={channelSections}
                     assignments={channelAssignments}
@@ -623,23 +731,20 @@ export function AppSidebar({
                     starredChannelIds={starredChannelIds}
                     onStarChannel={onStarChannel}
                     onUnstarChannel={onUnstarChannel}
+                    onLeaveChannel={requestLeaveChannel}
                   />
                 ))}
                 <ChannelGroupSection
                   browseAriaLabel="Browse channels"
-                  browseTestId="browse-channels"
                   createAriaLabel="Create a channel"
                   draggable
-                  groupClassName={
-                    channelSections.length > 0 ? undefined : "pt-1"
-                  }
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.channels}
                   isActiveChannel={selectedView === "channel"}
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
-                  onBrowse={onOpenBrowseChannels}
-                  onCreateClick={() => setCreateDialogKind("stream")}
+                  onBrowseClick={onBrowseChannels}
+                  onCreateClick={() => openCreateDialog("stream")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
                   onMarkChannelUnread={onMarkChannelUnread}
@@ -647,6 +752,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("channels")}
                   selectedChannelId={selectedChannelId}
                   title="Channels"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   sections={channelSections}
                   assignments={channelAssignments}
@@ -659,20 +765,18 @@ export function AppSidebar({
                   starredChannelIds={starredChannelIds}
                   onStarChannel={onStarChannel}
                   onUnstarChannel={onUnstarChannel}
+                  onLeaveChannel={requestLeaveChannel}
                 />
               </SidebarDndContext>
               <FeatureGate feature="forum">
                 <ChannelGroupSection
-                  browseAriaLabel="Browse forums"
-                  browseTestId="browse-forums"
                   createAriaLabel="Create a forum"
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.forums}
                   isActiveChannel={selectedView === "channel"}
                   items={forumChannels}
                   listTestId="forum-list"
-                  onBrowse={onOpenBrowseForums}
-                  onCreateClick={() => setCreateDialogKind("forum")}
+                  onCreateClick={() => openCreateDialog("forum")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
                   onMarkChannelUnread={onMarkChannelUnread}
@@ -680,6 +784,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("forums")}
                   selectedChannelId={selectedChannelId}
                   title="Forums"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={onMuteChannel}
@@ -688,26 +793,26 @@ export function AppSidebar({
               </FeatureGate>
               <SidebarSection
                 action={
-                  <SidebarGroupAction
-                    aria-expanded={isNewDmOpen}
-                    aria-label="Start a direct message"
-                    className={cn(
-                      "top-1/2 -translate-y-1/2 text-sidebar-foreground/50 hover:bg-sidebar-border/35 hover:text-sidebar-foreground",
-                      SECTION_ACTION_VISIBILITY_CLASS,
-                    )}
-                    data-testid="new-dm-trigger"
-                    onClick={() => {
-                      setIsNewDmOpen(true);
-                    }}
-                    type="button"
-                  >
-                    <PenSquare className="transition-transform" />
-                  </SidebarGroupAction>
+                  <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                    <button
+                      aria-expanded={isNewDmOpen}
+                      aria-label="Compose new message"
+                      className={`${SECTION_ICON_BUTTON_CLASS} ${SECTION_ACTION_VISIBILITY_CLASS}`}
+                      data-testid="new-dm-trigger"
+                      onClick={() => {
+                        setIsNewDmOpen(true);
+                      }}
+                      title="Compose new message"
+                      type="button"
+                    >
+                      <MessageCirclePlus className="h-4 w-4" />
+                    </button>
+                  </div>
                 }
                 dmParticipantsByChannelId={dmParticipantsByChannelId}
                 isCollapsed={collapsedGroups.directMessages}
                 isActiveChannel={selectedView === "channel"}
-                items={directMessages}
+                items={sortedDirectMessages}
                 channelLabels={dmChannelLabels}
                 onHideDm={onHideDm}
                 onMarkChannelRead={onMarkChannelRead}
@@ -717,7 +822,8 @@ export function AppSidebar({
                 presenceByChannelId={dmPresenceByChannelId}
                 selectedChannelId={selectedChannelId}
                 testId="dm-list"
-                title="Direct Messages"
+                title="Direct messages"
+                unreadChannelCounts={unreadChannelCounts}
                 unreadChannelIds={unreadChannelIds}
                 mutedChannelIds={mutedChannelIds}
                 onMuteChannel={onMuteChannel}
@@ -726,67 +832,74 @@ export function AppSidebar({
             </>
           ) : null}
 
-          {errorMessage ? (
-            isRelayUnreachableError(errorMessage) ? (
-              <div
-                className="px-3 py-2 text-sm"
-                data-testid="sidebar-relay-unreachable"
-              >
-                <span className="text-muted-foreground">
-                  {RELAY_UNREACHABLE_SHORT}{" "}
-                </span>
-                <button
-                  className="text-primary hover:underline disabled:opacity-50"
-                  data-testid="sidebar-reconnect"
-                  disabled={isReconnectPending}
-                  onClick={() => void reconnect()}
-                  type="button"
-                >
-                  {isReconnectPending ? "Reconnecting…" : "Reconnect"}
-                </button>
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-sm text-destructive">
-                {errorMessage}
-              </div>
-            )
+          {errorMessage &&
+          !sidebarRelayConnectionCard.hasRelayUnreachableError ? (
+            <div className="px-3 py-2 text-sm text-destructive">
+              {errorMessage}
+            </div>
           ) : null}
         </SidebarContent>
 
-        {unreadBelowCount > 0 ? (
-          <MoreUnreadButton
-            bottomClassName="bottom-28"
-            count={unreadBelowCount}
-            icon={<ArrowDown />}
-            onClick={scrollToNextBelow}
-            position="bottom"
-            testId="sidebar-more-unread-below"
-          />
-        ) : null}
+        <div className="relative z-30 shrink-0">
+          {unreadBelowCount > 0 ? (
+            <MoreUnreadButton
+              bottomClassName="bottom-full"
+              count={unreadBelowCount}
+              onClick={scrollToNextBelow}
+              position="bottom"
+              testId="sidebar-more-unread-below"
+            />
+          ) : null}
 
-        <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarProfileCard
-                activeWorkspace={activeWorkspace}
-                isPresencePending={isPresencePending}
-                onOpenAddWorkspace={onOpenAddWorkspace}
-                onOpenSettings={onSelectSettings}
-                onRemoveWorkspace={onRemoveWorkspace}
-                onSetPresenceStatus={onSetPresenceStatus}
-                onSetUserStatus={onSetUserStatus}
-                onClearUserStatus={onClearUserStatus}
-                onSwitchWorkspace={onSwitchWorkspace}
-                onUpdateWorkspace={onUpdateWorkspace}
-                profile={profile}
-                resolvedDisplayName={resolvedDisplayName}
-                selfPresenceStatus={selfPresenceStatus}
-                selfUserStatus={selfUserStatus}
-                workspaces={workspaces}
-              />
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarFooter>
+          <SidebarFooter className="bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+            <AnimatePresence>
+              {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
+                <SidebarRelayConnectionCard
+                  className="mb-2 group-data-[collapsible=icon]:hidden"
+                  isConnected={
+                    sidebarRelayConnectionCard.isRelayConnectionSuccess
+                  }
+                  isReconnectPending={
+                    sidebarRelayConnectionCard.isRelayReconnectPending
+                  }
+                  onDismiss={
+                    sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                  }
+                  onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+                  key="sidebar-relay-connection-card"
+                />
+              ) : null}
+            </AnimatePresence>
+            {showSidebarUpdateCard ? (
+              <div className="mb-2 group-data-[collapsible=icon]:hidden">
+                <SidebarUpdateCard
+                  onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+                />
+              </div>
+            ) : null}
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarProfileCard
+                  activeWorkspace={activeWorkspace}
+                  isPresencePending={isPresencePending}
+                  onOpenAddWorkspace={onOpenAddWorkspace}
+                  onOpenSettings={onSelectSettings}
+                  onRemoveWorkspace={onRemoveWorkspace}
+                  onSetPresenceStatus={onSetPresenceStatus}
+                  onSetUserStatus={onSetUserStatus}
+                  onClearUserStatus={onClearUserStatus}
+                  onSwitchWorkspace={onSwitchWorkspace}
+                  onUpdateWorkspace={onUpdateWorkspace}
+                  profile={profile}
+                  resolvedDisplayName={resolvedDisplayName}
+                  selfPresenceStatus={selfPresenceStatus}
+                  selfUserStatus={selfUserStatus}
+                  workspaces={workspaces}
+                />
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        </div>
       </div>
 
       <CreateChannelDialog
@@ -866,6 +979,7 @@ export function AppSidebar({
           setDeleteSectionTarget(null);
         }}
       />
+      {leaveChannelDialog}
       <SidebarRail />
     </Sidebar>
   );

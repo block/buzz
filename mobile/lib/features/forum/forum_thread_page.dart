@@ -224,10 +224,8 @@ class _ThreadContent extends HookConsumerWidget {
               bottom: Grid.xs,
             ),
             children: [
-              // Original post
               _OriginalPost(post: post),
 
-              // Replies header
               Padding(
                 padding: const EdgeInsets.symmetric(
                   horizontal: Grid.xs,

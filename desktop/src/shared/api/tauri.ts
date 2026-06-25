@@ -1,5 +1,4 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -56,12 +55,10 @@ type RawProfile = {
   avatar_url: string | null;
   about: string | null;
   nip05_handle: string | null;
+  owner_pubkey: string | null;
 };
 
-type RawUserProfileSummary = {
-  display_name: string | null;
-  avatar_url: string | null;
-  nip05_handle: string | null;
+type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
   is_agent?: boolean;
 };
 
@@ -70,13 +67,7 @@ type RawUsersBatchResponse = {
   missing: string[];
 };
 
-type RawUserSearchResult = {
-  pubkey: string;
-  display_name: string | null;
-  avatar_url: string | null;
-  nip05_handle: string | null;
-  is_agent?: boolean;
-};
+type RawUserSearchResult = RawUserProfileSummary & { pubkey: string };
 
 type RawSearchUsersResponse = {
   users: RawUserSearchResult[];
@@ -197,8 +188,8 @@ type RawRelayAgent = {
   capabilities: string[];
   status: RelayAgent["status"];
   respond_to?: RelayAgent["respondTo"];
+  respond_to_allowlist?: string[];
 };
-
 export type RawManagedAgent = {
   pubkey: string;
   name: string;
@@ -206,6 +197,7 @@ export type RawManagedAgent = {
   relay_url: string;
   acp_command: string;
   agent_command: string;
+  agent_command_override?: string | null;
   agent_args: string[];
   mcp_command: string;
   turn_timeout_seconds: number;
@@ -214,6 +206,9 @@ export type RawManagedAgent = {
   parallelism: number;
   system_prompt: string | null;
   model: string | null;
+  provider: string | null;
+  persona_out_of_date: boolean;
+  persona_orphaned: boolean;
   mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
@@ -426,6 +421,7 @@ function fromRawProfile(profile: RawProfile): Profile {
     avatarUrl: profile.avatar_url,
     about: profile.about,
     nip05Handle: profile.nip05_handle,
+    ownerPubkey: profile.owner_pubkey,
   };
 }
 
@@ -436,6 +432,7 @@ function fromRawUserProfileSummary(
     displayName: profile.display_name,
     avatarUrl: profile.avatar_url,
     nip05Handle: profile.nip05_handle,
+    ownerPubkey: profile.owner_pubkey,
     isAgent: profile.is_agent ?? false,
   };
 }
@@ -446,6 +443,7 @@ function fromRawUserSearchResult(user: RawUserSearchResult): UserSearchResult {
     displayName: user.display_name,
     avatarUrl: user.avatar_url,
     nip05Handle: user.nip05_handle,
+    ownerPubkey: user.owner_pubkey,
     isAgent: user.is_agent ?? false,
   };
 }
@@ -850,6 +848,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     capabilities: agent.capabilities,
     status: agent.status,
     respondTo: agent.respond_to ?? null,
+    respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
 }
 
@@ -861,6 +860,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
+    agentCommandOverride: agent.agent_command_override ?? null,
     agentArgs: agent.agent_args,
     mcpCommand: agent.mcp_command,
     turnTimeoutSeconds: agent.turn_timeout_seconds,
@@ -869,6 +869,10 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
     model: agent.model,
+    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
+    provider: agent.provider ?? null,
+    personaOutOfDate: agent.persona_out_of_date ?? false,
+    personaOrphaned: agent.persona_orphaned ?? false,
     mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
@@ -1010,6 +1014,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
+        harnessOverride: input.harnessOverride ?? false,
         agentArgs: input.agentArgs,
         mcpCommand: input.mcpCommand,
         mcpToolsets: input.mcpToolsets,
@@ -1183,12 +1188,20 @@ export async function applyWorkspace(
   relayUrl: string,
   nsec?: string,
   token?: string,
+  reposDir?: string,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,
+    reposDir: reposDir ?? null,
   });
+}
+
+// Validate a candidate repos dir without mutating the filesystem. Rejects
+// with a human-readable reason; resolves for a valid or empty path.
+export async function validateReposDir(dir: string): Promise<void> {
+  await invokeTauri("validate_repos_dir", { dir });
 }
 
 export const setPreventSleepActive = (active: boolean) =>

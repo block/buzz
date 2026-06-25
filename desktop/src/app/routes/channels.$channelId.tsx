@@ -4,22 +4,32 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteSearch = {
+  agentSession?: string;
   messageId?: string;
+  profile?: string;
+  profileView?: "memories" | "channels";
+  thread?: string;
   threadRootId?: string;
 };
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function profileViewValue(value: unknown): "memories" | "channels" | undefined {
+  return value === "memories" || value === "channels" ? value : undefined;
+}
 
 function validateChannelSearch(
   search: Record<string, unknown>,
 ): ChannelRouteSearch {
   return {
-    messageId:
-      typeof search.messageId === "string" && search.messageId.length > 0
-        ? search.messageId
-        : undefined,
-    threadRootId:
-      typeof search.threadRootId === "string" && search.threadRootId.length > 0
-        ? search.threadRootId
-        : undefined,
+    agentSession: nonEmptyString(search.agentSession),
+    messageId: nonEmptyString(search.messageId),
+    profile: nonEmptyString(search.profile),
+    profileView: profileViewValue(search.profileView),
+    thread: nonEmptyString(search.thread),
+    threadRootId: nonEmptyString(search.threadRootId),
   };
 }
 
@@ -46,7 +56,7 @@ function ChannelRouteComponent() {
         selectedPostId={null}
         targetMessageId={search.messageId ?? null}
         targetReplyId={null}
-        targetThreadRootId={search.threadRootId ?? null}
+        targetThreadRootId={search.threadRootId ?? search.thread ?? null}
       />
     </React.Suspense>
   );

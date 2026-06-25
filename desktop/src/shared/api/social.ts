@@ -131,7 +131,6 @@ export async function getContactList(
     pubkey,
   });
 
-  // Parse p-tags into contact entries.
   const contacts = raw.tags
     .filter((t) => t[0] === "p" && t[1])
     .map((t) => ({

@@ -555,8 +555,6 @@ mod tests {
         assert!(result.is_err(), "should reject invalid policy value");
     }
 
-    // ── LIKE escaping unit tests (no DB required) ──────────────────────
-
     // Use the production `escape_like` function directly — no local mirror.
     use super::escape_like;
 

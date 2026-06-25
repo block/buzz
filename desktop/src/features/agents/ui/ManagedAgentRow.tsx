@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   Clipboard,
@@ -90,10 +91,10 @@ export function ManagedAgentRow({
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
-        .map(({ channelId, observedAt }) => ({
+        .map(({ channelId, anchorAt }) => ({
           id: channelId,
           name: channelIdToName[channelId] ?? channelId,
-          observedAt,
+          anchorAt,
         }))
         .slice(0, 3),
     [activeTurns, channelIdToName],
@@ -222,7 +223,7 @@ function AgentSummary({
   personaLabel,
   presenceStatus,
 }: {
-  activeWorkingChannels: { id: string; name: string; observedAt: number }[];
+  activeWorkingChannels: { id: string; name: string; anchorAt: number }[];
   agent: ManagedAgent;
   channelNames: { id: string; name: string }[];
   isExpandable: boolean;
@@ -256,6 +257,12 @@ function AgentSummary({
               <Badge variant="secondary">{personaLabel}</Badge>
             ) : null}
             <AgentOriginBadge agent={agent} />
+            {agent.personaOutOfDate ? (
+              <Badge className="gap-1" variant="warning">
+                <AlertTriangle className="h-3 w-3" />
+                Out of date
+              </Badge>
+            ) : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span className="font-mono">{truncatePubkey(agent.pubkey)}</span>
@@ -267,6 +274,12 @@ function AgentSummary({
               <span>Remote deployment</span>
             )}
           </div>
+          {agent.personaOutOfDate ? (
+            <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+              Persona updated since this agent was created. Respawn to apply the
+              new configuration.
+            </p>
+          ) : null}
           {channelNames.length > 0 ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               {channelNames.map((channel) => (
@@ -291,7 +304,7 @@ function AgentSummary({
                   key={`working-${channel.id}`}
                   channelId={channel.id}
                   name={channel.name}
-                  observedAt={channel.observedAt}
+                  anchorAt={channel.anchorAt}
                   onNavigate={goChannel}
                 />
               ))}
@@ -306,12 +319,12 @@ function AgentSummary({
 function WorkingBadge({
   channelId,
   name,
-  observedAt,
+  anchorAt,
   onNavigate,
 }: {
   channelId: string;
   name: string;
-  observedAt: number;
+  anchorAt: number;
   onNavigate: (channelId: string) => void;
 }) {
   // The 1s tick lives here, at the leaf, so only visible working badges
@@ -327,7 +340,7 @@ function WorkingBadge({
         onNavigate(channelId);
       }}
     >
-      Working in #{name} · {formatElapsed(now - observedAt)}
+      Working in #{name} · {formatElapsed(now - anchorAt)}
     </Badge>
   );
 }
@@ -349,7 +362,7 @@ function StatusBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
+      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Status
       </p>
       <AgentStatusBadge
@@ -385,7 +398,7 @@ function RuntimeBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
+      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Runtime
       </p>
       <p className="truncate font-mono text-xs text-foreground">
@@ -535,11 +548,13 @@ function AgentActionsMenu({
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <EditAgentDialog
-        agent={agent}
-        onOpenChange={setEditOpen}
-        open={editOpen}
-      />
+      {editOpen ? (
+        <EditAgentDialog
+          agent={agent}
+          onOpenChange={setEditOpen}
+          open={editOpen}
+        />
+      ) : null}
     </>
   );
 }

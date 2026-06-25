@@ -6,6 +6,8 @@ import {
 } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
+import { useSidebar } from "@/shared/ui/sidebar";
 
 const COPY: Partial<Record<ConnectionState, string>> = {
   reconnecting: "Reconnecting to relay…",
@@ -20,17 +22,29 @@ const COPY: Partial<Record<ConnectionState, string>> = {
  * The strip auto-disappears once the state transitions back to "connected" —
  * no success toast needed.
  */
-export function ConnectionBanner() {
+type ConnectionBannerProps = {
+  errorMessage?: string;
+};
+
+export function ConnectionBanner({ errorMessage }: ConnectionBannerProps) {
   const state = useRelayConnection();
   const { isPending, reconnect } = useReconnectRelay();
+  const { state: sidebarState } = useSidebar();
+  const hasCollapsedRelayError =
+    sidebarState === "collapsed" &&
+    Boolean(errorMessage && isRelayUnreachableError(errorMessage));
 
-  if (!isRelayConnectionDegraded(state)) return null;
+  if (!isRelayConnectionDegraded(state) && !hasCollapsedRelayError) {
+    return null;
+  }
 
-  const message = COPY[state] ?? "Connection issue detected.";
+  const message = hasCollapsedRelayError
+    ? "Can't reach the relay."
+    : (COPY[state] ?? "Connection issue detected.");
 
   return (
     <div
-      className="flex shrink-0 items-center gap-2 border-b border-warning/30 bg-warning/5 px-3 py-2 text-xs"
+      className="relative z-30 mt-10 flex shrink-0 items-center gap-2 border-b border-warning/30 bg-warning/5 px-3 py-2 text-xs"
       data-testid="connection-banner"
       role="alert"
     >

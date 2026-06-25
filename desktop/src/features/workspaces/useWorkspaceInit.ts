@@ -9,7 +9,10 @@ import {
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
+import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import { initFirstWorkspace } from "./workspaceStorage";
 import type { Workspace } from "./types";
@@ -24,7 +27,10 @@ import type { Workspace } from "./types";
 function resetWorkspaceState(): void {
   relayClient.disconnect();
   resetAgentObserverStore();
+  resetSidebarRelayConnectionCardState();
   resetMediaCaches();
+  resetVideoPlayerState();
+  resetRenderScopedReactionHydration();
   clearSearchHitEventCache();
   clearAllDrafts();
 }
@@ -61,7 +67,7 @@ export function useWorkspaceInit(
   // On the initial mount we skip resetting singletons (they're fresh).
   const hasInitializedRef = useRef(false);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token) — depending on the whole object would trigger resets on name-only changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
     let cancelled = false;
 
@@ -130,9 +136,23 @@ export function useWorkspaceInit(
           activeWorkspace.relayUrl,
           undefined,
           activeWorkspace.token,
+          activeWorkspace.reposDir,
         );
       } catch (error) {
+        // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
+        // it as non-fatal (relay/keys apply, bad value not persisted, REPOS
+        // falls back to a real dir, a `repos-dir-error` toast surfaces it) and
+        // returns Ok, so the app boots into a working state where the user can
+        // fix the value in workspace settings. This catch now only fires on a
+        // genuine relay/key apply failure (e.g. an invalid nsec or a poisoned
+        // lock). For those, marking the workspace ready would render
+        // workspace-scoped UI against a backend that never applied — park on
+        // the loading gate (isReady:false, no appliedKey) instead.
         console.error("Failed to apply workspace to backend:", error);
+        if (!cancelled) {
+          setResult({ isReady: false, needsSetup: false, appliedKey: null });
+        }
+        return;
       }
 
       if (!cancelled) {
@@ -153,6 +173,7 @@ export function useWorkspaceInit(
     activeWorkspace?.id,
     activeWorkspace?.relayUrl,
     activeWorkspace?.token,
+    activeWorkspace?.reposDir,
     isSharedIdentity,
     workspaceKey,
   ]);

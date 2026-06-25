@@ -355,6 +355,10 @@ export function AddChannelBotDialog({
           runtime: resolved.runtime ?? effectiveFallback ?? providers[0],
           name: persona.displayName,
           personaId: persona.id,
+          // A deliberate runtime-selector pick overrides the persona; a Case-3
+          // fallback (persona runtime not installed) is NOT a pin. `isOverridden`
+          // alone can't tell them apart, so thread the explicit user intent.
+          harnessOverride: isOverrideActive,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
           model: persona.model ?? undefined,
@@ -530,7 +534,7 @@ export function AddChannelBotDialog({
                 variant="ghost"
               >
                 <span className="truncate">{runtimeTriggerLabel}</span>
-                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                <ChevronDown className="h-4 w-4 text-muted-foreground" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent

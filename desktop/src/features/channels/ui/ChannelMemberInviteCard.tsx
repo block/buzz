@@ -1,4 +1,4 @@
-import { ChevronDown, Search, UserPlus, X } from "lucide-react";
+import { Search, UserPlus, X } from "lucide-react";
 import * as React from "react";
 
 import { formatPubkey } from "@/features/channels/lib/memberUtils";
@@ -9,10 +9,8 @@ import type {
   ChannelMember,
   UserSearchResult,
 } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
-import { Textarea } from "@/shared/ui/textarea";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 function formatSearchUserName(user: UserSearchResult) {
@@ -21,17 +19,6 @@ function formatSearchUserName(user: UserSearchResult) {
     user.nip05Handle?.trim() ||
     formatPubkey(user.pubkey)
   );
-}
-
-function formatSearchUserSecondary(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-
-  return formatPubkey(user.pubkey);
 }
 
 export function ChannelMemberInviteCard({
@@ -52,10 +39,7 @@ export function ChannelMemberInviteCard({
   open: boolean;
   requestErrorMessage?: string | null;
 }) {
-  const [invitePubkeys, setInvitePubkeys] = React.useState("");
   const [inviteQuery, setInviteQuery] = React.useState("");
-  const [isDirectPubkeyEntryOpen, setIsDirectPubkeyEntryOpen] =
-    React.useState(false);
   const [selectedInvitees, setSelectedInvitees] = React.useState<
     UserSearchResult[]
   >([]);
@@ -122,36 +106,17 @@ export function ChannelMemberInviteCard({
 
   React.useEffect(() => {
     if (!open) {
-      setInvitePubkeys("");
       setInviteQuery("");
-      setIsDirectPubkeyEntryOpen(false);
       setSelectedInvitees([]);
       setSubmissionErrors([]);
     }
   }, [open]);
 
-  const parsedInvitePubkeys = React.useMemo(
-    () =>
-      invitePubkeys
-        .split(/[\s,]+/)
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0),
-    [invitePubkeys],
-  );
-  const inviteTargets = [
-    ...new Set([
-      ...selectedInvitees.map((invitee) => invitee.pubkey),
-      ...parsedInvitePubkeys,
-    ]),
-  ];
-  const directEntryLabel =
-    parsedInvitePubkeys.length > 0 && !isDirectPubkeyEntryOpen
-      ? `Direct pubkey entry (${parsedInvitePubkeys.length} ready)`
-      : "Direct pubkey entry";
+  const inviteTargets = selectedInvitees.map((invitee) => invitee.pubkey);
 
   return (
     <form
-      className="space-y-2.5 rounded-xl border border-border/80 bg-muted/15 p-3"
+      className="space-y-2.5 rounded-xl border border-border/70 bg-background/70 p-3"
       onSubmit={(event) => {
         event.preventDefault();
         void onSubmit({
@@ -166,13 +131,6 @@ export function ChannelMemberInviteCard({
               (invitee) => !addedPubkeys.has(invitee.pubkey.toLowerCase()),
             ),
           );
-          const remainingPubkeys = parsedInvitePubkeys
-            .filter((pubkey) => !addedPubkeys.has(pubkey.toLowerCase()))
-            .join("\n");
-          setInvitePubkeys(remainingPubkeys);
-          if (remainingPubkeys.length > 0) {
-            setIsDirectPubkeyEntryOpen(true);
-          }
           setInviteQuery("");
           setSubmissionErrors(result.errors);
         });
@@ -184,7 +142,7 @@ export function ChannelMemberInviteCard({
           <span>Add members</span>
         </div>
         {inviteTargets.length > 0 ? (
-          <span className="rounded-full bg-background px-2 py-1 text-[11px] font-medium leading-none text-muted-foreground">
+          <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
             {inviteTargets.length} selected
           </span>
         ) : null}
@@ -202,7 +160,7 @@ export function ChannelMemberInviteCard({
               disabled={isPending}
               id="channel-management-search-users"
               onChange={(event) => setInviteQuery(event.target.value)}
-              placeholder="Search by name or NIP-05."
+              placeholder="Search people and agents"
               value={inviteQuery}
             />
           </div>
@@ -210,7 +168,7 @@ export function ChannelMemberInviteCard({
             <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
               {selectedInvitees.map((invitee) => (
                 <div
-                  className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] leading-none"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
                   data-testid={`selected-invitee-${invitee.pubkey}`}
                   key={invitee.pubkey}
                 >
@@ -234,7 +192,7 @@ export function ChannelMemberInviteCard({
                     }}
                     type="button"
                   >
-                    <X className="h-3 w-3" />
+                    <X className="h-4 w-4" />
                   </button>
                 </div>
               ))}
@@ -265,14 +223,14 @@ export function ChannelMemberInviteCard({
                           displayName={formatSearchUserName(result)}
                           size="xs"
                         />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-medium leading-5">
-                            {formatSearchUserName(result)}
-                          </p>
-                          <p className="truncate text-xs text-muted-foreground">
-                            {formatSearchUserSecondary(result)}
-                          </p>
-                        </div>
+                        <p className="truncate text-sm font-medium leading-5">
+                          {formatSearchUserName(result)}
+                        </p>
+                        {result.isAgent ? (
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            agent
+                          </span>
+                        ) : null}
                       </div>
                       <span className="text-xs text-muted-foreground">Add</span>
                     </button>
@@ -290,49 +248,6 @@ export function ChannelMemberInviteCard({
           <p className="text-sm text-destructive">
             {userSearchQuery.error.message}
           </p>
-        ) : null}
-      </div>
-      <div className="space-y-2">
-        <button
-          aria-controls="channel-management-direct-pubkeys-panel"
-          aria-expanded={isDirectPubkeyEntryOpen}
-          className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
-          data-testid="channel-management-toggle-direct-pubkeys"
-          onClick={() => {
-            setIsDirectPubkeyEntryOpen((current) => !current);
-          }}
-          type="button"
-        >
-          <ChevronDown
-            className={cn(
-              "h-4 w-4 transition-transform",
-              isDirectPubkeyEntryOpen && "rotate-180",
-            )}
-          />
-          <span>{directEntryLabel}</span>
-        </button>
-
-        {isDirectPubkeyEntryOpen ? (
-          <div
-            className="space-y-1.5 rounded-lg border border-dashed border-border/80 bg-background/70 p-2.5"
-            id="channel-management-direct-pubkeys-panel"
-          >
-            <label className="sr-only" htmlFor="channel-management-add-pubkeys">
-              Paste pubkeys
-            </label>
-            <p className="text-xs text-muted-foreground">
-              For exact pubkeys when search is not the right fit.
-            </p>
-            <Textarea
-              className="min-h-24"
-              data-testid="channel-management-add-pubkeys"
-              disabled={isPending}
-              id="channel-management-add-pubkeys"
-              onChange={(event) => setInvitePubkeys(event.target.value)}
-              placeholder="Paste one or more pubkeys, separated by spaces, commas, or new lines."
-              value={invitePubkeys}
-            />
-          </div>
         ) : null}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2">

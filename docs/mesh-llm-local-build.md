@@ -24,6 +24,14 @@ cargo build -p buzz-relay --bin buzz-relay
 cargo check --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
+To run the desktop app with mesh enabled, use the opt-in recipes — plain
+`just dev` / `just staging` are mesh-off for fast iteration:
+
+```bash
+just mesh=1 dev       # local relay, mesh-llm on
+just mesh=1 staging   # staging relay, mesh-llm on + native runtime prep
+```
+
 Expect the first build to take several minutes while mesh-llm prepares and builds
 patched llama.cpp. This is intentional for the local demo: there is no external
 binary artifact to fetch and no separate dylib path to configure.

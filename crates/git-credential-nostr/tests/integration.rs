@@ -9,8 +9,6 @@ use std::process::{Command, Stdio};
 use base64::Engine as _;
 use nostr::{Keys, ToBech32};
 
-// ── helper ────────────────────────────────────────────────────────────────────
-
 /// Spawn the binary, write `input` to stdin, collect output.
 /// `env_vars` are added on top of the inherited environment.
 /// `NOSTR_PRIVATE_KEY` is always cleared first to prevent test pollution.
@@ -54,8 +52,6 @@ fn valid_input() -> String {
      \n"
     .to_string()
 }
-
-// ── tests ─────────────────────────────────────────────────────────────────────
 
 /// Happy path: valid key + valid input → well-formed credential response with
 /// a base64-encoded kind:27235 JSON event.

@@ -32,11 +32,10 @@ keypair.
   Typesense, and S3 secrets stable across restarts.
 - `RELAY_OWNER_PUBKEY` is intentionally not prefixed with `BUZZ_`; it must be a
   64-character hex Nostr pubkey when closed relay mode is enabled.
-- `BUZZ_AUTO_MIGRATE=true` requires an image that includes embedded SQLx
-  migrations. Do not share this quick start for a fresh public install until PR
-  #988 is merged and `ghcr.io/block/buzz:main` has been rebuilt from it. Before
-  then, this bundle is only suitable for instances whose database schema has
-  already been applied.
+- `BUZZ_AUTO_MIGRATE` is opt-in. Set `BUZZ_AUTO_MIGRATE=true` or run
+  `buzz-admin migrate` before starting the relay when bootstrapping a fresh
+  database. Auto-migration requires an image that includes embedded SQLx
+  migrations.
 - The stack uses Postgres, Redis, Typesense, MinIO, and a git data volume because
   those are real Buzz dependencies today. Minimal mode can simplify this later.
 

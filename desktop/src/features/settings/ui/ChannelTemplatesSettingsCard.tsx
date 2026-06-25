@@ -33,6 +33,7 @@ import type {
   UpdateChannelTemplateInput,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -55,10 +56,6 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
-
-// ---------------------------------------------------------------------------
-// ChannelTemplatesSettingsCard
-// ---------------------------------------------------------------------------
 
 export function ChannelTemplatesSettingsCard() {
   const templatesQuery = useChannelTemplatesQuery();
@@ -103,27 +100,26 @@ export function ChannelTemplatesSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-channel-templates">
-      <div className="mb-12 flex min-w-0 items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h2 className="text-2xl font-semibold tracking-tight">
-            Channel Templates
-          </h2>
-          <p className="text-base font-normal text-muted-foreground">
+      <SettingsSectionHeader
+        title="Channel Templates"
+        description={
+          <>
             Save reusable channel configurations and apply them when creating
             new channels.
-          </p>
-        </div>
-        <Button
-          className="shrink-0"
-          onClick={() => setIsCreateOpen(true)}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          <Plus className="mr-1.5 h-3.5 w-3.5" />
-          Create
-        </Button>
-      </div>
+          </>
+        }
+        action={
+          <Button
+            onClick={() => setIsCreateOpen(true)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Plus className="mr-1.5 h-4 w-4" />
+            Create
+          </Button>
+        }
+      />
 
       {templatesQuery.isLoading ? (
         <p className="py-6 text-center text-sm text-muted-foreground">
@@ -192,10 +188,6 @@ export function ChannelTemplatesSettingsCard() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// TemplateRow
-// ---------------------------------------------------------------------------
-
 function TemplateRow({
   template,
   onEdit,
@@ -216,7 +208,7 @@ function TemplateRow({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{template.name}</span>
           {template.isBuiltin ? (
-            <Badge className="shrink-0 text-[10px] uppercase" variant="outline">
+            <Badge className="shrink-0 text-2xs uppercase" variant="outline">
               built-in
             </Badge>
           ) : null}
@@ -229,13 +221,13 @@ function TemplateRow({
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
           {agentCount > 0 ? (
             <span className="flex items-center gap-1">
-              <Users className="h-3 w-3" />
+              <Users className="h-4 w-4" />
               {agentCount} {agentCount === 1 ? "agent" : "agents"}
             </span>
           ) : null}
           {template.canvasTemplate ? (
             <span className="flex items-center gap-1">
-              <MessageSquare className="h-3 w-3" />
+              <MessageSquare className="h-4 w-4" />
               canvas
             </span>
           ) : null}
@@ -255,11 +247,11 @@ function TemplateRow({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={onEdit}>
-            <Pencil className="mr-2 h-3.5 w-3.5" />
+            <Pencil className="mr-2 h-4 w-4" />
             Edit
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onDuplicate}>
-            <Copy className="mr-2 h-3.5 w-3.5" />
+            <Copy className="mr-2 h-4 w-4" />
             Duplicate
           </DropdownMenuItem>
           {!template.isBuiltin ? (
@@ -267,7 +259,7 @@ function TemplateRow({
               className="text-destructive focus:text-destructive"
               onClick={onDelete}
             >
-              <Trash2 className="mr-2 h-3.5 w-3.5" />
+              <Trash2 className="mr-2 h-4 w-4" />
               Delete
             </DropdownMenuItem>
           ) : null}
@@ -276,10 +268,6 @@ function TemplateRow({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// TemplateFormDialog (create + edit)
-// ---------------------------------------------------------------------------
 
 function TemplateFormDialog({
   template,
@@ -584,10 +572,6 @@ function TemplateFormDialog({
   );
 }
 
-// ---------------------------------------------------------------------------
-// TemplateTeamSelector — chip-based team toggle for templates
-// ---------------------------------------------------------------------------
-
 function TemplateTeamSelector({
   isPending,
   isLoading,
@@ -645,10 +629,6 @@ function TemplateTeamSelector({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// RuntimeAssignments — per-entry runtime dropdowns for selected agents
-// ---------------------------------------------------------------------------
 
 function RuntimeAssignments({
   isPending,
@@ -756,7 +736,7 @@ function RuntimeRow({
         ) : (
           <ProfileAvatar
             avatarUrl={avatarUrl ?? null}
-            className="h-5 w-5 shrink-0 text-[8px] bg-muted text-muted-foreground ring-1 ring-border/50"
+            className="h-5 w-5 shrink-0 text-3xs bg-muted text-muted-foreground ring-1 ring-border/50"
             label={label}
           />
         )}

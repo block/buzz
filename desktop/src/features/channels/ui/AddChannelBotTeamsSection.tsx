@@ -124,13 +124,13 @@ export function AddChannelBotTeamsSection({
                       {inChannelCount > 0 ? (
                         <span
                           className={cn(
-                            "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none",
+                            "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none",
                             allSelected
                               ? "bg-primary/15 text-primary"
                               : "bg-muted/60 text-muted-foreground",
                           )}
                         >
-                          <Check className="h-2.5 w-2.5" />
+                          <Check className="h-4 w-4" />
                           {allInChannel
                             ? "All in channel"
                             : `${inChannelCount} in channel`}
@@ -143,7 +143,7 @@ export function AddChannelBotTeamsSection({
                   <div className="space-y-1.5">
                     <p className="font-medium">{team.name}</p>
                     {team.description ? (
-                      <p className="text-[11px] text-primary-foreground/80">
+                      <p className="text-2xs text-primary-foreground/80">
                         {team.description}
                       </p>
                     ) : null}
@@ -158,14 +158,14 @@ export function AddChannelBotTeamsSection({
                           >
                             <ProfileAvatar
                               avatarUrl={persona.avatarUrl}
-                              className="h-4 w-4 text-[8px] bg-primary-foreground/20 text-primary-foreground"
+                              className="h-4 w-4 text-3xs bg-primary-foreground/20 text-primary-foreground"
                               label={persona.displayName}
                             />
-                            <span className="text-[10px] text-primary-foreground">
+                            <span className="text-2xs text-primary-foreground">
                               {persona.displayName}
                             </span>
                             {personaInChannel ? (
-                              <Check className="h-2.5 w-2.5 text-emerald-300" />
+                              <Check className="h-4 w-4 text-emerald-300" />
                             ) : null}
                           </div>
                         );

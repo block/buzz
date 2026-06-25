@@ -1,6 +1,10 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
-import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installRelayBridge,
+  openChannelBrowser,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
 
 const isCi = Boolean(process.env.CI);
@@ -61,7 +65,7 @@ async function createAndJoinSharedStream(
   await expect(ownerPage.getByTestId("stream-list")).toContainText(channelName);
   await expect(ownerPage.getByTestId("chat-title")).toHaveText(channelName);
 
-  await memberPage.getByTestId("browse-channels").click();
+  await openChannelBrowser(memberPage);
   await expect(memberPage.getByTestId("channel-browser-dialog")).toBeVisible();
   await memberPage
     .getByTestId(`browse-channel-${channelName}`)
@@ -85,6 +89,18 @@ async function sendChannelMessage(
     mentionPubkeys?: string[];
   },
 ) {
+  await page.waitForFunction(
+    () => {
+      const tauriWindow = window as Window & {
+        __TAURI_INTERNALS__?: { invoke?: unknown };
+      };
+
+      return typeof tauriWindow.__TAURI_INTERNALS__?.invoke === "function";
+    },
+    null,
+    { timeout: 5_000 },
+  );
+
   await page.evaluate(
     async ({ channelName: targetChannelName, content, mentionPubkeys }) => {
       const tauriWindow = window as Window & {
@@ -131,6 +147,14 @@ async function scrollTimelineAwayFromBottom(page: Page, minDistance = 160) {
     await page.mouse.wheel(0, -800);
     const metrics = await getTimelineMetrics(page);
     if (metrics.distanceFromBottom > minDistance) {
+      // The DOM scroll position is now off the bottom, but the timeline's
+      // `onScroll` handler updates the React "away from bottom" anchor state
+      // asynchronously. If a new message lands before that commit, the stale
+      // at-bottom anchor swallows it and the unread counter never increments.
+      // The scroll-to-latest pill only mounts once that state has committed,
+      // so waiting for it guarantees the anchor is in the away-from-bottom
+      // branch before callers send the message they expect to be counted.
+      await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
       return;
     }
   }

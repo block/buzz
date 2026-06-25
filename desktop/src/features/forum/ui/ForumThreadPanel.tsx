@@ -75,7 +75,10 @@ function ReplyRow({
   const replyMentionNames = resolveMentionNames(reply.tags, profiles);
 
   return (
-    <div className="group px-4 py-3" data-forum-event-id={reply.eventId}>
+    <div
+      className="group content-visibility-auto px-4 py-3"
+      data-forum-event-id={reply.eventId}
+    >
       <div className="flex items-center gap-2">
         <UserProfilePopover pubkey={reply.pubkey}>
           <button
@@ -107,7 +110,7 @@ function ReplyRow({
       <div className="mt-1.5 pl-8">
         <Markdown
           channelNames={channelNames}
-          compact
+          className="text-sm"
           content={reply.content}
           imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
@@ -210,7 +213,6 @@ export function ForumThreadPanel({
         data-scroll-restoration-id={`forum-thread:${channelId}`}
         ref={scrollRef}
       >
-        {/* Original post */}
         <div
           className={cn(
             "group border-b border-border/60 p-4",
@@ -247,6 +249,7 @@ export function ForumThreadPanel({
           <div className="mt-3">
             <Markdown
               channelNames={channelNames}
+              className="text-sm"
               content={post.content}
               imetaByUrl={parseImetaTags(post.tags)}
               mentionNames={postMentionNames}
@@ -254,13 +257,11 @@ export function ForumThreadPanel({
           </div>
         </div>
 
-        {/* Replies header */}
         <div className="flex items-center gap-1.5 border-b border-border/60 px-4 py-2.5 text-sm font-medium text-muted-foreground">
           <MessageSquare className="h-4 w-4" />
           {replies.length} {replies.length === 1 ? "reply" : "replies"}
         </div>
 
-        {/* Reply list */}
         <div className="divide-y divide-border/40">
           {replies.map((reply) => (
             <ReplyRow
@@ -281,7 +282,6 @@ export function ForumThreadPanel({
         </div>
       </div>
 
-      {/* Reply composer */}
       <div className="border-t border-border/60 p-4">
         <ForumComposer
           channelId={channelId}

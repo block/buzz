@@ -52,6 +52,14 @@ type WorkspaceSwitcherProps = {
   onRemoveWorkspace: (id: string) => void;
 };
 
+function WorkspaceEmojiIcon({ className }: { className: string }) {
+  return (
+    <span aria-hidden="true" className={className}>
+      <span className="-translate-y-px leading-normal">🐝</span>
+    </span>
+  );
+}
+
 export function WorkspaceSwitcher({
   activeWorkspace,
   workspaces,
@@ -121,7 +129,7 @@ export function WorkspaceSwitcher({
               data-testid="relay-connection-warning"
               role="img"
             >
-              <WifiOff className={isProfileVariant ? "h-3 w-3" : "h-4 w-4"} />
+              <WifiOff className={isProfileVariant ? "h-4 w-4" : "h-4 w-4"} />
             </span>
           </TooltipTrigger>
           <TooltipContent side={isProfileVariant ? "top" : "bottom"}>
@@ -129,15 +137,13 @@ export function WorkspaceSwitcher({
           </TooltipContent>
         </Tooltip>
       ) : (
-        <span
+        <WorkspaceEmojiIcon
           className={
             isProfileVariant
-              ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-[10px] leading-none"
-              : "flex h-5 w-5 shrink-0 items-center justify-center text-xs leading-none"
+              ? "flex w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs"
+              : "flex w-5 shrink-0 items-center justify-center text-xs"
           }
-        >
-          🐝
-        </span>
+        />
       )}
       <span
         className={
@@ -154,8 +160,8 @@ export function WorkspaceSwitcher({
         <ChevronDown
           className={
             isProfileVariant
-              ? "h-3 w-3 shrink-0 text-sidebar-foreground/45"
-              : "h-3.5 w-3.5 shrink-0 text-sidebar-foreground/50"
+              ? "h-4 w-4 shrink-0 text-sidebar-foreground/45"
+              : "h-4 w-4 shrink-0 text-sidebar-foreground/50"
           }
         />
       )}
@@ -174,7 +180,7 @@ export function WorkspaceSwitcher({
                 ? `${activeWorkspace?.name ?? "Workspace"} — ${connectionLabel}`
                 : "Switch workspace"
             }
-            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-accent focus:bg-accent focus:outline-none focus-visible:bg-accent focus-visible:outline-none data-[state=open]:bg-accent data-[state=open]:text-popover-foreground"
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none data-[state=open]:bg-muted/50 data-[state=open]:text-popover-foreground"
             data-testid="workspace-switcher"
             onMouseEnter={() => scheduleProfileMenu(true)}
             onMouseLeave={() => scheduleProfileMenu(false)}
@@ -186,7 +192,7 @@ export function WorkspaceSwitcher({
         </PopoverTrigger>
         <PopoverContent
           align="end"
-          className="w-56 rounded-xl border border-border bg-popover p-1 shadow-lg"
+          className="w-60 p-1"
           onMouseEnter={() => scheduleProfileMenu(true)}
           onMouseLeave={() => scheduleProfileMenu(false)}
           side="right"
@@ -195,11 +201,11 @@ export function WorkspaceSwitcher({
           <div aria-label="Workspaces" role="menu">
             {workspaces.map((workspace) => (
               <div
-                className="group flex items-center rounded-xs transition-colors hover:bg-accent focus-within:bg-accent"
+                className="group flex min-h-9 items-center rounded-lg transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
                 key={workspace.id}
               >
                 <button
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm outline-hidden focus:outline-none"
+                  className="flex min-h-9 min-w-0 flex-1 items-center gap-2 py-2 pl-2 pr-1 text-left text-sm outline-hidden focus:outline-none"
                   onClick={() => {
                     onSwitchWorkspace(workspace.id);
                     setDropdownOpen(false);
@@ -209,7 +215,7 @@ export function WorkspaceSwitcher({
                 >
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center">
                     {activeWorkspace?.id === workspace.id ? (
-                      <Check className="h-3.5 w-3.5 text-primary" />
+                      <Check className="h-4 w-4 text-primary" />
                     ) : null}
                   </span>
                   <span className="min-w-0 flex-1 truncate">
@@ -218,7 +224,7 @@ export function WorkspaceSwitcher({
                 </button>
                 <button
                   aria-label={`Edit ${workspace.name}`}
-                  className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 hover:bg-accent group-hover:opacity-100 group-focus-within:opacity-100"
+                  className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 hover:bg-muted/70 group-hover:opacity-100 group-focus-within:opacity-100"
                   onClick={(e) => {
                     e.stopPropagation();
                     setDropdownOpen(false);
@@ -226,13 +232,13 @@ export function WorkspaceSwitcher({
                   }}
                   type="button"
                 >
-                  <MoreHorizontal className="h-3.5 w-3.5" />
+                  <MoreHorizontal className="h-4 w-4" />
                 </button>
               </div>
             ))}
             <div className="-mx-1 my-1 h-px bg-muted" />
             <button
-              className="flex w-full items-center gap-2 rounded-xs px-2 py-1.5 text-left text-sm outline-hidden transition-colors hover:bg-accent focus:bg-accent focus:outline-none focus-visible:bg-accent focus-visible:outline-none"
+              className="flex min-h-9 w-full items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
               onClick={() => {
                 setDropdownOpen(false);
                 onAddWorkspace();
@@ -296,7 +302,7 @@ export function WorkspaceSwitcher({
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
               {activeWorkspace?.id === workspace.id ? (
-                <Check className="h-3.5 w-3.5 text-primary" />
+                <Check className="h-4 w-4 text-primary" />
               ) : null}
             </span>
             <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
@@ -311,7 +317,7 @@ export function WorkspaceSwitcher({
               }}
               type="button"
             >
-              <MoreHorizontal className="h-3.5 w-3.5" />
+              <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuItem>
         ))}

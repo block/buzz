@@ -1,101 +1,76 @@
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from "lucide-react";
 
-import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
-import type { Channel, SearchHit } from "@/shared/api/types";
+import { isMacPlatform } from "@/shared/lib/platform";
+import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
-import { SidebarTrigger, useSidebar } from "@/shared/ui/sidebar";
+import { cn } from "@/shared/lib/cn";
+import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
+import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
   canGoForward: boolean;
-  channels: Channel[];
-  currentPubkey?: string;
   onGoBack: () => void;
   onGoForward: () => void;
-  onOpenChannel: (channelId: string) => void;
-  onOpenResult: (hit: SearchHit) => void;
-  searchHidden?: boolean;
-  searchFocusRequest: number;
 };
 
-function GlobalTopDivider() {
-  const { state } = useSidebar();
-
-  return (
-    <div
-      aria-hidden="true"
-      className="pointer-events-none fixed top-10 z-40 h-px bg-border/35"
-      style={{
-        left: state === "expanded" ? "var(--sidebar-width)" : 0,
-        right: 0,
-      }}
-    />
-  );
-}
-
-function CenterColumnTopbarSearch({
-  channels,
-  currentPubkey,
-  onOpenChannel,
-  onOpenResult,
-  searchFocusRequest,
-}: Pick<
-  AppTopChromeProps,
-  | "channels"
-  | "currentPubkey"
-  | "onOpenChannel"
-  | "onOpenResult"
-  | "searchFocusRequest"
->) {
-  const { isResizing, state } = useSidebar();
-
-  return (
-    <div
-      className="pointer-events-none fixed top-[7px] z-45 flex justify-center px-24 transition-[left] duration-200 ease-linear data-[resizing=true]:transition-none"
-      data-testid="topbar-search-column"
-      data-resizing={isResizing}
-      style={{
-        left: state === "expanded" ? "var(--sidebar-width)" : 0,
-        right: 0,
-      }}
-    >
-      <TopbarSearch
-        channels={channels}
-        className="pointer-events-auto w-[220px] max-w-full md:w-[300px] lg:w-[360px] xl:w-[420px] 2xl:w-[480px]"
-        currentPubkey={currentPubkey}
-        focusRequest={searchFocusRequest}
-        onOpenChannel={onOpenChannel}
-        onOpenResult={onOpenResult}
-      />
-    </div>
-  );
-}
-
 const TOP_CHROME_ICON_BUTTON_CLASS =
-  "rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground";
+  "h-7 w-7 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
+
+function TopChromeSidebarTrigger() {
+  const sidebar = useOptionalSidebar();
+
+  return (
+    <Button
+      aria-label="Toggle Sidebar"
+      className={TOP_CHROME_ICON_BUTTON_CLASS}
+      data-sidebar="trigger"
+      disabled={!sidebar}
+      onClick={() => {
+        sidebar?.toggleSidebar();
+      }}
+      size="icon"
+      type="button"
+      variant="ghost"
+    >
+      {sidebar?.open ? <PanelLeftClose /> : <PanelLeftOpen />}
+      <span className="sr-only">Toggle Sidebar</span>
+    </Button>
+  );
+}
 
 export function AppTopChrome({
   canGoBack,
   canGoForward,
-  channels,
-  currentPubkey,
   onGoBack,
   onGoForward,
-  onOpenChannel,
-  onOpenResult,
-  searchHidden = false,
-  searchFocusRequest,
 }: AppTopChromeProps) {
+  const isFullscreen = useIsFullscreen();
+  // On macOS the traffic-light buttons overlay the chrome (see
+  // `trafficLightPosition` in `tauri.conf.json`), so the nav row clears their
+  // x-position and shifts to align the nav icon centers with the native dot
+  // centers. In fullscreen those buttons hide, so use the standard alignment.
+  const navRowPaddingClass =
+    isMacPlatform() && !isFullscreen ? "pl-20" : "pl-3";
+  const navRowAlignmentClass =
+    isMacPlatform() && !isFullscreen ? "translate-y-[3px]" : null;
+
   return (
-    <>
-      <div
-        aria-hidden="true"
-        className="fixed inset-x-0 top-0 z-20 h-10 cursor-default select-none"
-        data-tauri-drag-region
-      />
-      <GlobalTopDivider />
-      <div className="fixed left-[80px] top-[9px] z-45 flex items-center gap-0.5">
-        <SidebarTrigger className={TOP_CHROME_ICON_BUTTON_CLASS} />
+    <div
+      className={cn(
+        "relative z-45 flex shrink-0 cursor-default select-none items-center bg-sidebar pr-3 text-sidebar-foreground",
+        topChromeBackdrop.height,
+        navRowPaddingClass,
+      )}
+      data-tauri-drag-region
+    >
+      <div className={cn("flex items-center gap-0.5", navRowAlignmentClass)}>
+        <TopChromeSidebarTrigger />
         <Button
           aria-label="Go back"
           className={TOP_CHROME_ICON_BUTTON_CLASS}
@@ -119,15 +94,6 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
       </div>
-      {searchHidden ? null : (
-        <CenterColumnTopbarSearch
-          channels={channels}
-          currentPubkey={currentPubkey}
-          onOpenChannel={onOpenChannel}
-          onOpenResult={onOpenResult}
-          searchFocusRequest={searchFocusRequest}
-        />
-      )}
-    </>
+    </div>
   );
 }

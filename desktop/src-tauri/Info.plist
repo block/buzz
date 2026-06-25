@@ -8,5 +8,7 @@
     <string>Buzz</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Buzz needs microphone access for voice huddles.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Buzz needs camera access to record animated avatars.</string>
 </dict>
 </plist>

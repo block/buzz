@@ -121,7 +121,7 @@ function MemberRow({
               size="sm"
               variant="ghost"
             >
-              <MoreHorizontal className="h-3.5 w-3.5" />
+              <MoreHorizontal className="h-4 w-4" />
               <span className="sr-only">Actions</span>
             </Button>
           </DropdownMenuTrigger>
@@ -231,7 +231,7 @@ export function RelayMembersCard({
             onClick={() => setAddDialogOpen(true)}
             size="sm"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Plus className="h-4 w-4" />
             Add Member
           </Button>
         ) : null}

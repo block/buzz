@@ -9,7 +9,10 @@ import type {
   TimelineMessage,
   TimelineReaction,
 } from "@/features/messages/types";
-import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  getThreadReference,
+  isBroadcastReply,
+} from "@/features/messages/lib/threading";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -39,7 +42,7 @@ import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
-function isTimelineContentEvent(event: RelayEvent) {
+export function isTimelineContentEvent(event: RelayEvent) {
   return (
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||
@@ -64,6 +67,47 @@ function getDeletionTargets(tags: string[][]) {
         HEX_RE.test(tag[1]),
     )
     .map((tag) => tag[1]);
+}
+
+/**
+ * Count the *visible top-level rows* a raw event window would render in the
+ * main channel timeline — the same unit `buildMainTimelineEntries` produces.
+ *
+ * This is deliberately NOT `events.length`: thread replies collapse into their
+ * parent's summary row, deleted events disappear, and non-content kinds
+ * (reactions, edits, deletions) never render as their own row. A history batch
+ * heavy with replies can add 100 events but only a handful of rows, which is
+ * why fetch-older counts rows here, not messages, when deciding how far to page.
+ *
+ * Mirrors the two filters that bound the rendered list:
+ *   1. `formatTimelineMessages` keeps content kinds that aren't deletion targets.
+ *   2. `buildMainTimelineEntries` keeps entries that are top-level
+ *      (`parentId == null`) or broadcast replies.
+ */
+export function countTopLevelTimelineRows(events: RelayEvent[]): number {
+  const deletedEventIds = new Set<string>();
+  for (const event of events) {
+    if (
+      event.kind === KIND_DELETION ||
+      event.kind === KIND_NIP29_DELETE_EVENT
+    ) {
+      for (const targetId of getDeletionTargets(event.tags)) {
+        deletedEventIds.add(targetId);
+      }
+    }
+  }
+
+  let count = 0;
+  for (const event of events) {
+    if (!isTimelineContentEvent(event) || deletedEventIds.has(event.id)) {
+      continue;
+    }
+    const { parentId } = getThreadReference(event.tags);
+    if (parentId == null || isBroadcastReply(event.tags)) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function getReactionTargetId(tags: string[][]) {

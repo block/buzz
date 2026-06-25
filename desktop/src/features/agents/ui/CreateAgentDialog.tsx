@@ -40,8 +40,6 @@ import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 
-// ── Dialog ────────────────────────────────────────────────────────────────────
-
 export function CreateAgentDialog({
   open,
   onCreated,
@@ -52,16 +50,18 @@ export function CreateAgentDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const createMutation = useCreateManagedAgentMutation();
-  const providersQuery = useAvailableAcpRuntimes();
-  const allProvidersQuery = useAcpRuntimesQuery();
-  const backendProvidersQuery = useBackendProvidersQuery();
+  const providersQuery = useAvailableAcpRuntimes({ enabled: open });
+  const allProvidersQuery = useAcpRuntimesQuery({ enabled: open });
+  const backendProvidersQuery = useBackendProvidersQuery({ enabled: open });
   const { lastRuntimeId, setLastRuntime } = useLastRuntime();
   const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
-  const [agentCommand, setAgentCommand] = React.useState("goose");
+  const [agentCommand, setAgentCommand] = React.useState("buzz-agent");
   const [agentArgs, setAgentArgs] = React.useState("acp");
   const [mcpCommand, setMcpCommand] = React.useState("");
   const [mcpToolsets, setMcpToolsets] = React.useState("");
-  const prereqsQuery = useManagedAgentPrereqsQuery(acpCommand, mcpCommand);
+  const prereqsQuery = useManagedAgentPrereqsQuery(acpCommand, mcpCommand, {
+    enabled: open,
+  });
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [spawnAfterCreate, setSpawnAfterCreate] = React.useState(true);
@@ -80,7 +80,6 @@ export function CreateAgentDialog({
     [],
   );
 
-  // ── Backend provider ("Run on") state ──────────────────────────────────────
   const [runOn, setRunOn] = React.useState<"local" | string>("local");
   const [providerConfig, setProviderConfig] = React.useState<
     Record<string, string>
@@ -89,7 +88,6 @@ export function CreateAgentDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
-  // ── Relay-mesh flow state ──────────────────────────────────────────────────
   // When `useMesh` is on, the agent runs buzz-agent against a member's
   // shared compute. The ACP runtime + backend selectors are hidden; runtime
   // fields are driven by `mesh_agent_preset(meshModelId)` and the submit
@@ -236,7 +234,7 @@ export function CreateAgentDialog({
     setSpawnAfterCreate(true);
     setStartOnAppLaunch(true);
     setAcpCommand("buzz-acp");
-    setAgentCommand("goose");
+    setAgentCommand("buzz-agent");
     setAgentArgs("acp");
     setMcpCommand("");
     setMcpToolsets("");

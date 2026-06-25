@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_DM_VISIBILITY, KIND_GIFT_WRAP,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_DM_VISIBILITY,
+    KIND_GIFT_WRAP, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
 };
 use buzz_db::EventQuery;
 use hex;
@@ -20,7 +20,7 @@ use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
-const MAX_HISTORICAL_LIMIT: i64 = 10_000;
+const MAX_HISTORICAL_LIMIT: i64 = 2_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
 const P_GATED_KINDS: [u32; 5] = [
     KIND_AGENT_OBSERVER_FRAME,
@@ -91,7 +91,46 @@ pub async fn handle_req(
 
     let channel_id = extract_channel_id_from_filters(&filters);
 
-    // ── #p / engram gating for globally-stored sensitive kinds ───────────────
+    // Confirm channel access up front so the repaired `accessible_channels`
+    // vector reaches every downstream consumer: the NIP-50 search branch
+    // below, subscription registration, historical delivery, and COUNT. A
+    // cache-negative may be a stale miss on a non-writer pod (member just added
+    // on the pod that processed the write, before the 10s TTL expires or the
+    // cross-pod invalidation lands), so on a miss we confirm uncached against
+    // the DB; a verified positive repairs the vector request-locally (see
+    // `resolve_request_local_access`). Running this ahead of the search branch
+    // is what fixes the search false-miss: a `#h=<just-added>` search would
+    // otherwise be scoped against the stale vector and return empty.
+    if let Some(ch_id) = channel_id {
+        let token_allows = token_channel_ids
+            .as_deref()
+            .is_none_or(|allowed| allowed.contains(&ch_id));
+        let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
+            None
+        } else {
+            match state.db.is_member(ch_id, &pubkey_bytes).await {
+                Ok(member) => Some(member),
+                Err(e) => {
+                    warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
+                    conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                    return;
+                }
+            }
+        };
+        if !resolve_request_local_access(
+            &mut accessible_channels,
+            ch_id,
+            token_allows,
+            db_is_member,
+        ) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: not a channel member",
+            ));
+            return;
+        }
+    }
+
     // Applied BEFORE the NIP-50 search branch so that an authenticated member
     // cannot use `{"search":"...","kinds":[30174]}` (or similar for p-gated
     // kinds) to harvest indexed-but-globally-stored sensitive events. Search
@@ -116,9 +155,15 @@ pub async fn handle_req(
             ));
             return;
         }
+        if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: author-only kinds require authors=[self]",
+            ));
+            return;
+        }
     }
 
-    // ── NIP-50 search: one-shot, no persistent subscription ──────────────────
     // Search filters hit Typesense and return historical hits, then EOSE.
     // They are not registered for fan-out. The sensitive-kind gates above
     // already ran, so an authed member cannot use search to bypass author/#p
@@ -138,22 +183,12 @@ pub async fn handle_req(
             &accessible_channels,
             token_channel_ids.is_none(),
             &hex::encode(&pubkey_bytes),
+            &pubkey_bytes,
             &conn,
             &state,
         )
         .await;
         return;
-    }
-
-    // Check channel access BEFORE registering the subscription.
-    if let Some(ch_id) = channel_id {
-        if !accessible_channels.contains(&ch_id) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: not a channel member",
-            ));
-            return;
-        }
     }
 
     {
@@ -228,6 +263,12 @@ pub async fn handle_req(
                 continue;
             }
 
+            // Author-only kinds: only the event author may see these events.
+            // Mixed-kind filters still serve other kinds normally.
+            if is_author_only_event(&stored.event, &pubkey_bytes) {
+                continue;
+            }
+
             // Dedup AFTER acceptance — an event that fails filter A's constraints
             // must remain eligible for filter B (NIP-01 OR semantics).
             if !seen_ids.insert(stored.event.id) {
@@ -239,6 +280,9 @@ pub async fn handle_req(
                 return;
             }
             total_sent += 1;
+            if total_sent.is_multiple_of(100) {
+                tokio::task::yield_now().await;
+            }
         }
     }
 
@@ -256,6 +300,52 @@ pub async fn handle_req(
 /// Search subscriptions are one-shot — no persistent subscription is registered.
 /// Maximum Typesense pages to fetch per filter (prevents unbounded loops).
 const MAX_SEARCH_PAGES: u32 = 10;
+
+/// Resolve request-local channel access, repairing a stale cache-negative.
+///
+/// `accessible_channels` is the per-request membership vector — built once from
+/// the 10s cache (and already narrowed by any scoped-auth `token_channel_ids`
+/// via `retain`) and reused for subscription registration, historical delivery,
+/// search scope, and COUNT. On a multi-pod relay it can be stale on a non-writer
+/// pod (a member just added on another pod, before the TTL expires or the
+/// cross-pod invalidation lands), so the cache-negative branch confirms against
+/// the DB uncached and passes the result here.
+///
+/// `token_allows` is the scoped-auth upper bound: `false` when a scoped token is
+/// present and does NOT cover `ch_id`. The DB-positive repair must never push a
+/// channel back in past that bound, or a token scoped to channel A could reach
+/// channel B merely because the user is a DB member of B.
+///
+/// Truth table:
+/// - token denies `ch_id`               → denied, no DB needed, no repair
+/// - cached contains `ch_id`            → allowed, no repair, no DB needed
+/// - cache-miss + DB says member        → allowed, `ch_id` pushed once (repair)
+/// - cache-miss + DB says not a member  → denied, vector unchanged
+///
+/// The push is what makes the confirmation request-local-authoritative: every
+/// downstream consumer reads the same repaired vector, so a stale negative
+/// cannot stay sticky for the rest of the request. `db_is_member` is `None` when
+/// the cache hit or the token bound denied (DB was never consulted).
+pub(crate) fn resolve_request_local_access(
+    accessible_channels: &mut Vec<uuid::Uuid>,
+    ch_id: uuid::Uuid,
+    token_allows: bool,
+    db_is_member: Option<bool>,
+) -> bool {
+    if !token_allows {
+        return false;
+    }
+    if accessible_channels.contains(&ch_id) {
+        return true;
+    }
+    match db_is_member {
+        Some(true) => {
+            accessible_channels.push(ch_id);
+            true
+        }
+        _ => false,
+    }
+}
 
 pub(crate) fn build_search_channel_scope_filter(
     accessible_channels: &[uuid::Uuid],
@@ -283,12 +373,14 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
     filters: &[Filter],
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
     reader_pubkey_hex: &str,
+    reader_pubkey_bytes: &[u8],
     conn: &ConnectionState,
     state: &AppState,
 ) {
@@ -445,6 +537,9 @@ async fn handle_search_req(
                         &stored.event,
                         reader_pubkey_hex,
                     ) {
+                        continue;
+                    }
+                    if is_author_only_event(&stored.event, reader_pubkey_bytes) {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -807,10 +902,134 @@ pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &
     })
 }
 
+/// Returns `true` if the filter CAN match author-only kinds — meaning it either
+/// has no `kinds` constraint (wildcard) or includes at least one author-only kind.
+///
+/// Used by the COUNT handler to force the fallback path (per-event filtering)
+/// instead of the fast `count_events()` which cannot exclude other authors'
+/// author-only events from the aggregate count.
+pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| AUTHOR_ONLY_KINDS.contains(&(k.as_u16() as u32)))
+    })
+}
+
+/// Returns `true` if the event is an author-only kind and the requester is NOT
+/// the author. Used as a per-event filter during historical delivery and fan-out
+/// to silently omit unauthorized events from mixed-kind result sets.
+pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+    let kind_u32 = event.kind.as_u16() as u32;
+    AUTHOR_ONLY_KINDS.contains(&kind_u32) && event.pubkey.to_bytes() != requester_pubkey_bytes
+}
+
+/// Pre-filter authorization for filters that exclusively target author-only kinds.
+///
+/// If a filter targets ONLY author-only kinds (e.g. `{kinds:[30300]}`), the
+/// `authors` field MUST contain only the requester's pubkey. Otherwise the relay
+/// would execute a DB query guaranteed to return zero results after per-event
+/// filtering — wasting resources and potentially leaking timing information.
+///
+/// For unauthenticated single-kind 30300 requests, the WS handler closes with
+/// `auth-required:`. For authenticated requests targeting another author's
+/// reminders, the WS handler closes with `restricted:`.
+///
+/// Mixed-kind filters (e.g. `{kinds:[30300, 9]}`) pass this gate — the per-event
+/// filter in the delivery loop handles the author-only omission.
+pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
+    filters.iter().all(|filter| {
+        let targets_only_author_only = filter.kinds.as_ref().is_some_and(|ks| {
+            !ks.is_empty()
+                && ks
+                    .iter()
+                    .all(|k| AUTHOR_ONLY_KINDS.contains(&(k.as_u16() as u32)))
+        });
+        if !targets_only_author_only {
+            return true;
+        }
+        // Filter exclusively targets author-only kinds — require authors=[self].
+        filter.authors.as_ref().is_some_and(|authors| {
+            !authors.is_empty()
+                && authors
+                    .iter()
+                    .all(|a| a.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    #[test]
+    fn request_local_access_cache_positive_no_db_no_repair() {
+        let ch = uuid::Uuid::new_v4();
+        let mut accessible = vec![ch];
+        // Cache hit: DB was never consulted (None), allowed, vector unchanged.
+        assert!(resolve_request_local_access(
+            &mut accessible,
+            ch,
+            true,
+            None
+        ));
+        assert_eq!(accessible, vec![ch], "no repair, no duplicate on cache hit");
+    }
+
+    #[test]
+    fn request_local_access_cache_negative_db_member_repairs() {
+        let ch = uuid::Uuid::new_v4();
+        let mut accessible: Vec<uuid::Uuid> = vec![];
+        // Stale cache-miss but DB confirms membership: allowed AND repaired.
+        assert!(resolve_request_local_access(
+            &mut accessible,
+            ch,
+            true,
+            Some(true)
+        ));
+        assert!(
+            accessible.contains(&ch),
+            "verified positive must push ch_id so the rest of the request sees it"
+        );
+    }
+
+    #[test]
+    fn request_local_access_cache_negative_db_nonmember_denied() {
+        let ch = uuid::Uuid::new_v4();
+        let mut accessible: Vec<uuid::Uuid> = vec![];
+        // Cache-miss and DB confirms non-membership: denied, vector unchanged.
+        assert!(!resolve_request_local_access(
+            &mut accessible,
+            ch,
+            true,
+            Some(false)
+        ));
+        assert!(
+            accessible.is_empty(),
+            "denied access must not mutate the request-local vector"
+        );
+    }
+
+    #[test]
+    fn request_local_access_token_denies_never_repairs() {
+        let ch = uuid::Uuid::new_v4();
+        let mut accessible: Vec<uuid::Uuid> = vec![];
+        // Scoped token does NOT cover ch_id: denied even though the DB confirms
+        // membership. The token scope is an upper bound on the repair — a DB
+        // positive must never push a channel back in past a narrower token, or
+        // a token scoped to channel A could reach channel B merely because the
+        // user is a DB member of B.
+        assert!(!resolve_request_local_access(
+            &mut accessible,
+            ch,
+            false,
+            Some(true)
+        ));
+        assert!(
+            accessible.is_empty(),
+            "token-denied access must not be repaired into the vector"
+        );
+    }
 
     fn filter_with_channel(channel_id: uuid::Uuid) -> Filter {
         Filter::new().custom_tag(
@@ -1005,8 +1224,6 @@ mod tests {
         );
     }
 
-    // ── NIP-AE engram read gating ────────────────────────────────────────
-
     /// Three real x-only pubkeys (valid for `PublicKey::from_hex`). Distinct,
     /// so we can label them clearly in tests.
     fn three_pubkeys() -> (String, String, String) {
@@ -1116,7 +1333,6 @@ mod tests {
         assert!(!engram_filters_authorized(&[f], &agent));
     }
 
-    // ── NIP-50 search bypass regressions ─────────────────────────────────
     // These filters are the shape an authenticated relay member would send
     // to try to harvest indexed engram envelopes via the search path. The
     // gate must reject them regardless of the presence of `search`.

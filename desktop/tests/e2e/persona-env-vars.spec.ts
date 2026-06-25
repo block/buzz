@@ -62,7 +62,6 @@ test("persona env_vars round-trip through create_persona + update_persona", asyn
 }) => {
   await gotoApp(page);
 
-  // Create a persona with two env vars.
   const created = await invokeTauri<{
     id: string;
     env_vars?: Record<string, string>;
@@ -184,7 +183,6 @@ test("agent env_vars override persona env_vars on the agent record", async ({
     },
   });
 
-  // Create an agent under that persona with an override.
   const created = await invokeTauri<{
     agent: { pubkey: string; env_vars?: Record<string, string> };
   }>(page, "create_managed_agent", {
@@ -204,7 +202,6 @@ test("agent env_vars override persona env_vars on the agent record", async ({
     AGENT_ONLY: "1",
   });
 
-  // Update to replace the map entirely.
   const updated = await invokeTauri<{
     agent: { env_vars?: Record<string, string> };
   }>(page, "update_managed_agent", {
@@ -226,7 +223,10 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
 
   // Open the Agents view, click New > Persona to open the persona dialog.
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
   await page.getByRole("menuitem", { name: /^Persona$/ }).click();
 
   // The env vars editor should be present.
@@ -238,8 +238,7 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("env-vars-add").click();
   await expect(page.getByTestId("env-vars-key")).toHaveCount(1);
 
-  // Fill it in. Use realistic-looking keys/values so the screenshot
-  // captured below illustrates the feature for reviewers.
+  // Fill it in with realistic-looking keys/values to cover masked secrets and row controls.
   const keys = page.getByTestId("env-vars-key");
   const values = page.getByTestId("env-vars-value");
   await keys.nth(0).fill("ANTHROPIC_API_KEY");
@@ -250,12 +249,6 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("env-vars-add").click();
   await keys.nth(2).fill("OPENAI_BASE_URL");
   await values.nth(2).fill("https://api.openai.com/v1");
-
-  // Capture a screenshot of the dialog with three env vars filled. Helps
-  // reviewers see the UI at a glance.
-  await page
-    .getByRole("dialog")
-    .screenshot({ path: "test-results/persona-env-dialog.png" });
 
   // Remove the first row to verify per-row removal still works.
   await page.getByTestId("env-vars-remove").first().click();

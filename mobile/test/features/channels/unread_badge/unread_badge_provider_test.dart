@@ -24,10 +24,6 @@ void main() {
   const t20 = 20; // newer — any channel with lastMessageAt == t20 has a message
   const t30 = 30; // even newer — used for high-priority events
 
-  // ---------------------------------------------------------------------------
-  // Channel factory helper
-  // ---------------------------------------------------------------------------
-
   Channel makeChannel({
     required String id,
     String channelType = 'stream',
@@ -54,10 +50,6 @@ void main() {
           : null,
     );
   }
-
-  // ---------------------------------------------------------------------------
-  // Container builder
-  // ---------------------------------------------------------------------------
 
   ProviderContainer buildContainer({
     required List<Channel> channels,
@@ -88,10 +80,6 @@ void main() {
       ],
     );
   }
-
-  // ---------------------------------------------------------------------------
-  // Tests
-  // ---------------------------------------------------------------------------
 
   test('all channels read returns (0, 0)', () async {
     final container = buildContainer(
@@ -325,10 +313,6 @@ void main() {
     },
   );
 }
-
-// ---------------------------------------------------------------------------
-// Test doubles
-// ---------------------------------------------------------------------------
 
 /// A [ChannelsNotifier] that immediately resolves to a canned [channels] list
 /// and exposes a pre-seeded [latestHighPriorityByChannel] map.

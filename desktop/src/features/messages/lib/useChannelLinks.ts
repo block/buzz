@@ -44,7 +44,6 @@ export function useChannelLinks() {
     knownNamesLowerRef.current = knownNamesLower;
   }, [knownNamesLower]);
 
-  // Clean up pending timeout on unmount
   React.useEffect(() => {
     return () => {
       if (debounceTimerRef.current !== null) {
@@ -76,7 +75,6 @@ export function useChannelLinks() {
 
   const insertChannel = React.useCallback(
     (suggestion: ChannelSuggestion, selectionEnd: number): AutocompleteEdit => {
-      // Cancel any pending debounced detection — user already selected
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;

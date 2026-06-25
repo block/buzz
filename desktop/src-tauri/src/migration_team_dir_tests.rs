@@ -11,17 +11,13 @@ fn team_dir_reconcile_rewrites_worktree_path() {
     // Team must exist on disk for the reconcile to proceed past the existence gate.
     std::fs::create_dir_all(canonical.join("agents/teams/com.wpfleger.sietch-tabr")).unwrap();
 
-    let worktree_pack_path = format!(
-        "{}/agents/packs/com.wpfleger.sietch-tabr",
-        parent
+    let worktree_pack_path = pack_dir(
+        &parent
             .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch")
-            .display()
+            .join("xyz.block.buzz.app.dev.worktree-my-branch"),
+        "com.wpfleger.sietch-tabr",
     );
-    let expected_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        canonical.display()
-    );
+    let expected_path = team_dir(&canonical, "com.wpfleger.sietch-tabr");
 
     write_agents_json(
         &canonical,
@@ -47,17 +43,13 @@ fn team_dir_reconcile_rewrites_new_field_name() {
     // Team must exist on disk for the reconcile to proceed past the existence gate.
     std::fs::create_dir_all(canonical.join("agents/teams/com.wpfleger.sietch-tabr")).unwrap();
 
-    let worktree_team_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        parent
+    let worktree_team_path = team_dir(
+        &parent
             .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch")
-            .display()
+            .join("xyz.block.buzz.app.dev.worktree-my-branch"),
+        "com.wpfleger.sietch-tabr",
     );
-    let expected_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        canonical.display()
-    );
+    let expected_path = team_dir(&canonical, "com.wpfleger.sietch-tabr");
 
     write_agents_json(
         &canonical,
@@ -79,10 +71,7 @@ fn team_dir_reconcile_leaves_canonical_path_unchanged() {
     let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
     std::fs::create_dir_all(canonical.join("agents")).unwrap();
 
-    let canonical_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        canonical.display()
-    );
+    let canonical_path = team_dir(&canonical, "com.wpfleger.sietch-tabr");
 
     write_agents_json(
         &canonical,
@@ -128,12 +117,11 @@ fn team_dir_reconcile_is_idempotent() {
     // Team must exist on disk for the reconcile to proceed past the existence gate.
     std::fs::create_dir_all(canonical.join("agents/teams/com.wpfleger.sietch-tabr")).unwrap();
 
-    let worktree_pack_path = format!(
-        "{}/agents/packs/com.wpfleger.sietch-tabr",
-        parent
+    let worktree_pack_path = pack_dir(
+        &parent
             .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch")
-            .display()
+            .join("xyz.block.buzz.app.dev.worktree-my-branch"),
+        "com.wpfleger.sietch-tabr",
     );
 
     write_agents_json(
@@ -161,11 +149,11 @@ fn team_dir_reconcile_heals_legacy_release_path() {
     let release_dir = parent.path().join("xyz.block.buzz.app");
     std::fs::create_dir_all(release_dir.join("agents/teams/com.example.team")).unwrap();
 
-    let legacy_path = format!(
-        "{}/agents/packs/com.example.team",
-        parent.path().join("xyz.block.sprout.app").display()
+    let legacy_path = pack_dir(
+        &parent.path().join("xyz.block.sprout.app"),
+        "com.example.team",
     );
-    let expected_path = format!("{}/agents/teams/com.example.team", release_dir.display());
+    let expected_path = team_dir(&release_dir, "com.example.team");
 
     write_agents_json(
         &release_dir,
@@ -193,12 +181,9 @@ fn team_dir_reconcile_leaves_record_when_team_missing() {
     std::fs::create_dir_all(canonical.join("agents")).unwrap();
     // Intentionally do NOT create agents/teams/com.example.missing.
 
-    let stale_path = format!(
-        "{}/agents/packs/com.example.missing",
-        parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-old")
-            .display()
+    let stale_path = pack_dir(
+        &parent.path().join("xyz.block.buzz.app.dev.worktree-old"),
+        "com.example.missing",
     );
 
     write_agents_json(
@@ -222,6 +207,7 @@ fn team_dir_reconcile_leaves_record_when_team_missing() {
     assert!(records[0].get("persona_team_dir").is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn team_dir_reconcile_heals_to_symlinked_team_dir() {
     // When agents/teams/<id> is a symlink to a real directory elsewhere,
@@ -237,14 +223,11 @@ fn team_dir_reconcile_heals_to_symlinked_team_dir() {
     std::fs::create_dir_all(canonical.join("agents/teams")).unwrap();
     std::os::unix::fs::symlink(&real_team, &symlink_target).unwrap();
 
-    let stale_path = format!(
-        "{}/agents/packs/com.example.team",
-        parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-old")
-            .display()
+    let stale_path = pack_dir(
+        &parent.path().join("xyz.block.buzz.app.dev.worktree-old"),
+        "com.example.team",
     );
-    let expected_path = format!("{}/agents/teams/com.example.team", canonical.display());
+    let expected_path = team_dir(&canonical, "com.example.team");
 
     write_agents_json(
         &canonical,
@@ -260,6 +243,7 @@ fn team_dir_reconcile_heals_to_symlinked_team_dir() {
     assert_eq!(records[0]["persona_team_dir"], expected_path);
 }
 
+#[cfg(unix)]
 #[test]
 fn team_dir_reconcile_skips_dangling_candidate_symlink() {
     // When agents/teams/<id> is a symlink whose target does not exist,
@@ -273,12 +257,9 @@ fn team_dir_reconcile_skips_dangling_candidate_symlink() {
     let symlink_path = canonical.join("agents/teams/com.example.gone");
     std::os::unix::fs::symlink(&dangling_target, &symlink_path).unwrap();
 
-    let stale_path = format!(
-        "{}/agents/packs/com.example.gone",
-        parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-old")
-            .display()
+    let stale_path = pack_dir(
+        &parent.path().join("xyz.block.buzz.app.dev.worktree-old"),
+        "com.example.gone",
     );
 
     write_agents_json(
@@ -299,6 +280,7 @@ fn team_dir_reconcile_skips_dangling_candidate_symlink() {
     assert_eq!(records[0]["persona_pack_path"], stale_path);
 }
 
+#[cfg(unix)]
 #[test]
 fn team_dir_reconcile_through_symlink_preserves_symlink() {
     // Dev worktree instances reach the canonical store through a symlinked
@@ -312,8 +294,8 @@ fn team_dir_reconcile_through_symlink_preserves_symlink() {
     std::fs::create_dir_all(canonical.join("agents/teams/com.example.team")).unwrap();
     std::fs::create_dir_all(worktree.join("agents")).unwrap();
 
-    let stale_path = format!("{}/agents/packs/com.example.team", worktree.display());
-    let expected_path = format!("{}/agents/teams/com.example.team", canonical.display());
+    let stale_path = pack_dir(&worktree, "com.example.team");
+    let expected_path = team_dir(&canonical, "com.example.team");
 
     write_agents_json(
         &canonical,
@@ -435,7 +417,7 @@ fn team_dir_reconcile_renames_legacy_field_when_value_already_canonical() {
     let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
     std::fs::create_dir_all(canonical.join("agents/teams/com.example.team")).unwrap();
 
-    let correct_path = format!("{}/agents/teams/com.example.team", canonical.display());
+    let correct_path = team_dir(&canonical, "com.example.team");
 
     write_agents_json(
         &canonical,

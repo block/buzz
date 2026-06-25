@@ -2,10 +2,28 @@
 export default {
   theme: {
     extend: {
+      // Sub-`text-xs` ramp for meta text (timestamps, count badges, tracking
+      // labels) and tiny glyphs. Defined in rem so Cmd +/- zoom — which scales
+      // the root <html> font-size — keeps scaling them. Do NOT reintroduce
+      // arbitrary `text-[…rem]` / `text-[…px]` literals; the px-text guard
+      // rejects them. Stock scale picks up from here: xs (12px), sm (14px)…
+      fontSize: {
+        "2xs": "0.6875rem", // 11px — meta-text workhorse (timestamps, badges)
+        "3xs": "0.5rem", // 8px — tiny glyphs / micro labels
+      },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+      },
+      fontFamily: {
+        sans: [
+          '"Inter Variable"',
+          "Inter",
+          '"Avenir Next"',
+          '"Segoe UI"',
+          "sans-serif",
+        ],
       },
       colors: {
         background: "hsl(var(--background))",

@@ -1,6 +1,10 @@
 import { expect, test, type Browser } from "@playwright/test";
 
-import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installRelayBridge,
+  openChannelBrowser,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 import { assertRelaySeeded } from "../helpers/seed";
 
@@ -28,8 +32,15 @@ async function openChannelManagement(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
 }
 
+async function openChannelEditDialog(page: import("@playwright/test").Page) {
+  await page.getByTestId("channel-management-edit").click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit channel" }),
+  ).toBeVisible();
+}
+
 async function closeChannelManagement(page: import("@playwright/test").Page) {
-  await page.keyboard.press("Escape");
+  await page.getByTestId("channel-management-close").click();
   await expect(page.getByTestId("channel-management-sheet")).not.toBeVisible();
 }
 
@@ -154,6 +165,13 @@ async function getLoggedNotificationCount(
   return (await getLoggedNotifications(page)).length;
 }
 
+async function expectLoggedNotifications(
+  page: import("@playwright/test").Page,
+  expected: Array<{ body: string | null; title: string }>,
+) {
+  await expect.poll(() => getLoggedNotifications(page)).toEqual(expected);
+}
+
 test.beforeAll(async () => {
   test.setTimeout(relaySeedHookTimeoutMs);
   await assertRelaySeeded();
@@ -194,7 +212,7 @@ test("two users see the same channel", async ({
     await expect(pageOne.getByTestId("stream-list")).toContainText(channelName);
 
     await pageTwo.goto("/");
-    await pageTwo.getByTestId("browse-channels").click();
+    await openChannelBrowser(pageTwo);
     await expect(pageTwo.getByTestId("channel-browser-dialog")).toBeVisible();
     await pageTwo
       .getByTestId(`browse-channel-${channelName}`)
@@ -275,23 +293,22 @@ test("live mentions refetch the home feed without waiting for polling", async ({
       message,
     );
 
-    await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
-
-    const notifications = await getLoggedNotifications(targetPage);
-
-    expect(notifications).toEqual([
+    await expectLoggedNotifications(targetPage, [
       {
         body: message,
         title: "alice mentioned you in #general",
       },
     ]);
 
-    // The home feed should have been refetched live (the original purpose
+    // The inbox feed should have been refetched live (the original purpose
     // of this test). The home badge stays at 0 while the user is actively
     // reading #general — reading in-channel advances the NIP-RS marker past
     // the new mention — so the assertion that the refetch happened is the
     // inbox-list content, not the badge.
-    await targetPage.getByRole("button", { name: "Home" }).click();
+    await targetPage
+      .getByTestId("app-sidebar")
+      .getByRole("button", { name: "Inbox" })
+      .click();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
       message,
@@ -337,18 +354,17 @@ test("live forum mentions refetch the home feed without waiting for polling", as
 
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveText("1");
 
-    await expect.poll(() => getLoggedNotificationCount(targetPage)).toBe(1);
-
-    const notifications = await getLoggedNotifications(targetPage);
-
-    expect(notifications).toEqual([
+    await expectLoggedNotifications(targetPage, [
       {
         body: message,
         title: "alice mentioned you in #watercooler",
       },
     ]);
 
-    await targetPage.getByRole("button", { name: "Home" }).click();
+    await targetPage
+      .getByTestId("app-sidebar")
+      .getByRole("button", { name: "Inbox" })
+      .click();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
@@ -412,13 +428,11 @@ test("multiple channels independent", async ({ page }) => {
   await installRelayBridge(page, "tyler");
   await page.goto("/");
 
-  // Create channel A
   await page.getByRole("button", { name: "Create a channel" }).click();
   await page.getByTestId("create-channel-name").fill(channelA);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelA);
 
-  // Create channel B
   await page.getByRole("button", { name: "Create a channel" }).click();
   await page.getByTestId("create-channel-name").fill(channelB);
   await page.getByTestId("create-channel-submit").click();
@@ -455,31 +469,22 @@ test("manage sheet updates channel details and context through the relay", async
   await createStream(page, initialName, initialDescription);
 
   await openChannelManagement(page);
-  await page.getByTestId("channel-management-name").fill(renamedChannel);
-  await page
+  await openChannelEditDialog(page);
+  const editDialog = page.getByRole("dialog", { name: "Edit channel" });
+
+  await editDialog.getByTestId("channel-management-name").fill(renamedChannel);
+  await editDialog
     .getByTestId("channel-management-description")
     .fill(updatedDescription);
-  await page.getByTestId("channel-management-save-details").click();
+  await editDialog.getByTestId("channel-management-topic").fill(updatedTopic);
+  await editDialog
+    .getByTestId("channel-management-purpose")
+    .fill(updatedPurpose);
+  await editDialog.getByTestId("channel-management-save-changes").click();
+  await expect(editDialog).toHaveCount(0);
 
   await expect(page.getByTestId("chat-title")).toHaveText(renamedChannel);
   await expect(page.getByTestId("stream-list")).toContainText(renamedChannel);
-
-  const saveTopicButton = page.getByTestId("channel-management-save-topic");
-  const savePurposeButton = page.getByTestId("channel-management-save-purpose");
-
-  await page.getByTestId("channel-management-topic").fill(updatedTopic);
-  await saveTopicButton.click();
-  await expect(saveTopicButton).toHaveText("Save topic");
-  await expect(page.getByTestId("channel-management-topic")).toHaveValue(
-    updatedTopic,
-  );
-
-  await page.getByTestId("channel-management-purpose").fill(updatedPurpose);
-  await savePurposeButton.click();
-  await expect(savePurposeButton).toHaveText("Save purpose");
-  await expect(page.getByTestId("channel-management-purpose")).toHaveValue(
-    updatedPurpose,
-  );
 
   await closeChannelManagement(page);
   await page.reload();
@@ -493,18 +498,23 @@ test("manage sheet updates channel details and context through the relay", async
   );
 
   await openChannelManagement(page);
-  await expect(page.getByTestId("channel-management-name")).toHaveValue(
-    renamedChannel,
-  );
-  await expect(page.getByTestId("channel-management-description")).toHaveValue(
-    updatedDescription,
-  );
-  await expect(page.getByTestId("channel-management-topic")).toHaveValue(
-    updatedTopic,
-  );
-  await expect(page.getByTestId("channel-management-purpose")).toHaveValue(
-    updatedPurpose,
-  );
+  await openChannelEditDialog(page);
+  const reopenedEditDialog = page.getByRole("dialog", {
+    name: "Edit channel",
+  });
+
+  await expect(
+    reopenedEditDialog.getByTestId("channel-management-name"),
+  ).toHaveValue(renamedChannel);
+  await expect(
+    reopenedEditDialog.getByTestId("channel-management-description"),
+  ).toHaveValue(updatedDescription);
+  await expect(
+    reopenedEditDialog.getByTestId("channel-management-topic"),
+  ).toHaveValue(updatedTopic);
+  await expect(
+    reopenedEditDialog.getByTestId("channel-management-purpose"),
+  ).toHaveValue(updatedPurpose);
 });
 
 test("manage sheet archive and unarchive survives a reload through the relay", async ({
@@ -531,7 +541,7 @@ test("manage sheet archive and unarchive survives a reload through the relay", a
   await page.reload();
 
   await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
-  await page.getByTestId("browse-channels").click();
+  await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await expect(page.getByTestId(`browse-channel-${channelName}`)).toContainText(
     "archived",

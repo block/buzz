@@ -1,16 +1,78 @@
 #[cfg(feature = "mesh-llm")]
 use super::relay_mesh_model_id;
 use super::{
-    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
-    spawn_agent_child, sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
+    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, load_personas,
+    save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
+    ManagedAgentProcess,
 };
 use crate::app_state::AppState;
 use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
-type SpawnResult = Result<(std::process::Child, std::path::PathBuf), String>;
+type SpawnResult = Result<ManagedAgentProcess, String>;
 type AgentSpawnResult = (String, SpawnResult);
+
+/// Backfill the pinned persona snapshot for pre-existing agents created before
+/// the record became the spawn source of truth. Runs once at launch, before
+/// `restore_managed_agents_on_launch` spawns anything, so no agent boots from an
+/// empty snapshot.
+///
+/// Only records with a `persona_id` but no `persona_source_version` are touched.
+/// If the linked persona is gone, we log loudly and leave the snapshot empty —
+/// the record's own `system_prompt`/`model` (possibly empty for persona-created
+/// agents) is then all the config that remains, which is the same fallback an
+/// orphaned agent already gets.
+pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    let mut records = load_managed_agents(app)?;
+    let needs_backfill = records
+        .iter()
+        .any(|r| r.persona_id.is_some() && r.persona_source_version.is_none());
+    if !needs_backfill {
+        return Ok(());
+    }
+
+    let personas = load_personas(app)?;
+    let mut changed = false;
+    for record in records.iter_mut() {
+        let Some(persona_id) = record.persona_id.clone() else {
+            continue;
+        };
+        if record.persona_source_version.is_some() {
+            continue;
+        }
+        let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
+            eprintln!(
+                "buzz-desktop: persona-snapshot backfill: agent {} links persona {persona_id} which no longer exists; leaving snapshot empty — it will spawn from its record fields",
+                record.pubkey
+            );
+            continue;
+        };
+        // Layer the agent's own env overrides over persona env, matching
+        // create-time precedence (persona env < agent env).
+        let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+        if let Some(prompt) = snapshot.system_prompt {
+            record.system_prompt = Some(prompt);
+        }
+        record.model = snapshot.model;
+        record.provider = snapshot.provider;
+        record.env_vars = snapshot.env_vars;
+        record.persona_source_version = Some(snapshot.source_version);
+        record.updated_at = util::now_iso();
+        changed = true;
+    }
+
+    if changed {
+        save_managed_agents(app, &records)?;
+    }
+    Ok(())
+}
 
 /// Restore managed agents that were running before the app was closed.
 ///
@@ -29,7 +91,7 @@ pub async fn restore_managed_agents_on_launch(
     let state = app.state::<AppState>();
 
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
-    let agents_to_start: Vec<super::ManagedAgentRecord>;
+    let mut agents_to_start: Vec<super::ManagedAgentRecord>;
     {
         let _store_guard = state
             .managed_agents_store_lock
@@ -45,8 +107,13 @@ pub async fn restore_managed_agents_on_launch(
             .managed_agent_processes
             .lock()
             .map_err(|error| error.to_string())?;
-        let mut changed = sync_managed_agent_processes(&mut records, &mut runtimes);
-        changed |= kill_stale_tracked_processes(&mut records, &runtimes);
+        let mut changed = sync_managed_agent_processes(
+            &mut records,
+            &mut runtimes,
+            &super::current_instance_id(app),
+        );
+        changed |=
+            kill_stale_tracked_processes(&mut records, &runtimes, &super::current_instance_id(app));
 
         let tracked_pids: Vec<u32> = records
             .iter()
@@ -88,6 +155,38 @@ pub async fn restore_managed_agents_on_launch(
             }
         }
         agents_to_start = to_start;
+
+        // Re-snapshot persona config for agents about to be restored, matching
+        // the interactive spawn path so auto-start agents also pick up the
+        // current persona on app launch.
+        let personas_for_snapshot = super::load_personas(app).unwrap_or_default();
+        for record in records.iter_mut() {
+            if !agents_to_start.iter().any(|r| r.pubkey == record.pubkey) {
+                continue;
+            }
+            let Some(persona_id) = record.persona_id.clone() else {
+                continue;
+            };
+            let Some(persona) = personas_for_snapshot.iter().find(|p| p.id == persona_id) else {
+                continue;
+            };
+            let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+            if let Some(prompt) = snapshot.system_prompt {
+                record.system_prompt = Some(prompt);
+            }
+            record.model = snapshot.model;
+            record.provider = snapshot.provider;
+            record.env_vars = snapshot.env_vars;
+            record.persona_source_version = Some(snapshot.source_version);
+            record.updated_at = util::now_iso();
+            changed = true;
+        }
+        // Re-collect to_start from the updated records so Phase B spawns the refreshed config.
+        agents_to_start = records
+            .iter()
+            .filter(|r| agents_to_start.iter().any(|s| s.pubkey == r.pubkey))
+            .cloned()
+            .collect();
 
         if changed {
             save_managed_agents(app, &records)?;
@@ -176,15 +275,15 @@ pub async fn restore_managed_agents_on_launch(
             Err(_) => continue,
         };
         match result {
-            Ok((child, log_path)) => {
+            Ok(process) => {
                 let now = util::now_iso();
                 record.updated_at = now.clone();
-                record.runtime_pid = Some(child.id());
+                record.runtime_pid = Some(process.child.id());
                 record.last_started_at = Some(now);
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(pubkey.clone(), ManagedAgentProcess { child, log_path });
+                runtimes.insert(pubkey.clone(), process);
                 successfully_spawned.push(pubkey);
             }
             Err(error) => {
@@ -198,11 +297,20 @@ pub async fn restore_managed_agents_on_launch(
     // releasing the lock. This mirrors the fire-and-forget pattern in
     // start_managed_agent — ensuring boot-restored agents get the same profile
     // self-healing as UI-started agents.
+    let reconcile_personas = super::load_personas(app).unwrap_or_default();
     let reconcile_items: Vec<(String, crate::commands::ProfileReconcileData)> =
         successfully_spawned
             .iter()
             .filter_map(|pubkey| {
                 let record = records.iter().find(|r| r.pubkey == *pubkey)?;
+                // Resolve the effective harness for the avatar-fallback
+                // derivation (the snapshot may be empty/stale for an inherited
+                // harness). Mirrors the UI start path.
+                let effective_command = crate::managed_agents::effective_agent_command(
+                    record.persona_id.as_deref(),
+                    &reconcile_personas,
+                    record.agent_command_override.as_deref(),
+                );
                 Some((
                     pubkey.clone(),
                     crate::commands::ProfileReconcileData {
@@ -212,7 +320,7 @@ pub async fn restore_managed_agents_on_launch(
                         avatar_url: record.avatar_url.clone(),
                         auth_tag: record.auth_tag.clone(),
                         pubkey: record.pubkey.clone(),
-                        agent_command: record.agent_command.clone(),
+                        agent_command: effective_command,
                         persona_id: record.persona_id.clone(),
                     },
                 ))

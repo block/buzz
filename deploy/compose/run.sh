@@ -86,6 +86,15 @@ case "${1:-help}" in
   backup-hint)
     backup_hint
     ;;
+  add-member)
+    docker compose exec relay /usr/local/bin/buzz-admin add-member --pubkey "${2:?Usage: ./run.sh add-member <npub-or-hex> [--role member|admin]}" "${@:3}"
+    ;;
+  remove-member)
+    docker compose exec relay /usr/local/bin/buzz-admin remove-member --pubkey "${2:?Usage: ./run.sh remove-member <npub-or-hex> [--role member|admin]}" "${@:3}"
+    ;;
+  list-members)
+    docker compose exec relay /usr/local/bin/buzz-admin list-members
+    ;;
   help|-h|--help)
     cat <<'MSG'
 Usage: ./run.sh <command>
@@ -100,6 +109,16 @@ Commands:
   status        Show compose service status
   config        Render merged compose config
   backup-hint   Print the production backup checklist
+
+  add-member <npub-or-hex> [--role member|admin]
+                Add a relay member (default role: member)
+  remove-member <npub-or-hex> [--role member|admin]
+                Remove a relay member
+  list-members  List all relay members
+
+  Note: when adding multiple members in a loop, add `sleep 1` between
+  invocations to avoid same-second timestamp collisions in the kind:13534
+  roster event. Do not use parallel adds (e.g. xargs -P).
 
 Environment switches:
   BUZZ_COMPOSE_TLS=true   Include compose.caddy.yml for automatic HTTPS

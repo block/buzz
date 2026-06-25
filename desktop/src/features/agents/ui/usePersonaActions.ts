@@ -36,7 +36,11 @@ type PersonaFeedbackSurface = "catalog" | "library";
 export function usePersonaActions() {
   const queryClient = useQueryClient();
   const personasQuery = usePersonasQuery();
-  const acpRuntimesQuery = useAcpRuntimesQuery();
+  const [shouldLoadAcpRuntimes, setShouldLoadAcpRuntimes] =
+    React.useState(false);
+  const acpRuntimesQuery = useAcpRuntimesQuery({
+    enabled: shouldLoadAcpRuntimes,
+  });
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
@@ -141,6 +145,7 @@ export function usePersonaActions() {
     try {
       const result = await parsePersonaFiles(fileBytes, fileName);
       if (isSingleItemFile(fileBytes) && result.personas.length === 1) {
+        setShouldLoadAcpRuntimes(true);
         setPersonaDialogState(importPersonaDialogState(result.personas[0]));
       } else if (result.personas.length > 0) {
         setBatchImportResult(result);
@@ -182,16 +187,19 @@ export function usePersonaActions() {
 
   function openCreate() {
     clearFeedback("library");
+    setShouldLoadAcpRuntimes(true);
     setPersonaDialogState(createPersonaDialogState());
   }
 
   function openEdit(persona: AgentPersona) {
     clearFeedback("library");
+    setShouldLoadAcpRuntimes(true);
     setPersonaDialogState(editPersonaDialogState(persona));
   }
 
   function openDuplicate(persona: AgentPersona) {
     clearFeedback("library");
+    setShouldLoadAcpRuntimes(true);
     setPersonaDialogState(duplicatePersonaDialogState(persona));
   }
 
@@ -213,19 +221,15 @@ export function usePersonaActions() {
     exportPersonaJsonMutation.isPending;
 
   return {
-    // Queries
     personasQuery,
     acpRuntimesQuery,
-    // Mutations (for error/pending access)
     createPersonaMutation,
     updatePersonaMutation,
     setPersonaActiveMutation,
-    // Derived state
     catalogPersonas,
     libraryPersonas,
     personaLabelsById,
     isPending,
-    // UI state
     personaDialogState,
     setPersonaDialogState,
     personaToDelete,
@@ -238,9 +242,7 @@ export function usePersonaActions() {
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
-    // Import actions (composed)
     personaImportActions,
-    // Handlers
     handleSubmit,
     handleDelete,
     handleSetActive,

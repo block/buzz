@@ -1,0 +1,51 @@
+{{- /*
+Creates the media bucket in the bundled MinIO after install/upgrade. Mirrors
+the docker-compose `minio-init` step. Hook-managed so it re-runs on upgrade
+and is garbage-collected. Quickstart-only.
+*/ -}}
+{{- if .Values.minio.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "buzz.minioFullname" . }}-init
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-init
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "buzz.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-init
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: {{ .Values.minio.mcImage | quote }}
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              until mc alias set local {{ include "buzz.minioEndpoint" . }} "$S3_ACCESS_KEY" "$S3_SECRET_KEY"; do
+                echo "waiting for MinIO..."; sleep 3
+              done
+              mc mb --ignore-existing local/{{ .Values.s3.bucket }}
+              mc anonymous set none local/{{ .Values.s3.bucket }}
+              echo "bucket {{ .Values.s3.bucket }} ready"
+{{- end -}}

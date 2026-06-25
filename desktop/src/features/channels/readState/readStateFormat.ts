@@ -8,7 +8,41 @@ export const READ_STATE_D_TAG_PREFIX = "read-state:";
 export const READ_STATE_FETCH_LIMIT = 500;
 export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
-const MAX_CONTEXTS = 10_000;
+export const MAX_CONTEXTS = 10_000;
+
+// Context-key prefix for a per-MESSAGE read marker (LP4 v3). One grow-only
+// marker per reply id; the badge predicate reads effective("msg:<id>") live so
+// reading an ancestor never covers a descendant (Issue 2 by construction).
+// Distinct from THREAD_PREFIX so the parent resolver and eviction can tell the
+// two key families apart.
+export const MSG_PREFIX = "msg:";
+export const THREAD_PREFIX = "thread:";
+
+const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
+
+export function maxReadAt(...markers: Array<number | null>): number | null {
+  return markers.reduce<number | null>((latest, marker) => {
+    if (marker === null) return latest;
+    if (latest === null || marker > latest) return marker;
+    return latest;
+  }, null);
+}
+
+export function msgContextKey(messageId: string): string {
+  return `${MSG_PREFIX}${messageId}`;
+}
+
+// Spec-conformance helpers for well-known interoperable context keys. Runtime
+// folding/eviction remains prefix-based so opaque client-local keys still work.
+export function isThreadContextKey(value: string): value is `thread:${string}` {
+  if (!value.startsWith(THREAD_PREFIX)) return false;
+  return EVENT_ID_PATTERN.test(value.slice(THREAD_PREFIX.length));
+}
+
+export function isMsgContextKey(value: string): value is `msg:${string}` {
+  if (!value.startsWith(MSG_PREFIX)) return false;
+  return EVENT_ID_PATTERN.test(value.slice(MSG_PREFIX.length));
+}
 
 export function localReadStateKey(pubkey: string): string {
   return `buzz.channel-read-state.v2:${pubkey}`;

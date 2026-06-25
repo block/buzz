@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import {
   getProfile,
@@ -17,6 +22,7 @@ import type {
   UsersBatchResponse,
 } from "@/shared/api/types";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { getAvatarSnapshotUrl } from "@/shared/lib/animatedAvatar";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import {
   SELF_PROFILE_CACHE_EVENT,
@@ -34,10 +40,6 @@ export const contactListQueryKey = (pubkey: string) =>
   ["contact-list", pubkey] as const;
 export const allPulseTimelinesQueryKey = ["pulse-timeline"] as const;
 
-// ---------------------------------------------------------------------------
-// Module-private helper
-// ---------------------------------------------------------------------------
-
 /**
  * Persists a freshly-fetched profile to localStorage as the offline fallback.
  * Reuses an existing avatar data URL when the avatar URL is unchanged to avoid
@@ -49,9 +51,10 @@ async function persistSelfProfile(
   profile: Profile,
 ): Promise<void> {
   const existing = readSelfProfileCache(relayUrl, pubkey);
+  const avatarSnapshotUrl = getAvatarSnapshotUrl(profile.avatarUrl);
   const fetched =
-    shouldFetchAvatar(profile.avatarUrl, existing) && profile.avatarUrl !== null
-      ? await fetchAvatarDataUrl(rewriteRelayUrl(profile.avatarUrl))
+    shouldFetchAvatar(profile.avatarUrl, existing) && avatarSnapshotUrl !== null
+      ? await fetchAvatarDataUrl(rewriteRelayUrl(avatarSnapshotUrl))
       : null;
   const avatarDataUrl = resolveAvatarDataUrl(
     profile.avatarUrl,
@@ -66,10 +69,6 @@ async function persistSelfProfile(
     updatedAt: Date.now(),
   });
 }
-
-// ---------------------------------------------------------------------------
-// Hooks
-// ---------------------------------------------------------------------------
 
 export function useProfileQuery(enabled = true) {
   const { activeWorkspace } = useWorkspaces();
@@ -97,6 +96,7 @@ export function useProfileQuery(enabled = true) {
             avatarUrl: cached.avatarUrl,
             about: null,
             nip05Handle: null,
+            ownerPubkey: null,
           } satisfies Profile)
         : undefined,
     [cached, pubkey],
@@ -279,6 +279,10 @@ export function useUsersBatchQuery(
     enabled,
     queryKey: ["users-batch", ...normalizedPubkeys],
     queryFn: () => getUsersBatch(normalizedPubkeys),
+    // Loading older messages grows the pubkey set, which changes this query's
+    // key entirely. Without this, already-resolved authors would flash back
+    // to their raw pubkey while the larger batch refetches.
+    placeholderData: keepPreviousData,
     staleTime: 60_000,
     gcTime: 5 * 60 * 1_000,
   });

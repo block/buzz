@@ -9,9 +9,12 @@
 //! Why this shape:
 //! - Owner secret key never leaves Rust. The desktop signs in as the owner
 //!   and decrypts via `agent ↔ owner` NIP-44 conversation key.
-//! - Owner gating is enforced here: the requested agent pubkey MUST exist
-//!   in the local `managed_agents` store. If not, the command refuses.
-//!   The UI hides the section anyway, but defense in depth.
+//! - Owner gating is enforced here: the request is accepted if the agent is
+//!   in the local `managed_agents` store OR the agent's live `kind:0`
+//!   cryptographically declares the viewer as its NIP-OA owner. Either way
+//!   the engrams are NIP-44 encrypted to the viewer's own pubkey, so the
+//!   encryption is the real boundary; this gate just decides whether to try.
+//!   The UI hides the section for non-owners anyway, but defense in depth.
 //! - One call returns everything because the orphans view requires the
 //!   full set anyway. Lazy/per-node decrypt is deferred to IXI-60.
 
@@ -25,6 +28,7 @@ use tauri::{AppHandle, State};
 use buzz_core_pkg::engram::{self, extract_refs, select_head, validate_and_decrypt, Body};
 use buzz_core_pkg::kind::KIND_AGENT_ENGRAM;
 
+use crate::commands::identity_archive::{extract_oa_owner, fetch_kind0};
 use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::query_relay};
 
 /// Hard cap on engrams returned per (agent, owner) pair. Matches the CLI
@@ -67,6 +71,26 @@ pub struct AgentMemoryListing {
     pub fetched_at: u64,
 }
 
+/// Does `kind0` cryptographically declare `viewer_pubkey` as the NIP-OA owner
+/// of the agent it belongs to?
+///
+/// This is the remote-owner gate predicate for [`get_agent_memory`]. It runs
+/// the live `kind:0` through [`extract_oa_owner`] (which verifies the auth tag
+/// against the agent's own pubkey via `nip_oa::verify_auth_tag`) and compares
+/// the recovered owner to the viewer, case-insensitively. Returns `false` for
+/// a missing `kind:0`, a `kind:0` without a verifiable auth tag, or an owner
+/// that doesn't match the viewer — so a forged/mismatched declaration never
+/// opens the gate. Pure over its inputs so the auth branch can be unit-tested
+/// without the relay/Tauri machinery.
+fn kind0_declares_viewer_owner(kind0: Option<&nostr::Event>, viewer_pubkey: &str) -> bool {
+    match kind0 {
+        Some(kind0) => extract_oa_owner(kind0)
+            .map(|(owner_hex, _tag)| owner_hex.eq_ignore_ascii_case(viewer_pubkey))
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
 /// `get_agent_memory` — owner-gated single-payload engram listing.
 ///
 /// Returns the full decrypted set for the (agent, owner) pair where
@@ -85,29 +109,53 @@ pub async fn get_agent_memory(
     state: State<'_, AppState>,
 ) -> Result<AgentMemoryListing, String> {
     // ── Owner gating ────────────────────────────────────────────────────
-    // The viewer (this desktop's identity) is the prospective owner. We
-    // accept the request only if the agent appears in our managed_agents
-    // store — that's the local source of truth for "agents I own". The UI
-    // must already have hidden the section for non-owners; this is just
-    // defense in depth.
+    // The viewer (this desktop's identity) is the prospective owner. The
+    // relay query below is `#p`-tagged for the viewer's OWN pubkey and every
+    // engram is NIP-44 encrypted to that pubkey, so the viewer decrypts with
+    // their own key — the agent's seckey is never needed. Encryption + the
+    // relay's server-side `#p` scoping are the real boundary; this gate only
+    // decides whether we bother attempting (and avoids a needless roundtrip
+    // for agents the viewer plainly doesn't own).
     //
-    // Why `managed_agents` rather than a NIP-OA `kind:0` lookup (the gate
-    // the archive command uses): the question this surface needs to answer
-    // is "do I have the seckey to decrypt this agent's engrams?", not
-    // "does this agent's `kind:0` declare me as its OA owner?". The former
-    // is what `managed_agents` records — it can't lie, you either have the
-    // key locally or you don't. The latter is forgeable (a malicious agent
-    // can put any pubkey in their `auth` tag) and would also require a
-    // relay roundtrip on every panel open. Keep this gate; don't swap it
-    // back to `resolve_oa_owner` "for consistency" — they're answering
-    // different questions.
+    // We accept the request on either of two owner signals, mirroring the UI's
+    // `viewerIsOwner = isCurrentUserOwner || isOwner`:
+    //   1. The agent is in this desktop's `managed_agents` store — local
+    //      fast-path, no roundtrip. Covers locally-run agents (and older
+    //      agents that never advertised an owner).
+    //   2. The agent's live `kind:0` cryptographically declares the viewer as
+    //      its NIP-OA owner (verified via `extract_oa_owner`). This is the
+    //      remote-owner case: the owner runs the agent on another desktop, so
+    //      holds no local seckey, but legitimately owns it.
+    //
+    // (Historical note: this gate used to refuse anything not in
+    // `managed_agents`, on the theory that key-custody was the only safe
+    // proxy for ownership. That conflated "do I hold the seckey?" with "am I
+    // the owner?" — the two diverge exactly for a remote-owned agent, which
+    // wrongly locked legitimate owners out of their own memory. The declared-
+    // owner path is cleared (PR #917 author signed off); decryption still
+    // does the real guarding.)
     let agent = PublicKey::from_hex(&agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
+    let viewer_pubkey = {
+        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        keys.public_key().to_hex()
+    };
+
     let managed = load_managed_agents(&app)?;
-    if !managed.iter().any(|m| m.pubkey == agent_pubkey) {
+    let is_managed = managed.iter().any(|m| m.pubkey == agent_pubkey);
+    let is_declared_owner = if is_managed {
+        false // already authorized; skip the relay roundtrip
+    } else {
+        // Verify the agent's live `kind:0` declares the viewer as owner.
+        let kind0 = fetch_kind0(&state, &agent_pubkey).await?;
+        kind0_declares_viewer_owner(kind0.as_ref(), &viewer_pubkey)
+    };
+
+    if !is_managed && !is_declared_owner {
         return Err(format!(
-            "not the owner of agent {agent_pubkey} (no managed-agent record)"
+            "not the owner of agent {agent_pubkey} (no managed-agent record \
+             and no verified NIP-OA owner declaration)"
         ));
     }
 
@@ -224,4 +272,101 @@ pub async fn get_agent_memory(
         truncated,
         fetched_at,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// Build a `kind:0` carrying a valid NIP-OA `auth` tag declaring `owner`
+    /// as the owner of `agent`. Mirrors the helper in `identity_archive`'s
+    /// tests — same `compute_auth_tag` → `parse_auth_tag` bridge.
+    fn kind0_with_auth(agent: &Keys, owner: &Keys) -> nostr::Event {
+        let agent_hex = agent.public_key().to_hex();
+        let agent_compat = nostr::PublicKey::from_hex(&agent_hex).unwrap();
+        let owner_compat_secret =
+            nostr::SecretKey::from_slice(owner.secret_key().as_secret_bytes()).unwrap();
+        let owner_compat_keys = nostr::Keys::new(owner_compat_secret);
+        let tag_json =
+            buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_compat_keys, &agent_compat, "")
+                .expect("compute_auth_tag");
+        let compat_tag = buzz_sdk_pkg::nip_oa::parse_auth_tag(&tag_json).unwrap();
+        let tag = Tag::parse(compat_tag.as_slice()).unwrap();
+        EventBuilder::new(Kind::Metadata, "{}")
+            .tags([tag])
+            .sign_with_keys(agent)
+            .unwrap()
+    }
+
+    /// The declared-owner gate branch opens when a verified `kind:0` names the
+    /// viewer as the agent's NIP-OA owner. This is the remote-owner case that
+    /// the old key-custody gate wrongly refused (PR #917 migration).
+    #[test]
+    fn declared_owner_gate_opens_for_verified_owner_kind0() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let kind0 = kind0_with_auth(&agent, &owner);
+
+        assert!(kind0_declares_viewer_owner(
+            Some(&kind0),
+            &owner.public_key().to_hex(),
+        ));
+    }
+
+    /// Owner match is case-insensitive — a verified declaration still opens the
+    /// gate when the viewer pubkey is supplied in a different hex case.
+    #[test]
+    fn declared_owner_gate_is_case_insensitive() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let kind0 = kind0_with_auth(&agent, &owner);
+
+        assert!(kind0_declares_viewer_owner(
+            Some(&kind0),
+            &owner.public_key().to_hex().to_uppercase(),
+        ));
+    }
+
+    /// A verified declaration for a *different* owner must NOT open the gate for
+    /// some other viewer — the recovered owner has to equal the viewer.
+    #[test]
+    fn declared_owner_gate_refuses_non_owner_viewer() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let stranger = Keys::generate();
+        let kind0 = kind0_with_auth(&agent, &owner);
+
+        assert!(!kind0_declares_viewer_owner(
+            Some(&kind0),
+            &stranger.public_key().to_hex(),
+        ));
+    }
+
+    /// A `kind:0` with no auth tag carries no owner claim, so the gate stays
+    /// shut even for the agent's own would-be owner.
+    #[test]
+    fn declared_owner_gate_refuses_kind0_without_auth_tag() {
+        let agent = Keys::generate();
+        let viewer = Keys::generate();
+        let kind0 = EventBuilder::new(Kind::Metadata, "{}")
+            .sign_with_keys(&agent)
+            .unwrap();
+
+        assert!(!kind0_declares_viewer_owner(
+            Some(&kind0),
+            &viewer.public_key().to_hex(),
+        ));
+    }
+
+    /// No live `kind:0` at all (relay returned nothing) means no declared
+    /// owner — the gate can only open via the local managed-agent fast path.
+    #[test]
+    fn declared_owner_gate_refuses_missing_kind0() {
+        let viewer = Keys::generate();
+        assert!(!kind0_declares_viewer_owner(
+            None,
+            &viewer.public_key().to_hex(),
+        ));
+    }
 }

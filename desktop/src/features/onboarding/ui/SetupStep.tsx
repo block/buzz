@@ -106,7 +106,7 @@ function RuntimeStatus({
         className="flex h-8 shrink-0 items-center justify-center"
         role="status"
       >
-        <Spinner className="h-4 w-4 text-foreground" />
+        <Spinner className="h-4 w-4 border-2 text-foreground" />
       </div>
     );
   }

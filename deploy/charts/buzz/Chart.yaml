@@ -1,0 +1,42 @@
+apiVersion: v2
+name: buzz
+description: |
+  Buzz — a Nostr-based messaging platform for human–agent collaboration.
+
+  A single relay binary serving WebSocket + REST + web UI, backed by
+  PostgreSQL, Redis, and Typesense. Configurable for single-node evaluation
+  (subcharts on) and HA production (external services, existingSecret).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/block/buzz
+sources:
+  - https://github.com/block/buzz
+keywords:
+  - nostr
+  - relay
+  - messaging
+  - websocket
+  - chat
+maintainers:
+  - name: Block
+    url: https://github.com/block
+annotations:
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial chart for Buzz relay.
+  artifacthub.io/license: Apache-2.0
+
+# Optional eval-only subcharts. Production deploys disable both and point
+# externalPostgresql / externalRedis (or secrets.existingSecret) at managed
+# services.
+dependencies:
+  - name: postgres
+    version: "0.19.x"
+    repository: oci://registry-1.docker.io/cloudpirates
+    condition: postgresql.enabled
+    alias: postgresql
+  - name: redis
+    version: "0.30.x"
+    repository: oci://registry-1.docker.io/cloudpirates
+    condition: redis.enabled

@@ -85,17 +85,9 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
     return ChannelStarsState(isReady: false, store: manager.store, version: 1);
   }
 
-  // -------------------------------------------------------------------------
-  // CRUD delegates
-  // -------------------------------------------------------------------------
-
   void starChannel(String channelId) => _manager?.starChannel(channelId);
 
   void unstarChannel(String channelId) => _manager?.unstarChannel(channelId);
-
-  // -------------------------------------------------------------------------
-  // Internal
-  // -------------------------------------------------------------------------
 
   void _emitManagerState(ChannelStarsManager manager) {
     if (_manager != manager) return;

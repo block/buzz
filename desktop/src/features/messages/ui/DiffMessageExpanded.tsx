@@ -46,7 +46,7 @@ export default function DiffMessageExpanded({
                 type="button"
                 variant={viewType === "unified" ? "secondary" : "ghost"}
               >
-                <Rows3 className="h-3.5 w-3.5" />
+                <Rows3 className="h-4 w-4" />
                 Unified
               </Button>
               <Button
@@ -58,7 +58,7 @@ export default function DiffMessageExpanded({
                 type="button"
                 variant={viewType === "split" ? "secondary" : "ghost"}
               >
-                <SplitSquareVertical className="h-3.5 w-3.5" />
+                <SplitSquareVertical className="h-4 w-4" />
                 Split
               </Button>
             </div>

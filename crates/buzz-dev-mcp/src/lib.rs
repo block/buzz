@@ -1,4 +1,5 @@
-#![forbid(unsafe_code)]
+#![cfg_attr(not(windows), forbid(unsafe_code))]
+#![cfg_attr(windows, deny(unsafe_code))]
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ServerCapabilities, ServerInfo},
@@ -137,7 +138,7 @@ impl ServerHandler for DevMcp {
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let argv0 = std::env::args().next().unwrap_or_default();
     let cmd = Path::new(&argv0)
-        .file_name()
+        .file_stem()
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();

@@ -1,0 +1,87 @@
+suite: networking
+templates:
+  - templates/ingress.yaml
+  - templates/httproute.yaml
+  - templates/service.yaml
+tests:
+  - it: Service exposes app/health/metrics ports
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - equal:
+          path: spec.ports[0].name
+          value: app
+        template: templates/service.yaml
+      - equal:
+          path: spec.ports[0].port
+          value: 3000
+        template: templates/service.yaml
+
+  - it: Ingress disabled by default
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/ingress.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/httproute.yaml
+
+  - it: Ingress renders with derived host when relayUrl provided
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      ingress.enabled: true
+      ingress.className: nginx
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/ingress.yaml
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+        template: templates/ingress.yaml
+
+  - it: HTTPRoute renders when enabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      httproute.enabled: true
+      httproute.parentRefs:
+        - name: my-gateway
+          namespace: gateway-system
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: templates/httproute.yaml
+      - equal:
+          path: kind
+          value: HTTPRoute
+        template: templates/httproute.yaml

@@ -130,7 +130,7 @@ export function TeamImportDialog({
           {preview ? (
             <div className="space-y-4">
               <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-card/80 px-4 py-3">
-                <Users className="h-5 w-5 shrink-0 text-muted-foreground" />
+                <Users className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold tracking-tight">
                     {preview.name}

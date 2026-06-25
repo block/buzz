@@ -1,14 +1,13 @@
 use sha2::{Digest, Sha256};
 
-use crate::client::{extract_d_tag, normalize_write_response, print_create_response, BuzzClient};
+use crate::client::{
+    extract_d_tag, extract_relay_response_field, normalize_write_response, print_create_response,
+    BuzzClient,
+};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
 // TODO(phase-4): Replace raw nostr::EventBuilder usage with buzz-sdk builder functions
-
-// ---------------------------------------------------------------------------
-// Read commands — POST /query
-// ---------------------------------------------------------------------------
 
 /// List workflows in a channel — query kind:30620 workflow definition events.
 pub async fn cmd_list_workflows(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
@@ -95,10 +94,6 @@ pub async fn cmd_get_workflow_runs(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Write commands — signed events via POST /events
-// ---------------------------------------------------------------------------
-
 /// Create a workflow — sign and submit a kind:30620 event.
 pub async fn cmd_create_workflow(
     client: &BuzzClient,
@@ -114,7 +109,9 @@ pub async fn cmd_create_workflow(
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
-    print_create_response(&resp, "workflow_id", &workflow_id.to_string());
+    let final_workflow_id = extract_relay_response_field(&resp, "workflow_id")
+        .unwrap_or_else(|| workflow_id.to_string());
+    print_create_response(&resp, "workflow_id", &final_workflow_id);
     Ok(())
 }
 
@@ -213,10 +210,6 @@ pub async fn cmd_approve_step(
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
 
 pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::WorkflowsCmd;

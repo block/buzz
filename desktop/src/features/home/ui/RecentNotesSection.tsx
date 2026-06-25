@@ -67,7 +67,7 @@ export function RecentNotesSection({
                   size="sm"
                 />
                 {isAgent ? (
-                  <Bot className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-background p-0.5 text-muted-foreground" />
+                  <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
                 ) : null}
               </div>
               <div className="min-w-0 flex-1">
@@ -76,16 +76,16 @@ export function RecentNotesSection({
                     {displayName}
                   </span>
                   {isAgent ? (
-                    <span className="inline-flex h-3.5 items-center rounded bg-muted px-1 text-[9px] font-medium text-muted-foreground">
+                    <span className="inline-flex h-3.5 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
                       bot
                     </span>
                   ) : null}
-                  <span className="shrink-0 text-[10px] text-muted-foreground">
+                  <span className="shrink-0 text-2xs text-muted-foreground">
                     {formatRelativeTime(note.createdAt)}
                   </span>
                 </div>
                 <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                  <Markdown compact content={note.content} />
+                  <Markdown content={note.content} />
                 </div>
               </div>
             </div>

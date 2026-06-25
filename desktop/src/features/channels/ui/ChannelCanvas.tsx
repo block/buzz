@@ -36,6 +36,9 @@ export function ChannelCanvas({
   const [draft, setDraft] = React.useState("");
 
   const canvasContent = canvasQuery.data?.content ?? null;
+  // Defer the single large Markdown parse so opening the canvas commits the
+  // surrounding chrome immediately and the heavy render reconciles after.
+  const deferredCanvasContent = React.useDeferredValue(canvasContent);
 
   function handleStartEditing() {
     setDraft(canvasContent ?? "");
@@ -53,7 +56,7 @@ export function ChannelCanvas({
   }
 
   if (canvasQuery.isLoading) {
-    return <p className="text-sm text-muted-foreground">Loading canvas…</p>;
+    return <p className="text-sm text-muted-foreground">Loading canvas...</p>;
   }
 
   if (canvasQuery.error instanceof Error) {
@@ -75,7 +78,7 @@ export function ChannelCanvas({
           data-testid="channel-canvas-editor"
           disabled={setCanvasMutation.isPending}
           onChange={(event) => setDraft(event.target.value)}
-          placeholder="Write your canvas content in Markdown…"
+          placeholder="Write your canvas content in Markdown..."
           value={draft}
         />
         <div className="flex gap-2">
@@ -91,7 +94,7 @@ export function ChannelCanvas({
             type="button"
           >
             <Save className="h-4 w-4" />
-            {setCanvasMutation.isPending ? "Saving…" : "Save canvas"}
+            {setCanvasMutation.isPending ? "Saving..." : "Save canvas"}
           </Button>
           <Button
             data-testid="channel-canvas-cancel"
@@ -123,8 +126,7 @@ export function ChannelCanvas({
         >
           <Markdown
             channelNames={channelNames}
-            compact
-            content={canvasContent}
+            content={deferredCanvasContent ?? ""}
           />
         </div>
       ) : (

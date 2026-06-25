@@ -81,8 +81,17 @@ export function resetMediaCaches(): void {
 }
 
 /**
+ * Build the local proxy URL with an IPv4 literal. The Rust proxy binds
+ * `127.0.0.1:0`, not `::1`, and some WebViews resolve `localhost` to IPv6
+ * first. Matching the bind address avoids machine-dependent image failures.
+ */
+export function mediaProxyUrl(port: number, mediaPath: string): string {
+  return `http://127.0.0.1:${port}/media/${mediaPath}`;
+}
+
+/**
  * If `url` is a Blossom media URL hosted on the Buzz relay, rewrite it
- * to go through the localhost streaming proxy. External Blossom URLs and
+ * to go through the local streaming proxy. External Blossom URLs and
  * non-Blossom URLs are returned unchanged.
  *
  * Falls back to buzz-media:// if the proxy port isn't available yet.
@@ -100,10 +109,9 @@ export function rewriteRelayUrl(url: string): string {
   }
 
   if (cachedPort && cachedPort > 0) {
-    return `http://localhost:${cachedPort}/media/${m[1]}`;
+    return mediaProxyUrl(cachedPort, m[1]);
   }
 
-  // Kick off fetch if we haven't yet.
   if (!portPromise && typeof window !== "undefined") {
     portPromise = fetchProxyPort();
   }

@@ -29,7 +29,6 @@ use crate::state::AppState;
 /// Pure Nostr protocol: WebSocket (NIP-01), HTTP bridge (NIP-98), media (Blossom),
 /// git (smart HTTP), NIP-05, and health probes.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    // ── Media routes: body limit covers both images and video ────────────────
     let media_body_limit = state
         .config
         .media
@@ -44,13 +43,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(RequestBodyLimitLayer::new(media_body_limit))
         .with_state(state.clone());
 
-    // ── Git routes: configurable body limit (default 500 MB) ─────────────────
     let git_router = api::git::git_router(state.clone());
 
-    // ── Internal git policy route (pre-receive hook callback) ────────────────
     let git_policy_router = api::git::git_policy_router(state.clone());
 
-    // ── All other routes: 1 MB body limit ────────────────────────────────────
     let api_router = Router::new()
         // WebSocket + NIP-11
         .route("/", get(nip11_or_ws_handler))
@@ -156,7 +152,11 @@ async fn nip11_or_ws_handler(
     let (relay_self, advertise_nip43) = nip11_facts(&state);
 
     if accept.contains("application/nostr+json") {
-        let info = RelayInfo::build(relay_self.as_deref(), advertise_nip43);
+        let info = RelayInfo::build(
+            relay_self.as_deref(),
+            advertise_nip43,
+            state.config.max_frame_bytes,
+        );
         return Json(info).into_response();
     }
 
@@ -175,7 +175,11 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
-            let info = RelayInfo::build(relay_self.as_deref(), advertise_nip43);
+            let info = RelayInfo::build(
+                relay_self.as_deref(),
+                advertise_nip43,
+                state.config.max_frame_bytes,
+            );
             Json(info).into_response()
         }
     }

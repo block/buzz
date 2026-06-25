@@ -15,22 +15,24 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_APPROVAL_DENY,
     KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
     KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST,
-    KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE,
-    KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED,
-    KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED,
-    KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT,
-    KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS,
-    KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
+    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
+    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
+    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
+    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
+    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MUTE_LIST,
+    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE, KIND_PROFILE,
-    KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
+    KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER,
 };
 use buzz_core::verification::verify_event;
 use nostr::Event;
@@ -38,8 +40,6 @@ use nostr::Event;
 use crate::state::AppState;
 
 use super::event::dispatch_persistent_event;
-
-// ── Public types ─────────────────────────────────────────────────────────────
 
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
@@ -143,8 +143,6 @@ pub enum IngestError {
     Internal(String),
 }
 
-// ── Per-kind scope allowlist ─────────────────────────────────────────────────
-
 /// Determine the required scope for a given event kind.
 ///
 /// Returns `Err` for unknown kinds — the relay rejects them.
@@ -152,7 +150,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     match kind {
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
-        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM => {
+        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
+        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
             Ok(Scope::UsersWrite)
         }
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
@@ -242,8 +241,6 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         _ => Err("restricted: unknown event kind"),
     }
 }
-
-// ── Channel resolution helpers ───────────────────────────────────────────────
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
 pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
@@ -340,8 +337,16 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_EMOJI_LIST
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
+            // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
+            | KIND_EVENT_REMINDER
             // Agent profile (10100): user-owned replaceable, keyed by pubkey.
             | KIND_AGENT_PROFILE
+            // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
+            | KIND_PERSONA
+            // NIP-AP: team (30176) + managed-agent (30177) definitions: owner-authored,
+            // keyed by (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
+            | KIND_TEAM
+            | KIND_MANAGED_AGENT
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -430,8 +435,6 @@ pub(crate) async fn check_channel_membership(
     }
 }
 
-// ── Token channel access ─────────────────────────────────────────────────────
-
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
     if let Some(allowed) = auth.channel_ids() {
         if !allowed.contains(&channel_id) {
@@ -440,8 +443,6 @@ fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(),
     }
     Ok(())
 }
-
-// ── NIP-10 thread resolution ─────────────────────────────────────────────────
 
 /// Owned thread metadata for the DB insert.
 pub(crate) struct ThreadMetadataOwned {
@@ -618,8 +619,6 @@ pub(crate) async fn resolve_nip10_thread_meta(
         broadcast,
     }))
 }
-
-// ── New validations (Phase 0a additions) ─────────────────────────────────────
 
 /// Count all `e` tags regardless of content validity.
 fn count_e_tags(event: &Event) -> usize {
@@ -883,6 +882,56 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate the envelope of a kind:30175 persona event.
+///
+/// Enforces:
+/// * exactly one `d` tag with a non-empty value matching the slug grammar
+///   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+///
+/// Without this, an empty d-tag collapses every persona into the
+/// `(pubkey, 30175, "")` slot — last-write-wins data loss.
+fn validate_persona_envelope(event: &Event) -> Result<(), String> {
+    let mut d_tags: Vec<&str> = Vec::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() >= 2 && parts[0].as_str() == "d" {
+            d_tags.push(&parts[1]);
+        }
+    }
+    if d_tags.len() != 1 {
+        return Err(format!(
+            "persona event must have exactly one `d` tag (got {})",
+            d_tags.len()
+        ));
+    }
+    let d = d_tags[0];
+    if d.is_empty() {
+        return Err("persona event `d` tag must not be empty".to_string());
+    }
+    // Slug grammar: ^[a-z0-9][a-z0-9_-]{0,63}$
+    if d.len() > 64 {
+        return Err(format!(
+            "persona event `d` tag too long ({} chars, max 64)",
+            d.len()
+        ));
+    }
+    let bytes = d.as_bytes();
+    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
+        return Err(
+            "persona event `d` tag must start with a lowercase letter or digit".to_string(),
+        );
+    }
+    if !bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(
+            "persona event `d` tag must match [a-z0-9_-] after the first character".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Validate that `content` is a syntactically plausible NIP-44 v2 ciphertext.
 ///
 /// Checks:
@@ -954,7 +1003,112 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-// ── The pipeline ─────────────────────────────────────────────────────────────
+/// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
+///
+/// The value MUST be a decimal integer string containing only ASCII digits, with
+/// no sign, whitespace, decimal point, or leading zero (except the literal `"0"`),
+/// and MUST be in the range 0..=9007199254740991 (`Number.MAX_SAFE_INTEGER`, the
+/// interoperable JSON integer bound the spec mandates). Parsing is exact integer
+/// parsing — never lossy floating-point — so values that overflow are malformed.
+fn validate_not_before(tag_value: &str) -> Result<u64, &'static str> {
+    const MAX_NOT_BEFORE: u64 = 9_007_199_254_740_991;
+
+    if tag_value.is_empty() || !tag_value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("malformed not_before");
+    }
+    // Reject leading zeros (e.g. "007") so each timestamp has one canonical form.
+    // "0" itself is the only value allowed to begin with '0'.
+    if tag_value.len() > 1 && tag_value.starts_with('0') {
+        return Err("malformed not_before");
+    }
+    // Exact integer parse — `u64::from_str` rejects overflow rather than rounding,
+    // so values that would lose precision as f64 are caught before the range check.
+    let value: u64 = tag_value.parse().map_err(|_| "malformed not_before")?;
+    if value > MAX_NOT_BEFORE {
+        return Err("malformed not_before");
+    }
+    Ok(value)
+}
+
+/// Validate the public tag envelope of a NIP-ER `kind:30300` event before it
+/// reaches NIP-33 parameterized replacement.
+///
+/// The relay never decrypts the reminder; it only enforces the public schedule
+/// tags. A reminder carries at most one `not_before` (omitted on terminal
+/// states), and — when both `not_before` and an optional NIP-40 `expiration`
+/// are present — `expiration` MUST be strictly after `not_before` (an
+/// `expiration <= not_before` window would expire the reminder before it ever
+/// became due).
+fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
+    let mut not_before: Option<u64> = None;
+    let mut expiration: Option<&str> = None;
+    let mut d_count = 0u8;
+    let mut d_empty = false;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "not_before" => {
+                // Spec (NIP-ER line 60) collapses invalid and duplicate
+                // `not_before` into one wire string clients may match on.
+                if not_before.is_some() {
+                    return Err("malformed not_before");
+                }
+                not_before = Some(validate_not_before(&parts[1])?);
+            }
+            "expiration" => expiration = Some(&parts[1]),
+            "d" => {
+                d_count = d_count.saturating_add(1);
+                if parts[1].is_empty() {
+                    d_empty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // d-tag: must have exactly one, non-empty
+    if d_count == 0 {
+        return Err("missing d tag");
+    }
+    if d_count > 1 {
+        return Err("duplicate d tag");
+    }
+    if d_empty {
+        return Err("empty d tag");
+    }
+
+    // `not_before` is optional — terminal states (done/cancelled) and bookmarks
+    // omit it. The ordering check only applies when both are present.
+    if let Some(nb) = not_before {
+        // Reject reminders scheduled beyond the configured horizon. The same
+        // SPROUT_MAX_NOT_BEFORE_DELTA env var is advertised in NIP-11.
+        let max_delta: u64 = std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(31_536_000); // 1 year default
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if nb > now + max_delta {
+            return Err("not_before too far in future");
+        }
+
+        if let Some(exp) = expiration {
+            if let Ok(exp) = exp.parse::<u64>() {
+                if exp <= nb {
+                    return Err("expiration before not_before");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
@@ -970,7 +1124,6 @@ pub async fn ingest_event(
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
 
-    // ── 1. Blocked kinds ─────────────────────────────────────────────────
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
             "invalid: AUTH events cannot be submitted".into(),
@@ -982,19 +1135,16 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 1b. HTTP-only kind gate ─────────────────────────────────────────
     if auth.is_http() && (kind_u32 == KIND_GIFT_WRAP || kind_u32 == KIND_PRESENCE_UPDATE) {
         return Err(IngestError::Rejected(format!(
             "invalid: kind {kind_u32} is only accepted via WebSocket"
         )));
     }
 
-    // ── 1c. Reject relay-only kinds from external submission ─────────────
     if buzz_core::kind::is_relay_only_kind(kind_u32) {
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
-    // ── 2. Signature verification ────────────────────────────────────────
     let event_clone = event.clone();
     let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
     match verify_result {
@@ -1010,7 +1160,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 2b. Timestamp sanity ─────────────────────────────────────────────
     // Skip for proxy:submit — proxy-translated events preserve upstream
     // created_at timestamps which may be historical (backfill/replay).
     if !auth.has_proxy_scope() {
@@ -1024,7 +1173,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 2c. Content size guard ───────────────────────────────────────────
     const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
     if event.content.len() > MAX_EVENT_CONTENT_BYTES {
         return Err(IngestError::Rejected(format!(
@@ -1034,7 +1182,6 @@ pub async fn ingest_event(
         )));
     }
 
-    // ── 3. Pubkey match ──────────────────────────────────────────────────
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !auth.has_proxy_scope() && !is_gift_wrap {
         return Err(IngestError::AuthFailed(
@@ -1042,7 +1189,6 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 4. Per-kind scope allowlist ──────────────────────────────────────
     let required = match required_scope_for_kind(kind_u32, &event) {
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
@@ -1077,14 +1223,12 @@ pub async fn ingest_event(
         )));
     }
 
-    // ── 4b. Route command kinds to command executor ──────────────────────
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
     if buzz_core::kind::is_command_kind(kind_u32) {
         return super::command_executor::handle_command(state, event, auth).await;
     }
 
-    // ── 5. Channel resolution ────────────────────────────────────────────
     let mut channel_id = if kind_u32 == KIND_REACTION {
         match derive_reaction_channel(&state.db, &event).await {
             ReactionChannelResult::Channel(ch_id) => Some(ch_id),
@@ -1146,19 +1290,16 @@ pub async fn ingest_event(
         extract_channel_id(&event)
     };
 
-    // ── 5b. Global-only kinds ignore h-tags ─────────────────────────────
     if is_global_only_kind(kind_u32) {
         channel_id = None;
     }
 
-    // ── 6. h-tag requirement ─────────────────────────────────────────────
     if requires_h_channel_scope(kind_u32) && channel_id.is_none() {
         return Err(IngestError::Rejected(
             "invalid: channel-scoped events must include an h tag".into(),
         ));
     }
 
-    // ── 7. Token channel access ──────────────────────────────────────────
     if let Some(ch_id) = channel_id {
         check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
     } else if auth.channel_ids().is_some() {
@@ -1171,7 +1312,6 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 8. Membership check ──────────────────────────────────────────────
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
     if let Some(ch_id) = channel_id {
         // kind:9021 (join) doesn't require prior membership.
@@ -1186,7 +1326,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 9a. Relay admin commands (kinds 9030–9032) ───────────────────────
     // Handled directly — these mutate relay_members and do NOT get stored.
     if is_relay_admin_kind(event.kind.as_u16() as u32) {
         crate::handlers::relay_admin::handle_relay_admin_event(state, &event)
@@ -1199,7 +1338,6 @@ pub async fn ingest_event(
         });
     }
 
-    // ── 9b. NIP-43 leave request (kind 28936) ────────────────────────────
     // Handled directly — removes the sender from relay_members. NOT stored.
     if kind_u32 == KIND_NIP43_LEAVE_REQUEST {
         if !state.config.require_relay_membership {
@@ -1283,14 +1421,12 @@ pub async fn ingest_event(
         });
     }
 
-    // ── 9. Admin validation (kinds 9000–9022) ────────────────────────────
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(kind_u32, &event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 9c. NIP-IA identity archive requests (kinds 9035/9036) ───────────
     // Processed here (verify consent, mutate archived_identities, emit the
     // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
     // NIP-43 admin commands above — the request itself falls through to normal
@@ -1301,14 +1437,12 @@ pub async fn ingest_event(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 10. Standard deletion validation (kind:5) ────────────────────────
     if kind_u32 == KIND_DELETION {
         crate::handlers::side_effects::validate_standard_deletion_event(&event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 11. Archived channel check ───────────────────────────────────────
     if let Some(ch_id) = channel_id {
         // Allow kind:9002 with archived=false (unarchive operation)
         let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
@@ -1326,7 +1460,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 12. Single-target enforcement (kind:9005, kind:5) ────────────────
     // NIP-09: kind:5 may reference targets via `e` tag (regular events) OR
     // `a` tag (addressable/parameterized-replaceable events like kind:30620).
     if kind_u32 == KIND_NIP29_DELETE_EVENT || kind_u32 == KIND_DELETION {
@@ -1343,35 +1476,40 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 13. Edit ownership (kind:40003) ──────────────────────────────────
     if kind_u32 == KIND_STREAM_MESSAGE_EDIT {
         validate_edit_ownership(&event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 14. Forum vote target-kind (kind:45002) ──────────────────────────
     if kind_u32 == KIND_FORUM_VOTE {
         validate_forum_vote_target(&event, state)
             .await
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 15. Diff validation (kind:40008) ─────────────────────────────────
     if kind_u32 == KIND_STREAM_MESSAGE_DIFF {
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 15a. Agent engram envelope (kind:30174) ──────────────────────────
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_EVENT_REMINDER {
+        validate_event_reminder(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    if kind_u32 == KIND_PERSONA {
+        validate_persona_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
-    // ── 16. kind:9007 UUID dedup (create channel with client UUID) ───────
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
         // Validate name tag is present and non-empty before any DB work.
         let create_name = event.tags.iter().find_map(|t| {
@@ -1463,7 +1601,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 17. kind:9021 open-only check ────────────────────────────────────
     if kind_u32 == KIND_NIP29_JOIN_REQUEST {
         // A join without an h-tag is meaningless — reject early.
         if channel_id.is_none() {
@@ -1486,7 +1623,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 18. imeta tag validation ─────────────────────────────────────────
     let imeta_tags: Vec<Vec<String>> = event
         .tags
         .iter()
@@ -1501,7 +1637,6 @@ pub async fn ingest_event(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // ── 19. NIP-10 thread resolution ─────────────────────────────────────
     let thread_meta = if requires_h_channel_scope(kind_u32) {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(&event, ch_id, state)
@@ -1514,8 +1649,6 @@ pub async fn ingest_event(
         None
     };
 
-    // ── 20. DB insert ────────────────────────────────────────────────────
-
     // Pre-validate kind:0 content before storage so we don't store an event
     // whose profile sync will silently fail in the side-effect handler.
     if kind_u32 == KIND_PROFILE
@@ -1526,7 +1659,6 @@ pub async fn ingest_event(
         ));
     }
 
-    // ── 20a. Reaction dedup (kind:7) — before storage ────────────────────
     // Resolve target event, insert the reaction row (dedup via ON CONFLICT),
     // store the event, then backfill the reaction_event_id. If the event insert
     // fails, compensate by removing the reaction row so state stays consistent.
@@ -1714,7 +1846,6 @@ pub async fn ingest_event(
         });
     }
 
-    // ── 20b. Bump ephemeral channel TTL deadline ──────────────────────
     // Any successfully stored channel-scoped event keeps the channel alive.
     // Skip kind:9007 (create) — the deadline was just set during creation.
     if let Some(ch_id) = channel_id {
@@ -1725,7 +1856,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 21. Side effects ─────────────────────────────────────────────────
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(kind_u32, &event, state).await
@@ -1734,7 +1864,6 @@ pub async fn ingest_event(
         }
     }
 
-    // ── 22. Fan-out ──────────────────────────────────────────────────────
     let pubkey_hex = auth.pubkey().to_hex();
     dispatch_persistent_event(state, &stored_event, kind_u32, &pubkey_hex).await;
 
@@ -1752,7 +1881,8 @@ mod tests {
     use super::*;
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
-        KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF, KIND_USER_STATUS,
+        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
 
     #[test]
@@ -1921,6 +2051,9 @@ mod tests {
             KIND_EMOJI_LIST,
             KIND_AGENT_ENGRAM,
             KIND_AGENT_PROFILE,
+            KIND_PERSONA,
+            KIND_TEAM,
+            KIND_MANAGED_AGENT,
         ];
         for kind in migrated {
             assert!(
@@ -1968,6 +2101,47 @@ mod tests {
             KIND_FOLLOW_SET,
             KIND_BOOKMARK_SET,
         ] {
+            assert!(
+                is_global_only_kind(kind),
+                "kind {kind} should be global-only (never channel-scoped)"
+            );
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h-tag channel scope"
+            );
+        }
+    }
+
+    #[test]
+    fn persona_is_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PERSONA, &dummy).unwrap(),
+            Scope::UsersWrite,
+        );
+    }
+
+    #[test]
+    fn persona_is_global_only() {
+        assert!(is_global_only_kind(KIND_PERSONA));
+        assert!(!requires_h_channel_scope(KIND_PERSONA));
+    }
+
+    #[test]
+    fn team_and_managed_agent_are_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_TEAM, KIND_MANAGED_AGENT] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::UsersWrite,
+                "kind {kind} should require UsersWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn team_and_managed_agent_are_global_only() {
+        for kind in [KIND_TEAM, KIND_MANAGED_AGENT] {
             assert!(
                 is_global_only_kind(kind),
                 "kind {kind} should be global-only (never channel-scoped)"
@@ -2084,8 +2258,6 @@ mod tests {
         assert!(validate_diff_event(&event).is_err());
     }
 
-    // ── Test helpers ─────────────────────────────────────────────────────
-
     fn make_dummy_event() -> Event {
         let keys = nostr::Keys::generate();
         nostr::EventBuilder::new(nostr::Kind::Custom(9), "")
@@ -2123,8 +2295,6 @@ mod tests {
         let event = make_event_with_tags(5, "", &[&["e", "a".repeat(64).as_str()]]);
         assert_eq!(count_e_tags(&event), 1);
     }
-
-    // ── NIP-AE envelope validation ───────────────────────────────────────
 
     fn make_engram(tags: &[&[&str]], content: &str) -> Event {
         make_event_with_tags(KIND_AGENT_ENGRAM, content, tags)
@@ -2265,5 +2435,293 @@ mod tests {
         let ev = make_engram(&[&["d", &d], &["p", &p]], &bad);
         let err = validate_engram_envelope(&ev).unwrap_err();
         assert!(err.contains("base64"), "got: {err}");
+    }
+
+    #[test]
+    fn not_before_accepts_zero() {
+        assert_eq!(validate_not_before("0"), Ok(0));
+    }
+
+    #[test]
+    fn not_before_accepts_typical_timestamp() {
+        assert_eq!(validate_not_before("1717000000"), Ok(1_717_000_000));
+    }
+
+    #[test]
+    fn not_before_accepts_max_safe_integer() {
+        assert_eq!(
+            validate_not_before("9007199254740991"),
+            Ok(9_007_199_254_740_991)
+        );
+    }
+
+    #[test]
+    fn not_before_rejects_above_max_safe_integer() {
+        assert_eq!(
+            validate_not_before("9007199254740992"),
+            Err("malformed not_before")
+        );
+    }
+
+    #[test]
+    fn not_before_rejects_leading_zero() {
+        assert_eq!(validate_not_before("007"), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn not_before_rejects_empty() {
+        assert_eq!(validate_not_before(""), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn not_before_rejects_non_digits() {
+        // Sign, whitespace, decimal point, and non-decimal forms are all
+        // rejected — only ASCII decimal digits are valid.
+        for value in ["-1", "+1", " 1", "1 ", "1.0", "1e3", "0x10", "abc"] {
+            assert_eq!(
+                validate_not_before(value),
+                Err("malformed not_before"),
+                "value {value:?} should be malformed"
+            );
+        }
+    }
+
+    #[test]
+    fn not_before_rejects_u64_overflow() {
+        // Exceeds u64::MAX — `from_str` errors rather than wrapping, so the
+        // value is malformed (not a lossy round-trip).
+        assert_eq!(
+            validate_not_before("99999999999999999999999999"),
+            Err("malformed not_before")
+        );
+    }
+
+    fn make_reminder(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(KIND_EVENT_REMINDER, "ciphertext", tags)
+    }
+
+    #[test]
+    fn reminder_accepts_single_valid_not_before() {
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", "1717000000"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_accepts_expiration_after_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "1717000001"],
+        ]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_accepts_missing_not_before() {
+        // Terminal states (done/cancelled) and bookmarks omit not_before
+        let ev = make_reminder(&[&["d", "abc"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_rejects_not_before_too_far_in_future() {
+        // `not_before` beyond the max horizon (default 1 year) is rejected.
+        let far_future = (chrono::Utc::now().timestamp() as u64) + 63_072_000; // ~2 years
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", &far_future.to_string()]]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("not_before too far in future")
+        );
+    }
+
+    #[test]
+    fn reminder_rejects_duplicate_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["not_before", "1717000005"],
+        ]);
+        assert_eq!(validate_event_reminder(&ev), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn reminder_rejects_malformed_not_before() {
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", "007"]]);
+        assert_eq!(validate_event_reminder(&ev), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn reminder_rejects_expiration_equal_to_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "1717000000"],
+        ]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("expiration before not_before")
+        );
+    }
+
+    #[test]
+    fn reminder_rejects_expiration_before_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "1716000000"],
+        ]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("expiration before not_before")
+        );
+    }
+
+    #[test]
+    fn reminder_ignores_malformed_expiration() {
+        // A malformed `expiration` is NIP-40's concern, not this validator's:
+        // the ordering check runs only when `expiration` parses, so a valid
+        // `not_before` with an unparseable expiration is accepted here.
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "notanumber"],
+        ]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn event_reminder_is_global_only_and_param_replaceable() {
+        assert!(is_global_only_kind(KIND_EVENT_REMINDER));
+        assert!(!requires_h_channel_scope(KIND_EVENT_REMINDER));
+        assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER));
+    }
+
+    #[test]
+    fn reminder_accepts_expiration_without_not_before() {
+        // A terminal/bookmark with expiration but no not_before is valid —
+        // no ordering check applies when not_before is absent.
+        let ev = make_reminder(&[&["d", "abc"], &["expiration", "1777542730"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_rejects_missing_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("missing d tag"));
+    }
+
+    #[test]
+    fn reminder_rejects_empty_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["d", ""], &["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("empty d tag"));
+    }
+
+    #[test]
+    fn reminder_rejects_duplicate_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["d", "abc"], &["d", "def"], &["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("duplicate d tag"));
+    }
+
+    fn make_persona(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x","system_prompt":"y"}"#,
+            tags,
+        )
+    }
+
+    #[test]
+    fn persona_envelope_accepts_valid_slug() {
+        let ev = make_persona(&[&["d", "my-persona-1"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_single_char() {
+        let ev = make_persona(&[&["d", "a"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_max_length() {
+        let slug = "a".repeat(64);
+        let ev = make_persona(&[&["d", &slug]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_rejects_missing_d_tag() {
+        let ev = make_persona(&[]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_empty_d_tag() {
+        let ev = make_persona(&[&["d", ""]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_duplicate_d_tags() {
+        let ev = make_persona(&[&["d", "slug-a"], &["d", "slug-b"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_too_long() {
+        let slug = "a".repeat(65);
+        let ev = make_persona(&[&["d", &slug]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("too long"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_uppercase() {
+        let ev = make_persona(&[&["d", "My-Persona"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_leading_underscore() {
+        let ev = make_persona(&[&["d", "_invalid"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("start with"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_leading_hyphen() {
+        let ev = make_persona(&[&["d", "-invalid"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("start with"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_spaces() {
+        let ev = make_persona(&[&["d", "has space"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_dots() {
+        let ev = make_persona(&[&["d", "has.dot"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
     }
 }

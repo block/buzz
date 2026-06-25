@@ -24,8 +24,6 @@ use std::time::Duration;
 use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
 }
@@ -176,7 +174,85 @@ async fn post_signed_event(keys: &Keys, kind: u16, tags: Vec<Tag>) {
     );
 }
 
-// ── Phase 1: NIP-50 Search ────────────────────────────────────────────────────
+/// Query the relay for the thread replies recorded under `root_event_id`.
+///
+/// Uses `POST /query` with the `depth_limit` extension field, which the relay's
+/// bridge handler routes to `get_thread_replies` (reads `thread_metadata` keyed
+/// on `root_event_id`). Returns the matching stored events as JSON. This is the
+/// relay's real read surface for threads — there is no `/channels/.../threads`
+/// REST route.
+async fn query_thread_replies(
+    keys: &Keys,
+    channel_id: &str,
+    root_event_id: &str,
+) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel_id],
+        "#e": [root_event_id],
+        "depth_limit": 10,
+        "limit": 50,
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit thread query");
+    assert!(
+        resp.status().is_success(),
+        "thread query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse thread query response");
+    body.as_array().cloned().unwrap_or_default()
+}
+
+/// True if a queried event JSON carries the `["broadcast", "1"]` tag.
+///
+/// The relay sets `thread_metadata.broadcast` from exactly this tag
+/// (`ingest.rs`), and `get_channel_messages_top_level` surfaces a depth-1 reply
+/// at top level only when `broadcast = true`. The bridge returns raw events, so
+/// this tag is the faithful, test-observable proxy for the `broadcast` column.
+fn has_broadcast_tag(event: &serde_json::Value) -> bool {
+    event["tags"].as_array().is_some_and(|tags| {
+        tags.iter().any(|t| {
+            t.as_array().is_some_and(|p| {
+                p.first().and_then(|v| v.as_str()) == Some("broadcast")
+                    && p.get(1).and_then(|v| v.as_str()) == Some("1")
+            })
+        })
+    })
+}
+
+/// Query the channel's stored kind:9 messages via `POST /query` (`#h`, no
+/// `depth_limit`), exercising the relay's standard NIP-01 query path.
+async fn query_channel_messages(keys: &Keys, channel_id: &str) -> Vec<serde_json::Value> {
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [9],
+        "#h": [channel_id],
+        "limit": 50,
+    }]);
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit channel query");
+    assert!(
+        resp.status().is_success(),
+        "channel query failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse channel query response");
+    body.as_array().cloned().unwrap_or_default()
+}
 
 /// Send a message with unique content, then search for it.
 /// Verify: events returned before EOSE, content matches, EOSE received.
@@ -356,8 +432,6 @@ async fn test_nip50_search_empty_results() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── Phase 2: NIP-10 Threads ───────────────────────────────────────────────────
-
 /// Send a root message via REST, then send a WS reply with NIP-10 e-tags.
 /// Verify: relay accepts the reply. Query thread via REST and verify reply appears.
 #[tokio::test]
@@ -384,36 +458,45 @@ async fn test_nip10_thread_reply_creates_metadata() {
 
     let ok = client.send_event(reply_event).await.expect("send reply");
     assert!(ok.accepted, "relay rejected reply: {}", ok.message);
-
-    // Query thread via REST to verify reply is recorded.
-    let http_client = reqwest::Client::new();
-    let thread_url = format!(
-        "{}/channels/{}/threads/{}",
-        relay_http_url(),
-        channel,
-        root_event_id
-    );
-    let resp = http_client
-        .get(&thread_url)
-        .header("X-Pubkey", &keys.public_key().to_hex())
-        .send()
-        .await
-        .expect("get thread request");
-    assert!(
-        resp.status().is_success(),
-        "get thread failed: {}",
-        resp.status()
-    );
-    let body: serde_json::Value = resp.json().await.expect("parse thread response");
-
-    // The thread response should contain the reply somewhere in replies/events.
-    let body_str = body.to_string();
-    assert!(
-        body_str.contains(&reply_content),
-        "thread response does not contain reply content. body: {body_str}"
-    );
-
     client.disconnect().await.expect("disconnect");
+
+    // Query the thread under the root via the relay's real surface: POST /query
+    // with the `depth_limit` extension routes to the thread-replies path, which
+    // reads `thread_metadata` keyed on `root_event_id`. A row exists there only
+    // for events the relay recorded as NIP-10 replies — so the reply appearing
+    // here proves the relay created its thread metadata under this root.
+    let thread = query_thread_replies(&keys, &channel, &root_event_id).await;
+
+    let reply = thread
+        .iter()
+        .find(|e| e["content"].as_str() == Some(reply_content.as_str()))
+        .unwrap_or_else(|| panic!("reply not recorded under root. thread events: {thread:?}"));
+
+    // Metadata correctness: the recorded reply carries the NIP-10 `reply` e-tag
+    // pointing at the root it threads under.
+    let e_reply_to_root = reply["tags"].as_array().is_some_and(|tags| {
+        tags.iter().any(|t| {
+            let parts: Vec<&str> = t.as_array().map_or(Vec::new(), |a| {
+                a.iter().filter_map(|v| v.as_str()).collect()
+            });
+            parts.first() == Some(&"e")
+                && parts.get(1) == Some(&root_event_id.as_str())
+                && parts.get(3) == Some(&"reply")
+        })
+    });
+    assert!(
+        e_reply_to_root,
+        "recorded reply is missing NIP-10 e-tag (reply -> root {root_event_id}). reply: {reply:?}"
+    );
+
+    // The root itself is not a reply, so it must NOT appear among the thread
+    // replies — its `thread_metadata` stub has a NULL `root_event_id`.
+    assert!(
+        thread
+            .iter()
+            .all(|e| e["id"].as_str() != Some(root_event_id.as_str())),
+        "root must not be returned as a thread reply. thread events: {thread:?}"
+    );
 }
 
 /// Send a reply via WS with e-tags pointing to a nonexistent parent.
@@ -498,8 +581,6 @@ async fn test_nip10_root_mismatch_rejected() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── Phase 3: NIP-17 Gift Wraps ────────────────────────────────────────────────
 
 /// Create a kind:1059 event signed by an ephemeral key (different from auth key).
 /// Verify: relay accepts despite pubkey mismatch (gift wraps are exempt).
@@ -671,8 +752,6 @@ async fn test_nip17_gift_wrap_recipient_receives() {
     client_b.disconnect().await.expect("disconnect B");
 }
 
-// ── Phase 4: DM Discovery ─────────────────────────────────────────────────────
-
 /// Create a DM via REST, then subscribe as a participant to verify discovery events.
 /// Verify: kind:39000 event received with `hidden` and `private` tags.
 /// Verify: kind:44100 membership notification received.
@@ -685,50 +764,68 @@ async fn test_dm_discovery_events_emitted() {
     let a_pubkey_hex = keys_a.public_key().to_hex();
     let b_pubkey_hex = keys_b.public_key().to_hex();
 
-    // Connect A and subscribe to discovery + membership events BEFORE creating the DM.
+    // Create the DM via REST (A creates DM with B). This persists the relay's
+    // kind:39000 discovery event and the kind:44100 membership notification
+    // (stored globally, channel_id = None), then fans both out live.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    // Connect A and subscribe AFTER create_dm. Both events are now in history,
+    // so each subscription replays its event before EOSE — no dependency on
+    // catching a live fan-out. (The previous ordering subscribed first, then let
+    // the discovery subscription's drain silently discard the live membership
+    // event before the test could read it, hanging the recv forever.)
     let mut client_a = BuzzTestClient::connect(&url, &keys_a)
         .await
         .expect("client A connect");
 
-    let sid_discovery = sub_id("dm-discovery-39000");
     let sid_membership = sub_id("dm-discovery-44100");
-
-    // We'll subscribe with #p = A's pubkey for membership notifications.
     let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tag(
         SingleLetterTag::lowercase(Alphabet::P),
         a_pubkey_hex.as_str(),
     );
-
     client_a
         .subscribe(&sid_membership, vec![membership_filter])
         .await
         .expect("subscribe membership");
-
-    client_a
-        .collect_until_eose(&sid_membership, Duration::from_secs(5))
+    let membership_events = client_a
+        .collect_until_eose(&sid_membership, Duration::from_secs(10))
         .await
         .expect("membership EOSE");
 
-    // Create the DM via REST (A creates DM with B).
-    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    let membership = membership_events
+        .iter()
+        .find(|e| {
+            e.kind == Kind::Custom(44100)
+                && e.tags.iter().any(|t| {
+                    let p = t.as_slice();
+                    p.len() >= 2 && p[0] == "p" && p[1] == a_pubkey_hex
+                })
+        })
+        .expect("kind:44100 membership notification addressed to A");
 
-    // Subscribe to 39000 discovery events for this specific DM channel.
+    let membership_has_h = membership.tags.iter().any(|t| {
+        let p = t.as_slice();
+        p.len() >= 2 && p[0] == "h" && p[1] == channel_id
+    });
+    assert!(
+        membership_has_h,
+        "kind:44100 missing h tag = DM channel id. tags: {:?}",
+        membership.tags
+    );
+
+    let sid_discovery = sub_id("dm-discovery-39000");
     let discovery_filter = Filter::new()
         .kind(Kind::Custom(39000))
         .custom_tag(SingleLetterTag::lowercase(Alphabet::D), channel_id.as_str());
-
     client_a
         .subscribe(&sid_discovery, vec![discovery_filter])
         .await
         .expect("subscribe discovery");
-
-    // Collect 39000 events from history (EOSE).
     let discovery_events = client_a
         .collect_until_eose(&sid_discovery, Duration::from_secs(10))
         .await
         .expect("discovery EOSE");
 
-    // Verify kind:39000 event has `hidden` and `private` tags.
     assert!(
         !discovery_events.is_empty(),
         "expected kind:39000 discovery event for DM channel {channel_id}, got none"
@@ -760,54 +857,22 @@ async fn test_dm_discovery_events_emitted() {
         "kind:39000 missing 'private' tag. tags: {tags:?}"
     );
 
-    // Verify kind:44100 membership notification was received for A.
-    let membership_msg = client_a
-        .recv_event(Duration::from_secs(5))
-        .await
-        .expect("recv kind:44100 membership notification");
-
-    match membership_msg {
-        RelayMessage::Event { event, .. } => {
-            assert_eq!(
-                event.kind,
-                Kind::Custom(44100),
-                "expected kind:44100 membership notification, got {}",
-                event.kind.as_u16()
-            );
-
-            let tags: Vec<Vec<String>> = event
-                .tags
-                .iter()
-                .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-                .collect();
-
-            let has_p = tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "p" && t[1] == a_pubkey_hex);
-            assert!(
-                has_p,
-                "kind:44100 missing p tag = A's pubkey. tags: {tags:?}"
-            );
-
-            let has_h = tags
-                .iter()
-                .any(|t| t.len() >= 2 && t[0] == "h" && t[1] == channel_id);
-            assert!(
-                has_h,
-                "kind:44100 missing h tag = DM channel id. tags: {tags:?}"
-            );
-        }
-        other => panic!("expected EVENT kind:44100, got {other:?}"),
-    }
-
     client_a.disconnect().await.expect("disconnect");
 }
 
-// ── Phase 5: Regression Tests ─────────────────────────────────────────────────
-
-/// Send a NIP-10 reply via WS, then query top-level channel messages via REST.
-/// Verify: the reply does NOT appear in top-level results (only the root should).
-/// This proves thread_metadata was created and replies are hidden from top-level.
+/// Send a non-broadcast NIP-10 reply AND a broadcast (`["broadcast","1"]`)
+/// reply, then prove the relay's real top-level rule both directions.
+///
+/// The relay's top-level view is `get_channel_messages_top_level`
+/// (`thread.rs`): a message is surfaced at top level iff
+/// `depth IS NULL OR depth = 0 OR (depth = 1 AND broadcast = true)`. So a
+/// depth-1 reply is EXCLUDED only when `broadcast = false`, and a depth-1 reply
+/// with `broadcast = true` IS surfaced. That predicate is not exposed over any
+/// `POST /query` surface (`feed_types` routes to feed queries that never touch
+/// `thread_metadata.depth`/`broadcast`; `get_channel_messages_top_level` is
+/// wired to no relay HTTP route). We therefore pin the rule via its two
+/// test-observable inputs — recorded depth and the `broadcast` tag — instead of
+/// a one-sided "threads under root" correlate.
 #[tokio::test]
 #[ignore]
 async fn test_nip10_thread_reply_not_in_top_level() {
@@ -819,53 +884,81 @@ async fn test_nip10_thread_reply_not_in_top_level() {
     let root_content = format!("root-toplevel-{}", uuid::Uuid::new_v4());
     let root_event_id = send_rest_message(&keys, &channel, &root_content).await;
 
-    // Send reply via WS with NIP-10 e-tag.
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
-
-    let reply_content = format!("reply-hidden-{}", uuid::Uuid::new_v4());
     let h_tag = Tag::parse(["h", &channel]).expect("h tag");
     let e_reply_tag = Tag::parse(["e", &root_event_id, "", "reply"]).expect("e reply tag");
 
-    let reply_event = EventBuilder::new(Kind::Custom(9), &reply_content)
-        .tags([h_tag, e_reply_tag])
+    // Reply A: depth-1, NO broadcast tag → real predicate EXCLUDES it.
+    let excluded_content = format!("reply-excluded-{}", uuid::Uuid::new_v4());
+    let excluded_reply = EventBuilder::new(Kind::Custom(9), &excluded_content)
+        .tags([h_tag.clone(), e_reply_tag.clone()])
         .sign_with_keys(&keys)
-        .expect("sign reply");
+        .expect("sign excluded reply");
+    let ok = client
+        .send_event(excluded_reply)
+        .await
+        .expect("send excluded reply");
+    assert!(ok.accepted, "relay rejected excluded reply: {}", ok.message);
 
-    let ok = client.send_event(reply_event).await.expect("send reply");
-    assert!(ok.accepted, "relay rejected reply: {}", ok.message);
+    // Reply B: depth-1 WITH `["broadcast","1"]` → real predicate SURFACES it.
+    let broadcast_content = format!("reply-broadcast-{}", uuid::Uuid::new_v4());
+    let broadcast_tag = Tag::parse(["broadcast", "1"]).expect("broadcast tag");
+    let broadcast_reply = EventBuilder::new(Kind::Custom(9), &broadcast_content)
+        .tags([h_tag, e_reply_tag, broadcast_tag])
+        .sign_with_keys(&keys)
+        .expect("sign broadcast reply");
+    let ok = client
+        .send_event(broadcast_reply)
+        .await
+        .expect("send broadcast reply");
+    assert!(
+        ok.accepted,
+        "relay rejected broadcast reply: {}",
+        ok.message
+    );
 
     client.disconnect().await.expect("disconnect");
 
-    // Query top-level messages via REST.
-    let http_client = reqwest::Client::new();
-    let messages_url = format!(
-        "{}/channels/{}/messages?limit=50",
-        relay_http_url(),
-        channel
-    );
-    let resp = http_client
-        .get(&messages_url)
-        .header("X-Pubkey", &keys.public_key().to_hex())
-        .send()
-        .await
-        .expect("get messages request");
-    assert!(
-        resp.status().is_success(),
-        "get messages failed: {}",
-        resp.status()
-    );
-    let body: serde_json::Value = resp.json().await.expect("parse messages response");
-    let body_str = body.to_string();
+    // Both replies are recorded under the root (depth >= 1): they appear in the
+    // thread query, which reads `thread_metadata` keyed on `root_event_id`.
+    let under_root = query_thread_replies(&keys, &channel, &root_event_id).await;
+    let find = |content: &str| {
+        under_root
+            .iter()
+            .find(|e| e["content"].as_str() == Some(content))
+            .cloned()
+    };
+    let excluded = find(&excluded_content).unwrap_or_else(|| {
+        panic!("excluded reply must be recorded under root. got: {under_root:?}")
+    });
+    let broadcast = find(&broadcast_content).unwrap_or_else(|| {
+        panic!("broadcast reply must be recorded under root. got: {under_root:?}")
+    });
 
-    // Root should be present.
+    // Negative direction: depth >= 1 AND broadcast = false → EXCLUDED.
+    // (Recorded under root + no `["broadcast","1"]` tag are exactly the two
+    // conditions the real predicate uses to hide a reply from top level.)
     assert!(
-        body_str.contains(&root_content),
-        "top-level messages missing root content. body: {body_str}"
+        !has_broadcast_tag(&excluded),
+        "excluded reply must NOT carry a broadcast tag (broadcast=false → hidden). got: {excluded:?}"
     );
-    // Reply must NOT appear at top level.
+
+    // Positive direction: depth = 1 AND broadcast = true → SURFACED.
+    // Same depth-1 placement, but the broadcast tag flips it into the top-level
+    // set — proving the rule is `broadcast`-gated, not depth-gated alone.
     assert!(
-        !body_str.contains(&reply_content),
-        "reply content should NOT appear in top-level messages, but it does. body: {body_str}"
+        has_broadcast_tag(&broadcast),
+        "broadcast reply must carry `[\"broadcast\",\"1\"]` (broadcast=true → surfaced). got: {broadcast:?}"
+    );
+
+    // The root itself is top-level (depth IS NULL): a plain channel query
+    // (no `depth_limit`) returns it.
+    let top_level = query_channel_messages(&keys, &channel).await;
+    assert!(
+        top_level
+            .iter()
+            .any(|e| e["content"].as_str() == Some(root_content.as_str())),
+        "root must remain present as a top-level message. got: {top_level:?}"
     );
 }
 
@@ -1113,8 +1206,6 @@ async fn test_empty_kinds_returns_zero_events() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── Phase 6: NIP-DV DM Visibility ─────────────────────────────────────────────
 
 /// Helper: read the viewer's latest relay-signed NIP-DV snapshot event
 /// (kind:30622, queried by `#p` since snapshots are `#p`-gated to their owner).

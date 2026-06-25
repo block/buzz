@@ -22,10 +22,6 @@ import type {
   WorkflowFormState,
 } from "./workflowFormTypes";
 
-// ---------------------------------------------------------------------------
-// Trigger config fields
-// ---------------------------------------------------------------------------
-
 function TriggerConfigFields({
   trigger,
   onUpdate,
@@ -122,10 +118,6 @@ function TriggerConfigFields({
   }
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
 type WorkflowFormBuilderProps = {
   disabled?: boolean;
   onChange: (yaml: string) => void;
@@ -219,7 +211,7 @@ export function WorkflowFormBuilder({
           type="button"
           variant="ghost"
         >
-          <Code className="h-3.5 w-3.5" />
+          <Code className="h-4 w-4" />
           {mode === "form" ? "Edit as YAML" : "Back to form"}
         </Button>
       </div>
@@ -335,7 +327,7 @@ export function WorkflowFormBuilder({
                 type="button"
                 variant="outline"
               >
-                <Plus className="h-3.5 w-3.5" />
+                <Plus className="h-4 w-4" />
                 Add step
               </Button>
             </div>

@@ -54,7 +54,7 @@ export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
           }
           size="sm"
         >
-          <Check className="mr-1 h-3 w-3" />
+          <Check className="mr-1 h-4 w-4" />
           Approve
         </Button>
         <Button
@@ -70,7 +70,7 @@ export function WorkflowApprovalCard({ approval }: WorkflowApprovalCardProps) {
           size="sm"
           variant="destructive"
         >
-          <X className="mr-1 h-3 w-3" />
+          <X className="mr-1 h-4 w-4" />
           Deny
         </Button>
       </div>

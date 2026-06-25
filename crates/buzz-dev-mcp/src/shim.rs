@@ -40,12 +40,13 @@ impl Shim {
         }
 
         let original = std::env::var_os("PATH").unwrap_or_default();
-        let mut new_path = std::ffi::OsString::from(dir.path());
-        if !original.is_empty() {
-            new_path.push(":");
-            new_path.push(&original);
-        }
-        let path_env = new_path.to_string_lossy().into_owned();
+        let mut entries = vec![PathBuf::from(dir.path())];
+        entries.extend(std::env::split_paths(&original));
+        // join_paths uses the platform separator (':' on Unix, ';' on Windows).
+        let path_env = std::env::join_paths(entries)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+            .to_string_lossy()
+            .into_owned();
 
         // Read and unconditionally remove NOSTR_PRIVATE_KEY from this process's
         // env. The key must never leak to child processes regardless of whether
@@ -234,6 +235,9 @@ fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    // No symlinks without elevation on Windows; copy instead. The target needs
+    // a .exe extension or PATH lookup (via PATHEXT) won't treat it as runnable.
+    let dst = dst.with_extension("exe");
     std::fs::copy(src, dst).map(|_| ())
 }
 

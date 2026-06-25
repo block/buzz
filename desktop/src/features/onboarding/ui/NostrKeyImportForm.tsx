@@ -222,12 +222,12 @@ export function NostrKeyImportForm({
           className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
           data-testid="nostr-import-npub-preview"
         >
-          <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+          <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
           <div className="min-w-0 space-y-0.5">
             <p className="font-medium text-foreground">
               This will use this Nostr identity:
             </p>
-            <p className="break-all font-mono text-[11px] text-muted-foreground">
+            <p className="break-all font-mono text-2xs text-muted-foreground">
               {shortenNpub(previewNpub)}
             </p>
           </div>
@@ -252,7 +252,7 @@ export function NostrKeyImportForm({
           type="submit"
         >
           {isBusy ? (
-            <Spinner aria-label="Importing key" className="h-4 w-4" />
+            <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
           ) : (
             "Continue with this key"
           )}

@@ -13,17 +13,18 @@ use super::{stt, tts};
 
 /// Voice input mode: push-to-talk (PTT) or voice-activity detection (VAD).
 ///
-/// PTT (default): mic is gated by a global shortcut (Ctrl+Space). Pressing the
-/// key sets `ptt_active` and immediately cancels any playing TTS. Releasing
-/// the key (after a 200 ms delay) stops mic capture and flushes the utterance.
+/// PTT: mic is gated by a global shortcut (Ctrl+Space). Pressing the key sets
+/// `ptt_active` and immediately cancels any playing TTS. Releasing the key
+/// (after a 200 ms delay) stops mic capture and flushes the utterance.
 ///
-/// VAD: the earshot VAD runs continuously and speech is accumulated whenever
-/// the probability exceeds the threshold. Barge-in is enabled in this mode.
+/// VAD (default): the earshot VAD runs continuously and speech is accumulated
+/// whenever the probability exceeds the threshold. Barge-in is enabled in this
+/// mode.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceInputMode {
-    #[default]
     PushToTalk,
+    #[default]
     VoiceActivity,
 }
 

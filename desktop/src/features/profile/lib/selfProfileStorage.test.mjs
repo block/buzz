@@ -8,8 +8,6 @@ import {
   storageKey,
 } from "./selfProfileStorage.ts";
 
-// ── storageKey ────────────────────────────────────────────────────────────────
-
 test("storageKey: includes pubkey in result", () => {
   const key = storageKey("https://relay.example.com", "deadbeef");
   assert.ok(
@@ -49,8 +47,6 @@ test("storageKey: different pubkeys produce different keys", () => {
   const b = storageKey("https://relay.example.com", "pubkey-b");
   assert.notEqual(a, b);
 });
-
-// ── parseSelfProfileCache ─────────────────────────────────────────────────────
 
 test("parseSelfProfileCache: valid v1 payload round-trips", () => {
   const payload = {
@@ -160,8 +156,6 @@ test("parseSelfProfileCache: non-number updatedAt is coerced to 0", () => {
   assert.equal(result?.updatedAt, 0);
 });
 
-// ── parseSelfProfileCache: avatarDataUrl data:image/ guard ────────────────────
-
 test("parseSelfProfileCache: valid data:image/ avatarDataUrl is preserved", () => {
   const result = parseSelfProfileCache({
     version: 1,
@@ -205,8 +199,6 @@ test("parseSelfProfileCache: data:text/html avatarDataUrl is coerced to null", (
   });
   assert.equal(result?.avatarDataUrl, null);
 });
-
-// ── shouldFetchAvatar ─────────────────────────────────────────────────────────
 
 /** Minimal SelfProfileCache fixture for policy helper tests. */
 function makeCache(overrides = {}) {
@@ -260,8 +252,6 @@ test("shouldFetchAvatar: nextAvatarUrl null → no fetch", () => {
   });
   assert.equal(shouldFetchAvatar(null, existing), false);
 });
-
-// ── resolveAvatarDataUrl ──────────────────────────────────────────────────────
 
 test("resolveAvatarDataUrl: nextAvatarUrl null → null", () => {
   const existing = makeCache({ avatarDataUrl: "data:image/jpeg;base64,/old" });

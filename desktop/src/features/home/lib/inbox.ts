@@ -2,9 +2,13 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  getThreadReference,
+  isBroadcastReply,
+} from "@/features/messages/lib/threading";
 import type { TimelineReaction } from "@/features/messages/types";
 import type {
+  Channel,
   FeedItem,
   FeedItemCategory,
   HomeFeedResponse,
@@ -15,9 +19,11 @@ import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 export type InboxFilter =
   | "all"
   | "mention"
+  | "thread"
   | "needs_action"
   | "activity"
-  | "agent_activity";
+  | "agent_activity"
+  | "reminders";
 
 export type InboxItem = {
   avatarUrl: string | null;
@@ -27,6 +33,7 @@ export type InboxItem = {
   categoryLabel: string;
   channelLabel: string | null;
   fullTimestampLabel: string;
+  groupItems: FeedItem[];
   isActionRequired: boolean;
   latestActivityAt: number;
   mentionNames: string[];
@@ -34,6 +41,11 @@ export type InboxItem = {
   senderLabel: string;
   subject: string;
   timestampLabel: string;
+};
+
+export type InboxTypeLabel = {
+  text: string;
+  channelLabel: string | null;
 };
 
 export type InboxReply = {
@@ -46,6 +58,7 @@ export type InboxReply = {
   parentId?: string | null;
   reactions?: TimelineReaction[];
   rootId?: string | null;
+  tags?: string[][];
 };
 
 export type InboxContextMessage = InboxReply & {
@@ -58,6 +71,8 @@ export type InboxGroup = {
   label: string;
   items: InboxItem[];
 };
+
+type InboxChannel = Pick<Channel, "channelType" | "id" | "name">;
 
 const listTimeFormatter = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
@@ -159,24 +174,92 @@ function categoryLabelFor(category: FeedItemCategory) {
         : "Activity";
 }
 
-export function formatInboxTypeLabel(item: InboxItem) {
+export function isThreadActivityItem(item: FeedItem) {
+  if (item.category !== "activity") {
+    return false;
+  }
+
+  const thread = getThreadReference(item.tags);
+  return thread.parentId !== null && !isBroadcastReply(item.tags);
+}
+
+function activityHeadline(item: FeedItem) {
+  return feedHeadline(item);
+}
+
+function resolveItemChannel(
+  item: FeedItem,
+  channelById: ReadonlyMap<string, InboxChannel>,
+) {
+  const channel = item.channelId ? channelById.get(item.channelId) : undefined;
+  const name = item.channelName?.trim() || channel?.name.trim() || null;
+
+  return {
+    name,
+    type: item.channelType ?? channel?.channelType,
+  };
+}
+
+function resolveGroupChannel(
+  primaryItem: FeedItem,
+  groupItems: FeedItem[],
+  channelById: ReadonlyMap<string, InboxChannel>,
+) {
+  for (const candidate of [primaryItem, ...groupItems]) {
+    const channel = resolveItemChannel(candidate, channelById);
+    if (channel.name || channel.type) {
+      return channel;
+    }
+  }
+
+  return resolveItemChannel(primaryItem, channelById);
+}
+
+export function getInboxTypeLabel(item: InboxItem): InboxTypeLabel {
   const channelName = item.channelLabel;
-  const channelSuffix = channelName ? ` in #${channelName}` : "";
 
   if (item.item.channelType === "dm") {
-    return item.senderLabel ? `DM from ${item.senderLabel}` : "DM";
+    return {
+      text: item.senderLabel ? `DM from ${item.senderLabel}` : "DM",
+      channelLabel: null,
+    };
   }
 
-  const category = item.categories[0] ?? item.item.category;
-  if (category === "mention") {
-    return channelName ? `Mentioned in #${channelName}` : "Mentioned";
+  const primaryCategory = item.item.category;
+  if (primaryCategory === "mention") {
+    return {
+      text: channelName ? "Mentioned in" : "Mentioned",
+      channelLabel: channelName,
+    };
   }
 
-  if (category === "needs_action") {
-    return channelName ? `Needs action in #${channelName}` : "Needs action";
+  if (primaryCategory === "needs_action") {
+    return {
+      text: channelName ? "Needs action in" : "Needs action",
+      channelLabel: channelName,
+    };
   }
 
-  return `${feedHeadline(item.item)}${channelSuffix}`;
+  if (isThreadActivityItem(item.item)) {
+    return {
+      text: channelName ? "Thread in" : "Thread",
+      channelLabel: channelName,
+    };
+  }
+
+  return {
+    text: channelName
+      ? `${activityHeadline(item.item)} in`
+      : activityHeadline(item.item),
+    channelLabel: channelName,
+  };
+}
+
+export function formatInboxTypeLabel(item: InboxItem) {
+  const label = getInboxTypeLabel(item);
+  return label.channelLabel
+    ? `${label.text} #${label.channelLabel}`
+    : label.text;
 }
 
 function categoryPriority(category: FeedItemCategory) {
@@ -261,10 +344,12 @@ export function groupInboxItems(items: InboxItem[]): InboxGroup[] {
 }
 
 export function buildInboxItems({
+  channels,
   currentPubkey,
   feed,
   profiles,
 }: {
+  channels?: InboxChannel[];
   currentPubkey?: string;
   feed?: HomeFeedResponse;
   profiles?: UserProfileLookup;
@@ -291,6 +376,9 @@ export function buildInboxItems({
       category: "agent_activity" as const,
     })),
   ];
+  const channelById = new Map(
+    (channels ?? []).map((channel) => [channel.id, channel]),
+  );
 
   const threadGroups = new Map<
     string,
@@ -324,7 +412,7 @@ export function buildInboxItems({
       const latestItem = group.items.reduce((latest, current) =>
         current.createdAt > latest.createdAt ? current : latest,
       );
-      const item = group.rootItem ?? latestItem;
+      const item = latestItem;
       const categories = [
         ...new Set(group.items.map((groupItem) => groupItem.category)),
       ].sort((left, right) => categoryPriority(left) - categoryPriority(right));
@@ -337,17 +425,24 @@ export function buildInboxItems({
       const subject = feedHeadline(item);
       const preview = feedPreview(item);
       const mentionNames = resolveMentionNames(item.tags, profiles) ?? [];
-      const channelLabel = item.channelName.trim() || null;
+      const groupChannel = resolveGroupChannel(item, group.items, channelById);
+      const channelLabel = groupChannel.name;
+      const displayItem: FeedItem = {
+        ...item,
+        channelName: channelLabel ?? item.channelName,
+        channelType: item.channelType ?? groupChannel.type,
+      };
       const categoryLabel = categoryLabelFor(categories[0] ?? item.category);
 
       return {
         avatarUrl: profiles?.[item.pubkey.toLowerCase()]?.avatarUrl ?? null,
         id: item.id,
-        item,
+        item: displayItem,
         categories,
         categoryLabel,
         channelLabel,
         fullTimestampLabel: formatInboxFullTimestamp(item.createdAt),
+        groupItems: group.items,
         isActionRequired: categories.includes("needs_action"),
         latestActivityAt: group.latestActivityAt,
         mentionNames,

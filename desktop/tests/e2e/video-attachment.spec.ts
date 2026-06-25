@@ -4,6 +4,17 @@ import { installMockBridge } from "../helpers/bridge";
 
 const VIDEO_SHA = "b".repeat(64);
 const VIDEO_URL = `http://localhost:3000/media/${VIDEO_SHA}.mp4`;
+const PORTRAIT_VIDEO_SHA = "c".repeat(64);
+const PORTRAIT_VIDEO_URL = `http://localhost:3000/media/${PORTRAIT_VIDEO_SHA}.mp4`;
+const CONSTRAINED_LANDSCAPE_VIDEO_SHA = "d".repeat(64);
+const CONSTRAINED_LANDSCAPE_VIDEO_URL = `http://localhost:3000/media/${CONSTRAINED_LANDSCAPE_VIDEO_SHA}.mp4`;
+const VIDEO_REVIEW_NEUTRAL_ACCENT = "neutral";
+const VIDEO_REVIEW_LIGHT_THEME = "catppuccin-latte";
+const VIDEO_REVIEW_ACCENT = "#ec4899";
+const VIDEO_REVIEW_ACCENT_FOREGROUND_RGB = "rgb(240, 115, 177)";
+const VIDEO_REVIEW_INDIGO_ACCENT = "#6366f1";
+const VIDEO_REVIEW_INDIGO_FOREGROUND_RGB = "rgb(141, 143, 245)";
+const VIDEO_REVIEW_NEUTRAL_DARK_RGB = "rgb(250, 250, 250)";
 const POSTER_DATA_URL =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgODAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iODAiIGZpbGw9IiMyNjQ2NTMiLz48Y2lyY2xlIGN4PSI1NCIgY3k9IjQwIiByPSIyMiIgZmlsbD0iI2YyYzE0ZSIvPjxwYXRoIGQ9Ik05MiAyNGg0NHYzMkg5MnoiIGZpbGw9IiNmNzgxNTQiLz48L3N2Zz4=";
 
@@ -25,72 +36,107 @@ async function waitForMockLiveSubscription(page: Page, channelName: string) {
     .toBe(true);
 }
 
-function emitMockMessage(page: Page, channelName: string, content: string) {
+function emitMockMessage(
+  page: Page,
+  channelName: string,
+  content: string,
+  options: { extraTags?: string[][] } = {},
+) {
   return page.evaluate(
-    ({ channelName, content }) => {
+    ({ channelName, content, extraTags }) => {
       const emit = (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
+            extraTags?: string[][];
           }) => unknown;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
       if (!emit) {
         throw new Error("Mock message emitter is unavailable.");
       }
-      emit({ channelName, content });
+      emit({ channelName, content, extraTags });
     },
-    { channelName, content },
+    { channelName, content, extraTags: options.extraTags },
   );
 }
 
-test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => {
-    let mediaCurrentTime = 0;
-    let mediaPaused = true;
-    Object.defineProperty(HTMLMediaElement.prototype, "load", {
-      configurable: true,
-      value() {},
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "play", {
-      configurable: true,
-      value() {
-        mediaPaused = false;
-        this.dispatchEvent(new Event("play"));
-        return Promise.resolve();
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "pause", {
-      configurable: true,
-      value() {
-        mediaPaused = true;
-        this.dispatchEvent(new Event("pause"));
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "paused", {
-      configurable: true,
-      get() {
-        return mediaPaused;
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
-      configurable: true,
-      get() {
-        return mediaCurrentTime;
-      },
-      set(value) {
-        mediaCurrentTime = Number(value) || 0;
-        this.dispatchEvent(new Event("seeked"));
-      },
-    });
-    Object.defineProperty(HTMLMediaElement.prototype, "duration", {
-      configurable: true,
-      get() {
-        return 12.5;
-      },
-    });
-  });
+async function installVideoReviewHarness(
+  page: Page,
+  {
+    accentColor = VIDEO_REVIEW_ACCENT,
+    themeName,
+  }: { accentColor?: string; themeName?: string } = {},
+) {
+  await page.addInitScript(
+    ({ accentColor, themeName }) => {
+      if (themeName) {
+        window.localStorage.setItem("buzz-theme", themeName);
+      }
+      window.localStorage.setItem("buzz-accent-color", accentColor);
+
+      type MediaState = {
+        currentTime: number;
+        paused: boolean;
+      };
+      const mediaState = new WeakMap<HTMLMediaElement, MediaState>();
+      const getMediaState = (element: HTMLMediaElement) => {
+        let state = mediaState.get(element);
+        if (!state) {
+          state = { currentTime: 0, paused: true };
+          mediaState.set(element, state);
+        }
+        return state;
+      };
+
+      Object.defineProperty(HTMLMediaElement.prototype, "load", {
+        configurable: true,
+        value() {
+          getMediaState(this as HTMLMediaElement).currentTime = 0;
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "play", {
+        configurable: true,
+        value() {
+          getMediaState(this as HTMLMediaElement).paused = false;
+          this.dispatchEvent(new Event("play"));
+          return Promise.resolve();
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "pause", {
+        configurable: true,
+        value() {
+          getMediaState(this as HTMLMediaElement).paused = true;
+          this.dispatchEvent(new Event("pause"));
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "paused", {
+        configurable: true,
+        get() {
+          return getMediaState(this as HTMLMediaElement).paused;
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
+        configurable: true,
+        get() {
+          return getMediaState(this as HTMLMediaElement).currentTime;
+        },
+        set(value) {
+          getMediaState(this as HTMLMediaElement).currentTime =
+            Number(value) || 0;
+          this.dispatchEvent(new Event("seeked"));
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "duration", {
+        configurable: true,
+        get() {
+          return 12.5;
+        },
+      });
+    },
+    { accentColor, themeName },
+  );
 
   await installMockBridge(page, {
     uploadDescriptors: [
@@ -107,11 +153,65 @@ test.beforeEach(async ({ page }) => {
       },
     ],
   });
-});
+}
+
+async function openReviewWithPostedTimecode(
+  page: Page,
+  commentText = "Neutral accent check",
+) {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.getByRole("button", { name: "Attach image" }).click();
+  await expect(
+    page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
+  ).toBeVisible();
+  await page.getByTestId("send-message").click();
+  await expect(page.getByText("Sending")).toHaveCount(0);
+
+  const reviewButton = page
+    .getByRole("button", { name: "Open video review" })
+    .last();
+  await expect(reviewButton).toBeVisible();
+  await page.waitForFunction(() => {
+    const launcher = document.querySelector("[data-video-review-launcher]");
+    const row = launcher?.closest("[data-message-id]");
+    const messageId = row?.getAttribute("data-message-id") ?? "";
+    return Boolean(messageId) && !messageId.startsWith("optimistic");
+  });
+  await reviewButton.evaluate((button) =>
+    (button as HTMLButtonElement).click(),
+  );
+
+  const reviewDialog = page.getByTestId("video-review-dialog");
+  await expect(reviewDialog).toBeVisible();
+  await reviewDialog.locator("video").evaluate((video) => {
+    const el = video as HTMLVideoElement;
+    el.currentTime = 10;
+    el.dispatchEvent(new Event("timeupdate"));
+  });
+  await expect(page.getByTestId("video-review-composer-timecode")).toHaveText(
+    "00:10",
+  );
+
+  const commentBox = reviewDialog.getByTestId("message-input");
+  await commentBox.click();
+  await commentBox.fill(commentText);
+  await reviewDialog.getByTestId("send-message").click();
+  await expect(page.getByTestId("video-review-comments")).toContainText(
+    commentText,
+  );
+
+  return reviewDialog;
+}
 
 test("video upload previews use poster frames and inline videos open review mode", async ({
   page,
 }) => {
+  await installVideoReviewHarness(page);
+
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -125,8 +225,8 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();
-  expect(box?.width).toBeGreaterThanOrEqual(104);
-  expect(box?.width).toBeLessThanOrEqual(132);
+  expect(box?.width).toBeGreaterThanOrEqual(53);
+  expect(box?.width).toBeLessThanOrEqual(58);
   expect(box?.height).toBeGreaterThanOrEqual(52);
   expect(box?.height).toBeLessThanOrEqual(58);
 
@@ -143,6 +243,12 @@ test("video upload previews use poster frames and inline videos open review mode
     const messageId = row?.getAttribute("data-message-id") ?? "";
     return Boolean(messageId) && !messageId.startsWith("optimistic");
   });
+  const videoMessageId = await reviewButton.evaluate((button) =>
+    button.closest("[data-message-id]")?.getAttribute("data-message-id"),
+  );
+  if (!videoMessageId) {
+    throw new Error("Expected uploaded video row to have a message id.");
+  }
 
   const inlinePlayer = page.getByTestId("video-player").last();
   const inlineVideo = inlinePlayer.locator("video");
@@ -179,6 +285,64 @@ test("video upload previews use poster frames and inline videos open review mode
     )
     .toBeLessThan(6.5);
   await expect(page.getByTestId("video-inline-time")).toHaveText("00:06");
+
+  await inlinePlayer.getByRole("button", { name: "Pause video" }).click();
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const restoredInlinePlayer = page.getByTestId("video-player").last();
+  const restoredInlineVideo = restoredInlinePlayer.locator("video");
+  await restoredInlineVideo.evaluate((video) => {
+    video.dispatchEvent(new Event("loadedmetadata"));
+  });
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).currentTime,
+      ),
+    )
+    .toBeGreaterThan(6);
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).currentTime,
+      ),
+    )
+    .toBeLessThan(6.5);
+  await restoredInlinePlayer
+    .getByRole("button", { name: "Play video" })
+    .click();
+  await expect(
+    restoredInlinePlayer.getByRole("button", { name: "Pause video" }),
+  ).toBeVisible();
+
+  const inlineSpeedButton =
+    restoredInlinePlayer.getByTestId("video-inline-speed");
+  await expect(inlineSpeedButton).toHaveText("1x");
+  await inlineSpeedButton.click();
+  const inlineSpeedMenu = page.getByTestId("video-inline-speed-menu");
+  await expect(inlineSpeedMenu.getByRole("button")).toHaveText([
+    "2x",
+    "1.75x",
+    "1.5x",
+    "1.25x",
+    "1x",
+    "0.75x",
+    "0.5x",
+    "0.25x",
+  ]);
+  await inlineSpeedMenu
+    .getByRole("button", { name: "1.5x", exact: true })
+    .click();
+  await expect(inlineSpeedButton).toHaveText("1.5x");
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(1.5);
 
   // Inline volume controls.
   await inlinePlayer.getByRole("button", { name: "Mute" }).click();
@@ -220,6 +384,24 @@ test("video upload previews use poster frames and inline videos open review mode
 
   const reviewVideo = reviewDialog.locator("video");
   await expect(reviewVideo).not.toHaveAttribute("controls", "");
+  const reviewSpeedButton = reviewDialog.getByTestId("video-review-speed");
+  await expect(reviewSpeedButton).toHaveText("1.5x");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(1.5);
+  await reviewSpeedButton.click();
+  await page
+    .getByTestId("video-review-speed-menu")
+    .getByRole("button", { name: "0.25x", exact: true })
+    .click();
+  await expect(reviewSpeedButton).toHaveText("0.25x");
+  await expect
+    .poll(() =>
+      reviewVideo.evaluate((video) => (video as HTMLVideoElement).playbackRate),
+    )
+    .toBe(0.25);
   await reviewDialog.getByRole("button", { name: "Play review video" }).click();
   await expect(
     reviewDialog.getByRole("button", { name: "Pause review video" }),
@@ -410,6 +592,9 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(
     reviewDialog.getByTestId("video-review-comment-timecode").first(),
   ).toHaveText("00:10");
+  await expect(
+    reviewDialog.getByTestId("video-review-comment-timecode").first(),
+  ).toHaveCSS("color", VIDEO_REVIEW_ACCENT_FOREGROUND_RGB);
 
   // Regression: a timeline re-render (live message arriving in the channel)
   // must not remount the review dialog or wipe an in-progress comment draft.
@@ -517,6 +702,16 @@ test("video upload previews use poster frames and inline videos open review mode
     .getByRole("button", { name: "Close video review" })
     .click();
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
+  await expect(
+    restoredInlinePlayer.getByTestId("video-inline-speed"),
+  ).toHaveText("0.25x");
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).playbackRate,
+      ),
+    )
+    .toBe(0.25);
 
   await reviewButton.evaluate((button) =>
     (button as HTMLButtonElement).click(),
@@ -526,4 +721,163 @@ test("video upload previews use poster frames and inline videos open review mode
     .getByTestId("video-review-backdrop")
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
+
+  const videoSummaryRow = page.locator(
+    `[data-thread-head-id="${videoMessageId}"]`,
+  );
+  await expect(videoSummaryRow).toBeVisible();
+  await videoSummaryRow.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadHead = threadPanel.getByTestId("message-thread-head");
+  await expect(threadHead.getByTestId("video-player")).toBeVisible();
+
+  await threadHead.getByRole("button", { name: "Open video review" }).click();
+  const threadReviewDialog = page.getByTestId("video-review-dialog");
+  await expect(threadReviewDialog).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("video-review-comments-panel"),
+  ).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("message-composer"),
+  ).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("video-review-comments"),
+  ).toContainText("Color pass looks right");
+});
+
+test("narrow inline videos hide playback speed control", async ({ page }) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${PORTRAIT_VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${PORTRAIT_VIDEO_URL}`,
+        "m video/mp4",
+        `x ${PORTRAIT_VIDEO_SHA}`,
+        "size 987654",
+        "dim 80x160",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename portrait-demo.mp4",
+      ],
+    ],
+  });
+
+  const portraitPlayer = page.getByTestId("video-player").last();
+  await expect(portraitPlayer).toBeVisible();
+  const portraitBox = await portraitPlayer.boundingBox();
+  expect(portraitBox?.width).toBeLessThan(220);
+
+  await portraitPlayer.getByRole("button", { name: "Play video" }).click();
+  await expect(
+    portraitPlayer.getByTestId("video-inline-controls"),
+  ).toBeVisible();
+  await expect(portraitPlayer.getByTestId("video-inline-speed")).toHaveCount(0);
+
+  await portraitPlayer
+    .getByRole("button", { name: "Open video review" })
+    .click();
+  const reviewDialog = page.getByTestId("video-review-dialog");
+  await expect(reviewDialog).toBeVisible();
+  await expect(reviewDialog.getByTestId("video-review-speed")).toHaveText("1x");
+});
+
+test("constrained landscape inline videos measure rendered width before showing speed", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(
+    page,
+    "general",
+    `![video](${CONSTRAINED_LANDSCAPE_VIDEO_URL})`,
+    {
+      extraTags: [
+        [
+          "imeta",
+          `url ${CONSTRAINED_LANDSCAPE_VIDEO_URL}`,
+          "m video/mp4",
+          `x ${CONSTRAINED_LANDSCAPE_VIDEO_SHA}`,
+          "size 987654",
+          "dim 160x80",
+          "duration 12.5",
+          `image ${POSTER_DATA_URL}`,
+          "filename constrained-landscape-demo.mp4",
+        ],
+      ],
+    },
+  );
+
+  const landscapePlayer = page.getByTestId("video-player").last();
+  await expect(landscapePlayer).toBeVisible();
+  const fullWidthBox = await landscapePlayer.boundingBox();
+  expect(fullWidthBox?.width).toBeGreaterThan(220);
+
+  await landscapePlayer.getByRole("button", { name: "Play video" }).click();
+  await expect(
+    landscapePlayer.getByTestId("video-inline-controls"),
+  ).toBeVisible();
+  await expect(landscapePlayer.getByTestId("video-inline-speed")).toBeVisible();
+
+  await landscapePlayer.evaluate((element) => {
+    (element as HTMLElement).style.width = "180px";
+  });
+  await expect
+    .poll(async () => {
+      const box = await landscapePlayer.boundingBox();
+      return box?.width ?? 0;
+    })
+    .toBeLessThan(220);
+  await expect(landscapePlayer.getByTestId("video-inline-speed")).toHaveCount(
+    0,
+  );
+});
+
+test("neutral accent uses the forced-dark review foreground", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page, {
+    accentColor: VIDEO_REVIEW_NEUTRAL_ACCENT,
+    themeName: VIDEO_REVIEW_LIGHT_THEME,
+  });
+
+  const reviewDialog = await openReviewWithPostedTimecode(page);
+
+  await expect(
+    reviewDialog.getByTestId("video-review-composer-timecode"),
+  ).toHaveCSS("color", VIDEO_REVIEW_NEUTRAL_DARK_RGB);
+  await expect(
+    reviewDialog.getByTestId("video-review-comment-timecode").first(),
+  ).toHaveCSS("color", VIDEO_REVIEW_NEUTRAL_DARK_RGB);
+});
+
+test("dark accent uses a contrast-safe review foreground", async ({ page }) => {
+  await installVideoReviewHarness(page, {
+    accentColor: VIDEO_REVIEW_INDIGO_ACCENT,
+  });
+
+  const reviewDialog = await openReviewWithPostedTimecode(
+    page,
+    "Indigo contrast check",
+  );
+
+  await expect(
+    reviewDialog.getByTestId("video-review-composer-timecode"),
+  ).toHaveCSS("color", VIDEO_REVIEW_INDIGO_FOREGROUND_RGB);
+  await expect(
+    reviewDialog.getByTestId("video-review-comment-timecode").first(),
+  ).toHaveCSS("color", VIDEO_REVIEW_INDIGO_FOREGROUND_RGB);
 });

@@ -11,7 +11,11 @@ export function subscribeToAgentObserverFrames(
     {
       kinds: [KIND_AGENT_OBSERVER_FRAME],
       "#p": [ownerPubkey],
-      limit: 0,
+      // The high `limit` lets reconnect replay recover observer frames missed
+      // during a drop. `since` still suppresses launch-time history; only the
+      // reconnect replay window is backfilled. A `limit: 0` here would truncate
+      // that replay to zero rows, dropping the gap (NIP-01: limit 0 = no rows).
+      limit: 1000,
       since: Math.floor(Date.now() / 1_000),
     },
     onEvent,

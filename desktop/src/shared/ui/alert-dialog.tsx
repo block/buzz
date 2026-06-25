@@ -5,6 +5,11 @@ import * as AlertDialogPrimitive from "@radix-ui/react-alert-dialog";
 
 import { cn } from "@/shared/lib/cn";
 import { buttonVariants } from "@/shared/ui/button";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
+import {
+  MODAL_CONTENT_MOTION_CLASS,
+  MODAL_OVERLAY_MOTION_CLASS,
+} from "@/shared/ui/modalMotion";
 
 const AlertDialog = AlertDialogPrimitive.Root;
 const AlertDialogTrigger = AlertDialogPrimitive.Trigger;
@@ -15,7 +20,9 @@ const AlertDialogOverlay = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Overlay
     className={cn(
-      "fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+      "fixed inset-0 z-50 bg-black/60",
+      MODAL_OVERLAY_MOTION_CLASS,
+      MODAL_BACKDROP_BLUR_CLASS,
       className,
     )}
     ref={ref}
@@ -33,7 +40,8 @@ const AlertDialogContent = React.forwardRef<
     <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4 pointer-events-none">
       <AlertDialogPrimitive.Content
         className={cn(
-          "pointer-events-auto grid w-[calc(100vw-2rem)] max-w-md gap-4 rounded-3xl border border-border bg-background p-6 shadow-2xl duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
+          "pointer-events-auto grid w-[calc(100vw-2rem)] max-w-md gap-4 rounded-3xl bg-background p-6 shadow-2xl outline-hidden",
+          MODAL_CONTENT_MOTION_CLASS,
           className,
         )}
         ref={ref}
@@ -74,7 +82,7 @@ const AlertDialogTitle = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof AlertDialogPrimitive.Title>
 >(({ className, ...props }, ref) => (
   <AlertDialogPrimitive.Title
-    className={cn("text-lg font-semibold tracking-tight", className)}
+    className={cn("text-xl font-semibold tracking-tight", className)}
     ref={ref}
     {...props}
   />

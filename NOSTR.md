@@ -471,6 +471,117 @@ is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 �
 
 ---
 
+## Relay Membership (NIP-43)
+
+When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is checked against the
+`relay_members` table. Only pubkeys with a row in that table may use the relay. The relay owner
+is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup.
+
+### CLI: Managing Members
+
+Use `buzz-admin` — the operator CLI shipped in the relay image — to manage relay membership.
+In a Docker Compose deployment, use `run.sh`:
+
+```bash
+# Add a member (accepts bech32 npub or 64-char hex; default role: member)
+./run.sh add-member npub1abc...
+./run.sh add-member <64-char-hex-pubkey>
+./run.sh add-member npub1abc... --role admin
+
+# Remove a member
+./run.sh remove-member npub1abc...
+./run.sh remove-member npub1abc... --role member   # only removes if role matches
+
+# List all members
+./run.sh list-members
+```
+
+Or invoke `buzz-admin` directly inside the container:
+
+```bash
+docker compose exec relay buzz-admin add-member --pubkey npub1abc...
+docker compose exec relay buzz-admin add-member --pubkey npub1abc... --role admin
+docker compose exec relay buzz-admin remove-member --pubkey npub1abc...
+docker compose exec relay buzz-admin list-members
+```
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Validation error (bad pubkey, bad role, usage error) |
+| 2 | Not found (remove: member does not exist) |
+| 3 | Cannot remove relay owner (use `RELAY_OWNER_PUBKEY` to change owner) |
+| 4 | Role mismatch (`--role` check failed) |
+| 5 | DB/Redis/internal error |
+
+**Required environment variables for member management:**
+
+| Variable | Notes |
+|----------|-------|
+| `DATABASE_URL` | Postgres connection string |
+| `REDIS_URL` | Redis connection string |
+| `BUZZ_RELAY_PRIVATE_KEY` | Hex private key — required to sign kind:13534 events |
+
+### NIP-43 Admin Events (WebSocket)
+
+Relay membership can also be managed over WebSocket using NIP-43 admin events. These require
+the sender to be authenticated (NIP-42) as the relay owner or an admin.
+
+| Kind | Action | Required tags |
+|------|--------|---------------|
+| 9030 | Add member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
+| 9031 | Remove member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
+| 9032 | Change role | `["p", "<hex-pubkey>"]`, `["role", "member\|admin"]` |
+
+Example using `nak`:
+
+```bash
+# Add a member (owner or admin must sign)
+nak event -k 9030 \
+  --tag "p=<target-hex-pubkey>" \
+  --tag "role=member" \
+  --auth --sec <owner-or-admin-privkey> \
+  ws://localhost:3000
+
+# Remove a member
+nak event -k 9031 \
+  --tag "p=<target-hex-pubkey>" \
+  --auth --sec <owner-or-admin-privkey> \
+  ws://localhost:3000
+
+# Change a member's role to admin
+nak event -k 9032 \
+  --tag "p=<target-hex-pubkey>" \
+  --tag "role=admin" \
+  --auth --sec <owner-or-admin-privkey> \
+  ws://localhost:3000
+```
+
+After each add/remove/role-change, the relay publishes a kind:13534 membership list event
+(relay-signed, NIP-70 protected) that clients can subscribe to:
+
+```bash
+# Subscribe to the live membership roster
+nak req -k 13534 --auth --sec <privkey> ws://localhost:3000
+```
+
+### Known Limitations
+
+1. **CLI intentionally does not emit kind 8000/8001 deltas** — `publish_nip43_delta` is
+   in-process-only (no Redis hop), so a sidecar call stores but never pushes. The 13534 list
+   snapshot is the authoritative roster and rides Redis to live clients. Do not wire a delta call
+   that passes in-process tests and silently no-ops in the deployed `compose exec` path.
+
+2. **The `custom_created_at = max(now, newest_existing_13534 + 1s)` bump defeats same-second
+   domination for serial invocations; it does NOT serialize concurrent CLI processes** — two
+   near-simultaneous adds can read the same newest timestamp and collide on the bumped second.
+   `run.sh` serialization is the guard against parallel adds (e.g. `xargs -P`). When adding
+   multiple members in a loop, add `sleep 1` between invocations.
+
+---
+
 ## Relay Environment Variables (NIP-29 relevant)
 
 | Variable | Required | Default | Description |

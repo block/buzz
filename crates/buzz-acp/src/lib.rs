@@ -21,6 +21,7 @@ use buzz_core::kind::{
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
+    OBSERVER_MAX_PLAINTEXT_LEN,
 };
 use clap::Parser;
 use config::{Config, DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode};
@@ -37,8 +38,6 @@ use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-// ── Subcommand dispatch ───────────────────────────────────────────────────────
-
 /// Check if argv[1] matches a subcommand name, before any clap parsing.
 ///
 /// This avoids clap rejecting harness flags (like `--private-key`) that aren't
@@ -53,8 +52,6 @@ fn is_subcommand(name: &str) -> bool {
 
 /// Timeout for the `buzz-acp models` subcommand (spawn + init + session/new).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
-
-// ── Presence helper ───────────────────────────────────────────────────────────
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -79,8 +76,6 @@ async fn publish_presence(
     publisher.publish_event(event).await?;
     Ok(())
 }
-
-// ── Owner resolution ──────────────────────────────────────────────────────────
 
 /// Resolve the agent's owner pubkey at startup.
 ///
@@ -109,8 +104,6 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
     // Fall back to --agent-owner config.
     config.agent_owner.clone()
 }
-
-// ── Owner cache ───────────────────────────────────────────────────────────────
 
 /// Cache for the agent's owner pubkey.
 ///
@@ -183,6 +176,29 @@ async fn is_owner_or_sibling(
     let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
     owner_cache.cache_sibling(author.to_string(), is_sibling);
     is_sibling
+}
+
+/// Inbound author gate decision: does this author's event fire a turn?
+///
+/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
+/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
+/// additionally accepts the explicit external pubkey list.
+async fn author_allowed(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    match respond_to {
+        RespondTo::Anyone => true,
+        RespondTo::Nobody => false,
+        RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        RespondTo::Allowlist => {
+            allowlist.contains(author)
+                || is_owner_or_sibling(author, owner_cache, rest_client).await
+        }
+    }
 }
 
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
@@ -355,7 +371,10 @@ struct ObserverChunkKey {
 }
 
 /// Flush coalesced chunks before they exceed the NIP-44 plaintext limit (65,535 bytes).
-/// Leave headroom for the JSON envelope wrapping the text.
+/// Leave headroom for the JSON envelope wrapping the text. This is a SOFT pre-flush
+/// of raw text below the hard cap; `fit_observer_event_to_budget` (the final ceiling,
+/// keyed to `OBSERVER_MAX_PLAINTEXT_LEN` in buzz-core/observer.rs:25) is what actually
+/// guarantees the serialized frame fits. Edit one of these two and review the other.
 const OBSERVER_CHUNK_MAX_TEXT_BYTES: usize = 60_000;
 
 impl ObserverChunkCoalescer {
@@ -440,14 +459,179 @@ fn set_observer_chunk_text(payload: &mut serde_json::Value, text: String) {
     }
 }
 
+/// Bytes of head and tail to retain from an elided string leaf — the value
+/// shown to the renderer at each end. The ONLY tuning knob here: large enough
+/// that a clipped diff/tool-result still shows real content, small enough that
+/// eliding actually shrinks the frame.
+const OBSERVER_LEAF_RETAIN_BYTES: usize = 3_000;
+
+/// Trim an oversized observer telemetry frame so its SERIALIZED form fits under
+/// `OBSERVER_MAX_PLAINTEXT_LEN`, instead of dropping the whole frame (silent
+/// telemetry loss). The common case — a frame already under budget — is left
+/// byte-identical.
+///
+/// The cap is measured in SERIALIZED bytes (JSON escaping makes serialized
+/// length differ from raw), so the stop condition is always a full reserialize
+/// of the whole frame: that counts the envelope, the variable `Option<String>`
+/// IDs, and any elision markers exactly. No separate margin constant is needed.
+///
+/// Termination is provable: each iteration elides the largest string leaf that
+/// would STRICTLY shrink the serialized frame, then reserializes. Shrinkability
+/// is re-evaluated against each leaf's CURRENT value, so a leaf already at its
+/// retained floor can never be re-elided — the loop strictly decreases the
+/// serialized length each pass and is bounded by the leaf count. When no leaf
+/// can shrink the frame and it still overflows, the payload is replaced with a
+/// tiny stub, which trivially fits. Monotone decrease, bounded below by the stub.
+///
+/// **Signature choice (`&mut`, double-serialize accepted):** on the common
+/// under-budget path this serializes the frame once to decide it fits, then
+/// `encrypt_observer_payload` serializes it again — one extra `to_string` of an
+/// already-small frame. Reusing that string would mean changing buzz-core's
+/// `encrypt_observer_payload` signature or adding a parallel encrypt path; both
+/// are out of this change's scope (buzz-core stays untouched). The clean `&mut`
+/// signature with one cheap redundant serialize is the deliberate tradeoff.
+fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
+    if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
+        return;
+    }
+
+    // Raw size of the payload we are about to trim, captured before mutation so
+    // the stub's `originalBytes` reports source bytes discarded, not serialized
+    // overflow — consistent with the per-leaf marker's raw byte count.
+    let original_payload_bytes = serde_json::to_string(&event.payload)
+        .map(|s| s.len())
+        .unwrap_or(0);
+
+    // Elide the largest shrinkable leaf, reserialize, repeat. Each successful
+    // elision strictly shrinks the serialized frame, and a floored leaf can
+    // never be re-elided, so the loop is bounded by the leaf count.
+    while let Some(leaf) = largest_shrinkable_leaf(&mut event.payload) {
+        elide_leaf(leaf);
+        if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
+            return;
+        }
+    }
+
+    // No leaf can shrink the frame further and it still overflows: replace the
+    // whole payload with a stub that is trivially under-cap.
+    event.payload = serde_json::json!({
+        "elided": format!("{} payload too large", event.kind),
+        "originalBytes": original_payload_bytes,
+    });
+}
+
+fn serialized_len(event: &observer::ObserverEvent) -> usize {
+    serde_json::to_string(event).map(|s| s.len()).unwrap_or(0)
+}
+
+/// Find the longest string leaf that would STRICTLY shrink if elided, returning
+/// a mutable handle to it. A leaf shrinks only if `head + marker + tail` is
+/// shorter than its current value (the marker-pushback guard); a leaf already at
+/// its retained floor fails this test and is skipped, which is what bounds the
+/// loop. Returns `None` when no leaf can shrink.
+fn largest_shrinkable_leaf(value: &mut serde_json::Value) -> Option<&mut serde_json::Value> {
+    // First pass: find the byte length of the best candidate without holding a
+    // borrow, then re-descend to return the matching mutable reference. Two
+    // immutable-style passes keep the borrow checker happy without unsafe.
+    let best_len = max_shrinkable_len(value)?;
+    find_leaf_with_len(value, best_len)
+}
+
+/// Largest current length among string leaves that can strictly shrink.
+fn max_shrinkable_len(value: &serde_json::Value) -> Option<usize> {
+    match value {
+        serde_json::Value::String(s) if leaf_shrinks(s) => Some(s.len()),
+        serde_json::Value::String(_) => None,
+        serde_json::Value::Array(items) => items.iter().filter_map(max_shrinkable_len).max(),
+        serde_json::Value::Object(map) => map.values().filter_map(max_shrinkable_len).max(),
+        _ => None,
+    }
+}
+
+/// Return the first string leaf whose current length equals `target` and that
+/// can strictly shrink. Used after `max_shrinkable_len` to re-acquire a mutable
+/// borrow of the chosen leaf.
+fn find_leaf_with_len(
+    value: &mut serde_json::Value,
+    target: usize,
+) -> Option<&mut serde_json::Value> {
+    match value {
+        serde_json::Value::String(s) if s.len() == target && leaf_shrinks(s) => Some(value),
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .find_map(|item| find_leaf_with_len(item, target)),
+        serde_json::Value::Object(map) => map
+            .values_mut()
+            .find_map(|item| find_leaf_with_len(item, target)),
+        _ => None,
+    }
+}
+
+/// True when eliding `s` to head + marker + tail yields a strictly shorter raw
+/// string. The marker width grows with `N` (bytes removed), so a leaf only
+/// marginally larger than the retained ends must NOT be touched.
+fn leaf_shrinks(s: &str) -> bool {
+    let (head_end, tail_start) = elision_boundaries(s);
+    tail_start > head_end && {
+        let removed = tail_start - head_end;
+        let marker = elision_marker(removed);
+        head_end + marker.len() + (s.len() - tail_start) < s.len()
+    }
+}
+
+/// Replace the middle of a string leaf with `…[elided N bytes]…`, keeping a head
+/// and tail slice on UTF-8 char boundaries. `N` is RAW bytes removed.
+fn elide_leaf(leaf: &mut serde_json::Value) {
+    let serde_json::Value::String(s) = leaf else {
+        return;
+    };
+    let (head_end, tail_start) = elision_boundaries(s);
+    let removed = tail_start - head_end;
+    let mut elided = String::with_capacity(head_end + 32 + (s.len() - tail_start));
+    elided.push_str(&s[..head_end]);
+    elided.push_str(&elision_marker(removed));
+    elided.push_str(&s[tail_start..]);
+    *s = elided;
+}
+
+fn elision_marker(removed_bytes: usize) -> String {
+    format!("…[elided {removed_bytes} bytes]…")
+}
+
+/// Byte offsets bounding the elided middle, snapped to char boundaries so we
+/// never split a multi-byte char. Returns `(head_end, tail_start)` with
+/// `head_end <= tail_start`.
+fn elision_boundaries(s: &str) -> (usize, usize) {
+    let head_end = floor_char_boundary(s, OBSERVER_LEAF_RETAIN_BYTES.min(s.len()));
+    let tail_start = ceil_char_boundary(s, s.len().saturating_sub(OBSERVER_LEAF_RETAIN_BYTES));
+    (head_end, tail_start.max(head_end))
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 async fn publish_relay_observer_event(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
     agent_pubkey_hex: &str,
     owner_pubkey_hex: &str,
     owner_pubkey: &PublicKey,
-    event: observer::ObserverEvent,
+    mut event: observer::ObserverEvent,
 ) {
+    // Trim oversized frames to fit the plaintext cap rather than letting
+    // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
+    fit_observer_event_to_budget(&mut event);
     let encrypted = match encrypt_observer_payload(keys, owner_pubkey, &event) {
         Ok(encrypted) => encrypted,
         Err(error) => {
@@ -756,7 +940,6 @@ impl Drop for RespawnGuard {
     }
 }
 
-// ── Finding #16: propagate_legacy_env_vars before tokio runtime ───────────────
 //
 // Sync env-var propagation must run before the tokio runtime starts so that
 // any child processes inherit the correct environment. This must happen in the
@@ -774,7 +957,6 @@ async fn tokio_main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
-    // ── Subcommand dispatch — before Config::from_cli() or any harness setup ──
     if is_subcommand("models") {
         // Strip the "models" token so clap doesn't reject it as a positional.
         // Keeps argv[0] (binary name) and passes everything after "models".
@@ -815,7 +997,6 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    // ── Step 1: Spawn N ACP agent subprocesses and initialize ─────────────────
     //
     // Finding #10: one agent failing to start must not kill the whole pool.
     // We attempt each spawn under a 60-second timeout; failures are logged and
@@ -892,7 +1073,6 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("agent_pool_ready agents={}", live_count);
     let mut pool = AgentPool::from_slots(agent_slots);
 
-    // ── Step 2: Connect to Buzz relay ──────────────────────────────────────
     //
     // Finding #22: capture a startup watermark BEFORE connecting to the relay.
     // This timestamp is used for membership notification replay (via
@@ -928,14 +1108,12 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
-    // ── Step 2b: Subscribe to membership notifications ────────────────────────
     relay
         .subscribe_membership_notifications()
         .await
         .map_err(|e| anyhow::anyhow!("membership notification subscribe error: {e}"))?;
     tracing::info!("subscribed to membership notifications");
 
-    // ── Step 2c: Set initial presence ─────────────────────────────────────────
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
     if config.presence_enabled {
@@ -945,7 +1123,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Step 2d: Resolve agent owner ────────────────────────────────────────
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
     if let Some(ref owner) = startup_owner {
@@ -1009,7 +1186,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Step 3: Discover channels and build subscription rules ────────────────
     let channel_info_map = relay
         .discover_channels()
         .await
@@ -1055,7 +1231,6 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    // ── Step 4: Subscribe to channels ────────────────────────────────────────
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
@@ -1068,7 +1243,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Step 5: Build shared prompt context ──────────────────────────────────
     let dedup_mode = config.dedup_mode;
     let mut queue = EventQueue::new(dedup_mode);
 
@@ -1112,7 +1286,6 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    // ── Step 6: Heartbeat timer ───────────────────────────────────────────────
     let mut heartbeat = if config.heartbeat_interval_secs > 0 {
         let interval = Duration::from_secs(config.heartbeat_interval_secs);
         Some(tokio::time::interval_at(
@@ -1124,7 +1297,6 @@ async fn tokio_main() -> Result<()> {
     };
     let mut heartbeat_in_flight = false;
 
-    // ── Step 6b: Presence heartbeat timer (refreshes 90s TTL every 60s) ───────
     let mut presence_heartbeat = if config.presence_enabled {
         let interval = Duration::from_secs(60);
         Some(tokio::time::interval_at(
@@ -1135,7 +1307,6 @@ async fn tokio_main() -> Result<()> {
         None
     };
 
-    // ── Step 6c: Typing refresh timer (re-publishes kind:20002 every 3s) ──────
     let mut typing_refresh = if config.typing_enabled {
         let interval = Duration::from_secs(3);
         Some(tokio::time::interval_at(
@@ -1148,7 +1319,6 @@ async fn tokio_main() -> Result<()> {
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    // ── Step 6d: Maintenance (slot refill + queue compaction) ────────────────
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
     // spawn_and_init never blocks the main loop.
@@ -1161,7 +1331,6 @@ async fn tokio_main() -> Result<()> {
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-    // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
     let tx = shutdown_tx.clone();
@@ -1213,7 +1382,6 @@ async fn tokio_main() -> Result<()> {
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
 
-    // ── Finding #14: Per-slot crash history for circuit breaker ───────────────
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
     // CIRCUIT_BREAKER_WINDOW on each respawn attempt. The Vec is indexed by
@@ -1227,7 +1395,6 @@ async fn tokio_main() -> Result<()> {
         })
         .collect();
 
-    // ── Step 8: Main orchestration loop ──────────────────────────────────────
     //
     // Branches 1 & 2 both need to borrow `pool`, but they access different
     // fields (result_rx vs join_set). We use `rx_and_join_set()` to split the
@@ -1238,7 +1405,6 @@ async fn tokio_main() -> Result<()> {
     }
 
     loop {
-        // ── Maintenance (runs at loop top — cannot be starved by biased select) ──
         if last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
@@ -1278,7 +1444,6 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
-        // ── Collect completed background respawns (non-blocking) ─────────────
         let mut respawn_collected = false;
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
@@ -1360,7 +1525,6 @@ async fn tokio_main() -> Result<()> {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
-                            // ── Membership notification handling ──────────────
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
                             {
@@ -1467,14 +1631,12 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 continue;
                             }
-                            // ── End membership notification handling ──────────
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
 
-                            // ── Shutdown command handling ─────────────────────
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
                             let is_shutdown = is_owner_control_command(
                                 &buzz_event.event,
@@ -1499,9 +1661,7 @@ async fn tokio_main() -> Result<()> {
                                 // Don't drop it — it's a regular message that happens to
                                 // contain "!shutdown" from a non-owner.
                             }
-                            // ── End shutdown command handling ──────────────────
 
-                            // ── Cancel command handling ──────────────────────
                             // Mirrors !shutdown: kind:9, content "!cancel", from
                             // owner, mentions THIS agent. Must be BEFORE
                             // queue.push() — the event content is moved by push.
@@ -1534,9 +1694,7 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 // Not from owner — fall through to normal prompt handling.
                             }
-                            // ── End cancel command handling ───────────────────
 
-                            // ── Rotate command handling ─────────────────────
                             // Mirrors !shutdown / !cancel: kind:9, content
                             // "!rotate", from owner, mentions THIS agent.
                             //
@@ -1581,33 +1739,28 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 // Not from owner — fall through to normal prompt handling.
                             }
-                            // ── End rotate command handling ──────────────────
 
-                            // ── Inbound author gate ──────────────────────────
                             // Coarse security policy: drop events from disallowed
                             // authors before they reach subscription rules or the
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // OwnerOnly also accepts events from "siblings" —
-                            // pubkeys whose agent_owner_pubkey matches this
-                            // agent's owner (e.g. other bots launched by the
-                            // same human). Allowlist is unchanged: owner +
-                            // explicit pubkey list only.
+                            // Both OwnerOnly and Allowlist accept events from
+                            // "siblings" — pubkeys whose agent_owner_pubkey
+                            // matches this agent's owner (e.g. other bots
+                            // launched by the same human). Allowlist adds the
+                            // explicit pubkey list on top, for external people;
+                            // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                let allowed = match &config.respond_to {
-                                    RespondTo::Anyone => true,
-                                    RespondTo::Nobody => false,
-                                    RespondTo::OwnerOnly => {
-                                        is_owner_or_sibling(&author, &owner_cache, &ctx.rest_client).await
-                                    }
-                                    RespondTo::Allowlist => {
-                                        let owner = owner_cache.get();
-                                        config.respond_to_allowlist.contains(&author)
-                                            || owner == Some(author.as_str())
-                                    }
-                                };
+                                let allowed = author_allowed(
+                                    &config.respond_to,
+                                    &config.respond_to_allowlist,
+                                    &author,
+                                    &owner_cache,
+                                    &ctx.rest_client,
+                                )
+                                .await;
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
@@ -1618,7 +1771,6 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             }
-                            // ── End inbound author gate ──────────────────────
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
                             let prompt_tag = match matched {
@@ -1649,7 +1801,6 @@ async fn tokio_main() -> Result<()> {
                                     pool::reaction_add(&rc, &event_id_hex, "👀").await;
                                 });
                             }
-                            // ── Multiple-event-handling mode gate ─────────────
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
@@ -1671,7 +1822,6 @@ async fn tokio_main() -> Result<()> {
                                     );
                                 }
                             }
-                            // ── End mode gate ────────────────────────────────
                             for (channel_id, thread_tags) in
                                 dispatch_pending(&mut pool, &mut queue, &ctx)
                             {
@@ -1827,7 +1977,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Shutdown sequence ─────────────────────────────────────────────────────
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
@@ -1928,15 +2077,11 @@ async fn tokio_main() -> Result<()> {
     Ok(())
 }
 
-// ── Loop control ──────────────────────────────────────────────────────────────
-
 #[derive(PartialEq)]
 enum LoopAction {
     Continue,
     Exit,
 }
-
-// ── Owner control commands ───────────────────────────────────────────────────
 
 fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     event.tags.iter().any(|t| {
@@ -1955,8 +2100,6 @@ fn is_owner_control_command(
         && event.content.trim() == command
         && event_mentions_agent(event, agent_pubkey_hex)
 }
-
-// ── signal_in_flight_task ─────────────────────────────────────────────────────
 
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
@@ -1979,8 +2122,6 @@ fn signal_in_flight_task(
     }
     false
 }
-
-// ── dispatch_pending ──────────────────────────────────────────────────────────
 
 /// Flush queued work to available agents.
 fn dispatch_pending(
@@ -2056,8 +2197,6 @@ fn dispatch_pending(
     );
     dispatched_channels
 }
-
-// ── handle_prompt_result ──────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
@@ -2253,8 +2392,6 @@ fn handle_prompt_result(
     LoopAction::Continue
 }
 
-// ── recover_panicked_agent ────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn recover_panicked_agent(
     pool: &mut AgentPool,
@@ -2351,8 +2488,6 @@ fn recover_panicked_agent(
     });
 }
 
-// ── drain_ready_join_results ──────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn drain_ready_join_results(
     pool: &mut AgentPool,
@@ -2389,8 +2524,6 @@ fn drain_ready_join_results(
     }
     LoopAction::Continue
 }
-
-// ── dispatch_heartbeat ────────────────────────────────────────────────────────
 
 fn dispatch_heartbeat(
     pool: &mut AgentPool,
@@ -2434,8 +2567,6 @@ fn dispatch_heartbeat(
     tracing::info!(agent = agent_index, "heartbeat_fired");
 }
 
-// ── default_heartbeat_prompt ──────────────────────────────────────────────────
-
 fn default_heartbeat_prompt() -> String {
     let now = chrono::Utc::now().to_rfc3339();
     format!(
@@ -2454,8 +2585,6 @@ fn default_heartbeat_prompt() -> String {
          Do not invent work — only act on items surfaced by the feed commands."
     )
 }
-
-// ── respawn_agent_into ────────────────────────────────────────────────────────
 
 /// Spawn a background respawn task for a crashed agent slot.
 ///
@@ -2514,8 +2643,6 @@ fn spawn_respawn_task(
     true
 }
 
-// ── spawn_and_init ────────────────────────────────────────────────────────────
-
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
@@ -2554,10 +2681,6 @@ async fn spawn_and_init(
         }
     }
 }
-
-// ── build_mcp_servers ─────────────────────────────────────────────────────────
-
-// ── run_models ─────────────────────────────────────────────────────────────────
 
 /// `buzz-acp models` — spawn an agent, query its available models, exit.
 ///
@@ -2743,8 +2866,6 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     }]
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod heartbeat_base_prompt_tests {
     use super::*;
@@ -2883,6 +3004,104 @@ mod owner_cache_tests {
     fn get_returns_cached_value() {
         let cache = OwnerCache::new(Some("ab".repeat(32)));
         assert_eq!(cache.get(), Some("ab".repeat(32)).as_deref());
+    }
+}
+
+#[cfg(test)]
+mod author_gate_tests {
+    use super::*;
+
+    /// A `RestClient` for tests. The author-gate decisions exercised here all
+    /// resolve from the owner pubkey or sibling cache before any HTTP call, so
+    /// this client is never actually used to make a request.
+    fn dummy_rest_client() -> relay::RestClient {
+        relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:0".into(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    const OWNER: &str = "00";
+    const SIBLING: &str = "11";
+    const EXTERNAL: &str = "22";
+    const STRANGER: &str = "33";
+
+    /// Owner + a known sibling, none of them on the explicit allowlist.
+    fn cache_with_sibling() -> OwnerCache {
+        let cache = OwnerCache::new(Some(OWNER.into()));
+        cache.cache_sibling(SIBLING.into(), true);
+        cache.cache_sibling(STRANGER.into(), false);
+        cache
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_accepts_sibling_not_in_allowlist() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                SIBLING,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a same-owner sibling must fire a turn under Allowlist even when not listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_accepts_explicit_external_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "an explicitly allowlisted external pubkey must still be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_rejects_non_sibling_not_in_allowlist() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                STRANGER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a non-sibling absent from the allowlist must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_accepts_owner() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::new();
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                OWNER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "the owner must always be accepted under Allowlist"
+        );
     }
 }
 
@@ -3287,5 +3506,253 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+}
+
+#[cfg(test)]
+mod observer_payload_trim_tests {
+    use super::*;
+
+    fn event_with_payload(kind: &str, payload: serde_json::Value) -> observer::ObserverEvent {
+        observer::ObserverEvent {
+            seq: 1,
+            timestamp: "2026-06-16T00:00:00Z".to_string(),
+            kind: kind.to_string(),
+            agent_index: Some(0),
+            channel_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            session_id: Some("sess-1".to_string()),
+            turn_id: Some("turn-1".to_string()),
+            payload,
+        }
+    }
+
+    fn serialized(event: &observer::ObserverEvent) -> String {
+        serde_json::to_string(event).unwrap()
+    }
+
+    #[test]
+    fn test_under_budget_frame_passes_through_byte_identical() {
+        let mut event = event_with_payload("acp_read", serde_json::json!({ "body": "small" }));
+        let before = serialized(&event);
+        fit_observer_event_to_budget(&mut event);
+        assert_eq!(
+            serialized(&event),
+            before,
+            "under-budget frame must not be mutated"
+        );
+    }
+
+    #[test]
+    fn test_single_giant_leaf_is_elided_to_fit_with_envelope_intact() {
+        let big = "x".repeat(100_000);
+        let mut event = event_with_payload("acp_read", serde_json::json!({ "body": big }));
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(
+            serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN,
+            "frame must fit after trimming"
+        );
+        // Envelope intact.
+        assert_eq!(event.kind, "acp_read");
+        assert_eq!(event.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            event.channel_id.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert_eq!(event.seq, 1);
+
+        let leaf = event.payload["body"].as_str().unwrap();
+        assert!(
+            leaf.starts_with(&"x".repeat(OBSERVER_LEAF_RETAIN_BYTES)),
+            "head retained"
+        );
+        assert!(
+            leaf.ends_with(&"x".repeat(OBSERVER_LEAF_RETAIN_BYTES)),
+            "tail retained"
+        );
+        // N in the marker is RAW bytes removed: original len minus retained len.
+        let removed = 100_000 - leaf.chars().filter(|c| *c == 'x').count();
+        assert!(
+            leaf.contains(&format!("…[elided {removed} bytes]…")),
+            "marker reports raw bytes removed"
+        );
+    }
+
+    #[test]
+    fn test_multi_block_prompt_retains_every_section_header_after_elision() {
+        // The real session/prompt fix: format_prompt now emits one block per
+        // section, so the observer payload is params.prompt = [{text: "[Base]…"},
+        // {text: "[Agent Memory — core]…"}, … {text: "[Buzz event: …]…<huge>"}].
+        // An oversized section is its own leaf, so eliding its body keeps the
+        // leaf's head-3000 (which begins with the section's [Header] line) — every
+        // header survives, so the desktop "Prompt context" panel counts them all.
+        // This is the regression the single-fat-leaf shape caused (the trailing
+        // [Buzz event] header fell into the elided middle and the count collapsed
+        // to 1).
+        let sections = [
+            "[Base]\nyou are a helpful agent".to_string(),
+            "[System]\npersona text".to_string(),
+            "[Agent Memory — core]\nremember this".to_string(),
+            "[Context]\nScope: thread".to_string(),
+            // The triggering event body, oversized on its own.
+            format!("[Buzz event: @mention]\nContent: {}", "E".repeat(90_000)),
+        ];
+        let block_refs: Vec<&str> = sections.iter().map(String::as_str).collect();
+        // Mirror the wire shape build_prompt_params produces: each block is its
+        // own {type:"text", text} leaf under params.prompt.
+        let prompt_blocks: Vec<serde_json::Value> = block_refs
+            .iter()
+            .map(|text| serde_json::json!({ "type": "text", "text": text }))
+            .collect();
+        let mut event = event_with_payload(
+            "acp_write",
+            serde_json::json!({
+                "method": "session/prompt",
+                "params": { "sessionId": "sess-1", "prompt": prompt_blocks },
+            }),
+        );
+        assert!(
+            serialized(&event).len() > OBSERVER_MAX_PLAINTEXT_LEN,
+            "precondition: oversized event body pushes the frame over the cap"
+        );
+
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(
+            serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN,
+            "frame must fit after trimming"
+        );
+        let blocks = event.payload["params"]["prompt"]
+            .as_array()
+            .expect("prompt array survives");
+        let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
+        for header in [
+            "[Base]",
+            "[System]",
+            "[Agent Memory — core]",
+            "[Context]",
+            "[Buzz event: @mention]",
+        ] {
+            assert!(
+                texts.iter().any(|t| t.starts_with(header)),
+                "section header {header} must survive at the head of its own block"
+            );
+        }
+        // The oversized event body was elided in place (header kept, middle cut).
+        let event_block = texts
+            .iter()
+            .find(|t| t.starts_with("[Buzz event: @mention]"))
+            .unwrap();
+        assert!(
+            event_block.contains("…[elided"),
+            "the oversized event body is elided, not dropped"
+        );
+    }
+
+    #[test]
+    fn test_multi_leaf_elides_largest_shrinkable_first_and_stops_when_it_fits() {
+        // One leaf alone over the cap; a second smaller-but-still-large leaf.
+        // Eliding the biggest should suffice, leaving the smaller intact.
+        let mut event = event_with_payload(
+            "acp_write",
+            serde_json::json!({
+                "huge": "a".repeat(90_000),
+                "medium": "b".repeat(20_000),
+            }),
+        );
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN);
+        assert!(
+            event.payload["huge"].as_str().unwrap().contains("…[elided"),
+            "the largest leaf is elided"
+        );
+        assert_eq!(
+            event.payload["medium"].as_str().unwrap().len(),
+            20_000,
+            "the smaller leaf is left untouched once the frame fits"
+        );
+    }
+
+    #[test]
+    fn test_coalesced_chunk_nested_leaf_is_reached_by_recursive_walk() {
+        // The coalesced-chunk big leaf lives at params.update.content.text,
+        // not a top-level field — the walk must recurse to reach it.
+        let big = "z".repeat(80_000);
+        let mut event = event_with_payload(
+            "session_update",
+            serde_json::json!({
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "text": big }
+                    }
+                }
+            }),
+        );
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN);
+        let text = event.payload["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("…[elided"), "nested leaf was elided");
+    }
+
+    #[test]
+    fn test_many_medium_leaves_terminate_via_stub() {
+        // Many leaves each too small to shrink on their own (below 2x retain),
+        // collectively over the cap. No leaf can strictly shrink, so the trimmer
+        // must terminate via the stub rather than loop forever.
+        let leaf = "m".repeat(OBSERVER_LEAF_RETAIN_BYTES); // shorter than head+tail → cannot shrink
+        let items: Vec<serde_json::Value> = (0..40)
+            .map(|_| serde_json::Value::String(leaf.clone()))
+            .collect();
+        let mut event = event_with_payload("acp_read", serde_json::json!({ "items": items }));
+        assert!(
+            serialized(&event).len() > OBSERVER_MAX_PLAINTEXT_LEN,
+            "precondition: frame is over the cap"
+        );
+
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN);
+        assert_eq!(
+            event.payload["elided"].as_str().unwrap(),
+            "acp_read payload too large",
+            "fell back to the stub"
+        );
+        assert!(event.payload.get("originalBytes").is_some());
+    }
+
+    #[test]
+    fn test_leaf_too_small_to_shrink_is_not_mutated() {
+        // A frame already under budget whose only leaf is below the shrink floor:
+        // nothing should change. (Under-budget short-circuits, and even if forced,
+        // leaf_shrinks would reject it.)
+        let short = "s".repeat(OBSERVER_LEAF_RETAIN_BYTES); // == head; cannot strictly shrink
+        assert!(
+            !leaf_shrinks(&short),
+            "a leaf at the retain floor must not shrink"
+        );
+        let longer = "L".repeat(OBSERVER_LEAF_RETAIN_BYTES * 2 + 100);
+        assert!(leaf_shrinks(&longer), "a clearly larger leaf must shrink");
+    }
+
+    #[test]
+    fn test_utf8_multibyte_leaf_elides_on_char_boundary() {
+        // A leaf of 3-byte chars (… = U+2026) — eliding must land on char
+        // boundaries and never panic or produce invalid UTF-8.
+        let big: String = "…".repeat(40_000); // 120_000 bytes
+        let mut event = event_with_payload("acp_read", serde_json::json!({ "body": big }));
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN);
+        let leaf = event.payload["body"].as_str().unwrap();
+        // Valid UTF-8 by construction (it's a &str); confirm head/tail are whole
+        // multi-byte chars and the marker is present.
+        assert!(leaf.starts_with('…'));
+        assert!(leaf.ends_with('…'));
+        assert!(leaf.contains("[elided"));
     }
 }

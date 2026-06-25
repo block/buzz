@@ -16,7 +16,9 @@ export function ImportStatusIcon({
 }) {
   switch (status) {
     case "importing":
-      return <Spinner className="h-4 w-4 shrink-0 text-muted-foreground" />;
+      return (
+        <Spinner className="h-4 w-4 shrink-0 border-2 text-muted-foreground" />
+      );
     case "done":
       return <Check className="h-4 w-4 shrink-0 text-green-500" />;
     case "error":

@@ -1,12 +1,4 @@
-import {
-  ArrowLeft,
-  CheckCheck,
-  Hash,
-  Mail,
-  MailOpen,
-  MoreHorizontal,
-  Trash2,
-} from "lucide-react";
+import { ArrowLeft, Hash, Mail, MoreHorizontal, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import type {
@@ -31,7 +23,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import {
@@ -41,12 +32,16 @@ import {
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
 
+const MembersSidebar = React.lazy(async () => {
+  const module = await import("@/features/channels/ui/MembersSidebar");
+  return { default: module.MembersSidebar };
+});
+
 type InboxDetailPaneProps = {
   canDelete: boolean;
   canOpenChannel: boolean;
   canReply: boolean;
   disabledReplyReason?: string | null;
-  isDone: boolean;
   isDeletingMessage?: boolean;
   isSendingReply?: boolean;
   isSinglePanelView?: boolean;
@@ -60,7 +55,6 @@ type InboxDetailPaneProps = {
   onBack?: () => void;
   onDelete: () => void;
   onOpenChannel: (channelId: string) => void;
-  onOpenContext?: (channelId: string, messageId: string) => void;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
@@ -72,7 +66,6 @@ type InboxDetailPaneProps = {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
-  onToggleDone: () => void;
 };
 
 export function InboxDetailPane({
@@ -80,7 +73,6 @@ export function InboxDetailPane({
   canOpenChannel,
   canReply,
   disabledReplyReason,
-  isDone,
   isDeletingMessage = false,
   isSendingReply = false,
   isSinglePanelView = false,
@@ -94,16 +86,16 @@ export function InboxDetailPane({
   onBack,
   onDelete,
   onOpenChannel,
-  onOpenContext,
   onSendReply,
   onToggleReaction,
-  onToggleDone,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
+  const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
   const selectedItemId = item?.id ?? null;
+  const selectedChannelId = item?.item.channelId ?? null;
   const selectedMessageScrollKey = React.useMemo(() => {
     if (!selectedItemId) {
       return null;
@@ -129,6 +121,11 @@ export function InboxDetailPane({
     void selectedItemId;
     setReplyTargetId(null);
   }, [selectedItemId]);
+
+  React.useEffect(() => {
+    void selectedChannelId;
+    setIsMembersSidebarOpen(false);
+  }, [selectedChannelId]);
 
   React.useEffect(() => {
     void selectedItemId;
@@ -234,9 +231,9 @@ export function InboxDetailPane({
       ref={detailPaneRef}
     >
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        <TopChromeInsetHeader>
-          <div className="px-5 py-1 pr-3">
-            <div className="flex min-w-0 items-center justify-between gap-3">
+        <TopChromeInsetHeader flush>
+          <div className="px-5 py-2">
+            <div className="flex min-h-9 min-w-0 items-center justify-between gap-3">
               <div
                 className={cn(
                   "flex min-w-0 items-center",
@@ -256,18 +253,15 @@ export function InboxDetailPane({
                   </Button>
                 ) : null}
                 <div className="min-w-0">
-                  {canOpenChannel && contextChannelId && onOpenContext ? (
+                  {canOpenChannel && contextChannelId ? (
                     <button
                       className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      onClick={() => onOpenContext(contextChannelId, item.id)}
+                      onClick={() => onOpenChannel(contextChannelId)}
                       title={item.fullTimestampLabel}
                       type="button"
                     >
                       {hasChannelContext ? (
-                        <Hash
-                          className="h-[14px] w-[14px] shrink-0"
-                          color="gray"
-                        />
+                        <Hash className="h-4 w-4 shrink-0" color="gray" />
                       ) : null}
                       <span className="min-w-0 translate-y-px truncate">
                         {contextLabel}
@@ -279,10 +273,7 @@ export function InboxDetailPane({
                       title={item.fullTimestampLabel}
                     >
                       {hasChannelContext ? (
-                        <Hash
-                          className="h-[14px] w-[14px] shrink-0"
-                          color="gray"
-                        />
+                        <Hash className="h-4 w-4 shrink-0" color="gray" />
                       ) : null}
                       <span className="min-w-0 translate-y-px truncate">
                         {contextLabel}
@@ -299,30 +290,33 @@ export function InboxDetailPane({
                     <ChannelMembersBar
                       channel={channel}
                       currentPubkey={currentPubkey}
-                      onManageChannel={() => onOpenChannel(channel.id)}
-                      onToggleMembers={() => onOpenChannel(channel.id)}
+                      onManageChannel={() => {
+                        if (contextChannelId) {
+                          onOpenChannel(contextChannelId);
+                        }
+                      }}
+                      onToggleMembers={() =>
+                        setIsMembersSidebarOpen((open) => !open)
+                      }
                     />
                   ) : null}
-                  <HeaderMoreMenu
-                    canDelete={canDelete}
-                    isDeletingMessage={isDeletingMessage}
-                    isDone={isDone}
-                    onDelete={onDelete}
-                    onToggleDone={onToggleDone}
-                  />
+                  {canDelete ? (
+                    <HeaderMoreMenu
+                      isDeletingMessage={isDeletingMessage}
+                      onDelete={onDelete}
+                    />
+                  ) : null}
                 </div>
               </TooltipProvider>
             </div>
           </div>
         </TopChromeInsetHeader>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32">
+        <div
+          aria-busy={isThreadContextLoading}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
+        >
           <div>
-            {isThreadContextLoading ? (
-              <div className="px-6 pb-3 text-[11px] text-muted-foreground">
-                Loading context...
-              </div>
-            ) : null}
             {displayMessages.map((message, index) => (
               <React.Fragment key={message.id}>
                 {index === 1 ? (
@@ -373,22 +367,27 @@ export function InboxDetailPane({
           </div>
         </div>
       </div>
+
+      {channel ? (
+        <React.Suspense fallback={null}>
+          <MembersSidebar
+            channel={channel}
+            currentPubkey={currentPubkey}
+            onOpenChange={setIsMembersSidebarOpen}
+            open={isMembersSidebarOpen}
+          />
+        </React.Suspense>
+      ) : null}
     </section>
   );
 }
 
 function HeaderMoreMenu({
-  canDelete,
   isDeletingMessage,
-  isDone,
   onDelete,
-  onToggleDone,
 }: {
-  canDelete: boolean;
   isDeletingMessage: boolean;
-  isDone: boolean;
   onDelete: () => void;
-  onToggleDone: () => void;
 }) {
   const trigger = (
     <Button
@@ -411,25 +410,14 @@ function HeaderMoreMenu({
         <TooltipContent>More actions</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={onToggleDone}>
-          {isDone ? (
-            <MailOpen className="h-4 w-4" />
-          ) : (
-            <CheckCheck className="h-4 w-4" />
-          )}
-          {isDone ? "Unmark as read" : "Mark as read"}
+        <DropdownMenuItem
+          className="text-destructive focus:text-destructive"
+          disabled={isDeletingMessage}
+          onClick={onDelete}
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete message
         </DropdownMenuItem>
-        {canDelete ? <DropdownMenuSeparator /> : null}
-        {canDelete ? (
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            disabled={isDeletingMessage}
-            onClick={onDelete}
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete message
-          </DropdownMenuItem>
-        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

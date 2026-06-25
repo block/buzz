@@ -18,8 +18,6 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-// ── NIP-98 verification ──────────────────────────────────────────────────────
-
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
 ///
 /// Returns the authenticated public key and an event ID for replay detection.
@@ -104,8 +102,6 @@ fn canonical_url(relay_url: &str, path: &str) -> String {
     format!("{base}{path}")
 }
 
-// ── Channel access helpers ───────────────────────────────────────────────────
-
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
     let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
@@ -118,7 +114,6 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
     })
 }
 
-// ── Custom filter field extractors ──────────────────────────────────────────
 //
 // The CLI injects extension fields (before_id, depth_limit, feed_types) into
 // Nostr filter JSON. nostr::Filter silently drops unknown fields during
@@ -161,8 +156,6 @@ fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::
         None => true,
     }
 }
-
-// ── POST /events ─────────────────────────────────────────────────────────────
 
 /// Submit a signed Nostr event via HTTP bridge (NIP-98 auth).
 pub async fn submit_event(
@@ -233,8 +226,6 @@ pub async fn submit_event(
     }
 }
 
-// ── POST /query ──────────────────────────────────────────────────────────────
-
 /// Query events via HTTP bridge (NIP-98 auth). Returns JSON array of events.
 ///
 /// Enforces channel access: results are filtered to channels the user can access.
@@ -282,6 +273,12 @@ pub async fn query_events(
             "restricted: agent-engram reads require authors=[self] or #p=[self]",
         ));
     }
+    if !crate::handlers::req::author_only_filters_authorized(&filters, &authed_pubkey_hex) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: author-only kinds require authors=[self]",
+        ));
+    }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
     let accessible_channels = state
@@ -289,13 +286,17 @@ pub async fn query_events(
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
 
-    // ── NIP-50 search: route to Typesense if any filter has a `search` field ──
     if filters.iter().any(|f| f.search.is_some()) {
-        return handle_bridge_search(&state, &filters, &accessible_channels, &authed_pubkey_hex)
-            .await;
+        return handle_bridge_search(
+            &state,
+            &filters,
+            &accessible_channels,
+            &authed_pubkey_hex,
+            &pubkey_bytes,
+        )
+        .await;
     }
 
-    // ── Presence: synthesize kind:20001 from Redis (ephemeral, never in DB) ──
     if let Some(presence_events) = synthesize_presence(&state, &filters).await {
         return Ok(Json(Value::Array(presence_events)));
     }
@@ -303,7 +304,6 @@ pub async fn query_events(
     let mut events: Vec<Value> = Vec::new();
     let mut handled: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-    // ── feed_types: route to dedicated feed query functions ──
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         let feed_types = match extract_feed_types(raw) {
             Some(t) => t,
@@ -368,7 +368,6 @@ pub async fn query_events(
         handled.insert(idx);
     }
 
-    // ── depth_limit: route thread queries to get_thread_replies ──
     let e_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
@@ -408,28 +407,18 @@ pub async fn query_events(
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
-        if !thread_replies.is_empty() {
-            let reply_ids: Vec<Vec<u8>> =
-                thread_replies.iter().map(|r| r.event_id.clone()).collect();
-            let id_refs: Vec<&[u8]> = reply_ids.iter().map(|b| b.as_slice()).collect();
-            let stored = state
-                .db
-                .get_events_by_ids(&id_refs)
-                .await
-                .map_err(|e| internal_error(&format!("thread fetch error: {e}")))?;
-            for se in stored {
-                if !event_in_accessible_channel(&se, &accessible_channels) {
-                    continue;
-                }
-                if let Ok(v) = serde_json::to_value(&se.event) {
-                    events.push(v);
-                }
+        for reply in thread_replies {
+            let se = reply.stored_event;
+            if !event_in_accessible_channel(&se, &accessible_channels) {
+                continue;
+            }
+            if let Ok(v) = serde_json::to_value(&se.event) {
+                events.push(v);
             }
         }
         handled.insert(idx);
     }
 
-    // ── Standard query path (with before_id injection) ──
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -472,6 +461,9 @@ pub async fn query_events(
                     ) {
                         continue;
                     }
+                    if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes) {
+                        continue;
+                    }
                     if let Ok(v) = serde_json::to_value(&se.event) {
                         events.push(v);
                     }
@@ -485,8 +477,6 @@ pub async fn query_events(
 
     Ok(Json(Value::Array(events)))
 }
-
-// ── POST /count ──────────────────────────────────────────────────────────────
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
 ///
@@ -528,6 +518,12 @@ pub async fn count_events(
             "restricted: agent-engram reads require authors=[self] or #p=[self]",
         ));
     }
+    if !crate::handlers::req::author_only_filters_authorized(&filters, &authed_pubkey_hex) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: author-only kinds require authors=[self]",
+        ));
+    }
 
     // Get channels this user can access.
     let accessible_channels = state
@@ -537,6 +533,9 @@ pub async fn count_events(
 
     let mut total: u64 = 0;
     for filter in &filters {
+        let needs_author_only_filtering =
+            crate::handlers::req::filter_can_match_author_only_kinds(filter);
+
         // If filter targets a specific channel, verify access.
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             if !accessible_channels.contains(&ch_id) {
@@ -546,7 +545,15 @@ pub async fn count_events(
             let query =
                 crate::handlers::req::build_event_query_from_filter(filter, &pubkey_bytes, &state)
                     .await;
-            if crate::handlers::req::filter_fully_pushable(filter) {
+            let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
+                !authors.is_empty()
+                    && authors
+                        .iter()
+                        .all(|a| a.to_hex().eq_ignore_ascii_case(&authed_pubkey_hex))
+            });
+            if crate::handlers::req::filter_fully_pushable(filter)
+                && (!needs_author_only_filtering || author_is_self)
+            {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
@@ -561,9 +568,15 @@ pub async fn count_events(
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
                         for se in stored_events {
-                            if buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
-                                total += 1;
+                            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
+                            {
+                                continue;
                             }
+                            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
+                            {
+                                continue;
+                            }
+                            total += 1;
                         }
                     }
                     Err(e) => {
@@ -579,7 +592,15 @@ pub async fn count_events(
                     .await;
             query.channel_ids = Some(accessible_channels.to_vec());
 
-            if crate::handlers::req::filter_fully_pushable(filter) {
+            let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
+                !authors.is_empty()
+                    && authors
+                        .iter()
+                        .all(|a| a.to_hex().eq_ignore_ascii_case(&authed_pubkey_hex))
+            });
+            if crate::handlers::req::filter_fully_pushable(filter)
+                && (!needs_author_only_filtering || author_is_self)
+            {
                 query.limit = None;
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -594,9 +615,15 @@ pub async fn count_events(
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
                         for se in stored_events {
-                            if buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
-                                total += 1;
+                            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
+                            {
+                                continue;
                             }
+                            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
+                            {
+                                continue;
+                            }
+                            total += 1;
                         }
                     }
                     Err(e) => {
@@ -609,8 +636,6 @@ pub async fn count_events(
 
     Ok(Json(serde_json::json!({ "count": total })))
 }
-
-// ── NIP-50 search via HTTP bridge ────────────────────────────────────────────
 
 /// Decide whether a search hit should be returned to the caller.
 ///
@@ -651,6 +676,7 @@ async fn handle_bridge_search(
     filters: &[nostr::Filter],
     accessible_channels: &[uuid::Uuid],
     reader_pubkey_hex: &str,
+    pubkey_bytes: &[u8],
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Bridge always includes global (non-channel) events — same as WS with full scopes.
     let channel_scope = match crate::handlers::req::build_search_channel_scope_filter(
@@ -766,6 +792,9 @@ async fn handle_bridge_search(
             if !search_hit_accepted(filter, stored, accessible_channels, reader_pubkey_hex) {
                 continue;
             }
+            if crate::handlers::req::is_author_only_event(&stored.event, pubkey_bytes) {
+                continue;
+            }
             // Dedup across filters.
             if !seen_ids.insert(id_array) {
                 continue;
@@ -778,8 +807,6 @@ async fn handle_bridge_search(
 
     Ok(Json(Value::Array(events)))
 }
-
-// ── POST /hooks/{id} — Webhook trigger ───────────────────────────────────────
 
 /// Query parameters for the webhook trigger endpoint.
 #[derive(serde::Deserialize)]
@@ -924,8 +951,6 @@ pub async fn workflow_webhook(
         })),
     ))
 }
-
-// ── Presence synthesis from Redis ────────────────────────────────────────────
 
 /// If all filters target kind:20001 or kind:40902 with authors, synthesize
 /// presence from Redis instead of querying the DB (ephemeral events are never
@@ -1102,8 +1127,6 @@ mod tests {
             "channel-scoped hit must be accepted when caller has access to that channel"
         );
     }
-
-    // ── Custom filter field extractor tests ──
 
     #[test]
     fn extract_before_id_valid_hex() {

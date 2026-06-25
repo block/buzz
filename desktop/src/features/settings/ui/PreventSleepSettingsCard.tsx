@@ -1,6 +1,7 @@
 import { usePreventSleepContext } from "@/features/agents/usePreventSleep";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 export function PreventSleepSettingsCard() {
   const { enabled, setEnabled, hasRunningAgents, expired, clearExpired } =
@@ -8,12 +9,10 @@ export function PreventSleepSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-agents">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Agents</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Settings that affect how local managed agents run on this machine.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Agents"
+        description="Settings that affect how local managed agents run on this machine."
+      />
 
       <SettingsOptionGroup>
         <SettingsOptionRow>

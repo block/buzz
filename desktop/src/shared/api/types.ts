@@ -114,12 +114,14 @@ export type Profile = {
   avatarUrl: string | null;
   about: string | null;
   nip05Handle: string | null;
+  ownerPubkey: string | null;
 };
 
 export type UserProfileSummary = {
   displayName: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
+  ownerPubkey: string | null;
   isAgent?: boolean;
 };
 
@@ -133,6 +135,7 @@ export type UserSearchResult = {
   displayName: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
+  ownerPubkey: string | null;
   isAgent: boolean;
 };
 
@@ -262,6 +265,7 @@ export type RelayAgent = {
   capabilities: string[];
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
+  respondToAllowlist: string[];
 };
 
 export type ManagedAgentBackend =
@@ -274,7 +278,14 @@ export type ManagedAgent = {
   personaId: string | null;
   relayUrl: string;
   acpCommand: string;
+  /** Resolved/effective harness command (persona-wins, override-honored). */
   agentCommand: string;
+  /**
+   * Explicit per-instance harness pin. `null` means the agent inherits its
+   * harness from the linked persona's runtime. Lets the Edit dialog show
+   * "Inherit from persona" vs a concrete pin.
+   */
+  agentCommandOverride: string | null;
   agentArgs: string[];
   mcpCommand: string;
   turnTimeoutSeconds: number;
@@ -283,6 +294,21 @@ export type ManagedAgent = {
   parallelism: number;
   systemPrompt: string | null;
   model: string | null;
+  /** LLM inference provider, from the agent's pinned record snapshot. */
+  provider: string | null;
+  /**
+   * `true` when the linked persona has been edited since this agent was
+   * created — the running agent uses the older pinned snapshot. Surface a
+   * "out of date" marker and prompt the user to delete + respawn to update.
+   * Always `false` for non-persona agents and for orphaned agents.
+   */
+  personaOutOfDate: boolean;
+  /**
+   * `true` when the agent's linked persona no longer exists. Distinct from
+   * out-of-date: there is no current persona to respawn into, so do not prompt
+   * a respawn — the pinned snapshot is all the config that remains.
+   */
+  personaOrphaned: boolean;
   mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
@@ -337,6 +363,13 @@ export type CreateManagedAgentInput = {
   relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
+  /**
+   * True when `agentCommand` is a runtime the user deliberately picked to
+   * override the linked persona (a deploy-dialog runtime selector). Lets the
+   * backend distinguish a real pin from a missing-runtime fallback. Omit/false
+   * for persona-less creates and fallback divergence — both inherit.
+   */
+  harnessOverride?: boolean;
   agentArgs?: string[];
   mcpCommand?: string;
   turnTimeoutSeconds?: number;

@@ -143,9 +143,16 @@ mod tests {
     #[test]
     fn read_allows_absolute_path() {
         let dir = tempdir().expect("tempdir");
+        // A real file in a SECOND tempdir, genuinely outside the workspace
+        // root — proves absolute paths beyond workdir resolve, without a
+        // Unix-only system path like /etc/hosts (which is C:\etc\hosts on
+        // Windows and does not exist).
+        let outside = tempdir().expect("tempdir");
+        let target = outside.path().join("outside.txt");
+        fs::write(&target, b"localhost").expect("write");
         let state = make_state(dir.path());
         let p = ReadFileParams {
-            path: "/etc/hosts".into(),
+            path: target.display().to_string(),
             offset: None,
             limit: None,
             workdir: Some(dir.path().display().to_string()),
@@ -153,7 +160,7 @@ mod tests {
         let out = run(&state, p).expect("ok");
         assert!(
             out.contains("localhost"),
-            "expected /etc/hosts content, got: {out}"
+            "expected out-of-workspace file content, got: {out}"
         );
     }
 

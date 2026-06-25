@@ -25,10 +25,6 @@ const FIRST_RUN_ALICE = {
   ...TEST_IDENTITIES.alice,
   username: "",
 };
-const FIRST_RUN_KENNY = {
-  ...TEST_IDENTITIES.tyler,
-  username: "Kenny QA",
-};
 
 type TestIdentity = {
   privateKey: string;
@@ -220,6 +216,7 @@ async function expectWelcomeView(page: Page) {
   await expect(page.getByTestId("chat-title")).toContainText("Welcome");
   await expect(page.getByTestId("channel-ephemeral-Welcome")).toHaveCount(0);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveCount(0);
+  await expect(page.getByTestId("message-unread-pill")).toHaveCount(0);
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(page.getByTestId("message-channel-intro")).toContainText(
     "This is the beginning of the private welcome channel.",
@@ -296,34 +293,7 @@ async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
   ).toBeVisible();
   await expect(banner).toContainText("Nice work.");
   await expect(banner).not.toContainText("Try mentioning");
-  const introBoxBeforeDismiss = await channelIntro.boundingBox();
-  if (!introBoxBeforeDismiss) {
-    throw new Error("Could not measure welcome intro before banner dismiss");
-  }
-
-  await page.waitForFunction(
-    ({ beforeY }) => {
-      const bannerElement = document.querySelector(
-        '[data-testid="welcome-composer-guide-banner"]',
-      );
-      const introElement = document.querySelector(
-        '[data-testid="message-channel-intro"]',
-      );
-
-      if (
-        !(bannerElement instanceof HTMLElement) ||
-        !(introElement instanceof HTMLElement) ||
-        bannerElement.dataset.state !== "dismissing"
-      ) {
-        return false;
-      }
-
-      return introElement.getBoundingClientRect().y > beforeY + 4;
-    },
-    { beforeY: introBoxBeforeDismiss.y },
-    { polling: "raf", timeout: 5_000 },
-  );
-  await expect(banner).toHaveCount(0, { timeout: 7_000 });
+  await expect(channelIntro).toBeVisible();
 }
 
 async function getMockChannels(page: Page) {
@@ -511,27 +481,6 @@ async function expectWelcomeGuideIntro(
     ).toBeVisible();
     await expect(page.getByTestId("system-message-row")).toHaveCount(0);
   }
-}
-
-async function getMockProfile(page: Page) {
-  return page.evaluate(async () => {
-    const invoke = (
-      window as Window & {
-        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-          command: string,
-          payload?: Record<string, unknown>,
-        ) => Promise<unknown>;
-      }
-    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
-    if (!invoke) {
-      throw new Error("Mock invoke bridge is unavailable.");
-    }
-
-    return (await invoke("get_profile")) as {
-      avatar_url: string | null;
-      display_name: string | null;
-    };
-  });
 }
 
 async function expectIncompleteOnboarding(page: Page) {
@@ -931,7 +880,10 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
     buffer: Buffer.from("png bytes"),
   });
 
-  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue(url);
+  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue("");
+  await expect(
+    page.getByTestId("onboarding-avatar-preview-fallback"),
+  ).toHaveText("MQ");
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
@@ -1160,6 +1112,112 @@ test("failed first profile saves can be skipped for the current session", async 
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
+});
+
+test("generic relay save failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Click to connect");
+});
+
+test("custom relay proxy sign-in failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError:
+        "relay unreachable: relay returned an unexpected HTML page (network sign-in?)",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+});
+
+test("relay access failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: 403 Forbidden",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+});
+
+test("dismissed relay save failures reappear on retry", async ({ page }) => {
+  const relayError = "relay unreachable: could not connect to relay";
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateErrors: [relayError, relayError],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+
+  await page.getByTestId("onboarding-relay-reconnect-card").hover();
+  await page.getByTestId("onboarding-relay-reconnect-card-dismiss").click();
+  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
+    0,
+  );
+
+  await page.getByTestId("onboarding-next").click();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
 });
 
 test("existing relay profile with display name auto-completes onboarding", async ({

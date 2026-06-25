@@ -45,10 +45,6 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// Top-level CLI
-// ---------------------------------------------------------------------------
-
 #[derive(Parser)]
 #[command(
     name = "buzz",
@@ -86,10 +82,6 @@ struct Cli {
     #[command(subcommand)]
     command: Cmd,
 }
-
-// ---------------------------------------------------------------------------
-// Value enums for typed --type / --visibility / --status flags
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, clap::ValueEnum)]
 pub enum ChannelType {
@@ -165,10 +157,6 @@ pub enum OutputFormat {
     Compact,
 }
 
-// ---------------------------------------------------------------------------
-// Subcommand groups
-// ---------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 enum Cmd {
     /// Send, read, search, and manage messages
@@ -207,6 +195,15 @@ enum Cmd {
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
+    /// Send, get, list, and set status on git patches (NIP-34)
+    #[command(subcommand)]
+    Patches(PatchesCmd),
+    /// Create, get, list, and set status on git issues (NIP-34)
+    #[command(subcommand)]
+    Issues(IssuesCmd),
+    /// Open, update, list, and set status on git pull requests (NIP-34)
+    #[command(subcommand)]
+    Pr(PrCmd),
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -217,10 +214,6 @@ enum Cmd {
     #[command(subcommand)]
     Pack(PackCmd),
 }
-
-// ---------------------------------------------------------------------------
-// Messages subcommands
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum MessagesCmd {
@@ -358,10 +351,6 @@ pub enum MessagesCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Channels subcommands
-// ---------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
@@ -405,7 +394,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\""
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle"
     )]
     Create {
         /// Channel name
@@ -420,8 +409,12 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
+        /// Make the channel ephemeral: lifetime in seconds. The relay archives
+        /// it once this many seconds pass without a new message.
+        #[arg(long, value_name = "SECONDS")]
+        ttl: Option<i64>,
     },
-    /// Update channel name or description
+    /// Update channel name, description, or ephemeral TTL
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -432,6 +425,13 @@ pub enum ChannelsCmd {
         /// New channel description
         #[arg(long)]
         description: Option<String>,
+        /// Make the channel ephemeral (or change its lifetime): seconds until
+        /// the relay archives it after the last message. Conflicts with --no-ttl.
+        #[arg(long, value_name = "SECONDS", conflicts_with = "no_ttl")]
+        ttl: Option<i64>,
+        /// Clear an existing TTL, making the channel permanent.
+        #[arg(long)]
+        no_ttl: bool,
     },
     /// Set the channel topic
     Topic {
@@ -519,10 +519,6 @@ pub enum ChannelsCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Canvas subcommands
-// ---------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum CanvasCmd {
     /// Get the canvas document for a channel
@@ -541,10 +537,6 @@ pub enum CanvasCmd {
         content: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Reactions subcommands
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum ReactionsCmd {
@@ -576,10 +568,6 @@ pub enum ReactionsCmd {
         event: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Custom emoji subcommands
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum EmojiCmd {
@@ -623,10 +611,6 @@ pub enum EmojiCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// DMs subcommands
-// ---------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum DmsCmd {
     /// List direct message conversations
@@ -657,10 +641,6 @@ pub enum DmsCmd {
         channel: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Users subcommands
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum UsersCmd {
@@ -703,10 +683,6 @@ pub enum UsersCmd {
         status: PresenceStatus,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Workflows subcommands
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum WorkflowsCmd {
@@ -787,10 +763,6 @@ pub enum WorkflowsCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Feed subcommands
-// ---------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum FeedCmd {
     /// Get recent activity feed entries
@@ -806,10 +778,6 @@ pub enum FeedCmd {
         types: Option<String>,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Social subcommands
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum SocialCmd {
@@ -887,10 +855,6 @@ pub enum SocialCmd {
         d_tag: Option<String>,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Notes subcommands (NIP-23 long-form)
-// ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 pub enum NotesCmd {
@@ -971,10 +935,6 @@ pub enum NotesCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Repos subcommands
-// ---------------------------------------------------------------------------
-
 #[derive(Subcommand)]
 pub enum ReposCmd {
     /// Announce a git repository (NIP-34)
@@ -1018,9 +978,327 @@ pub enum ReposCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Upload subcommands
-// ---------------------------------------------------------------------------
+#[derive(Subcommand)]
+pub enum PatchesCmd {
+    /// Send a git patch (NIP-34 kind:1617)
+    #[command(
+        after_help = "Examples:\n  git format-patch -1 HEAD --stdout | buzz patches send --repo-owner <hex> --repo-id myrepo --patch-file - --root\n  buzz patches send --repo-owner <hex> --repo-id myrepo --patch-file 0001-fix.patch --reply-to <prev-patch-id>"
+    )]
+    Send {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Path to a `git format-patch` file, or '-' to read from stdin
+        #[arg(long)]
+        patch_file: String,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Previous patch event id (series) or original root (revision)
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Mark as the first patch of a new series
+        #[arg(long, default_value_t = false)]
+        root: bool,
+        /// Mark as the first patch of a new revision of an existing series
+        #[arg(long, default_value_t = false)]
+        root_revision: bool,
+        /// Commit ID this patch produces when applied
+        #[arg(long)]
+        commit: Option<String>,
+        /// Parent commit ID
+        #[arg(long)]
+        parent_commit: Option<String>,
+        /// PGP signature of the commit
+        #[arg(long)]
+        commit_pgp_sig: Option<String>,
+        /// Committer identity: 'name|email|timestamp|tz-offset-minutes'
+        #[arg(long)]
+        committer: Option<String>,
+    },
+    /// Get a patch by event id
+    Get {
+        /// Patch event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// List patches for a repo
+    List {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Filter by patch author pubkey
+        #[arg(long)]
+        author: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Set status on a patch (open/merged/closed/draft — NIP-34 kind:1630-1633)
+    Status {
+        /// Root patch event id (first patch of the series/revision)
+        #[arg(long)]
+        root: String,
+        /// New status
+        #[arg(long, value_parser = ["open", "merged", "closed", "draft"])]
+        status: String,
+        /// Markdown context for the status change ('-' to read from stdin)
+        #[arg(long)]
+        content: Option<String>,
+        /// Repo owner pubkey — requires --repo-id
+        #[arg(long, requires = "repo_id")]
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag) — requires --repo-owner
+        #[arg(long, requires = "repo_owner")]
+        repo_id: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Root id of the revision that was accepted (status=merged only)
+        #[arg(long)]
+        revision: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. root/revision author. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Applied patch event id — can be specified multiple times (status=merged only).
+        /// Accepts `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<pubkey>`.
+        #[arg(long = "q")]
+        q: Vec<String>,
+        /// Merge commit id (status=merged only)
+        #[arg(long)]
+        merge_commit: Option<String>,
+        /// Commit id applied to the target branch — can be specified multiple times (status=merged only)
+        #[arg(long = "applied-as-commit")]
+        applied_as_commit: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PrCmd {
+    /// Open a git pull request (NIP-34 kind:1618)
+    #[command(
+        after_help = "Examples:\n  buzz pr open --repo-owner <hex> --repo-id myrepo --subject 'Fix bug' --body-file - --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo --branch-name fix-bug\n  buzz pr update --repo-owner <hex> --repo-id myrepo --pr <event> --pr-author <hex> --commit $(git rev-parse HEAD) --clone https://relay/git/owner/myrepo"
+    )]
+    Open {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pull request subject/header
+        #[arg(long, alias = "title")]
+        subject: String,
+        /// Pull request body markdown. Use '-' to read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to pull request body markdown, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Tip commit of the PR branch
+        #[arg(long)]
+        commit: String,
+        /// Clone URL where the tip commit can be fetched — can be specified multiple times
+        #[arg(long = "clone", required = true)]
+        clone: Vec<String>,
+        /// Recommended branch name
+        #[arg(long)]
+        branch_name: Option<String>,
+        /// Most recent common ancestor with the target branch
+        #[arg(long)]
+        merge_base: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Label — can be specified multiple times
+        #[arg(long = "label")]
+        label: Vec<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Root patch event id this PR revises
+        #[arg(long)]
+        revision_of: Option<String>,
+    },
+    /// Update a git pull request tip (NIP-34 kind:1619)
+    Update {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Pull request event id being updated
+        #[arg(long)]
+        pr: String,
+        /// Pull request author's pubkey
+        #[arg(long)]
+        pr_author: String,
+        /// Updated tip commit of the PR branch
+        #[arg(long)]
+        commit: String,
+        /// Clone URL where the updated tip commit can be fetched — can be specified multiple times
+        #[arg(long = "clone", required = true)]
+        clone: Vec<String>,
+        /// Markdown context for the update. Use '-' to read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to markdown context for the update, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Most recent common ancestor with the target branch
+        #[arg(long)]
+        merge_base: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+    /// Get a PR by event id
+    Get {
+        /// PR event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// List PRs for a repo
+    List {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Filter by PR author pubkey
+        #[arg(long)]
+        author: Option<String>,
+        /// Filter by label
+        #[arg(long)]
+        label: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Set status on a PR (open/merged/closed/draft — NIP-34 kind:1630-1633)
+    Status {
+        /// Pull request event id
+        #[arg(long)]
+        pr: String,
+        /// New status
+        #[arg(long, value_parser = ["open", "merged", "closed", "draft"])]
+        status: String,
+        /// Markdown context for the status change. Use '-' to read from stdin.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Path to markdown context for the status change, or '-' to read from stdin.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<String>,
+        /// Repo owner pubkey — requires --repo-id
+        #[arg(long, requires = "repo_id")]
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag) — requires --repo-owner
+        #[arg(long, requires = "repo_owner")]
+        repo_id: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. PR author/reviewers. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Merge commit id (status=merged only)
+        #[arg(long)]
+        merge_commit: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum IssuesCmd {
+    /// Create a git issue (NIP-34 kind:1621)
+    Create {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Issue title
+        #[arg(long, alias = "subject")]
+        title: String,
+        /// Issue body, markdown. Use '-' to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Label — can be specified multiple times
+        #[arg(long = "label")]
+        label: Vec<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+    /// Get an issue by event id
+    Get {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// List issues for a repo
+    List {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Filter by issue author pubkey
+        #[arg(long)]
+        author: Option<String>,
+        /// Filter by label
+        #[arg(long)]
+        label: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633)
+    Status {
+        /// Issue event id
+        #[arg(long)]
+        issue: String,
+        /// New status
+        #[arg(long, value_parser = ["open", "resolved", "closed", "draft"])]
+        status: String,
+        /// Markdown context for the status change ('-' to read from stdin)
+        #[arg(long)]
+        content: Option<String>,
+        /// Repo owner pubkey — requires --repo-id
+        #[arg(long, requires = "repo_id")]
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag) — requires --repo-owner
+        #[arg(long, requires = "repo_owner")]
+        repo_id: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. the issue author. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+}
 
 #[derive(Subcommand)]
 pub enum UploadCmd {
@@ -1031,10 +1309,6 @@ pub enum UploadCmd {
         file: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Mem subcommands (NIP-AE)
-// ---------------------------------------------------------------------------
 
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
@@ -1119,10 +1393,6 @@ pub enum MemCmd {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Pack subcommands (local, no relay connection needed)
-// ---------------------------------------------------------------------------
-
 /// Subcommands for `buzz pack`.
 #[derive(Subcommand)]
 pub enum PackCmd {
@@ -1137,10 +1407,6 @@ pub enum PackCmd {
         path: String,
     },
 }
-
-// ---------------------------------------------------------------------------
-// Command dispatch
-// ---------------------------------------------------------------------------
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
@@ -1192,15 +1458,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
+        Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
+        Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
+        Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1221,10 +1486,13 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "issues",
             "mem",
             "messages",
             "notes",
             "pack",
+            "patches",
+            "pr",
             "reactions",
             "repos",
             "social",
@@ -1338,6 +1606,18 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
+        assert_eq!(
+            names(&cmd, "pr"),
+            vec!["get", "list", "open", "status", "update"]
+        );
+        assert_eq!(
+            names(&cmd, "patches"),
+            vec!["get", "list", "send", "status"]
+        );
+        assert_eq!(
+            names(&cmd, "issues"),
+            vec!["create", "get", "list", "status"]
+        );
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
     }
@@ -1350,8 +1630,11 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("issues", 4),
             ("messages", 8),
             ("pack", 2),
+            ("patches", 4),
+            ("pr", 5),
             ("reactions", 3),
             ("repos", 3),
             ("social", 7),

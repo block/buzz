@@ -11,7 +11,7 @@ export function MessageTimestamp({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <p className="shrink-0 cursor-default whitespace-nowrap text-xs font-normal leading-none tabular-nums text-muted-foreground/55">
+        <p className="shrink-0 cursor-default whitespace-nowrap text-xs font-normal leading-4 tabular-nums text-muted-foreground/55">
           {time}
         </p>
       </TooltipTrigger>

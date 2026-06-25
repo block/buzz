@@ -3,8 +3,10 @@ import * as React from "react";
 import type { Workspace } from "@/features/workspaces/types";
 import {
   deriveWorkspaceName,
+  expandTilde,
   normalizeRelayUrl,
 } from "@/features/workspaces/workspaceStorage";
+import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -29,18 +31,34 @@ export function AddWorkspaceDialog({
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
   const [token, setToken] = React.useState("");
+  const [reposDir, setReposDir] = React.useState("");
+  const [reposDirError, setReposDirError] = React.useState<string | null>(null);
 
   const handleClose = React.useCallback(() => {
     onOpenChange(false);
     setName("");
     setRelayUrl("");
     setToken("");
+    setReposDir("");
+    setReposDirError(null);
   }, [onOpenChange]);
 
   const handleSubmit = React.useCallback(
-    (e: React.FormEvent) => {
+    async (e: React.FormEvent) => {
       e.preventDefault();
       if (!relayUrl.trim()) {
+        return;
+      }
+
+      // Expand `~` before save — the backend rejects tilde paths. Empty input
+      // resolves to `undefined` so REPOS keeps its default location. Validate
+      // the expanded value (the bytes the backend canonicalizes) before save
+      // so a bad path is caught here instead of bricking a later boot.
+      const expandedReposDir = await expandTilde(reposDir);
+      try {
+        await validateReposDir(expandedReposDir ?? "");
+      } catch (error) {
+        setReposDirError(String(error));
         return;
       }
 
@@ -49,13 +67,14 @@ export function AddWorkspaceDialog({
         name: name.trim() || deriveWorkspaceName(relayUrl.trim()),
         relayUrl: normalizeRelayUrl(relayUrl.trim()),
         token: token.trim() || undefined,
+        reposDir: expandedReposDir,
         addedAt: new Date().toISOString(),
       };
 
       onSubmit(workspace);
       handleClose();
     },
-    [name, relayUrl, token, onSubmit, handleClose],
+    [name, relayUrl, token, reposDir, onSubmit, handleClose],
   );
 
   return (
@@ -68,7 +87,10 @@ export function AddWorkspaceDialog({
             messages, and identity.
           </DialogDescription>
         </DialogHeader>
-        <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(e) => void handleSubmit(e)}
+        >
           <div className="flex flex-col gap-1.5">
             <label
               className="text-sm font-medium text-foreground"
@@ -120,6 +142,35 @@ export function AddWorkspaceDialog({
               type="password"
               value={token}
             />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="ws-repos-dir"
+            >
+              Repos Directory
+              <span className="ml-1 text-xs font-normal text-muted-foreground">
+                (optional)
+              </span>
+            </label>
+            <Input
+              id="ws-repos-dir"
+              onChange={(e) => {
+                setReposDir(e.target.value);
+                setReposDirError(null);
+              }}
+              placeholder="~/Development"
+              type="text"
+              value={reposDir}
+            />
+            {reposDirError ? (
+              <p className="text-xs text-destructive">{reposDirError}</p>
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              Point the agent's <code>REPOS</code> directory at an existing
+              folder so agents work in your local checkouts. Leave blank to use
+              the default location.
+            </p>
           </div>
           <p className="text-xs text-muted-foreground">
             Workspaces share your active identity. To use a different key,

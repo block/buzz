@@ -3,13 +3,13 @@ import test from "node:test";
 
 import {
   extractPromptText,
+  extractToolIdentity,
   parsePromptText,
+  parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers.ts";
 
 const HEX = "a".repeat(64);
 const HEX_UPPER = "A".repeat(64);
-
-// --- parsePromptText: no section headers ---
 
 test("parsePromptText returns the empty/Prompt fallback for whitespace-only input", () => {
   // The early `sections.length === 0` branch only fires when there are no
@@ -37,8 +37,6 @@ test("parsePromptText wraps header-less free text in a single Prompt section", (
   assert.equal(result.userTitle, "Buzz event");
   assert.equal(result.userPubkey, null);
 });
-
-// --- parsePromptText: Buzz event section ---
 
 test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () => {
   const text = [
@@ -102,8 +100,6 @@ test("parsePromptText leading text before a header becomes a Prompt section", ()
   );
 });
 
-// --- extractPromptText ---
-
 test("extractPromptText joins text blocks from params.prompt", () => {
   const payload = {
     params: {
@@ -121,4 +117,87 @@ test("extractPromptText handles plain string blocks", () => {
 test("extractPromptText returns empty string when prompt is missing or not an array", () => {
   assert.equal(extractPromptText({}), "");
   assert.equal(extractPromptText({ params: { prompt: "nope" } }), "");
+});
+
+test("extractToolIdentity ignores Buzz tool names that only appear in file contents", () => {
+  const identity = extractToolIdentity({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "read-file-1",
+    status: "completed",
+    title: "read_file",
+    kind: "read_file",
+    rawInput: {
+      path: "desktop/src/features/agents/ui/agentSessionToolCatalog.ts",
+    },
+    content: {
+      text: 'const BUZZ_READ_TOOLS = new Set(["get_feed", "get_event"]);',
+    },
+  });
+
+  assert.deepEqual(identity, {
+    title: "read_file",
+    toolName: "read_file",
+    buzzToolName: null,
+  });
+});
+
+test("extractToolIdentity still recognizes explicit Buzz tool fields", () => {
+  const identity = extractToolIdentity({
+    sessionUpdate: "tool_call",
+    title: "Tool call",
+    toolName: "get_feed",
+    rawInput: { limit: 50 },
+  });
+
+  assert.deepEqual(identity, {
+    title: "Tool call",
+    toolName: "get_feed",
+    buzzToolName: "get_feed",
+  });
+});
+
+test("parseSystemPromptSections splits both prompts into Base and System", () => {
+  const framed = "[Base]\nbase text\n\n[System]\npersona text";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text" },
+    { title: "System", body: "persona text" },
+  ]);
+});
+
+test("parseSystemPromptSections yields one Base section for a base-only frame", () => {
+  const sections = parseSystemPromptSections("[Base]\nbase text");
+  assert.deepEqual(sections, [{ title: "Base", body: "base text" }]);
+});
+
+test("parseSystemPromptSections yields one System section for a persona-only frame", () => {
+  const sections = parseSystemPromptSections("[System]\npersona text");
+  assert.deepEqual(sections, [{ title: "System", body: "persona text" }]);
+});
+
+test("parseSystemPromptSections keeps embedded bracket lines literal in bodies", () => {
+  // A persona that itself contains a [Context]-like line must NOT split into a
+  // spurious sub-section — the body is read literally after the first boundary.
+  const framed = "[Base]\nbase\n\n[System]\nrule one\n[Context]\nrule two";
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base" },
+    { title: "System", body: "rule one\n[Context]\nrule two" },
+  ]);
+});
+
+test("parseSystemPromptSections degrades to a labeled Base when [System] header is elided", () => {
+  // Oversize trim can drop the [System] header mid-string. Without a boundary
+  // the whole value stays under a correctly-labeled Base — no missing label,
+  // no inflated count, just a truncated body.
+  const elided = "[Base]\nbase text …[elided 900000 bytes]… persona tail";
+  const sections = parseSystemPromptSections(elided);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "base text …[elided 900000 bytes]… persona tail" },
+  ]);
+});
+
+test("parseSystemPromptSections returns no sections for empty input", () => {
+  assert.deepEqual(parseSystemPromptSections(""), []);
+  assert.deepEqual(parseSystemPromptSections("   "), []);
 });

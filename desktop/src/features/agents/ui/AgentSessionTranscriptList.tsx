@@ -27,7 +27,7 @@ export function AgentSessionTranscriptList({
   if (items.length === 0) {
     return (
       <div className="flex min-h-56 flex-col items-center justify-center px-6 py-10 text-center">
-        <Radio className="mx-auto h-5 w-5 text-muted-foreground" />
+        <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
         <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
         <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
       </div>
@@ -42,7 +42,7 @@ export function AgentSessionTranscriptList({
       role="log"
     >
       {items.map((item) => (
-        <div className="mt-4 first:mt-0" key={item.id}>
+        <div className="mt-4 first:mt-0 content-visibility-auto" key={item.id}>
           <TranscriptItemView
             agentName={agentName}
             item={item}
@@ -112,7 +112,7 @@ function MessageItem({
       {!isAssistant ? (
         <UserAvatar
           avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="mr-2 mt-1 h-5 w-5 shrink-0 text-[8px]"
+          className="mr-2 mt-1 h-5 w-5 shrink-0 text-3xs"
           displayName={authorLabel}
           size="xs"
         />
@@ -126,7 +126,7 @@ function MessageItem({
         {isAssistant ? (
           <div className="mb-0.5 flex items-center gap-1 text-xs">
             <span className="flex h-5 w-5 items-center justify-center">
-              <Bot className="h-3.5 w-3.5 text-muted-foreground" />
+              <Bot className="h-4 w-4 text-muted-foreground" />
             </span>
             <span className="font-normal text-foreground">{agentName}</span>
             <TranscriptTimestamp timestamp={item.timestamp} />
@@ -139,7 +139,7 @@ function MessageItem({
           )}
         >
           {isAssistant ? (
-            <Markdown compact content={text || " "} />
+            <Markdown content={text || " "} />
           ) : (
             <>
               <p className="whitespace-pre-wrap break-words">{text}</p>
@@ -163,10 +163,10 @@ function ThoughtItem({
         <Brain className="h-4 w-4" />
         <span className="truncate text-sm font-medium">{item.title}</span>
         <TranscriptTimestamp timestamp={item.timestamp} />
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <div className="py-2 pl-5 text-sm leading-6 text-muted-foreground">
-        <Markdown compact content={item.text.trim() || " "} />
+        <Markdown content={item.text.trim() || " "} />
       </div>
     </details>
   );
@@ -186,7 +186,7 @@ function MetadataItem({
           {item.sections.length} section{item.sections.length === 1 ? "" : "s"}
         </span>
         <TranscriptTimestamp timestamp={item.timestamp} />
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <div className="space-y-3 py-2 pl-5">
         {item.sections.map((section) => (
@@ -196,9 +196,9 @@ function MetadataItem({
           >
             <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-foreground/80">
               <span className="truncate">{section.title}</span>
-              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
+              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
             </summary>
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
+            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-2xs leading-5 text-muted-foreground">
               {section.body.trim() || "No metadata."}
             </pre>
           </details>
@@ -248,7 +248,7 @@ function TranscriptTimestamp({ timestamp }: { timestamp: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-[11px] text-muted-foreground/60">
+        <span className="shrink-0 cursor-default text-2xs text-muted-foreground/60">
           {formatted}
         </span>
       </TooltipTrigger>

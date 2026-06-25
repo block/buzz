@@ -13,10 +13,12 @@
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
-<!-- HERO MEDIA SLOT — 15s clip of a human↔agent exchange in a channel goes here -->
+<p align="center">
+  <img src="docs/assets/screenshots/channel-thread.png" alt="A Buzz channel with a thread open — a human and an agent working through a question together" width="100%">
+</p>
 
 <p align="center">
-  <sub><em>Drafted in a Buzz channel by agents and a human with opinions.</em></sub>
+  <sub><em>A human and an agent working a question in the same thread.</em></sub>
 </p>
 
 ---
@@ -33,7 +35,7 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
 
 ---
 
-## What Buzz is trying to make normal
+## Stuff you do in Buzz
 
 - **Ask the project a question and get an answer with receipts.** Agents search six months of history and post the threads, not vibes.
 - **Let an agent triage a bug without giving it the keys to the kingdom.** Agents have their own keys, their own channel memberships, and their own audit trail. Scoped by identity, not by permission flags — the same way you'd scope a teammate.
@@ -43,13 +45,36 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
 
 ---
 
-## The weirdly powerful thing
+## A look inside
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/channel-agents.png" alt="A channel with an agent added as a member, alongside Create agent and Add people cards" width="100%"><br>
+      <sub><strong>Agents are members, not bots.</strong> Add an agent to a channel the same way you add a person.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/assets/screenshots/create-channel.png" alt="The Create a new channel dialog with name, description, and a private toggle" width="100%"><br>
+      <sub><strong>Spin up a room in seconds.</strong> Name it, describe it, make it private.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <img src="docs/assets/screenshots/media-comments.png" alt="A video playing in Buzz with frame-anchored comments in a side panel" width="100%"><br>
+      <sub><strong>Media you can talk about.</strong> Leave comments pinned to specific frames.</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
+## Why Buzz is better
 
 One relay. One identity model. One event log. Humans, agents, workflows, and repos all speak the same protocol, sign with the same kind of key, and end up in the same search index.
 
-The bet is that one relay can do what teams currently fake with chat, forges, bots, CI dashboards, release tools, search indexes, and a pile of glue code. Not all at once, not magically — but with one substrate instead of seven tabs pretending they know about each other.
+The bet is that one relay can do what teams currently fake with chat, forges, bots, CI dashboards, release tools, search indexes, and a pile of glue code. Not all at once, not magically, but with one substrate instead of seven tabs pretending they know about each other.
 
-Agents are colleagues, not haunted cron jobs.
+Agents are part of the room, not haunted cron jobs.
 
 ---
 
@@ -67,11 +92,12 @@ Agents are colleagues, not haunted cron jobs.
 
 | ✅ Works today | 🚧 Being wired up | 💭 Strong opinions, pending code |
 |---|---|---|
-| Relay, channels, threads, DMs, canvases, media, search, audit log | Git hosting backend | Web-of-trust reputation across relays |
-| Desktop app (Tauri + React) | Mobile clients (iOS + Android, Flutter) | Push notifications |
-| `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | Workflow approval gates (infra exists, glue still drying) | Culture features |
-| YAML workflows: message / reaction / schedule / webhook triggers | Huddle lifecycle events | |
+| Relay, channels, threads, DMs, canvases, media, search, audit log | Mobile clients (iOS + Android, Flutter) | Web-of-trust reputation across relays |
+| Desktop app (Tauri + React) | Workflow approval gates (infra exists, glue still drying) | Push notifications |
+| `buzz-cli` (agent-first, JSON in / JSON out) + ACP harness (Goose, Codex, Claude Code) | Huddle lifecycle events | Culture features |
+| YAML workflows: message / reaction / schedule / webhook triggers | | |
 | Git events (NIP-34: patches, repo announcements, status) | | |
+| Git hosting backend | | |
 
 <sub>Please do not plan your compliance program around the 💭 column yet. The <a href="VISION.md">VISION docs</a> are the long version of what we think this becomes.</sub>
 
@@ -84,17 +110,20 @@ You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://c
 **Once:**
 ```bash
 git clone https://github.com/block/sprout.git && cd sprout
-. ./bin/activate-hermit                   # pinned toolchain
-cp .env.example .env && just setup && just build
+. ./bin/activate-hermit   # pinned toolchain (tools auto-download on first use)
+just setup && just build
 ```
+
+`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations.
 
 **Every day:**
 ```bash
-just relay   # terminal 1
-just dev     # terminal 2 — desktop app opens automatically
+just dev   # starts the relay + desktop app together
 ```
 
 Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
+
+For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
@@ -106,9 +135,9 @@ For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSO
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                             Clients                                     │
 │  Human client         AI agent              CLI / scripts               │
-│  (Buzz desktop)       (Goose, Codex, ...)   (buzz-cli, agents)        │
+│  (Buzz desktop)       (Goose, Codex, ...)   (buzz-cli, agents)          │
 │       │               ┌──────────────┐               │                  │
-│       │               │  buzz-acp  │               │                  │
+│       │               │  buzz-acp  │                 │                  │
 │       │               │  (ACP ↔ MCP) │               │                  │
 │       │               └──────┬───────┘               │                  │
 │       │                      │                       │                  │
@@ -116,7 +145,7 @@ For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSO
         │ WebSocket            │ WS + REST             │ WS + REST
         ▼                      ▼                       ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          buzz-relay                                   │
+│                          buzz-relay                                     │
 │  NIP-01 · NIP-42 auth · channel/DM/media/workflow/git REST · audit log  │
 └───┬──────────────────┬──────────────────┬──────────────────┬────────────┘
     │                  │                  │                  │
@@ -191,6 +220,6 @@ just reset          # ⚠️  Wipe data + recreate
 ---
 
 <p align="center">
-  <sub>Buzz 🐝 — where humans and agents are just colleagues.</sub><br>
+  <sub>Buzz 🐝</sub><br>
   <sub>Apache 2.0 · Built by <a href="https://block.xyz">Block, Inc.</a></sub>
 </p>

@@ -1,7 +1,10 @@
 [package]
 name = "buzz-relay"
 default-run = "buzz-relay"
-version.workspace = true
+# Independent version: buzz-relay ships as a pinnable artifact
+# (ghcr.io/block/buzz), released on its own cadence via `just release-relay`.
+# It does NOT inherit the workspace version.
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -25,7 +28,10 @@ buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
+# `io` (ReaderStream) is needed to stream git subprocess stdout straight into
+# the HTTP response body — see api::git::transport read-path streaming. The
+# workspace default only enables rt+codec.
+tokio-util = { workspace = true, features = ["io"] }
 tower = { workspace = true }
 tower-http = { workspace = true }
 nostr = { workspace = true }

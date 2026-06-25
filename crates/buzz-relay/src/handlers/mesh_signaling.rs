@@ -316,14 +316,9 @@ async fn publish_channelless_ephemeral(state: &Arc<AppState>, event: &nostr::Eve
         tracing::warn!(event_id = %event.id, "mesh call-me-now global publish failed: {e}");
     }
     let stored = StoredEvent::new(event.clone(), None);
-    let matches = state.sub_registry.fan_out(&stored);
-    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
-    if let Ok(event_json) = serde_json::to_string(event) {
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{sub_id}",{event_json}]"#);
-            let _ = state.conn_manager.send_to(*target_conn_id, msg);
-        }
-    }
+    // Routed through the guarded send path for uniformity; the access gate
+    // no-ops for this globally-scoped (channel_id = None) call-me-now event.
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 }
 
 /// Handle a verified KIND_MESH_STATUS_REPORT (24620) from an authenticated relay
@@ -435,7 +430,6 @@ mod tests {
         assert_eq!(r2.peer_endpoint_id, None);
     }
 
-    // ── Trust gate: membership_admits_mesh ──────────────────────────────────
     // This is the single pure predicate behind the requester, target, AND
     // reporter gates. v1 admits only direct relay members (or open relays);
     // NIP-OA-delegated (ViaOwner) and Denied are excluded, symmetrically.
@@ -550,6 +544,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)),
             std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            3,
         );
         state.sub_registry.register(
             conn_id,
@@ -679,7 +674,6 @@ mod tests {
         assert!(target_rx.try_recv().is_err(), "target receives no event");
     }
 
-    // ── HTTP door (handle_mesh_event_http) ──────────────────────────────────
     // Regression coverage for the post-#879 transport: the desktop's Rust
     // coordinator publishes 24620/24621 via POST /events, which used to fall
     // into ingest_event's allowlist and 400 with "unknown event kind".

@@ -1,17 +1,25 @@
-import { Lock, Zap } from "lucide-react";
+import { ChevronDown, ClockFading, Hash, type LucideIcon } from "lucide-react";
 import * as React from "react";
 
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
 import type { ChannelTemplate, ChannelVisibility } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
 
-/** Default TTL for ephemeral channels: 1 day of inactivity. */
-const EPHEMERAL_TTL_SECONDS = 86400;
+/** Default TTL for ephemeral channels: 7 days of inactivity. */
+const EPHEMERAL_TTL_SECONDS = 604800;
+const CREATE_FIELD_SHELL_CLASS =
+  "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
+const CREATE_FIELD_CONTROL_CLASS =
+  "border-0 bg-transparent text-muted-foreground/55 shadow-none outline-none ring-0 transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-foreground focus:outline-hidden focus-visible:ring-0";
+const CREATE_LABEL_OPTIONAL_CLASS =
+  "ml-1 text-xs font-normal text-muted-foreground/50";
 
 type ChannelKind = "stream" | "forum";
 
@@ -29,10 +37,6 @@ type CreateChannelDialogProps = {
   }) => Promise<void>;
 };
 
-// ---------------------------------------------------------------------------
-// CreateChannelDialog
-// ---------------------------------------------------------------------------
-
 export function CreateChannelDialog({
   channelKind,
   isCreating,
@@ -48,14 +52,16 @@ export function CreateChannelDialog({
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<
     string | null
   >(null);
+  const [typePopoverOpen, setTypePopoverOpen] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
 
   const templatesQuery = useChannelTemplatesQuery();
   const templates = templatesQuery.data ?? [];
 
   const kindLabel = channelKind === "forum" ? "forum" : "channel";
+  const durationLabel = ephemeral ? "Temporary" : "Ongoing";
+  const DurationIcon = ephemeral ? ClockFading : Hash;
 
-  // Reset form state when dialog opens/closes or kind changes
   React.useEffect(() => {
     if (!open) return;
 
@@ -65,9 +71,17 @@ export function CreateChannelDialog({
     setEphemeral(false);
     setErrorMessage(null);
     setSelectedTemplateId(null);
+    setTypePopoverOpen(false);
 
     // Small delay to let dialog animation start before focusing
     const timerId = globalThis.setTimeout(() => {
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLElement &&
+        activeElement.closest("#create-channel-form")
+      ) {
+        return;
+      }
       nameInputRef.current?.focus();
     }, 50);
     return () => globalThis.clearTimeout(timerId);
@@ -89,7 +103,6 @@ export function CreateChannelDialog({
 
     setSelectedTemplateId(templateId);
 
-    // Pre-fill fields from template (always overwrite to avoid stale values)
     setDescription(template.description ?? "");
     setVisibility(template.visibility);
 
@@ -136,7 +149,10 @@ export function CreateChannelDialog({
     >
       <ChooserDialogContent
         className="max-w-lg"
+        contentClassName="pt-3"
         data-testid="create-channel-dialog"
+        footerClassName="border-t-0 pt-0"
+        headerClassName="pb-2"
         title={`Create a new ${kindLabel}`}
         description={
           channelKind === "forum"
@@ -144,15 +160,52 @@ export function CreateChannelDialog({
             : "Channels are real-time streams for team conversation."
         }
         footer={
-          <div className="flex w-full items-center justify-end gap-2">
-            <Button
-              disabled={isCreating}
-              onClick={() => onOpenChange(false)}
-              type="button"
-              variant="ghost"
-            >
-              Cancel
-            </Button>
+          <div className="flex w-full items-center justify-between gap-3">
+            <Popover onOpenChange={setTypePopoverOpen} open={typePopoverOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  aria-label={`Channel duration: ${durationLabel}`}
+                  className="-ml-2.5 h-9 px-2.5 text-sm font-medium text-foreground hover:bg-muted/50"
+                  disabled={isCreating}
+                  type="button"
+                  variant="ghost"
+                >
+                  <DurationIcon className="h-4 w-4" />
+                  {durationLabel}
+                  <ChevronDown className="h-4 w-4 text-muted-foreground/70" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-72 p-1">
+                <div className="px-3 pb-1.5 pt-2 text-xs font-medium text-muted-foreground/70">
+                  Channel type
+                </div>
+                <fieldset className="space-y-1">
+                  <legend className="sr-only">Channel type</legend>
+                  <ChannelDurationOption
+                    ariaLabel="Ongoing channel"
+                    checked={!ephemeral}
+                    description="For projects, teams, and recurring conversations."
+                    icon={Hash}
+                    label="Ongoing"
+                    onSelect={() => {
+                      setEphemeral(false);
+                      setTypePopoverOpen(false);
+                    }}
+                  />
+                  <ChannelDurationOption
+                    ariaLabel="Ephemeral - auto-archives after 7 days of inactivity"
+                    checked={ephemeral}
+                    description="For quick discussions that archive automatically when inactive."
+                    icon={ClockFading}
+                    label="Temporary"
+                    onSelect={() => {
+                      setEphemeral(true);
+                      setTypePopoverOpen(false);
+                    }}
+                  />
+                </fieldset>
+              </PopoverContent>
+            </Popover>
             <Button
               data-testid="create-channel-submit"
               disabled={isCreating || name.trim().length === 0}
@@ -165,13 +218,12 @@ export function CreateChannelDialog({
         }
       >
         <form
-          className="space-y-4"
+          className="space-y-5"
           id="create-channel-form"
           onSubmit={(event) => {
             void handleSubmit(event);
           }}
         >
-          {/* Name */}
           <div className="space-y-1.5">
             <label
               className="text-sm font-medium text-foreground"
@@ -179,129 +231,195 @@ export function CreateChannelDialog({
             >
               Name
             </label>
-            <Input
-              autoCapitalize="none"
-              autoComplete="off"
-              autoCorrect="off"
-              data-testid="create-channel-name"
-              disabled={isCreating}
-              id="create-channel-name"
-              onChange={(event) => {
-                setName(event.target.value);
-                setErrorMessage(null);
-              }}
-              placeholder={
-                channelKind === "forum" ? "design-discussions" : "release-notes"
-              }
-              ref={nameInputRef}
-              spellCheck={false}
-              value={name}
-            />
+            <div
+              className={cn(
+                "flex min-h-11 items-center px-3",
+                CREATE_FIELD_SHELL_CLASS,
+              )}
+            >
+              <Input
+                autoCapitalize="none"
+                autoComplete="off"
+                autoCorrect="off"
+                className={cn(
+                  "h-8 px-0 py-0 leading-6",
+                  CREATE_FIELD_CONTROL_CLASS,
+                )}
+                data-testid="create-channel-name"
+                disabled={isCreating}
+                id="create-channel-name"
+                onChange={(event) => {
+                  setName(event.target.value);
+                  setErrorMessage(null);
+                }}
+                placeholder={
+                  channelKind === "forum"
+                    ? "design-discussions"
+                    : "release-notes"
+                }
+                ref={nameInputRef}
+                spellCheck={false}
+                value={name}
+              />
+            </div>
           </div>
 
-          {/* Description */}
           <div className="space-y-1.5">
             <label
               className="text-sm font-medium text-foreground"
               htmlFor="create-channel-description"
             >
-              Description{" "}
-              <span className="font-normal text-muted-foreground">
-                (optional)
+              Description
+              <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
+            </label>
+            <div className={CREATE_FIELD_SHELL_CLASS}>
+              <Textarea
+                className={cn(
+                  "min-h-20 resize-none px-3 py-3 leading-5",
+                  CREATE_FIELD_CONTROL_CLASS,
+                )}
+                data-testid="create-channel-description"
+                disabled={isCreating}
+                id="create-channel-description"
+                onChange={(event) => {
+                  setDescription(event.target.value);
+                  setErrorMessage(null);
+                }}
+                placeholder={`What this ${kindLabel} is for`}
+                rows={2}
+                value={description}
+              />
+            </div>
+          </div>
+
+          <div
+            className={cn(
+              "flex min-h-12 items-center justify-between gap-4 rounded-xl py-1",
+              isCreating && "opacity-50",
+            )}
+            data-testid="create-channel-visibility"
+          >
+            <label
+              className="min-w-0 cursor-pointer space-y-0.5"
+              htmlFor="create-channel-private"
+            >
+              <span className="block text-sm font-medium text-foreground">
+                Private
+              </span>
+              <span
+                className="block text-xs leading-4 text-muted-foreground/65"
+                id="create-channel-private-description"
+              >
+                Only members can invite people to this {kindLabel}.
               </span>
             </label>
-            <Textarea
-              className="min-h-16 resize-none"
-              data-testid="create-channel-description"
+            <Switch
+              aria-describedby="create-channel-private-description"
+              checked={visibility === "private"}
+              className="shrink-0 shadow-none [&>span]:shadow-none"
+              data-testid="create-channel-private-toggle"
               disabled={isCreating}
-              id="create-channel-description"
-              onChange={(event) => {
-                setDescription(event.target.value);
-                setErrorMessage(null);
-              }}
-              placeholder={`What this ${kindLabel} is for`}
-              rows={2}
-              value={description}
+              id="create-channel-private"
+              onCheckedChange={(checked) =>
+                setVisibility(checked ? "private" : "open")
+              }
             />
           </div>
 
-          {/* Options */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
+          {templates.length > 0 ? (
+            <div className="space-y-1.5">
               <label
-                className="flex items-center gap-1.5 text-sm text-muted-foreground"
-                htmlFor="create-channel-private"
+                className="text-sm font-medium text-foreground"
+                htmlFor="create-channel-template"
               >
-                <Lock className="h-3.5 w-3.5" />
-                Private — only visible to invited members
+                Template
+                <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
               </label>
-              <Switch
-                checked={visibility === "private"}
-                data-testid="create-channel-visibility"
+              <select
+                className="flex min-h-11 w-full rounded-xl border border-input bg-muted/40 px-3 py-2 text-sm text-muted-foreground/55 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus:border-muted-foreground/50 focus:text-foreground focus-visible:outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
+                data-testid="create-channel-template"
                 disabled={isCreating}
-                id="create-channel-private"
-                onCheckedChange={(checked) =>
-                  setVisibility(checked ? "private" : "open")
-                }
-              />
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <label
-                className="flex items-center gap-1.5 text-sm text-muted-foreground"
-                htmlFor="create-channel-ephemeral"
+                id="create-channel-template"
+                onChange={(event) => handleTemplateChange(event.target.value)}
+                value={selectedTemplateId ?? ""}
               >
-                <Zap className="h-3.5 w-3.5" />
-                Ephemeral — auto-archives after 1 day of inactivity
-              </label>
-              <Switch
-                checked={ephemeral}
-                disabled={isCreating}
-                id="create-channel-ephemeral"
-                onCheckedChange={setEphemeral}
-              />
+                <option value="">No template</option>
+                {templates.map((template: ChannelTemplate) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
             </div>
-          </div>
+          ) : null}
 
-          {/* Template Selector */}
-          <div className="space-y-1.5">
-            <label
-              className="text-sm font-medium text-foreground"
-              htmlFor="create-channel-template"
-            >
-              Template{" "}
-              <span className="font-normal text-muted-foreground">
-                (optional)
-              </span>
-            </label>
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              data-testid="create-channel-template"
-              disabled={isCreating || templates.length === 0}
-              id="create-channel-template"
-              onChange={(event) => handleTemplateChange(event.target.value)}
-              value={selectedTemplateId ?? ""}
-            >
-              <option value="">
-                {templatesQuery.isLoading
-                  ? "Loading..."
-                  : templates.length === 0
-                    ? "No templates created yet"
-                    : "No template"}
-              </option>
-              {templates.map((template: ChannelTemplate) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Error */}
           {errorMessage ? (
             <p className="text-sm text-destructive">{errorMessage}</p>
           ) : null}
         </form>
       </ChooserDialogContent>
     </Dialog>
+  );
+}
+
+function ChannelDurationOption({
+  ariaLabel,
+  checked,
+  description,
+  icon: Icon,
+  label,
+  onSelect,
+}: {
+  ariaLabel: string;
+  checked: boolean;
+  description: string;
+  icon: LucideIcon;
+  label: string;
+  onSelect: () => void;
+}) {
+  return (
+    <label
+      className={cn(
+        "relative flex min-h-16 cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 text-left text-muted-foreground/75 transition-colors duration-150 ease-out hover:bg-muted/50 hover:text-foreground has-[:focus-visible]:outline-hidden has-[:focus-visible]:ring-1 has-[:focus-visible]:ring-ring",
+        checked && "text-foreground",
+      )}
+    >
+      <input
+        aria-label={ariaLabel}
+        checked={checked}
+        className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+        name="create-channel-duration"
+        onChange={onSelect}
+        type="radio"
+      />
+      <span
+        className={cn(
+          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-muted-foreground/40",
+          checked && "border-foreground",
+        )}
+        aria-hidden="true"
+      >
+        <span
+          className={cn(
+            "h-1.5 w-1.5 rounded-full bg-foreground transition-opacity duration-150",
+            checked ? "opacity-100" : "opacity-0",
+          )}
+        />
+      </span>
+      <span className="grid min-w-0 flex-1 grid-cols-[1rem_minmax(0,1fr)] gap-x-2 gap-y-1">
+        <Icon className="h-4 w-4 shrink-0 text-current" />
+        <span className="block text-sm font-medium leading-4 text-current">
+          {label}
+        </span>
+        <span
+          className={cn(
+            "col-span-2 block text-xs leading-4 text-muted-foreground/70",
+            checked && "text-muted-foreground/65",
+          )}
+        >
+          {description}
+        </span>
+      </span>
+    </label>
   );
 }

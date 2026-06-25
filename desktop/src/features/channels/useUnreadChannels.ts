@@ -4,12 +4,25 @@ import {
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
+import {
+  countUnreadAppBadgeObservedEvents,
+  countUnreadBadgeObservedEvents,
+  countUnreadHighPriorityObservedEvents,
+  countUnreadObservedEvents,
+  makeObservedUnreadEvent,
+  mapsEqual,
+  observedUnreadEventReadAt,
+  recordObservedUnreadEvent,
+  type ObservedUnreadEvent,
+} from "@/features/channels/unreadChannelCounts";
 import { useReadState } from "@/features/channels/readState/useReadState";
+import { makeRootIdStore } from "@/features/channels/unreadRootIdStore";
 import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import {
+  hasMentionForEvent,
   isHighPriorityEventForUser,
   shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
@@ -30,121 +43,13 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
 // per-channel limit elsewhere in the app.
 const CATCH_UP_LIMIT = 1000;
 
-const PARTICIPATION_STORAGE_PREFIX = "buzz-thread-participation.v1";
-const MAX_PARTICIPATION_ENTRIES = 1000;
-
-function participationStorageKey(pubkey: string): string {
-  return `${PARTICIPATION_STORAGE_PREFIX}:${pubkey}`;
-}
-
-function readParticipationFromStorage(pubkey: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(participationStorageKey(pubkey));
-    if (!raw) {
-      return new Set();
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set();
-    }
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeParticipationToStorage(
-  pubkey: string,
-  rootIds: Set<string>,
-): void {
-  try {
-    const arr = [...rootIds];
-    const capped =
-      arr.length > MAX_PARTICIPATION_ENTRIES
-        ? arr.slice(arr.length - MAX_PARTICIPATION_ENTRIES)
-        : arr;
-    window.localStorage.setItem(
-      participationStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors (private browsing, quota exceeded).
-  }
-}
-
-const AUTHORED_STORAGE_PREFIX = "buzz-thread-authored.v1";
-const MAX_AUTHORED_ENTRIES = 1000;
-
-function authoredStorageKey(pubkey: string): string {
-  return `${AUTHORED_STORAGE_PREFIX}:${pubkey}`;
-}
-
-function readAuthoredFromStorage(pubkey: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(authoredStorageKey(pubkey));
-    if (!raw) {
-      return new Set();
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set();
-    }
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeAuthoredToStorage(pubkey: string, rootIds: Set<string>): void {
-  try {
-    const arr = [...rootIds];
-    const capped =
-      arr.length > MAX_AUTHORED_ENTRIES
-        ? arr.slice(arr.length - MAX_AUTHORED_ENTRIES)
-        : arr;
-    window.localStorage.setItem(
-      authoredStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors (private browsing, quota exceeded).
-  }
-}
-
-const MUTED_STORAGE_PREFIX = "buzz-thread-muted.v1";
-const MAX_MUTED_ENTRIES = 1000;
-
-function mutedStorageKey(pubkey: string): string {
-  return `${MUTED_STORAGE_PREFIX}:${pubkey}`;
-}
-
-function readMutedFromStorage(pubkey: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(mutedStorageKey(pubkey));
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeMutedToStorage(pubkey: string, rootIds: Set<string>): void {
-  try {
-    const arr = [...rootIds];
-    const capped =
-      arr.length > MAX_MUTED_ENTRIES
-        ? arr.slice(arr.length - MAX_MUTED_ENTRIES)
-        : arr;
-    window.localStorage.setItem(
-      mutedStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors (private browsing, quota exceeded).
-  }
-}
+const participationStore = makeRootIdStore("buzz-thread-participation.v1");
+const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
+// Thread roots where an external message @-mentioned the current user. The
+// badge gate ORs this in so a mention recipient who never participated,
+// authored, or followed still gets the thread-unread badge.
+const mentionedStore = makeRootIdStore("buzz-thread-mentioned.v1");
+const mutedStore = makeRootIdStore("buzz-thread-muted.v1");
 
 export type ThreadActivityItem = {
   id: string;
@@ -199,6 +104,31 @@ function writeActivityToStorage(
   }
 }
 
+export function addThreadActivityItems(
+  existing: ThreadActivityItem[],
+  items: ThreadActivityItem[],
+) {
+  if (items.length === 0) {
+    return { didAdd: false, items: existing };
+  }
+
+  const existingIds = new Set(existing.map((item) => item.id));
+  const newItems = items.filter((item) => !existingIds.has(item.id));
+  if (newItems.length === 0) {
+    return { didAdd: false, items: existing };
+  }
+
+  const merged = [...existing, ...newItems].sort(
+    (left, right) => left.createdAt - right.createdAt,
+  );
+  const capped =
+    merged.length > MAX_ACTIVITY_ITEMS
+      ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
+      : merged;
+
+  return { didAdd: true, items: capped };
+}
+
 function parseTimestamp(value: string | null | undefined) {
   if (!value) {
     return null;
@@ -213,6 +143,34 @@ function toUnixSeconds(isoOrMs: string | null | undefined): number | null {
   return ms === null ? null : Math.floor(ms / 1_000);
 }
 
+// Resolve where the read marker should land when a channel is marked read.
+// Folds the caller's timeline position together with the newest event this
+// client has observed live (`observedLatest`), so an explicit "mark read" still
+// covers messages that arrived faster than channel metadata — this fold is
+// load-bearing for the Esc shortcut, sidebar mark-read, and empty-channel open,
+// all of which pass a null/stale caller value. `clearObserved` reports whether
+// the resulting marker covers the observed timestamp, signalling the caller to
+// drop its observed refs so the unread memo sees `latest === undefined` until a
+// genuinely newer event arrives.
+export function resolveChannelReadMarker(
+  callerReadAt: string | null | undefined,
+  observedLatest: number | undefined,
+): { markAt: number | null; clearObserved: boolean } {
+  const callerUnix = toUnixSeconds(callerReadAt);
+  const markAt = Math.max(callerUnix ?? 0, observedLatest ?? 0) || null;
+  return {
+    markAt,
+    clearObserved:
+      markAt !== null &&
+      observedLatest !== undefined &&
+      observedLatest <= markAt,
+  };
+}
+
+export function resolveObservedUnreadRootId(tags: string[][]): string | null {
+  return isBroadcastReply(tags) ? null : getThreadReference(tags).rootId;
+}
+
 function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
   for (const item of a) {
@@ -224,7 +182,6 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 export function useUnreadChannels(
   channels: Channel[],
   activeChannel: Channel | null,
-  activeReadAt?: string | null,
   options: UseUnreadChannelsOptions = {},
 ) {
   const {
@@ -234,20 +191,16 @@ export function useUnreadChannels(
     ...liveUpdateOptions
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
-  const activeChannelLastMessageAt = activeChannel?.lastMessageAt ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
-
-  // Let callers pass `null` to intentionally suppress the optimistic
-  // channel-metadata fallback until a real timeline position is known.
-  const effectiveActiveReadAt =
-    activeReadAt === undefined ? activeChannelLastMessageAt : activeReadAt;
 
   const {
     getEffectiveTimestamp,
     isReady: isReadStateReady,
     markContextRead,
     drainSyncedAdvances,
+    setContextParentResolver,
     readStateVersion,
+    getOwnTimestamp,
   } = useReadState(pubkey, relayClient);
 
   // Observed "latest external trigger event" per channel (unix seconds). This
@@ -258,8 +211,8 @@ export function useUnreadChannels(
   // change. Stale entries for channels the user has left are silently
   // ignored by the memo (it iterates the current channels list, not the map).
   const latestByChannelRef = React.useRef(new Map<string, number>());
-  const latestHighPriorityByChannelRef = React.useRef(
-    new Map<string, number>(),
+  const observedUnreadEventsByChannelRef = React.useRef(
+    new Map<string, Map<string, ObservedUnreadEvent>>(),
   );
 
   const channelsRef = React.useRef(channels);
@@ -293,6 +246,11 @@ export function useUnreadChannels(
   // Used to notify the author when someone replies to their posts.
   const authoredRootIdsRef = React.useRef(new Set<string>());
 
+  // Root event IDs of threads where an external message @-mentioned the user.
+  // ORed into the badge gate so a mention recipient who never participated,
+  // authored, or followed the thread still gets the thread-unread badge.
+  const mentionedRootIdsRef = React.useRef(new Set<string>());
+
   // Root event IDs of threads the user has explicitly muted. Takes precedence
   // over participation, follow, and authorship for notification suppression.
   const mutedRootIdsRef = React.useRef(new Set<string>());
@@ -316,45 +274,75 @@ export function useUnreadChannels(
     0,
   );
 
+  // Version signal bumped only when the participated/authored/mentioned
+  // root-id sets change, so the gate snapshots (re-derived below) don't
+  // re-allocate on every observed external message the way reusing
+  // latestVersion would.
+  const [membershipVersion, bumpMembershipVersion] = React.useReducer(
+    (x: number) => x + 1,
+    0,
+  );
+
   // Reset all in-session state when the identity or relay changes. Unread
   // tracking depends only on NIP-RS read markers + observed relay events for
   // this user; nothing here is persisted across restarts.
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
   React.useEffect(() => {
     latestByChannelRef.current = new Map();
-    latestHighPriorityByChannelRef.current = new Map();
+    observedUnreadEventsByChannelRef.current = new Map();
     forcedUnreadRef.current = new Set();
     caughtUpChannelsRef.current = new Set();
     participatedRootIdsRef.current = pubkey
-      ? readParticipationFromStorage(pubkey)
+      ? participationStore.read(pubkey)
       : new Set();
     authoredRootIdsRef.current = pubkey
-      ? readAuthoredFromStorage(pubkey)
+      ? authoredStore.read(pubkey)
       : new Set();
-    mutedRootIdsRef.current = pubkey ? readMutedFromStorage(pubkey) : new Set();
+    mentionedRootIdsRef.current = pubkey
+      ? mentionedStore.read(pubkey)
+      : new Set();
+    mutedRootIdsRef.current = pubkey ? mutedStore.read(pubkey) : new Set();
     threadActivityRef.current = pubkey ? readActivityFromStorage(pubkey) : [];
     bumpLatestVersion();
+    bumpMembershipVersion();
   }, [pubkey, relayClient]);
 
+  // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
+  // caller's `readAt` is already the newest TOP-LEVEL message, so the marker
+  // must land exactly there without folding in `observedLatest` (which counts
+  // thread replies) and without clearing observed refs. Leaving the refs intact
+  // keeps the sidebar dot lit for a channel whose only unread is an unopened
+  // thread reply — viewing the channel no longer absorbs the reply, so the dot
+  // persists until an explicit mark-read (Esc, sidebar, mark-all) or a newer
+  // top-level message advances the channel marker past it. Those explicit
+  // "mark read" actions omit the flag and keep the fold, since they mean
+  // "clear everything in this channel."
   const markChannelRead = React.useCallback(
-    (channelId: string, readAt: string | null | undefined) => {
+    (
+      channelId: string,
+      readAt: string | null | undefined,
+      { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
+    ) => {
       if (forcedUnreadRef.current.delete(channelId)) {
         bumpLatestVersion();
       }
-      const callerUnix = toUnixSeconds(readAt);
-      const observedLatest = latestByChannelRef.current.get(channelId);
-      const unixSeconds =
-        Math.max(callerUnix ?? 0, observedLatest ?? 0) || null;
-      if (unixSeconds === null) return;
-      markContextRead(channelId, unixSeconds);
+      const observedLatest = topLevelOnly
+        ? undefined
+        : latestByChannelRef.current.get(channelId);
+      const { markAt, clearObserved } = resolveChannelReadMarker(
+        readAt,
+        observedLatest,
+      );
+      if (markAt === null) return;
+      markContextRead(channelId, markAt);
       // Clear observed-latest refs when the read marker covers them so the
       // unread memo sees `latest === undefined` until a genuinely new event
       // arrives. Without this, `latest > readAt` resolves to `T > T` (false)
       // but the channel lingers in the set when advanceContext's monotonic
       // guard suppresses the readStateVersion bump.
-      if (observedLatest !== undefined && observedLatest <= unixSeconds) {
+      if (clearObserved) {
         latestByChannelRef.current.delete(channelId);
-        latestHighPriorityByChannelRef.current.delete(channelId);
+        observedUnreadEventsByChannelRef.current.delete(channelId);
         bumpLatestVersion();
       }
     },
@@ -371,20 +359,27 @@ export function useUnreadChannels(
     }
   }, []);
 
-  // Mark the active channel as read when it changes or new messages arrive.
-  // Honours the caller's contract that a null activeReadAt suppresses
-  // read-marking until the timeline reports a real position. Manual
-  // mark-unread state is cleared inside markChannelRead, not here.
-  React.useEffect(() => {
-    if (!isReadStateReady) return;
-    if (!activeChannelId) return;
-    markChannelRead(activeChannelId, effectiveActiveReadAt);
-  }, [
-    activeChannelId,
-    effectiveActiveReadAt,
-    isReadStateReady,
-    markChannelRead,
-  ]);
+  // Record the thread root of an EXTERNAL message that @-mentioned the user.
+  // Keyed on the thread root so the badge gate trips for a mention recipient
+  // who never participated/authored/followed. Top-level mentions (no rootId)
+  // are ignored — thread badges only exist for replies. Returns true when the
+  // set actually grew so callers can decide whether to bump the gate snapshot.
+  const recordMentionedRoot = React.useCallback(
+    (event: RelayEvent): boolean => {
+      if (normalizedPubkey === null) return false;
+      if (event.pubkey.toLowerCase() === normalizedPubkey) return false;
+      if (!hasMentionForEvent(event, normalizedPubkey)) return false;
+      const { rootId } = getThreadReference(event.tags);
+      if (rootId === null) return false;
+      const target = mentionedRootIdsRef.current;
+      const sizeBefore = target.size;
+      target.add(rootId);
+      if (target.size === sizeBefore) return false;
+      mentionedStore.write(normalizedPubkey, target);
+      return true;
+    },
+    [normalizedPubkey],
+  );
 
   // Feed the in-session "latest external trigger" map from live channel
   // events. Composes with any caller-supplied onChannelMessage handler.
@@ -392,53 +387,90 @@ export function useUnreadChannels(
   // and external authors, so the map is always a strict subset of "newest
   // external trigger message this client has observed."
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
+  const recordUnreadEvent = React.useCallback(
+    (channelId: string, event: ObservedUnreadEvent) =>
+      recordObservedUnreadEvent(
+        observedUnreadEventsByChannelRef.current,
+        channelId,
+        event,
+        CATCH_UP_LIMIT,
+      ),
+    [],
+  );
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
+      const channel = channelsRef.current.find((ch) => ch.id === channelId);
+      const isHighPriority =
+        channel?.channelType === "dm" ||
+        (normalizedPubkey !== null &&
+          isHighPriorityEventForUser(event, normalizedPubkey));
+      const isThreadedReply =
+        getThreadReference(event.tags).parentId !== null &&
+        !isBroadcastReply(event.tags);
+      const didRecordUnreadEvent = recordUnreadEvent(
+        channelId,
+        makeObservedUnreadEvent({
+          id: event.id,
+          createdAt: event.created_at,
+          rootId: resolveObservedUnreadRootId(event.tags),
+          highPriority: isHighPriority,
+          channelType: channel?.channelType,
+          isThreadedReply,
+        }),
+      );
       const current = latestByChannelRef.current.get(channelId) ?? 0;
       if (event.created_at > current) {
         latestByChannelRef.current.set(channelId, event.created_at);
         bumpLatestVersion();
+      } else if (didRecordUnreadEvent) {
+        bumpLatestVersion();
       }
 
-      // Track high-priority events (DMs, mentions, broadcasts) separately.
-      const channel = channelsRef.current.find((ch) => ch.id === channelId);
-      if (
-        channel?.channelType === "dm" ||
-        (normalizedPubkey !== null &&
-          isHighPriorityEventForUser(event, normalizedPubkey))
-      ) {
-        const currentHigh =
-          latestHighPriorityByChannelRef.current.get(channelId) ?? 0;
-        if (event.created_at > currentHigh) {
-          latestHighPriorityByChannelRef.current.set(
-            channelId,
-            event.created_at,
-          );
-          bumpLatestVersion();
-        }
+      // A mention on a reply makes its thread badge-eligible even when the
+      // user never participated/authored/followed (the gate's missing term).
+      if (recordMentionedRoot(event)) {
+        bumpMembershipVersion();
+      }
+
+      // A high-priority event can be older than the channel's latest observed
+      // normal unread, so it may not advance latestByChannelRef. Still bump so
+      // highPriorityUnreadChannelIds re-reads the per-event priority flag.
+      if (isHighPriority) {
+        bumpLatestVersion();
       }
 
       callerOnChannelMessage?.(channelId, event);
     },
-    [callerOnChannelMessage, normalizedPubkey],
+    [
+      callerOnChannelMessage,
+      normalizedPubkey,
+      recordMentionedRoot,
+      recordUnreadEvent,
+    ],
   );
 
   const handleSelfChannelMessage = React.useCallback(
     (event: RelayEvent) => {
       const ref = getThreadReference(event.tags);
-      if (ref.rootId !== null) {
-        participatedRootIdsRef.current.add(ref.rootId);
-        if (normalizedPubkey !== null) {
-          writeParticipationToStorage(
-            normalizedPubkey,
-            participatedRootIdsRef.current,
-          );
-        }
-      } else {
-        authoredRootIdsRef.current.add(event.id);
-        if (normalizedPubkey !== null) {
-          writeAuthoredToStorage(normalizedPubkey, authoredRootIdsRef.current);
-        }
+      // Participation roots key on the thread root; authored roots (no thread
+      // ref) key on the event id itself.
+      const isParticipation = ref.rootId !== null;
+      const targetSet = isParticipation
+        ? participatedRootIdsRef.current
+        : authoredRootIdsRef.current;
+      const sizeBefore = targetSet.size;
+      targetSet.add(ref.rootId ?? event.id);
+      if (normalizedPubkey !== null) {
+        const write = isParticipation
+          ? participationStore.write
+          : authoredStore.write;
+        write(normalizedPubkey, targetSet);
+      }
+      // Only re-derive the gate snapshot when the set actually grew; a self-post
+      // to an already-tracked root is a no-op for the notify gate, so skipping
+      // the bump avoids a wasted snapshot re-allocation + gate recompute.
+      if (targetSet.size !== sizeBefore) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
@@ -459,27 +491,26 @@ export function useUnreadChannels(
         channelName,
         tags: [...event.tags],
       };
-      const existing = threadActivityRef.current;
-      if (existing.some((e) => e.id === item.id)) return;
-      const next = [...existing, item];
-      const capped =
-        next.length > MAX_ACTIVITY_ITEMS
-          ? next.slice(next.length - MAX_ACTIVITY_ITEMS)
-          : next;
-      threadActivityRef.current = capped;
+      const added = addThreadActivityItems(threadActivityRef.current, [item]);
+      if (!added.didAdd) return;
+      const didRecordMentionedRoot = recordMentionedRoot(event);
+      threadActivityRef.current = added.items;
       if (normalizedPubkey !== null) {
-        writeActivityToStorage(normalizedPubkey, capped);
+        writeActivityToStorage(normalizedPubkey, added.items);
+      }
+      if (didRecordMentionedRoot) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
-    [channels, normalizedPubkey],
+    [channels, normalizedPubkey, recordMentionedRoot],
   );
 
   const muteThread = React.useCallback(
     (rootId: string) => {
       mutedRootIdsRef.current.add(rootId);
       if (normalizedPubkey !== null) {
-        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+        mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
       }
       bumpLatestVersion();
     },
@@ -490,7 +521,7 @@ export function useUnreadChannels(
     (rootId: string) => {
       mutedRootIdsRef.current.delete(rootId);
       if (normalizedPubkey !== null) {
-        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+        mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
       }
       bumpLatestVersion();
     },
@@ -544,12 +575,21 @@ export function useUnreadChannels(
 
     let isCancelled = false;
 
+    // Snapshot membership sizes so the `.then` can detect whether the catch-up
+    // discovered new participated/authored/mentioned roots (pass 1 mutates the
+    // refs in place). A pure-participation or pure-mention discovery produces no
+    // maxExternal advance, so without this the notify gate would never
+    // invalidate to surface the badge.
+    const participatedSizeBefore = participatedRootIdsRef.current.size;
+    const authoredSizeBefore = authoredRootIdsRef.current.size;
+    const mentionedSizeBefore = mentionedRootIdsRef.current.size;
+
     type CatchUpResult =
       | {
           channelId: string;
           ok: true;
           maxExternal: number;
-          maxHighPriority: number;
+          unreadEvents: ObservedUnreadEvent[];
           threadReplies: ThreadActivityItem[];
         }
       | { channelId: string; ok: false };
@@ -570,37 +610,37 @@ export function useUnreadChannels(
             limit: CATCH_UP_LIMIT,
           });
 
-          // Pass 1: build participation from self-authored thread replies
-          // and track self-authored top-level messages for author notifications
+          // Pass 1: build participation from self-authored thread replies,
+          // track self-authored top-level messages for author notifications,
+          // and capture external mentions so their threads gate a badge.
           for (const event of events) {
-            if (
+            const isSelf =
               normalizedPubkey !== null &&
-              event.pubkey.toLowerCase() === normalizedPubkey
-            ) {
+              event.pubkey.toLowerCase() === normalizedPubkey;
+            if (isSelf) {
               const ref = getThreadReference(event.tags);
               if (ref.rootId !== null) {
                 participatedRootIdsRef.current.add(ref.rootId);
               } else {
                 authoredRootIdsRef.current.add(event.id);
               }
+            } else {
+              recordMentionedRoot(event);
             }
           }
 
           if (normalizedPubkey !== null) {
-            writeParticipationToStorage(
+            participationStore.write(
               normalizedPubkey,
               participatedRootIdsRef.current,
             );
-            writeAuthoredToStorage(
-              normalizedPubkey,
-              authoredRootIdsRef.current,
-            );
+            authoredStore.write(normalizedPubkey, authoredRootIdsRef.current);
           }
 
           // Pass 2: compute maxExternal and collect thread reply activity,
           // applying the notification filter to both.
           let maxExternal = 0;
-          let maxHighPriority = 0;
+          const unreadEvents: ObservedUnreadEvent[] = [];
           const threadReplies: ThreadActivityItem[] = [];
           const ch = channels.find((c) => c.id === channelId);
           const chType = ch?.channelType;
@@ -627,20 +667,27 @@ export function useUnreadChannels(
             ) {
               continue;
             }
+            const evtRef = getThreadReference(event.tags);
+            const isThreadedReply =
+              evtRef.parentId !== null && !isBroadcastReply(event.tags);
             if (event.created_at > maxExternal) {
               maxExternal = event.created_at;
             }
-            if (
+            const isHighPriority =
               chType === "dm" ||
               (normalizedPubkey !== null &&
-                isHighPriorityEventForUser(event, normalizedPubkey))
-            ) {
-              if (event.created_at > maxHighPriority) {
-                maxHighPriority = event.created_at;
-              }
-            }
-            const evtRef = getThreadReference(event.tags);
-            if (evtRef.parentId !== null && !isBroadcastReply(event.tags)) {
+                isHighPriorityEventForUser(event, normalizedPubkey));
+            unreadEvents.push(
+              makeObservedUnreadEvent({
+                id: event.id,
+                createdAt: event.created_at,
+                rootId: resolveObservedUnreadRootId(event.tags),
+                highPriority: isHighPriority,
+                channelType: chType,
+                isThreadedReply,
+              }),
+            );
+            if (isThreadedReply) {
               threadReplies.push({
                 id: event.id,
                 kind: event.kind,
@@ -658,7 +705,7 @@ export function useUnreadChannels(
             channelId,
             ok: true,
             maxExternal,
-            maxHighPriority,
+            unreadEvents,
             threadReplies,
           };
         } catch {
@@ -677,9 +724,14 @@ export function useUnreadChannels(
           caughtUpChannelsRef.current.delete(result.channelId);
           continue;
         }
-        const { channelId, maxExternal, maxHighPriority, threadReplies } =
-          result;
+        const { channelId, maxExternal, unreadEvents, threadReplies } = result;
         allThreadReplies.push(...threadReplies);
+        if (unreadEvents.length > 0) {
+          for (const event of unreadEvents) {
+            recordUnreadEvent(channelId, event);
+          }
+          didAdvance = true;
+        }
         if (maxExternal > 0) {
           const readAtNow = getEffectiveTimestamp(channelId) ?? 0;
           if (maxExternal > readAtNow) {
@@ -690,40 +742,28 @@ export function useUnreadChannels(
             }
           }
         }
-        if (maxHighPriority > 0) {
-          const readAtNow = getEffectiveTimestamp(channelId) ?? 0;
-          if (maxHighPriority > readAtNow) {
-            const currentHigh =
-              latestHighPriorityByChannelRef.current.get(channelId) ?? 0;
-            if (maxHighPriority > currentHigh) {
-              latestHighPriorityByChannelRef.current.set(
-                channelId,
-                maxHighPriority,
-              );
-              didAdvance = true;
-            }
-          }
-        }
       }
       if (allThreadReplies.length > 0) {
-        const existingIds = new Set(threadActivityRef.current.map((e) => e.id));
-        const newItems = allThreadReplies.filter(
-          (item) => !existingIds.has(item.id),
+        const added = addThreadActivityItems(
+          threadActivityRef.current,
+          allThreadReplies,
         );
-        if (newItems.length > 0) {
-          const merged = [...threadActivityRef.current, ...newItems];
-          const capped =
-            merged.length > MAX_ACTIVITY_ITEMS
-              ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
-              : merged;
-          threadActivityRef.current = capped;
+        if (added.didAdd) {
+          threadActivityRef.current = added.items;
           if (normalizedPubkey) {
-            writeActivityToStorage(normalizedPubkey, capped);
+            writeActivityToStorage(normalizedPubkey, added.items);
           }
           didAdvance = true;
         }
       }
       if (didAdvance) bumpLatestVersion();
+      if (
+        participatedRootIdsRef.current.size !== participatedSizeBefore ||
+        authoredRootIdsRef.current.size !== authoredSizeBefore ||
+        mentionedRootIdsRef.current.size !== mentionedSizeBefore
+      ) {
+        bumpMembershipVersion();
+      }
     });
 
     return () => {
@@ -740,6 +780,7 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     isReadStateReady,
     normalizedPubkey,
+    recordUnreadEvent,
     relayClient,
   ]);
 
@@ -757,11 +798,15 @@ export function useUnreadChannels(
         return {
           unreadChannelIds: new Set<string>(),
           highPriorityUnreadChannelIds: new Set<string>(),
+          unreadChannelCounts: new Map<string, number>(),
+          unreadChannelNotificationCount: 0,
         };
       }
 
       const unread = new Set<string>();
       const highPriority = new Set<string>();
+      const counts = new Map<string, number>();
+      let unreadChannelNotificationCount = 0;
 
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
@@ -769,42 +814,68 @@ export function useUnreadChannels(
         if (forcedUnreadRef.current.has(channel.id)) {
           // Forced-unread is dot tier only — not high-priority.
           unread.add(channel.id);
+          counts.set(channel.id, 1);
+          unreadChannelNotificationCount += 1;
           continue;
         }
 
-        const latest = latestByChannelRef.current.get(channel.id);
-        if (latest === undefined) continue;
+        if (latestByChannelRef.current.get(channel.id) === undefined) continue;
 
-        const readAt = getEffectiveTimestamp(channel.id);
-        if (readAt !== null && latest <= readAt) continue;
+        const observedEvents = observedUnreadEventsByChannelRef.current.get(
+          channel.id,
+        );
+        const channelReadAt = getEffectiveTimestamp(channel.id);
+        const readAtForObservedEvent = (event: ObservedUnreadEvent) =>
+          observedUnreadEventReadAt(
+            event,
+            channelReadAt,
+            (rootId) => getOwnTimestamp(`thread:${rootId}`),
+            (messageId) => getOwnTimestamp(`msg:${messageId}`),
+          );
+
+        const unreadCount = countUnreadObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
+        );
+        if (unreadCount === 0) continue;
 
         unread.add(channel.id);
+        const badgeCount = countUnreadBadgeObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
+        );
+        counts.set(channel.id, badgeCount);
+        unreadChannelNotificationCount += countUnreadAppBadgeObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
+        );
 
         // DM channels: any unread DM is high-priority.
         if (channel.channelType === "dm") {
           highPriority.add(channel.id);
-        } else {
-          // Non-DM: high-priority only if there's a mention/broadcast newer than read marker.
-          const latestHigh = latestHighPriorityByChannelRef.current.get(
-            channel.id,
-          );
-          if (
-            latestHigh !== undefined &&
-            (readAt === null || latestHigh > readAt)
-          ) {
-            highPriority.add(channel.id);
-          }
+        } else if (
+          countUnreadHighPriorityObservedEvents(
+            observedEvents,
+            readAtForObservedEvent,
+          ) > 0
+        ) {
+          // Non-DM: high-priority only if at least one mention/broadcast
+          // remains unread in its own channel/thread context.
+          highPriority.add(channel.id);
         }
       }
 
       return {
         unreadChannelIds: unread,
         highPriorityUnreadChannelIds: highPriority,
+        unreadChannelCounts: counts,
+        unreadChannelNotificationCount,
       };
     }, [
       activeChannelId,
       channels,
       getEffectiveTimestamp,
+      getOwnTimestamp,
       isReadStateReady,
       latestVersion,
       readStateVersion,
@@ -814,6 +885,9 @@ export function useUnreadChannels(
   // so downstream memos don't re-run on every render when sets are equal.
   const prevUnreadRef = React.useRef<ReadonlySet<string>>(new Set());
   const prevHighPriorityRef = React.useRef<ReadonlySet<string>>(new Set());
+  const prevUnreadCountsRef = React.useRef<ReadonlyMap<string, number>>(
+    new Map(),
+  );
 
   const unreadChannelIds = setsEqual(
     rawUnread.unreadChannelIds,
@@ -831,6 +905,16 @@ export function useUnreadChannels(
     : rawUnread.highPriorityUnreadChannelIds;
   prevHighPriorityRef.current = highPriorityUnreadChannelIds;
 
+  const unreadChannelCounts = mapsEqual(
+    rawUnread.unreadChannelCounts,
+    prevUnreadCountsRef.current,
+  )
+    ? prevUnreadCountsRef.current
+    : rawUnread.unreadChannelCounts;
+  prevUnreadCountsRef.current = unreadChannelCounts;
+  const unreadChannelNotificationCount =
+    rawUnread.unreadChannelNotificationCount;
+
   const unreadChannelIdsRef = React.useRef(unreadChannelIds);
   unreadChannelIdsRef.current = unreadChannelIds;
 
@@ -845,14 +929,36 @@ export function useUnreadChannels(
         markContextRead(channelId, unixSeconds);
       }
       latestByChannelRef.current.delete(channelId);
-      latestHighPriorityByChannelRef.current.delete(channelId);
+      observedUnreadEventsByChannelRef.current.delete(channelId);
     }
     bumpLatestVersion();
   }, [getEffectiveTimestamp, markContextRead]);
 
+  // Identity-stable snapshots of the membership sets for the notify gate.
+  // Re-derived only when membershipVersion bumps (a set actually changed), so
+  // `isNotifiedForThread`'s useCallback deps invalidate on async discovery
+  // while live consumers keep reading the mutable refs directly.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const participatedRootIds = React.useMemo(
+    () => new Set(participatedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const authoredRootIds = React.useMemo(
+    () => new Set(authoredRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const mentionedRootIds = React.useMemo(
+    () => new Set(mentionedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+
   return {
     unreadChannelIds,
+    unreadChannelCounts,
     highPriorityUnreadChannelIds,
+    unreadChannelNotificationCount,
     markAllChannelsRead,
     markChannelRead,
     markChannelUnread,
@@ -861,9 +967,12 @@ export function useUnreadChannels(
     // ReadStateManager. readStateVersion is the invalidation signal callers
     // should include in memo deps.
     getEffectiveTimestamp,
+    getOwnTimestamp,
     readStateVersion,
-    participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
-    authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
+    setContextParentResolver,
+    participatedRootIds,
+    authoredRootIds,
+    mentionedRootIds,
     threadActivityItems: threadActivityRef.current,
     mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
     muteThread,

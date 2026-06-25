@@ -7,7 +7,8 @@
 //! 1. GET pointer → manifest digest.
 //! 2. GET manifest (digest-verified) → parsed [`Manifest`].
 //! 3. GET every pack the manifest names (digest-verified, in parallel).
-//! 4. **Phase 1** — for each pack: write `pack-<hex>.pack`, run
+//! 4. **Phase 1** — for each pack: write `pack-<hex>.pack`; install and
+//!    validate a cached `idx/<hex>` sidecar when present, otherwise run
 //!    `git index-pack` to materialize `.idx`. Failure here tears down the
 //!    tempdir with no refs/HEAD ever written.
 //! 5. **Phase 2** — only after all packs are indexed: write loose refs and
@@ -93,6 +94,21 @@ pub async fn hydrate_for_read(
         return Ok(None);
     };
     Ok(Some(materialize_manifest(store, &manifest).await?))
+}
+
+/// Load the current manifest for a read path without materializing pack objects.
+///
+/// Used by `info/refs` fast paths that can answer directly from manifest refs.
+/// Returns `Ok(None)` when the repo pointer is absent; otherwise verifies the
+/// pointer-named manifest digest before returning it.
+pub async fn load_manifest_for_read(
+    store: &GitStore,
+    owner: &str,
+    repo: &str,
+) -> Result<Option<Manifest>, HydrateError> {
+    Ok(load_pointer(store, owner, repo)
+        .await?
+        .map(|(_etag, _digest, manifest)| manifest))
 }
 
 /// Hydrate a bare repo for write (`receive-pack`) and return the
@@ -206,12 +222,7 @@ async fn materialize_manifest(
         tokio::fs::write(&pack_path, bytes)
             .await
             .map_err(|e| HydrateError::Hydrate(format!("write pack {digest}: {e}")))?;
-        // No `--strict`: `index-pack` already validates structural integrity
-        // (CRC, type tags, internal refs). `--strict` adds connectivity-graph
-        // checks, which would re-prove what manifest.packs already covers by
-        // construction (Inv_Closed, write-path invariant). Latency cost on
-        // every clone is not worth re-proving a write-path bug.
-        run_git(&path, &["index-pack", pack_path.to_str().unwrap()]).await?;
+        install_or_generate_idx(store, &path, digest, &pack_path).await?;
     }
 
     // Phase 2: install refs and HEAD. After this point, the repo advertises.
@@ -256,6 +267,48 @@ async fn materialize_manifest(
         _tempdir: tempdir,
         path,
     })
+}
+
+async fn install_or_generate_idx(
+    store: &GitStore,
+    repo_path: &Path,
+    pack_digest: &str,
+    pack_path: &Path,
+) -> Result<(), HydrateError> {
+    let idx_path = pack_path.with_extension("idx");
+    match store.get_idx(pack_digest).await {
+        Ok(Some(idx_bytes)) => {
+            tokio::fs::write(&idx_path, &idx_bytes)
+                .await
+                .map_err(|e| HydrateError::Hydrate(format!("write idx {pack_digest}: {e}")))?;
+            match run_git(repo_path, &["verify-pack", idx_path.to_str().unwrap()]).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(
+                        pack_digest = %pack_digest,
+                        error = %e,
+                        "git pack idx sidecar failed validation; regenerating"
+                    );
+                    let _ = tokio::fs::remove_file(&idx_path).await;
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(
+                pack_digest = %pack_digest,
+                error = %e,
+                "failed to read git pack idx sidecar; regenerating"
+            );
+        }
+    }
+
+    // No `--strict`: `index-pack` already validates structural integrity
+    // (CRC, type tags, internal refs). `--strict` adds connectivity-graph
+    // checks, which would re-prove what manifest.packs already covers by
+    // construction (Inv_Closed, write-path invariant). Latency cost on every
+    // clone is not worth re-proving a write-path bug.
+    run_git(repo_path, &["index-pack", pack_path.to_str().unwrap()]).await
 }
 
 /// Run `git <args>` in `cwd`, fail on non-zero exit.

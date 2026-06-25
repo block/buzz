@@ -26,8 +26,6 @@ export function coerceConfigValues(
   return result;
 }
 
-// ── Provider config form ──────────────────────────────────────────────────────
-
 export function ProviderConfigFields({
   schema,
   config,

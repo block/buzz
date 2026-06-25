@@ -19,7 +19,6 @@ import type {
 } from "@/shared/api/types";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
-import { Card } from "@/shared/ui/card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -332,7 +331,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             size="sm"
             variant="ghost"
           >
-            <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+            <Trash2 className="mr-1.5 h-4 w-4" />
             Remove stopped
           </Button>
         </div>
@@ -474,18 +473,72 @@ function SectionHeader({
 
 function LoadingSkeleton() {
   return (
-    <Card className="overflow-hidden">
-      {["a", "b", "c"].map((k) => (
+    <div className="space-y-3">
+      {["a", "b", "c"].map((k, index) => (
         <div
-          className="flex items-center gap-4 border-b border-border/60 px-4 py-3 last:border-b-0"
+          className="overflow-hidden rounded-xl border border-border/70 bg-card/40"
           key={k}
         >
-          <Skeleton className="h-8 w-8 rounded-lg" />
-          <Skeleton className="h-4 w-28" />
-          <Skeleton className="h-5 w-16 rounded-full" />
+          <div className="flex items-center gap-2 px-3 py-2">
+            <div className="flex min-w-0 flex-1 items-center gap-2 py-1">
+              <Skeleton className="h-4 w-4 shrink-0 rounded-sm" />
+              <Skeleton className="h-8 w-8 shrink-0 rounded-lg" />
+              <div className="flex min-w-0 items-center gap-2">
+                <Skeleton className={index === 2 ? "h-4 w-36" : "h-4 w-32"} />
+                <Skeleton className="h-5 w-14 rounded-full" />
+              </div>
+              <Skeleton className="ml-1 h-3 w-20 shrink-0" />
+            </div>
+            {index === 1 ? (
+              <Skeleton className="h-5 w-16 rounded-full" />
+            ) : null}
+            <Skeleton className="h-8 w-8 shrink-0 rounded-lg" />
+          </div>
+          <div className="divide-y divide-border/50 border-t border-border/50">
+            <div className="flex items-start gap-3 px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="grid gap-3 lg:grid-cols-[minmax(0,1.8fr)_minmax(120px,0.8fr)_minmax(0,1.1fr)] lg:gap-4">
+                  <div className="min-w-0">
+                    <div className="flex items-start gap-3">
+                      <Skeleton className="mt-0.5 h-4 w-4 shrink-0 rounded-sm" />
+                      <Skeleton className="mt-1 h-2 w-2 shrink-0 rounded-full" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Skeleton className="h-4 w-36" />
+                          <Skeleton className="h-5 w-16 rounded-full" />
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <Skeleton className="h-3 w-20" />
+                          <Skeleton className="h-3 w-24" />
+                        </div>
+                        {index === 0 ? (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            <Skeleton className="h-5 w-20 rounded-full" />
+                            <Skeleton className="h-5 w-24 rounded-full" />
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Skeleton className="h-5 w-20 rounded-full" />
+                    <Skeleton className="h-3 w-24" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Skeleton className="h-4 w-28" />
+                    <Skeleton className="h-3 w-20" />
+                  </div>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-start gap-2 lg:pt-0.5">
+                <Skeleton className="h-7 w-24 rounded-md" />
+                <Skeleton className="h-7 w-7 rounded-md" />
+              </div>
+            </div>
+          </div>
         </div>
       ))}
-    </Card>
+    </div>
   );
 }
 

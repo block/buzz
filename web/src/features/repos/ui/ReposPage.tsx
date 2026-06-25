@@ -104,7 +104,7 @@ export function ReposPage() {
       <div className="flex w-full gap-8 px-4 py-8">
         <div className="min-w-0 flex-1">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold">
-            <BookMarked className="h-5 w-5" /> Repositories
+            <BookMarked className="h-4 w-4" /> Repositories
           </h2>
           <div className="divide-y">
             {["a", "b", "c", "d", "e"].map((key) => (
@@ -131,7 +131,7 @@ export function ReposPage() {
         </div>
 
         <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold">
-          <BookMarked className="h-5 w-5" /> Repositories
+          <BookMarked className="h-4 w-4" /> Repositories
         </h2>
 
         {/* Search + Sort bar */}

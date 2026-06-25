@@ -265,20 +265,20 @@ export function SettingsView({
 
       <SidebarInset
         className={cn(
-          "relative min-h-0 min-w-0 overflow-hidden motion-safe:transition-opacity motion-safe:duration-200",
+          "isolate relative min-h-0 min-w-0 overflow-hidden bg-sidebar motion-safe:transition-opacity motion-safe:duration-200",
           isLoaded ? "opacity-100" : "opacity-0",
         )}
         data-testid="settings-view"
       >
         <div
           aria-hidden="true"
-          className="absolute inset-x-0 top-0 h-11"
+          className="absolute inset-x-0 top-0 z-10 h-11"
           data-tauri-drag-region
         />
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden pt-11">
+        <div className="relative z-10 ml-px mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background pt-11 shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
           <section className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-4 sm:px-6">
             <div
-              className="mx-auto flex w-full max-w-4xl flex-col gap-4"
+              className="mx-auto flex h-full w-full max-w-4xl flex-col gap-4"
               data-testid={`settings-panel-${section}`}
             >
               {renderSettingsSection(section, {

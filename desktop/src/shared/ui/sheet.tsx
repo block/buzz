@@ -7,6 +7,7 @@ import { X } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 
 const Sheet = SheetPrimitive.Root;
 
@@ -26,6 +27,7 @@ const SheetOverlay = React.forwardRef<
     <SheetPrimitive.Overlay
       className={cn(
         "fixed inset-0 z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+        MODAL_BACKDROP_BLUR_CLASS,
         isDark ? "bg-black/80" : "bg-black/10",
         className,
       )}

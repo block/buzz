@@ -213,12 +213,12 @@ export function BatchImportDialog({
                   onClick={() => setSkippedExpanded((prev) => !prev)}
                   type="button"
                 >
-                  <AlertTriangle className="h-3.5 w-3.5" />
+                  <AlertTriangle className="h-4 w-4" />
                   {skipped.length} file{skipped.length !== 1 ? "s" : ""} skipped
                   {skippedExpanded ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
+                    <ChevronDown className="h-4 w-4" />
                   ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
+                    <ChevronRight className="h-4 w-4" />
                   )}
                 </button>
                 {skippedExpanded ? (

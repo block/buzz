@@ -94,7 +94,7 @@ export function WorkflowRunTrace({
             </div>
             {Object.keys(step.output).length > 0 ? (
               <div className="mt-3">
-                <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                <p className="mb-1 text-2xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
                   Output
                 </p>
                 <pre className="max-h-32 overflow-auto rounded-lg bg-muted/40 px-3 py-2 font-mono text-xs text-muted-foreground">
@@ -104,7 +104,7 @@ export function WorkflowRunTrace({
             ) : null}
             {step.error ? (
               <div className="mt-3">
-                <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.16em] text-red-400">
+                <p className="mb-1 text-2xs font-medium uppercase tracking-[0.16em] text-red-400">
                   Error
                 </p>
                 <pre className="max-h-32 overflow-auto rounded-lg bg-red-500/10 px-3 py-2 font-mono text-xs text-red-400">
@@ -114,7 +114,7 @@ export function WorkflowRunTrace({
             ) : null}
             {pendingApproval ? (
               <div className="mt-3">
-                <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-amber-600">
+                <p className="mb-2 text-2xs font-medium uppercase tracking-[0.16em] text-amber-600">
                   Pending approval
                 </p>
                 <WorkflowApprovalCard approval={pendingApproval} />

@@ -58,36 +58,69 @@ async function addGenericAgent(
   page: Page,
   channelName: string,
   agentName: string,
-) {
+): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
-  await page.getByTestId("channel-add-bot-trigger").click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
-  await page.getByRole("button", { name: "Generic" }).click();
-  await page.locator("#channel-generic-name").fill(agentName);
-  await page
-    .locator("#channel-generic-prompt")
-    .fill("Watch the channel and help when asked.");
-  await page.getByRole("button", { name: "Add agent" }).click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toHaveCount(
-    0,
-  );
-}
-
-async function getManagedAgentPubkey(page: Page, agentName: string) {
-  await page.getByTestId("open-agents-view").click();
-  const managedAgentRow = page
-    .locator('[data-testid^="managed-agent-"]')
-    .filter({ hasText: agentName });
-  await expect(managedAgentRow).toHaveCount(1);
-  const managedAgentTestId = await managedAgentRow
-    .first()
-    .getAttribute("data-testid");
-  if (!managedAgentTestId) {
-    throw new Error("Managed agent row test id missing.");
+  const channelId = await page
+    .getByTestId(`channel-${channelName}`)
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error(`Channel ${channelName} is missing a data-channel-id.`);
   }
 
-  return managedAgentTestId.replace("managed-agent-", "");
+  await page.waitForFunction(() => {
+    return Boolean(
+      (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__,
+    );
+  });
+  return page.evaluate(
+    async ({ agentName, channelId }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<{ agent?: { pubkey: string } }>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) {
+        throw new Error("Mock bridge is not installed.");
+      }
+
+      const created = await invoke("create_managed_agent", {
+        input: {
+          name: agentName,
+          spawnAfterCreate: true,
+          systemPrompt: "Watch the channel and help when asked.",
+        },
+      });
+      const pubkey = created.agent?.pubkey;
+      if (!pubkey) {
+        throw new Error("Mock managed agent creation did not return a pubkey.");
+      }
+
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+
+      await (
+        window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            invalidateQueries: () => Promise<void>;
+          };
+        }
+      ).__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+
+      return pubkey;
+    },
+    { agentName, channelId },
+  );
 }
 
 async function waitForMockLiveSubscription(page: Page, channelName: string) {
@@ -147,13 +180,14 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await page.getByTestId("profile-avatar-edit").click();
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
   await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
 
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await page.getByTestId("profile-avatar-done").click();
   await expandIdentity(page);
 
@@ -168,7 +202,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expandIdentity(page);
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await expect(page.getByTestId("profile-about-value")).toHaveText(about);
 });
 
@@ -269,6 +303,51 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
   );
   expect(transitionProperty).toContain("opacity");
   expect(transitionProperty).toContain("scale");
+});
+
+test("swaps the avatar preview and mode tabs while editing", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+
+  const previewFrame = page.getByTestId("profile-avatar-clip-frame");
+  const closedPreviewBox = await previewFrame.boundingBox();
+  if (!closedPreviewBox) {
+    throw new Error("Profile avatar preview did not render bounds.");
+  }
+
+  await page.getByTestId("profile-avatar-edit").click();
+  const tabList = page.getByRole("tablist", { name: "Avatar type" });
+  await expect(tabList).toBeVisible();
+  await expect(page.getByTestId("profile-avatar-mode-tabs-slot")).toBeVisible();
+  await page.waitForTimeout(350);
+
+  const openPreviewBox = await previewFrame.boundingBox();
+  const tabListBox = await tabList.boundingBox();
+  if (!openPreviewBox || !tabListBox) {
+    throw new Error("Profile avatar edit layout did not render bounds.");
+  }
+
+  const closedPreviewCenterY = closedPreviewBox.y + closedPreviewBox.height / 2;
+  const tabListCenterY = tabListBox.y + tabListBox.height / 2;
+  expect(Math.abs(tabListCenterY - closedPreviewCenterY)).toBeLessThan(16);
+  const tabListBottomY = tabListBox.y + tabListBox.height;
+  const segmentToPreviewGap = openPreviewBox.y - tabListBottomY;
+  expect(segmentToPreviewGap).toBeGreaterThan(48);
+  expect(segmentToPreviewGap).toBeLessThan(72);
+  expect(openPreviewBox.y).toBeGreaterThan(closedPreviewCenterY + 72);
+
+  await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
+  await expect(tabList).toHaveCount(0);
+
+  const restoredPreviewBox = await previewFrame.boundingBox();
+  if (!restoredPreviewBox) {
+    throw new Error("Profile avatar preview did not restore bounds.");
+  }
+  expect(Math.abs(restoredPreviewBox.y - closedPreviewBox.y)).toBeLessThan(8);
 });
 
 test("highlights the avatar drop target while dragging an image", async ({
@@ -387,9 +466,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
   await page.getByTestId("profile-avatar-done").click();
   await waitForAvatarEditorToClose(page);
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    pastedAvatarUrl,
-  );
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await page.getByTestId("profile-avatar-url").fill("");
   await page.getByTestId("profile-avatar-done").click();
   await expect(
@@ -397,9 +474,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
   ).toHaveCount(1);
   await waitForAvatarEditorToClose(page);
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    pastedAvatarUrl,
-  );
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
 
   await expect
     .poll(() =>
@@ -451,9 +526,7 @@ test("reveals emoji background colors only after choosing an emoji", async ({
   await waitForAvatarEditorToClose(page);
 
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    imageAvatarUrl,
-  );
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await page.getByRole("tab", { name: "Emoji" }).click();
 
   const colorGridShell = page.getByTestId("profile-avatar-color-grid-shell");
@@ -562,8 +635,7 @@ test("renders agent memories seeded through the Playwright mock bridge", async (
   });
   await page.goto("/");
 
-  await addGenericAgent(page, "general", "Memory Bot");
-  const agentPubkey = await getManagedAgentPubkey(page, "Memory Bot");
+  const agentPubkey = await addGenericAgent(page, "general", "Memory Bot");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -674,7 +746,10 @@ test("renders settings in the app shell with a back button", async ({
 }) => {
   await page.goto("/");
 
-  await expect(page.getByRole("button", { name: "Home" })).toBeVisible();
+  const inboxNavButton = page
+    .getByTestId("app-sidebar")
+    .getByRole("button", { name: "Inbox" });
+  await expect(inboxNavButton).toBeVisible();
 
   await openSettings(page);
   await expect(page.getByTestId("settings-sidebar")).toBeVisible();
@@ -703,14 +778,14 @@ test("renders settings in the app shell with a back button", async ({
       name: "Appearance",
     }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Home" })).toHaveCount(0);
+  await expect(inboxNavButton).toHaveCount(0);
 
   await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
-  await expect(page.getByRole("button", { name: "Home" })).toBeVisible();
+  await expect(inboxNavButton).toBeVisible();
 });
 
-test("notification settings drive the Home badge and desktop alerts", async ({
+test("notification settings drive the Inbox badge and desktop alerts", async ({
   page,
 }) => {
   async function getAppBadgeCount() {
@@ -839,7 +914,10 @@ test("notification settings drive the Home badge and desktop alerts", async ({
   await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
   await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
-  await page.getByRole("button", { name: "Home" }).click();
+  await page
+    .getByTestId("app-sidebar")
+    .getByRole("button", { name: "Inbox" })
+    .click();
   await expectHomeView(page);
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
   await expect.poll(getAppBadgeCount).toBe(baseline);

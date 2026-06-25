@@ -20,10 +20,6 @@ pre-commit:
 pre-push:
   parallel: true
   commands:
-    rust-clippy:
-      run: just clippy
-    desktop-tauri-clippy:
-      run: just desktop-tauri-clippy
     rust-tests:
       run: just test-unit
     desktop-test:

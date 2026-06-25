@@ -1,12 +1,14 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
+import "@fontsource-variable/inter/wght.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyWorkspaceStorageBeforeRender } from "@/features/workspaces/legacyWorkspaceStorage";
 import { WorkspacesProvider } from "@/features/workspaces/useWorkspaces";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
+import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
 import { Toaster } from "@/shared/ui/sonner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 
@@ -16,8 +18,7 @@ type E2eWindow = Window & {
 
 const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
 const E2E_WORKSPACE_ID = "e2e-default-workspace";
-const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
-  "sprout-onboarding-complete.v1:";
+const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 
 function configureDevE2eBridgeFromUrl() {
   if (!import.meta.env.DEV) {
@@ -38,8 +39,8 @@ function configureDevE2eBridgeFromUrl() {
     name: "E2E Test",
     relayUrl: "ws://localhost:3000",
   };
-  window.localStorage.setItem("sprout-workspaces", JSON.stringify([workspace]));
-  window.localStorage.setItem("sprout-active-workspace-id", E2E_WORKSPACE_ID);
+  window.localStorage.setItem("buzz-workspaces", JSON.stringify([workspace]));
+  window.localStorage.setItem("buzz-active-workspace-id", E2E_WORKSPACE_ID);
   window.localStorage.setItem(
     `${ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${E2E_DEFAULT_PUBKEY}`,
     "true",
@@ -53,10 +54,12 @@ function renderApp() {
         <ThemeProvider defaultTheme="houston">
           <TooltipProvider delayDuration={300}>
             <EmojiBurstProvider>
-              <UpdaterProvider>
-                <App />
-              </UpdaterProvider>
-              <Toaster />
+              <PoofBurstProvider>
+                <UpdaterProvider>
+                  <App />
+                </UpdaterProvider>
+                <Toaster />
+              </PoofBurstProvider>
             </EmojiBurstProvider>
           </TooltipProvider>
         </ThemeProvider>

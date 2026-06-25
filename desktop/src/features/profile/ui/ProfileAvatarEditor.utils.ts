@@ -430,17 +430,6 @@ export function dataTransferHasImage(dataTransfer: DataTransfer | null) {
   );
 }
 
-export function visibleUrlDraft(
-  avatarUrl: string,
-  hiddenAvatarUrl?: string | null,
-) {
-  if (avatarUrl.startsWith("data:") || avatarUrl === hiddenAvatarUrl) {
-    return "";
-  }
-
-  return avatarUrl;
-}
-
 export function useEmojiMartStyles(
   containerRef: React.RefObject<HTMLDivElement | null>,
   enabled: boolean,

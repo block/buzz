@@ -25,8 +25,6 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 
-// ── URL helpers ───────────────────────────────────────────────────────────────
-
 /// WebSocket relay URL (e.g. `ws://localhost:3000`).
 fn relay_ws_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3001".to_string())
@@ -46,8 +44,6 @@ fn http_client() -> Client {
         .build()
         .expect("failed to build HTTP client")
 }
-
-// ── NIP-98 helpers ────────────────────────────────────────────────────────────
 
 /// Build a `Authorization: Nostr <base64>` header value for NIP-98 HTTP Auth.
 ///
@@ -92,8 +88,6 @@ fn build_nip98_header_no_payload(keys: &Keys, url: &str, method: &str) -> String
     format!("Nostr {encoded}")
 }
 
-// ── Mint helper ───────────────────────────────────────────────────────────────
-
 /// Mint a token via dev-mode `X-Pubkey` header. Returns the parsed response body.
 async fn mint_token_dev(
     client: &Client,
@@ -122,8 +116,6 @@ async fn mint_token_dev(
     );
     resp.json().await.expect("response JSON")
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// POST /api/tokens via dev-mode X-Pubkey header returns 201 with token fields.
 #[tokio::test]

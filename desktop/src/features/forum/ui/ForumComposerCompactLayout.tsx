@@ -5,6 +5,7 @@ import { Plus } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Spinner } from "@/shared/ui/spinner";
 
 type ForumComposerCompactLayoutProps = {
   editor: Editor | null;
@@ -45,12 +46,12 @@ export function ForumComposerCompactLayout({
         variant="ghost"
       >
         {isSending ? (
-          <span
+          <Spinner
             aria-hidden
-            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
+            className="h-4 w-4 border-2 text-primary-foreground"
           />
         ) : (
-          <Plus aria-hidden className="h-3.5 w-3.5" />
+          <Plus aria-hidden className="h-4 w-4" />
         )}
       </Button>
     </div>

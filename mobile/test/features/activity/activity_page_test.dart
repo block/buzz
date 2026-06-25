@@ -268,10 +268,6 @@ void main() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Fake notifiers
-// ---------------------------------------------------------------------------
-
 class _FakeActivityNotifier extends ActivityNotifier {
   final HomeFeedResponse _feed;
   _FakeActivityNotifier(this._feed);

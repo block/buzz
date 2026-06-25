@@ -38,3 +38,12 @@ for bin in "${SIDECARS[@]}"; do
     cp "$SRC_DIR/${bin}${EXE}" "$BINARIES_DIR/${bin}-${TARGET}${EXE}"
 done
 echo "Sidecars bundled for $TARGET"
+
+# Windows-only: stage a genuine, non-WSL bash plus the full git toolchain next to
+# the sidecars so the MCP shell tool works on a bare host. The download/extract
+# logic lives in a self-contained script (no release-binary precondition) so CI can
+# call it directly to exercise this path on a real Windows runner — see
+# scripts/stage-windows-bash.sh for the full rationale and the PATH CONTRACT.
+if [[ "$TARGET" == *windows* ]]; then
+    "$(dirname "$0")/stage-windows-bash.sh" "$BINARIES_DIR/git-bash"
+fi

@@ -143,7 +143,7 @@ export function FeedSection({
   return (
     <section>
       <div className="flex items-center gap-2 pb-2">
-        <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+        <Icon className="h-4 w-4 text-muted-foreground" />
         <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {title}
         </h2>
@@ -187,11 +187,11 @@ export function FeedSection({
 
                 <div className="pointer-events-none relative flex min-w-0 items-center gap-2">
                   <span
-                    className={`text-[13px] font-medium ${isDone ? "line-through text-muted-foreground" : ""}`}
+                    className={`text-sm font-medium ${isDone ? "line-through text-muted-foreground" : ""}`}
                   >
                     {feedHeadline(item)}
                   </span>
-                  <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1 text-2xs text-muted-foreground">
                     <UserAvatar
                       avatarUrl={
                         profiles?.[item.pubkey.toLowerCase()]?.avatarUrl ?? null
@@ -212,19 +212,18 @@ export function FeedSection({
                     })}
                   </span>
                   {item.channelName ? (
-                    <span className="text-[11px] text-primary/80">
+                    <span className="text-2xs text-primary/80">
                       #{item.channelName}
                     </span>
                   ) : null}
-                  <span className="ml-auto shrink-0 text-[11px] text-muted-foreground/60">
+                  <span className="ml-auto shrink-0 text-2xs text-muted-foreground/60">
                     {formatRelativeTime(item.createdAt)}
                   </span>
                 </div>
 
                 <div className="pointer-events-none relative mt-0.5 line-clamp-2">
                   <Markdown
-                    className="max-w-none text-[13px] leading-snug text-muted-foreground"
-                    compact
+                    className="max-w-none text-sm leading-snug text-muted-foreground"
                     content={feedContent(item)}
                     mentionNames={mentionNames}
                   />

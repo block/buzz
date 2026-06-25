@@ -125,10 +125,6 @@ pub async fn cmd_add_dm_member(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
-
 pub async fn dispatch(cmd: crate::DmsCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::DmsCmd;
     match cmd {

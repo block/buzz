@@ -3,6 +3,11 @@ import { Bot } from "lucide-react";
 
 import { Badge } from "@/shared/ui/badge";
 import { cn } from "@/shared/lib/cn";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type MentionSuggestion = {
@@ -13,6 +18,7 @@ export type MentionSuggestion = {
   avatarUrl?: string | null;
   isAgent?: boolean;
   notInChannel?: boolean;
+  ownerLabel?: string | null;
   role?: string | null;
 };
 
@@ -50,8 +56,17 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       )}
     >
       <div
-        className="max-h-48 overflow-y-auto rounded-xl border bg-popover p-1 shadow-lg"
+        className={cn(
+          "max-h-48 overflow-y-auto rounded-xl p-1",
+          POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+          position === "below"
+            ? "origin-top slide-in-from-top-1"
+            : "origin-bottom slide-in-from-bottom-1",
+          POPOVER_SURFACE_CLASS,
+        )}
+        data-testid="mention-autocomplete"
         ref={listRef}
+        style={POPOVER_SHADOW_STYLE}
       >
         {suggestions.map((suggestion, index) => {
           const suggestionKey =
@@ -81,42 +96,58 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 avatarUrl={suggestion.avatarUrl ?? null}
                 displayName={suggestion.displayName}
                 size="xs"
+                testId="mention-suggestion-avatar"
               />
-              <span className="flex min-w-0 flex-1 items-center gap-2">
-                <span className="flex min-w-0 flex-1 items-baseline gap-1">
-                  <span className="truncate font-medium">
-                    {suggestion.displayName}
-                  </span>
-                  {suggestion.isAgent ? (
-                    <span
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-1 text-xs",
-                        index === selectedIndex
-                          ? "text-accent-foreground/70"
-                          : "text-muted-foreground",
-                      )}
-                    >
-                      <Bot
-                        aria-hidden="true"
-                        className="h-3 w-3"
-                        data-testid="mention-agent-icon"
-                      />
-                      {agentLabel}
-                    </span>
-                  ) : suggestion.role ? (
-                    <Badge variant="secondary">{suggestion.role}</Badge>
-                  ) : null}
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span
+                  className="min-w-0 break-words font-medium leading-snug"
+                  title={suggestion.displayName}
+                >
+                  {suggestion.displayName}
                 </span>
-                {suggestion.notInChannel ? (
+                {suggestion.isAgent ||
+                suggestion.role ||
+                suggestion.ownerLabel ||
+                suggestion.notInChannel ? (
                   <span
                     className={cn(
-                      "ml-auto shrink-0 text-xs",
+                      "flex min-w-0 items-center gap-1.5 text-2xs leading-none",
                       index === selectedIndex
-                        ? "text-accent-foreground/65"
+                        ? "text-accent-foreground/60"
                         : "text-muted-foreground",
                     )}
                   >
-                    not in channel
+                    {suggestion.isAgent ? (
+                      <span className="inline-flex shrink-0 items-center gap-1">
+                        <Bot
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5"
+                          data-testid="mention-agent-icon"
+                        />
+                        {agentLabel}
+                      </span>
+                    ) : suggestion.role ? (
+                      <Badge
+                        className="max-w-24 shrink-0 truncate"
+                        variant="secondary"
+                      >
+                        {suggestion.role}
+                      </Badge>
+                    ) : null}
+                    {suggestion.ownerLabel || suggestion.notInChannel ? (
+                      <span
+                        className="min-w-0 truncate"
+                        title={
+                          suggestion.ownerLabel
+                            ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
+                            : "not in channel"
+                        }
+                      >
+                        {suggestion.ownerLabel
+                          ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
+                          : "not in channel"}
+                      </span>
+                    ) : null}
                   </span>
                 ) : null}
               </span>

@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   buildImetaTags,
   buildOutgoingMessage,
+  findSpoileredImetaMediaUrls,
   formatImetaMediaLine,
   imetaMediaFromTags,
   mergeOutgoingTags,
@@ -22,6 +23,31 @@ test("strip: removes trailing image line whose URL is in imetaMedia", () => {
     { url: "https://blossom/abc.png", type: "image/png" },
   ]);
   assert.equal(stripped, "Look at this");
+});
+
+test("strip: removes trailing spoilered image line whose URL is in imetaMedia", () => {
+  const body = "Look at this\n||![image](https://blossom/abc.png)||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, "Look at this");
+});
+
+test("strip: removes trailing block-spoilered image line", () => {
+  const body = "Look at this\n||\n![image](https://blossom/abc.png)\n||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, "Look at this");
+});
+
+test("strip: keeps block spoiler text while stripping imeta media", () => {
+  const body =
+    "Look at this\n||\nsecret\n![image](https://blossom/abc.png)\n||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, body);
 });
 
 test("strip: removes trailing video line", () => {
@@ -81,6 +107,16 @@ test("formatImetaMediaLine: image mime → ![image] line", () => {
   );
 });
 
+test("formatImetaMediaLine: spoilered image mime → wrapped ![image] line", () => {
+  assert.equal(
+    formatImetaMediaLine(
+      { url: "https://b/a.png", type: "image/png" },
+      { spoiler: true },
+    ),
+    "\n||![image](https://b/a.png)||",
+  );
+});
+
 test("buildImetaTags keeps media filenames in imeta", () => {
   // Filenames are included for every MIME type — the video review dialog
   // and file cards use them as display titles.
@@ -126,6 +162,20 @@ test("formatImetaMediaLine: generic mime → [filename](url) link", () => {
   );
 });
 
+test("formatImetaMediaLine: spoiler option does not wrap generic files", () => {
+  assert.equal(
+    formatImetaMediaLine(
+      {
+        url: "https://b/blob",
+        type: "application/pdf",
+        filename: "report.pdf",
+      },
+      { spoiler: true },
+    ),
+    "\n[report.pdf](https://b/blob)",
+  );
+});
+
 test("formatImetaMediaLine: escapes markdown brackets/backslash in filename", () => {
   // `a].pdf` would otherwise close the link label early and break the FileCard.
   assert.equal(
@@ -147,6 +197,33 @@ test("strip: removes an escaped-bracket generic file line on edit", () => {
     { url, type: "application/pdf" },
   ]);
   assert.equal(stripped, "note");
+});
+
+test("findSpoileredImetaMediaUrls: extracts only spoilered matching media urls", () => {
+  const body = [
+    "note",
+    "||![image](https://b/a.png)||",
+    "![image](https://b/b.png)",
+    "||![video](https://b/c.mp4)||",
+    "||",
+    "![image](https://b/d.png)",
+    "![video](https://b/e.mp4)",
+    "||",
+  ].join("\n");
+  const spoilered = findSpoileredImetaMediaUrls(body, [
+    { url: "https://b/a.png", type: "image/png" },
+    { url: "https://b/b.png", type: "image/png" },
+    { url: "https://b/c.mp4", type: "video/mp4" },
+    { url: "https://b/d.png", type: "image/png" },
+    { url: "https://b/e.mp4", type: "video/mp4" },
+    { url: "https://b/other.png", type: "image/png" },
+  ]);
+  assert.deepEqual([...spoilered].sort(), [
+    "https://b/a.png",
+    "https://b/c.mp4",
+    "https://b/d.png",
+    "https://b/e.mp4",
+  ]);
 });
 
 // ── imetaMediaFromTags (full BlobDescriptor projection) ───────────────
@@ -324,6 +401,33 @@ test("buildOutgoingMessage: appends media markdown line per attachment, in order
   assert.equal(
     out.content,
     "hi\n![image](https://b/a.png)\n![video](https://b/v.mp4)",
+  );
+});
+
+test("buildOutgoingMessage: wraps spoilered image and video attachments", () => {
+  const out = buildOutgoingMessage(
+    "hi",
+    [
+      {
+        url: "https://b/a.png",
+        type: "image/png",
+        sha256: "x",
+        size: 1,
+        uploaded: 0,
+      },
+      {
+        url: "https://b/v.mp4",
+        type: "video/mp4",
+        sha256: "y",
+        size: 2,
+        uploaded: 0,
+      },
+    ],
+    new Set(["https://b/a.png", "https://b/v.mp4"]),
+  );
+  assert.equal(
+    out.content,
+    "hi\n||![image](https://b/a.png)||\n||![video](https://b/v.mp4)||",
   );
 });
 

@@ -5,11 +5,12 @@ use serde_json::Value;
 
 use crate::models::{SearchUsersResponse, UserSearchResultInfo};
 
-use super::profile_has_valid_oa_owner;
+use super::profile_valid_oa_owner_pubkey;
 
 /// Convert a single kind:0 event to a [`UserSearchResultInfo`].
 pub fn user_search_result_from_event(ev: &Event) -> UserSearchResultInfo {
     let v: Value = serde_json::from_str(&ev.content).unwrap_or(Value::Null);
+    let owner_pubkey = profile_valid_oa_owner_pubkey(ev);
     UserSearchResultInfo {
         pubkey: ev.pubkey.to_hex(),
         display_name: v
@@ -19,7 +20,8 @@ pub fn user_search_result_from_event(ev: &Event) -> UserSearchResultInfo {
             .map(str::to_string),
         avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
         nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
-        is_agent: profile_has_valid_oa_owner(ev),
+        is_agent: owner_pubkey.is_some(),
+        owner_pubkey,
     }
 }
 
@@ -224,9 +226,15 @@ mod tests {
     #[test]
     fn user_search_result_marks_valid_nip_oa_profile_as_agent() {
         let event = oa_profile_event(r#"{"display_name":"Mira"}"#);
+        let owner_pubkey = event
+            .tags
+            .iter()
+            .find_map(|tag| tag.as_slice().get(1).cloned())
+            .expect("owner pubkey");
         let result = user_search_result_from_event(&event);
 
         assert_eq!(result.display_name.as_deref(), Some("Mira"));
+        assert_eq!(result.owner_pubkey.as_deref(), Some(owner_pubkey.as_str()));
         assert!(result.is_agent);
     }
 

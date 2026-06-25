@@ -38,3 +38,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+
+# Windows Job Object APIs for the shell tool's timeout kill path: terminating a
+# job kills the bash child AND every MSYS grandchild it forked, the Windows
+# analogue of the Unix killpg above. windows-sys 0.61 is already workspace-
+# resident (pulled transitively), so this adds no new crate. Win32_Security is
+# required because CreateJobObjectW takes a SECURITY_ATTRIBUTES parameter;
+# Win32_System_Threading supplies IO_COUNTERS inside the extended-limit struct.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

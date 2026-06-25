@@ -38,10 +38,6 @@ fn sort_teams(records: &mut [TeamRecord]) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Built-in teams
-// ---------------------------------------------------------------------------
-
 struct BuiltInTeam {
     id: &'static str,
     name: &'static str,
@@ -158,9 +154,6 @@ pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String>
     crate::managed_agents::storage::atomic_write_json(&path, &payload)
 }
 
-// ---------------------------------------------------------------------------
-// Directory-backed team operations
-// ---------------------------------------------------------------------------
 /// Teams directory: `<AppDataDir>/agents/teams/`
 pub(super) fn teams_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("teams");
@@ -348,10 +341,14 @@ pub fn import_team_from_directory(
     Ok(team)
 }
 
-/// Delete a team. For directory-backed teams, also removes the backing directory
-/// and all personas sourced from that team. For JSON-only teams, only removes
-/// the team record (personas are preserved).
-pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), String> {
+/// Delete a team, cascading removal of its sourced personas and backing dir.
+///
+/// Returns the d-tags of the personas removed by the cascade so the caller can
+/// enqueue NIP-09 tombstones for them — without this, the team coordinate is
+/// tombstoned but the orphaned kind:30175 persona heads stay live on the relay.
+/// For JSON-only teams (no `source_dir`), nothing cascades and the returned
+/// vec is empty.
+pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<Vec<String>, String> {
     let mut teams = load_teams(app)?;
     let team = teams
         .iter()
@@ -359,6 +356,8 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), St
         .ok_or_else(|| format!("team {team_id} not found"))?;
 
     validate_team_deletion(team)?;
+
+    let mut cascaded_persona_d_tags = Vec::new();
 
     if team.source_dir.is_some() {
         // Directory-backed team: full cascade
@@ -390,6 +389,13 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), St
 
         // 2. Remove all PersonaRecords sourced from this team
         let mut personas = super::load_personas(app)?;
+        // Capture the d-tag of each cascaded persona BEFORE removal so the
+        // caller can tombstone its kind:30175 coordinate on the relay.
+        cascaded_persona_d_tags = personas
+            .iter()
+            .filter(|p| p.source_team.as_deref() == Some(persona_key.as_str()))
+            .map(super::persona_events::persona_d_tag)
+            .collect();
         personas.retain(|p| p.source_team.as_deref() != Some(persona_key.as_str()));
         super::save_personas(app, &personas)?;
 
@@ -412,7 +418,8 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), St
 
     // 4. Remove TeamRecord
     teams.retain(|record| record.id != team_id);
-    save_teams(app, &teams)
+    save_teams(app, &teams)?;
+    Ok(cascaded_persona_d_tags)
 }
 
 /// Re-reads a directory-backed team and reconciles with stored records.
@@ -599,10 +606,6 @@ pub fn sync_team_from_dir(
     })
 }
 
-// ---------------------------------------------------------------------------
-// Team JSON export / import
-// ---------------------------------------------------------------------------
-
 /// Encode a team as a JSON blob for export. The format includes the team's
 /// name, description, and the full persona data for each member (so the
 /// import side can recreate personas that don't exist locally).
@@ -766,10 +769,6 @@ mod tests {
         assert!(teams.is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // encode / parse round-trip tests
-    // -----------------------------------------------------------------------
-
     fn persona(id: &str, name: &str, prompt: &str) -> PersonaRecord {
         PersonaRecord {
             id: id.to_string(),
@@ -897,10 +896,6 @@ mod tests {
         assert!(parsed.personas.is_empty());
         assert_eq!(parsed.name, "Fizz");
     }
-
-    // -----------------------------------------------------------------------
-    // merge_teams + validate_team_deletion tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn merge_teams_adds_missing_built_ins() {

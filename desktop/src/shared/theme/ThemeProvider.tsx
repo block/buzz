@@ -12,13 +12,20 @@ import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
   extractThemeInfo,
+  getThemePair,
   loadThemeData,
+  resolveSystemTheme,
 } from "./theme-loader";
 
 export const THEME_STORAGE_KEY = "buzz-theme";
 const CACHE_KEY = "buzz-theme-cache";
 export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
+const FOLLOW_SYSTEM_KEY = "buzz-follow-system";
+const VIDEO_REVIEW_NEUTRAL_ACCENT = "0 0% 98%";
+const VIDEO_REVIEW_CHIP_SURFACE = "#161616";
+const VIDEO_REVIEW_TEXT_CONTRAST = 4.5;
+const VIDEO_REVIEW_CHIP_BACKGROUND_ALPHAS = [0.15, 0.3] as const;
 
 export const ACCENT_COLORS = [
   { name: "Neutral", value: NEUTRAL_ACCENT },
@@ -37,11 +44,15 @@ const DEFAULT_ACCENT = "#3b82f6";
 
 type ThemeContextValue = {
   themeName: string;
+  selectedThemeName: string;
   isDark: boolean;
   isLoading: boolean;
   accentColor: string;
+  followSystem: boolean;
+  hasPair: boolean;
   setTheme: (name: string) => void;
   setAccentColor: (color: string) => void;
+  setFollowSystem: (enabled: boolean) => void;
 };
 
 type ThemeProviderProps = {
@@ -77,12 +88,98 @@ function getContrastColor(hex: string): string {
   return lum > 0.5 ? "#000000" : "#ffffff";
 }
 
+type Rgb = {
+  r: number;
+  g: number;
+  b: number;
+};
+
+function hexToRgb(hex: string): Rgb {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})/i.exec(hex);
+  if (!m) return { r: 255, g: 255, b: 255 };
+  return {
+    r: parseInt(m[1], 16),
+    g: parseInt(m[2], 16),
+    b: parseInt(m[3], 16),
+  };
+}
+
+function mixRgb(from: Rgb, to: Rgb, factor: number): Rgb {
+  return {
+    r: from.r + (to.r - from.r) * factor,
+    g: from.g + (to.g - from.g) * factor,
+    b: from.b + (to.b - from.b) * factor,
+  };
+}
+
+function compositeRgb(foreground: Rgb, background: Rgb, alpha: number): Rgb {
+  return mixRgb(background, foreground, alpha);
+}
+
+function relativeLuminance({ r, g, b }: Rgb): number {
+  const [rs, gs, bs] = [r, g, b].map((channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+}
+
+function contrastRatio(a: Rgb, b: Rgb): number {
+  const aLum = relativeLuminance(a);
+  const bLum = relativeLuminance(b);
+  return (Math.max(aLum, bLum) + 0.05) / (Math.min(aLum, bLum) + 0.05);
+}
+
+function getReviewAccentForeground(hex: string): string {
+  const accent = hexToRgb(hex);
+  const surface = hexToRgb(VIDEO_REVIEW_CHIP_SURFACE);
+  const white = { r: 255, g: 255, b: 255 };
+  const backgrounds = VIDEO_REVIEW_CHIP_BACKGROUND_ALPHAS.map((alpha) =>
+    compositeRgb(accent, surface, alpha),
+  );
+  let low = 0;
+  let high = 1;
+
+  for (let i = 0; i < 20; i++) {
+    const mid = (low + high) / 2;
+    const candidate = mixRgb(accent, white, mid);
+    const minContrast = Math.min(
+      ...backgrounds.map((background) => contrastRatio(candidate, background)),
+    );
+
+    if (minContrast >= VIDEO_REVIEW_TEXT_CONTRAST) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+
+  return hexToHsl(rgbToHex(mixRgb(accent, white, high)));
+}
+
+function rgbToHex({ r, g, b }: Rgb): string {
+  const clamp = (value: number) =>
+    Math.max(0, Math.min(255, Math.round(value)));
+  return `#${[r, g, b]
+    .map((channel) => clamp(channel).toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 function applyAccentColor(value: string) {
   const root = document.documentElement;
   if (value === NEUTRAL_ACCENT) {
     const styles = window.getComputedStyle(root);
     const foreground = styles.getPropertyValue("--foreground").trim();
     const background = styles.getPropertyValue("--background").trim();
+    root.style.setProperty("--buzz-selected-accent", foreground);
+    root.style.setProperty(
+      "--buzz-video-review-accent",
+      VIDEO_REVIEW_NEUTRAL_ACCENT,
+    );
+    root.style.setProperty(
+      "--buzz-video-review-accent-foreground",
+      VIDEO_REVIEW_NEUTRAL_ACCENT,
+    );
     root.style.setProperty("--primary", foreground);
     root.style.setProperty("--primary-foreground", background);
     root.style.setProperty("--sidebar-primary", foreground);
@@ -95,6 +192,12 @@ function applyAccentColor(value: string) {
   const hex = value;
   const accentHsl = hexToHsl(hex);
   const fgHsl = hexToHsl(getContrastColor(hex));
+  root.style.setProperty("--buzz-selected-accent", accentHsl);
+  root.style.setProperty("--buzz-video-review-accent", accentHsl);
+  root.style.setProperty(
+    "--buzz-video-review-accent-foreground",
+    getReviewAccentForeground(hex),
+  );
   root.style.setProperty("--primary", accentHsl);
   root.style.setProperty("--primary-foreground", fgHsl);
   root.style.setProperty("--sidebar-primary", accentHsl);
@@ -116,7 +219,6 @@ function applyCachedVars(): string | null {
     root.classList.remove("light", "dark");
     root.classList.add(isDark ? "dark" : "light");
 
-    // Also apply cached accent
     const accent =
       window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
     applyAccentColor(accent);
@@ -163,9 +265,9 @@ export function ThemeProvider({
   defaultTheme = "houston",
 }: ThemeProviderProps) {
   // Apply cached vars synchronously before first render
-  const [themeName, setThemeName] = useState<string>(() => {
-    const cached = applyCachedVars();
-    return cached ?? readStoredTheme(defaultTheme);
+  const [selectedTheme, setSelectedTheme] = useState<string>(() => {
+    applyCachedVars();
+    return readStoredTheme(defaultTheme);
   });
   const [isDark, setIsDark] = useState<boolean>(() => {
     return document.documentElement.classList.contains("dark");
@@ -175,17 +277,33 @@ export function ThemeProvider({
   const [accentColor, setAccentColorState] = useState<string>(() => {
     return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
+  const [followSystem, setFollowSystemState] = useState<boolean>(() => {
+    return window.localStorage.getItem(FOLLOW_SYSTEM_KEY) === "true";
+  });
+  const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
 
-  // Load and apply theme
+  // Resolve the effective theme based on follow-system preference
+  const effectiveTheme = (() => {
+    if (!followSystem || !isValidThemeName(selectedTheme)) return selectedTheme;
+    return resolveSystemTheme(selectedTheme as SyntaxThemeName, systemIsDark);
+  })();
+
+  // Check if the selected theme has a pair (for UI hint)
+  const hasPair = isValidThemeName(selectedTheme)
+    ? getThemePair(selectedTheme as SyntaxThemeName) !== null
+    : false;
+
   useEffect(() => {
-    if (!isValidThemeName(themeName)) return;
+    if (!isValidThemeName(effectiveTheme)) return;
 
     // Track which theme we're loading to avoid race conditions
-    const thisTheme = themeName;
+    const thisTheme = effectiveTheme;
     loadingRef.current = thisTheme;
     setIsLoading(true);
 
-    applyTheme(themeName).then(({ isDark: dark }) => {
+    applyTheme(effectiveTheme as SyntaxThemeName).then(({ isDark: dark }) => {
       // Only update if this is still the theme we want
       if (loadingRef.current === thisTheme) {
         setIsDark(dark);
@@ -196,16 +314,29 @@ export function ThemeProvider({
         );
       }
     });
-  }, [themeName]);
+  }, [effectiveTheme]);
 
-  // Apply accent color changes
+  // Listen for system color scheme changes when followSystem is enabled
+  useEffect(() => {
+    if (!followSystem) return;
+
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = (event: MediaQueryListEvent) => {
+      setSystemIsDark(event.matches);
+    };
+
+    setSystemIsDark(mq.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [followSystem]);
+
   useEffect(() => {
     applyAccentColor(accentColor);
   }, [accentColor]);
 
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;
-    setThemeName(name);
+    setSelectedTheme(name);
     window.localStorage.setItem(THEME_STORAGE_KEY, name);
   }, []);
 
@@ -214,13 +345,22 @@ export function ThemeProvider({
     setAccentColorState(color);
   }, []);
 
+  const setFollowSystem = useCallback((enabled: boolean) => {
+    window.localStorage.setItem(FOLLOW_SYSTEM_KEY, enabled ? "true" : "false");
+    setFollowSystemState(enabled);
+  }, []);
+
   const value: ThemeContextValue = {
-    themeName,
+    themeName: effectiveTheme,
+    selectedThemeName: selectedTheme,
     isDark,
     isLoading,
     accentColor,
+    followSystem,
+    hasPair,
     setTheme,
     setAccentColor,
+    setFollowSystem,
   };
 
   return (

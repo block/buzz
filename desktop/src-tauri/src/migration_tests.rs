@@ -65,6 +65,7 @@ fn copy_dir_all_preserves_nested_files_without_overwriting() {
 /// Helper: create a temp dir structure mimicking canonical + worktree layout.
 /// Packs live in a `.main` sibling (not canonical) to match real-world state.
 /// Returns `(parent_dir_handle, canonical_dir, worktree_dir)`.
+#[cfg(unix)]
 fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let parent = tempfile::tempdir().unwrap();
     let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
@@ -97,7 +98,37 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
 /// Mirrors the symlink loop of `sync_shared_agent_data` but takes explicit
 /// paths. `sync_shared_agent_data` requires a live Tauri AppHandle and
 /// cannot be unit-tested directly.
+#[cfg(unix)]
 fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
+    // Seed-up: mirrors the SHARED_AGENT_FILES seed-up in `sync_shared_agent_data`.
+    // Kept logic-identical to production so these tests exercise real behavior.
+    for rel in SHARED_AGENT_FILES {
+        let canonical_file = canonical.join(rel);
+        if canonical_file.exists() {
+            continue;
+        }
+        let Some(parent) = canonical.parent() else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let sibling = entry.path();
+            if sibling == canonical {
+                continue;
+            }
+            let sibling_file = sibling.join(rel);
+            if sibling_file.is_file() && !sibling_file.is_symlink() {
+                if let Some(file_parent) = canonical_file.parent() {
+                    std::fs::create_dir_all(file_parent).unwrap();
+                }
+                let _ = std::fs::rename(&sibling_file, &canonical_file);
+                break;
+            }
+        }
+    }
+
     let mut synced = 0u32;
     for rel in SHARED_AGENT_FILES {
         let src = canonical.join(rel);
@@ -180,6 +211,7 @@ fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
     synced
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_creates_symlinks_to_fresh_worktree() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -201,6 +233,7 @@ fn sync_creates_symlinks_to_fresh_worktree() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_replaces_existing_files_with_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -226,6 +259,7 @@ fn sync_replaces_existing_files_with_symlinks() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_preserves_correct_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -238,6 +272,7 @@ fn sync_preserves_correct_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_replaces_wrong_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -256,6 +291,7 @@ fn sync_replaces_wrong_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_handles_broken_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -275,6 +311,7 @@ fn sync_handles_broken_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn writes_through_symlink_reach_canonical() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -304,6 +341,103 @@ fn writes_through_symlink_reach_canonical() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn seed_up_migrates_sibling_file_to_canonical_then_symlinks() {
+    let (_parent, canonical, worktree) = setup_sync_layout();
+    let rel = "agents/personas.json";
+    // Canonical is missing the file; a sibling (.main) holds real content.
+    std::fs::remove_file(canonical.join(rel)).unwrap();
+    let sibling = canonical
+        .parent()
+        .unwrap()
+        .join("xyz.block.buzz.app.dev.main");
+    std::fs::create_dir_all(sibling.join("agents")).unwrap();
+    std::fs::write(sibling.join(rel), r#"[{"id":"brain"}]"#).unwrap();
+
+    sync_files(&canonical, &worktree);
+
+    // The real file landed at canonical (proves the rename, not a dangling link).
+    let canonical_file = canonical.join(rel);
+    assert!(
+        canonical_file.is_file() && !canonical_file.is_symlink(),
+        "canonical should hold the migrated real file"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&canonical_file).unwrap(),
+        r#"[{"id":"brain"}]"#,
+    );
+    // The worktree is symlinked to canonical.
+    let dst = worktree.join(rel);
+    assert!(dst.is_symlink());
+    assert_eq!(std::fs::read_link(&dst).unwrap(), canonical_file);
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_up_no_sibling_content_is_noop() {
+    let (_parent, canonical, worktree) = setup_sync_layout();
+    let rel = "agents/personas.json";
+    // Canonical missing the file and no sibling holds it.
+    std::fs::remove_file(canonical.join(rel)).unwrap();
+
+    sync_files(&canonical, &worktree);
+
+    // Nothing to seed: canonical stays missing, worktree gets no symlink for it.
+    assert!(!canonical.join(rel).exists());
+    assert!(!worktree.join(rel).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_up_skipped_when_canonical_has_file() {
+    let (_parent, canonical, worktree) = setup_sync_layout();
+    let rel = "agents/personas.json";
+    // A sibling also holds different content, but canonical already has the file.
+    let sibling = canonical
+        .parent()
+        .unwrap()
+        .join("xyz.block.buzz.app.dev.main");
+    std::fs::create_dir_all(sibling.join("agents")).unwrap();
+    std::fs::write(sibling.join(rel), r#"[{"id":"should-not-win"}]"#).unwrap();
+
+    sync_files(&canonical, &worktree);
+
+    // Canonical's original content is untouched; the sibling did not seed it.
+    assert_eq!(
+        std::fs::read_to_string(canonical.join(rel)).unwrap(),
+        r#"[{"id":"builtin:fizz"}]"#,
+    );
+    // Pull-symlink path is unchanged: worktree links to canonical.
+    let dst = worktree.join(rel);
+    assert!(dst.is_symlink());
+    assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+}
+
+#[cfg(unix)]
+#[test]
+fn seed_up_ignores_sibling_symlink_as_source() {
+    let (_parent, canonical, worktree) = setup_sync_layout();
+    let rel = "agents/personas.json";
+    std::fs::remove_file(canonical.join(rel)).unwrap();
+    // Sibling holds only a symlink (not real content) — not a valid seed source.
+    let sibling = canonical
+        .parent()
+        .unwrap()
+        .join("xyz.block.buzz.app.dev.main");
+    std::fs::create_dir_all(sibling.join("agents")).unwrap();
+    std::os::unix::fs::symlink(
+        PathBuf::from("/nonexistent/elsewhere.json"),
+        sibling.join(rel),
+    )
+    .unwrap();
+
+    sync_files(&canonical, &worktree);
+
+    // The symlink was not promoted; canonical stays missing.
+    assert!(!canonical.join(rel).exists());
+}
+
 #[test]
 fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
     // When the current app data dir IS the canonical dev identifier,
@@ -321,6 +455,7 @@ fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
     assert_eq!(canonical_dev_data_dir(&canonical).unwrap(), canonical);
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_creates_teams_directory_symlink() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -341,6 +476,7 @@ fn sync_creates_teams_directory_symlink() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_migrates_teams_from_sibling_to_canonical() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -368,6 +504,7 @@ fn sync_migrates_teams_from_sibling_to_canonical() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_replaces_real_teams_dir_with_symlink() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -386,6 +523,7 @@ fn sync_replaces_real_teams_dir_with_symlink() {
 
 // ── Packs → Teams migration tests ───────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn migrate_packs_merge_preserves_non_empty_dir() {
     // When packs/ contains symlinks that weren't moved (e.g., external tools
@@ -514,6 +652,36 @@ fn migrate_packs_to_teams_rewrites_agents_json() {
     assert_eq!(records[0]["persona_name_in_team"], "agent-one");
     assert!(records[0].get("persona_pack_path").is_none());
     assert!(records[0].get("persona_name_in_pack").is_none());
+}
+
+/// `patch_json_records` rewrites `managed-agents.json`, which carries plaintext
+/// agent nsecs on a keyringless host — the writeback must land `0o600` from the
+/// write itself (no post-write `chmod`), or a launch-time reconcile reopens the
+/// umask window SECURITY.md:90 closes (Thufir, migration.rs:288).
+#[cfg(unix)]
+#[test]
+fn patch_json_records_rewrites_secret_store_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{ "private_key_nsec": "nsec1secret", "provider": "goose" }]),
+    );
+    let path = dir.path().join("agents/managed-agents.json");
+
+    // Mutate so the write actually fires (it only writes back on `changed`).
+    patch_json_records(&path, |obj| {
+        let provider = obj.remove("provider").unwrap();
+        obj.insert("runtime".to_string(), provider);
+        true
+    });
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "secret-bearing rewrite must be owner-only");
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["private_key_nsec"], "nsec1secret");
+    assert_eq!(records[0]["runtime"], "goose");
 }
 
 #[test]
@@ -692,6 +860,102 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
 }
 
 #[test]
+fn reconcile_mcp_commands_resolves_persona_runtime_over_stale_snapshot() {
+    // The frozen snapshot is buzz-agent (wants buzz-dev-mcp), but the linked
+    // persona's runtime is goose (wants no mcp). The reconcile must follow the
+    // EFFECTIVE harness (persona-wins) and clear the stale buzz-mcp-server.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "buzz-agent",
+            "mcp_command": "buzz-mcp-server"
+        }]),
+    );
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "");
+}
+
+#[test]
+fn reconcile_mcp_commands_sees_team_dir_runtime_edit_same_launch() {
+    // Gate (b): sync_team_personas (writer) MUST run before
+    // reconcile_provider_mcp_commands (reader) on the same launch, so a team-dir
+    // harness edit reaches the derived mcp_command immediately, not a launch
+    // behind. This drives the writer→reader sequence at the file layer the boot
+    // path exercises: load_persona_runtimes reads the same personas.json the
+    // sync writes. Reader-first would derive the OLD mcp_command (asserted), so
+    // the post-write derivation of the NEW value is the ordering regression catch.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "buzz-agent",
+            "mcp_command": ""
+        }]),
+    );
+    // Pre-edit launch state: persona runtime is goose (no mcp_command). A
+    // reader running against this stale file derives the empty goose value.
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    assert_eq!(
+        read_agents_json(dir.path())[0]["mcp_command"],
+        "",
+        "reader-before-writer would see only the stale goose runtime"
+    );
+
+    // Same launch: sync_team_personas propagates a team-dir harness edit
+    // (goose → buzz-agent) into personas.json. The reader runs AFTER, so it
+    // must derive the NEW buzz-agent mcp_command without a second launch.
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "buzz-agent"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    assert_eq!(
+        read_agents_json(dir.path())[0]["mcp_command"],
+        "buzz-dev-mcp",
+        "writer-before-reader must surface the new runtime's mcp_command same launch"
+    );
+}
+
+#[test]
+fn reconcile_mcp_commands_honors_explicit_override_over_persona() {
+    // An explicit per-instance pin (agent_command_override) beats the persona
+    // runtime: persona is goose (no mcp) but the pin is buzz-agent, so the
+    // reconcile sets the buzz-agent mcp_command.
+    let dir = tempfile::tempdir().unwrap();
+    write_agents_json(
+        dir.path(),
+        &serde_json::json!([{
+            "name": "Fizz",
+            "persona_id": "p1",
+            "agent_command": "goose",
+            "agent_command_override": "buzz-agent",
+            "mcp_command": ""
+        }]),
+    );
+    write_personas_json(
+        dir.path(),
+        &serde_json::json!([{"id": "p1", "runtime": "goose"}]),
+    );
+    reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+    let records = read_agents_json(dir.path());
+    assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
+}
+
+#[test]
 fn reconcile_mcp_commands_skips_record_without_agent_command() {
     let dir = tempfile::tempdir().unwrap();
     let json = serde_json::json!([{
@@ -703,4 +967,443 @@ fn reconcile_mcp_commands_skips_record_without_agent_command() {
     let before = std::fs::read_to_string(&path).unwrap();
     reconcile_mcp_commands_in_file(&path);
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+}
+
+#[test]
+fn migrate_legacy_nest_carries_knowledge_and_skips_repos() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    // Knowledge: a top-level file plus a nested dir.
+    std::fs::create_dir_all(legacy.join("RESEARCH")).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "agents").unwrap();
+    std::fs::write(legacy.join("RESEARCH/NOTES.md"), "notes").unwrap();
+    // A fat REPOS/ that must NOT be copied.
+    std::fs::create_dir_all(legacy.join("REPOS/buzz")).unwrap();
+    std::fs::write(legacy.join("REPOS/buzz/huge.bin"), "checkout").unwrap();
+
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert!(migrated, "migration ran because legacy nest existed");
+    assert!(
+        !current.join("REPOS").exists(),
+        "REPOS/ must never be migrated"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "agents"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("RESEARCH/NOTES.md")).unwrap(),
+        "notes"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_does_not_clobber_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(legacy.join("RESEARCH")).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy-agents").unwrap();
+    std::fs::write(legacy.join("RESEARCH/NOTES.md"), "legacy-notes").unwrap();
+    // Pre-existing live content the migration must preserve.
+    std::fs::create_dir_all(current.join("RESEARCH")).unwrap();
+    std::fs::write(current.join("AGENTS.md"), "live-agents").unwrap();
+    std::fs::write(current.join("RESEARCH/NOTES.md"), "live-notes").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "live-agents",
+        "existing top-level file must not be clobbered"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("RESEARCH/NOTES.md")).unwrap(),
+        "live-notes",
+        "existing nested file must not be clobbered"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_is_idempotent_on_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(legacy.join("PLANS")).unwrap();
+    std::fs::write(legacy.join("PLANS/PLAN.md"), "plan").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("PLANS/PLAN.md")).unwrap(),
+        "plan"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_noops_when_legacy_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    let migrated = super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert!(!migrated, "no migration when legacy nest is absent");
+    assert!(
+        !current.exists(),
+        "no destination created when legacy absent"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_overwrites_generated_default_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy team instructions").unwrap();
+
+    // First-time launch order: ensure_nest writes the generated default into
+    // ~/.buzz/AGENTS.md, then migration runs.
+    crate::managed_agents::ensure_nest_at(&current).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        crate::managed_agents::AGENTS_MD,
+        "precondition: ensure_nest writes the generated default"
+    );
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "legacy team instructions",
+        "legacy AGENTS.md must overwrite the untouched generated default"
+    );
+}
+
+#[test]
+fn migrate_legacy_nest_preserves_user_edited_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join(".sprout");
+    let current = dir.path().join(".buzz");
+
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("AGENTS.md"), "legacy team instructions").unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join("AGENTS.md"), "user-edited live AGENTS").unwrap();
+
+    super::migrate_legacy_nest_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("AGENTS.md")).unwrap(),
+        "user-edited live AGENTS",
+        "a user-edited live AGENTS.md must never be clobbered"
+    );
+}
+
+/// Helper: write a `personas.json` directly in `base_dir` (the migration
+/// reads `base_dir/personas.json`, where `base_dir` is the `agents` dir).
+fn write_base_personas(base_dir: &Path, records: &serde_json::Value) {
+    std::fs::write(
+        base_dir.join("personas.json"),
+        serde_json::to_string_pretty(records).unwrap(),
+    )
+    .unwrap();
+}
+
+fn one_persona() -> serde_json::Value {
+    serde_json::json!([{
+        "id": "code-reviewer",
+        "display_name": "Code Reviewer",
+        "system_prompt": "You review code.",
+        "is_builtin": false,
+        "is_active": true,
+        "name_pool": [],
+        "env_vars": {},
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+    }])
+}
+
+#[test]
+fn migrate_personas_writes_signed_retention_rows() {
+    use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    let migrated = migrate_personas_in_dir(base.path(), &keys).unwrap();
+    assert_eq!(migrated, 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let rows = get_retained_personas(&conn, &pubkey).unwrap();
+    assert_eq!(rows.len(), 1);
+    // Row holds a real signed event for the owner — not a placeholder.
+    assert_eq!(rows[0].pubkey, pubkey);
+    let event: nostr::Event = nostr::JsonUtil::from_json(&rows[0].raw_event).unwrap();
+    assert!(event.verify().is_ok());
+    assert!(rows[0].pending_sync);
+}
+
+#[test]
+fn migrate_personas_skips_builtins() {
+    use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(
+        base.path(),
+        &serde_json::json!([{
+            "id": "builtin:solo",
+            "display_name": "Solo",
+            "system_prompt": "x",
+            "is_builtin": true,
+            "is_active": true,
+            "name_pool": [],
+            "env_vars": {},
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z"
+        }]),
+    );
+    let keys = nostr::Keys::generate();
+
+    let migrated = migrate_personas_in_dir(base.path(), &keys).unwrap();
+    assert_eq!(migrated, 0);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let rows = get_retained_personas(&conn, &keys.public_key().to_hex()).unwrap();
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn migrate_personas_unchanged_second_run_is_noop() {
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+
+    // First run retains; second run with identical personas re-retains
+    // nothing — the per-coordinate content matches, so `pending_sync` is
+    // not churned.
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
+    assert!(!base.path().join("migration_state.json").exists());
+}
+
+#[test]
+fn migrate_personas_new_persona_after_first_run_gets_retained() {
+    use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    // A persona added to personas.json after the first reconcile must be
+    // picked up — the whole-store sentinel that previously short-circuited
+    // this is gone.
+    let mut two = one_persona();
+    two.as_array_mut().unwrap().push(serde_json::json!({
+        "id": "test-writer",
+        "display_name": "Test Writer",
+        "system_prompt": "You write tests.",
+        "is_builtin": false,
+        "is_active": true,
+        "name_pool": [],
+        "env_vars": {},
+        "created_at": "2025-01-02T00:00:00Z",
+        "updated_at": "2025-01-02T00:00:00Z"
+    }));
+    write_base_personas(base.path(), &two);
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let rows = get_retained_personas(&conn, &pubkey).unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn migrate_personas_edited_persona_re_retains_pending() {
+    use crate::managed_agents::retention::{get_retained_event, mark_synced, open_retention_db};
+    use buzz_core_pkg::kind::KIND_PERSONA;
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    // Simulate the flush loop confirming the first publish.
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    mark_synced(
+        &conn,
+        KIND_PERSONA,
+        &pubkey,
+        "code-reviewer",
+        row.created_at,
+        &row.content,
+    )
+    .unwrap();
+    drop(conn);
+
+    // Editing the persona on disk must re-retain it as pending so the edit
+    // reaches the relay on the next flush.
+    let mut edited = one_persona();
+    edited.as_array_mut().unwrap()[0]["system_prompt"] =
+        serde_json::json!("You review code carefully.");
+    write_base_personas(base.path(), &edited);
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    assert!(row.pending_sync);
+    assert!(row.content.contains("carefully"));
+}
+
+#[test]
+fn migrate_personas_no_file_is_noop() {
+    let base = tempfile::tempdir().unwrap();
+    let keys = nostr::Keys::generate();
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
+}
+
+/// F8: a future-dated retained head must be SUPERSEDED on a changed-content
+/// migration, not silently skipped by `retain_event`'s `>=` guard. Without the
+/// monotonic `created_at` bump the rebuilt event lands at `now <= head`, the
+/// upsert's `WHERE excluded.created_at >= ...` drops the UPDATE, and `migrated`
+/// over-reports. The bump (max(now, head+1)) guarantees supersession.
+#[test]
+fn migrate_personas_supersedes_future_dated_head() {
+    use crate::managed_agents::retention::{
+        get_retained_event, open_retention_db, retain_event, RetainedEvent,
+    };
+    use buzz_core_pkg::kind::KIND_PERSONA;
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    // First migrate retains the persona at ~now.
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    // Force the retained head far into the future, simulating a clock-skewed or
+    // same-second `max(now, head+1)` interactive bump.
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let head = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    let future = nostr::Timestamp::now().as_secs() as i64 + 100_000;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            created_at: future,
+            pending_sync: false,
+            ..head
+        },
+    )
+    .unwrap();
+
+    // Change the persona body on disk, then migrate again.
+    let mut edited = one_persona();
+    edited.as_array_mut().unwrap()[0]["system_prompt"] =
+        serde_json::json!("You review code very carefully.");
+    write_base_personas(base.path(), &edited);
+
+    assert_eq!(
+        migrate_personas_in_dir(base.path(), &keys).unwrap(),
+        1,
+        "changed content over a future-dated head must report a real migration"
+    );
+
+    let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    // The new body actually landed (not silently skipped) ...
+    assert!(
+        row.content.contains("very carefully"),
+        "changed body must supersede the future-dated head, not be dropped"
+    );
+    // ... at a created_at strictly past the future head (monotonic bump) ...
+    assert_eq!(row.created_at, future + 1);
+    // ... and is queued for republish.
+    assert!(row.pending_sync, "superseding row must be pending_sync");
+}
+
+fn write_base_teams(base_dir: &Path, records: &serde_json::Value) {
+    std::fs::write(
+        base_dir.join("teams.json"),
+        serde_json::to_string_pretty(records).unwrap(),
+    )
+    .unwrap();
+}
+
+/// F8 for the team migration site — same supersede guarantee as personas.
+#[test]
+fn migrate_teams_supersedes_future_dated_head() {
+    use crate::managed_agents::retention::{
+        get_retained_event, open_retention_db, retain_event, RetainedEvent,
+    };
+    use buzz_core_pkg::kind::KIND_TEAM;
+
+    let base = tempfile::tempdir().unwrap();
+    let team = serde_json::json!([{
+        "id": "my-team",
+        "name": "My Team",
+        "description": "first",
+        "persona_ids": ["code-reviewer"],
+        "is_builtin": false,
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+    }]);
+    write_base_teams(base.path(), &team);
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let head = get_retained_event(&conn, KIND_TEAM, &pubkey, "my-team")
+        .unwrap()
+        .unwrap();
+    let future = nostr::Timestamp::now().as_secs() as i64 + 100_000;
+    retain_event(
+        &conn,
+        &RetainedEvent {
+            created_at: future,
+            pending_sync: false,
+            ..head
+        },
+    )
+    .unwrap();
+
+    let mut edited = team.clone();
+    edited.as_array_mut().unwrap()[0]["description"] = serde_json::json!("second");
+    write_base_teams(base.path(), &edited);
+
+    assert_eq!(migrate_teams_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let row = get_retained_event(&conn, KIND_TEAM, &pubkey, "my-team")
+        .unwrap()
+        .unwrap();
+    assert!(row.content.contains("second"));
+    assert_eq!(row.created_at, future + 1);
+    assert!(row.pending_sync);
 }

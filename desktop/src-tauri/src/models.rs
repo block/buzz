@@ -15,6 +15,7 @@ pub struct ProfileInfo {
     pub avatar_url: Option<String>,
     pub about: Option<String>,
     pub nip05_handle: Option<String>,
+    pub owner_pubkey: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -22,6 +23,7 @@ pub struct UserProfileSummaryInfo {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub nip05_handle: Option<String>,
+    pub owner_pubkey: Option<String>,
     #[serde(default)]
     pub is_agent: bool,
 }
@@ -38,6 +40,7 @@ pub struct UserSearchResultInfo {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub nip05_handle: Option<String>,
+    pub owner_pubkey: Option<String>,
     #[serde(default)]
     pub is_agent: bool,
 }

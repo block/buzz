@@ -55,16 +55,16 @@ fn tags_named<'a>(event: &'a Event, name: &'a str) -> impl Iterator<Item = &'a [
     })
 }
 
-/// Return true when a kind:0 profile carries a valid NIP-OA owner tag.
+/// Return the owner pubkey from a valid NIP-OA owner tag on a kind:0 profile.
 ///
 /// NIP-OA marks an agent identity by having the owner sign an `auth` tag for
 /// the agent pubkey. We verify the tag against the profile event author, not
 /// against the owner, so a forged or stale marker does not turn a person into
 /// an agent in mention search.
-pub(crate) fn profile_has_valid_oa_owner(event: &Event) -> bool {
+pub(crate) fn profile_valid_oa_owner_pubkey(event: &Event) -> Option<String> {
     let target_hex = event.pubkey.to_hex();
     let Ok(target_pubkey) = nostr::PublicKey::from_hex(&target_hex) else {
-        return false;
+        return None;
     };
 
     for tag in event.tags.iter() {
@@ -75,12 +75,16 @@ pub(crate) fn profile_has_valid_oa_owner(event: &Event) -> bool {
         let Ok(json) = serde_json::to_string(slice) else {
             continue;
         };
-        if buzz_sdk_pkg::nip_oa::verify_auth_tag(&json, &target_pubkey).is_ok() {
-            return true;
+        if let Ok(owner_pubkey) = buzz_sdk_pkg::nip_oa::verify_auth_tag(&json, &target_pubkey) {
+            return Some(owner_pubkey.to_hex());
         }
     }
 
-    false
+    None
+}
+
+pub(crate) fn profile_has_valid_oa_owner(event: &Event) -> bool {
+    profile_valid_oa_owner_pubkey(event).is_some()
 }
 
 // ── kind:39000 / 39002 (NIP-29) ─────────────────────────────────────────────
@@ -299,6 +303,7 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
         avatar_url,
         about,
         nip05_handle,
+        owner_pubkey: profile_valid_oa_owner_pubkey(event),
     })
 }
 
@@ -326,6 +331,7 @@ pub fn users_batch_from_events(
     let mut profiles = HashMap::new();
     for (pk, ev) in &latest {
         let v: Value = serde_json::from_str(&ev.content).unwrap_or(Value::Null);
+        let owner_pubkey = profile_valid_oa_owner_pubkey(ev);
         let summary = UserProfileSummaryInfo {
             display_name: v
                 .get("display_name")
@@ -334,7 +340,8 @@ pub fn users_batch_from_events(
                 .map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
-            is_agent: profile_has_valid_oa_owner(ev),
+            is_agent: owner_pubkey.is_some(),
+            owner_pubkey,
         };
         profiles.insert(pk.clone(), summary);
     }
@@ -586,7 +593,7 @@ mod tests {
     }
 
     /// Build a kind:0 profile with a valid NIP-OA auth tag.
-    fn oa_profile_event(content: &str) -> Event {
+    fn oa_profile_event(content: &str) -> (Event, String) {
         let agent_keys = Keys::generate();
         let owner_keys = Keys::generate();
         let agent_pubkey = agent_keys.public_key();
@@ -595,10 +602,11 @@ mod tests {
         let tag_values: Vec<String> = serde_json::from_str(&tag_json).expect("parse auth tag json");
         let auth_tag = Tag::parse(tag_values).expect("parse auth tag");
 
-        EventBuilder::new(Kind::Metadata, content)
+        let event = EventBuilder::new(Kind::Metadata, content)
             .tags(vec![auth_tag])
             .sign_with_keys(&agent_keys)
-            .expect("sign")
+            .expect("sign");
+        (event, owner_keys.public_key().to_hex())
     }
 
     #[test]
@@ -760,6 +768,15 @@ mod tests {
         assert_eq!(p.about.as_deref(), Some("hi"));
         assert_eq!(p.nip05_handle.as_deref(), Some("alice@x"));
         assert_eq!(p.pubkey, e.pubkey.to_hex());
+        assert!(p.owner_pubkey.is_none());
+    }
+
+    #[test]
+    fn profile_info_extracts_valid_nip_oa_owner() {
+        let (event, owner_pubkey) = oa_profile_event(r#"{"display_name":"Mira"}"#);
+        let p = profile_info_from_event(&event).unwrap();
+
+        assert_eq!(p.owner_pubkey.as_deref(), Some(owner_pubkey.as_str()));
     }
 
     #[test]
@@ -803,12 +820,16 @@ mod tests {
 
     #[test]
     fn users_batch_marks_valid_nip_oa_profiles_as_agents() {
-        let agent = oa_profile_event(r#"{"display_name":"Mira"}"#);
+        let (agent, owner_pubkey) = oa_profile_event(r#"{"display_name":"Mira"}"#);
         let pubkey = agent.pubkey.to_hex();
         let resp =
             users_batch_from_events(std::slice::from_ref(&agent), std::slice::from_ref(&pubkey));
 
         assert!(resp.profiles[&pubkey].is_agent);
+        assert_eq!(
+            resp.profiles[&pubkey].owner_pubkey.as_deref(),
+            Some(owner_pubkey.as_str())
+        );
     }
 
     #[test]
@@ -917,6 +938,26 @@ mod tests {
             parsed[0].respond_to,
             Some(crate::managed_agents::RespondTo::Anyone)
         );
+    }
+
+    #[test]
+    fn agents_preserves_allowlist_metadata_for_directory_parse() {
+        let e = ev(
+            10100,
+            r#"{"name":"Scout","respond_to":"allowlist","respond_to_allowlist":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
+            vec![],
+        );
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].respond_to,
+            Some(crate::managed_agents::RespondTo::Allowlist)
+        );
+        assert_eq!(parsed[0].respond_to_allowlist, vec!["a".repeat(64)]);
     }
 
     #[test]

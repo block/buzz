@@ -16,8 +16,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-// ─── Fake LLM server ────────────────────────────────────────────────────────
-
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -58,8 +56,6 @@ async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     });
     url
 }
-
-// ─── Request-capturing fake LLM server ──────────────────────────────────────
 
 /// Like `spawn_fake_llm` but also captures the full JSON request body from each
 /// incoming HTTP request. Returns (url, captured_requests).
@@ -144,8 +140,6 @@ async fn spawn_capturing_fake_llm(responses: Vec<Value>) -> (String, Arc<Mutex<V
     (url, captures)
 }
 
-// ─── ACP harness ────────────────────────────────────────────────────────────
-
 struct Harness {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
@@ -221,8 +215,6 @@ impl Harness {
     }
 }
 
-// ─── Canned LLM responses (OpenAI-compat shape) ─────────────────────────────
-
 fn openai_text(content: &str) -> Value {
     json!({
         "id": "cc-1", "object": "chat.completion", "model": "fake-model",
@@ -267,8 +259,6 @@ async fn init_session(h: &mut Harness) -> String {
     assert!(sid.starts_with("ses_"));
     sid
 }
-
-// ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_only_end_turn() {

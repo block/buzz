@@ -22,12 +22,12 @@ export function RepoRefsSection({
             <>
               <div className="flex items-center gap-1.5">
                 <Badge variant="secondary">
-                  <GitBranch className="mr-1 h-3 w-3" />
+                  <GitBranch className="mr-1 h-4 w-4" />
                   {refs.head.ref}
                 </Badge>
                 {refs.head.sha && (
                   <Badge variant="outline" className="font-mono text-xs">
-                    <Hash className="mr-0.5 h-3 w-3" />
+                    <Hash className="mr-0.5 h-4 w-4" />
                     {refs.head.sha.slice(0, 7)}
                   </Badge>
                 )}
@@ -36,13 +36,13 @@ export function RepoRefsSection({
             </>
           )}
           <span className="flex items-center gap-1">
-            <GitBranch className="h-3.5 w-3.5" />
+            <GitBranch className="h-4 w-4" />
             {refs.branches.length}{" "}
             {refs.branches.length === 1 ? "branch" : "branches"}
           </span>
           <span className="text-muted-foreground/60">&middot;</span>
           <span className="flex items-center gap-1">
-            <Tag className="h-3.5 w-3.5" />
+            <Tag className="h-4 w-4" />
             {refs.tags.length} {refs.tags.length === 1 ? "tag" : "tags"}
           </span>
         </div>

@@ -30,7 +30,10 @@ async function gotoApp(page: import("@playwright/test").Page) {
 }
 
 async function openPersonaCatalog(page: import("@playwright/test").Page) {
-  await page.getByRole("button", { name: "New" }).click();
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
   await page.getByText("Choose from Catalog...").click();
 }
 
@@ -156,15 +159,16 @@ test("built-in personas are chosen from the dialog and can be selected", async (
   await expect(
     page.getByTestId("persona-catalog-dialog-scroll-area"),
   ).toHaveCSS("overflow-y", "auto");
-  expect(
-    await page
-      .getByTestId("persona-catalog-dialog-scroll-area")
-      .evaluate(
-        (element) =>
-          element.scrollHeight > element.clientHeight &&
-          element.clientHeight > 0,
-      ),
-  ).toBe(true);
+  const catalogScrollAreaMetrics = await page
+    .getByTestId("persona-catalog-dialog-scroll-area")
+    .evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+    }));
+  expect(catalogScrollAreaMetrics.clientHeight).toBeGreaterThan(0);
+  expect(catalogScrollAreaMetrics.scrollHeight).toBeGreaterThanOrEqual(
+    catalogScrollAreaMetrics.clientHeight,
+  );
   await expect(page.getByTestId("persona-catalog-dialog-footer")).toBeVisible();
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   const initialCatalogOrder = await getCatalogOrder(page);

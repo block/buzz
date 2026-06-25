@@ -4,20 +4,17 @@ import {
   SettingsOptionGroup,
   SettingsOptionRow,
 } from "./ui/SettingsOptionGroup";
+import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
 
 export function UpdateChecker() {
   const { status, checkForUpdate, relaunch } = useUpdaterContext();
 
   return (
-    <section className="min-w-0">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">
-          Software Updates
-        </h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Keep Buzz up to date with the latest features and fixes.
-        </p>
-      </div>
+    <section className="min-w-0" data-testid="settings-updates">
+      <SettingsSectionHeader
+        title="Software Updates"
+        description="Keep Buzz up to date with the latest features and fixes."
+      />
 
       <SettingsOptionGroup>
         {status.state === "idle" && (
@@ -51,6 +48,21 @@ export function UpdateChecker() {
               <p className="text-sm font-medium">Update status</p>
               <p className="text-sm font-normal text-muted-foreground">
                 You're on the latest version.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={checkForUpdate}>
+              Check Again
+            </Button>
+          </SettingsOptionRow>
+        )}
+
+        {status.state === "unavailable" && (
+          <SettingsOptionRow>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Update status</p>
+              <p className="text-sm font-normal text-muted-foreground">
+                Automatic updates aren't available on this build. Download the
+                latest release manually.
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={checkForUpdate}>

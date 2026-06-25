@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use buzz_audit::AuditService;
@@ -15,6 +15,15 @@ use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
 use buzz_workflow::WorkflowEngine;
+
+fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    })
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,10 +44,10 @@ async fn main() -> anyhow::Result<()> {
         relay_url = %config.relay_url,
         health_port = config.health_port,
         metrics_port = config.metrics_port,
+        max_frame_bytes = config.max_frame_bytes,
         "Config loaded"
     );
 
-    // ── Metrics recorder (Prometheus exporter on :9102) ──────────────────────
     relay_metrics::install(config.metrics_port);
     info!(
         port = config.metrics_port,
@@ -54,6 +63,18 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     info!("Postgres connected");
+
+    let auto_migrate =
+        buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
+    if auto_migrate {
+        db.migrate().await.map_err(|e| {
+            error!("Failed to run database migrations: {e}");
+            anyhow::anyhow!("Database migration failed: {e}")
+        })?;
+        info!("Database migrations complete");
+    } else {
+        info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
+    }
 
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
@@ -164,6 +185,12 @@ async fn main() -> anyhow::Result<()> {
     // fanned out to local WebSocket subscribers.
     let pubsub_for_sub = Arc::clone(&pubsub);
     tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
+
+    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
+    // Membership / visibility changes on other pods are received here and the
+    // matching local moka caches are dropped (via the consumer loop below).
+    let pubsub_for_cache = Arc::clone(&pubsub);
+    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
 
     let auth = AuthService::new(config.auth.clone());
 
@@ -368,6 +395,96 @@ async fn main() -> anyhow::Result<()> {
                     {
                         error!(channel = %channel_id, "reaper discovery update failed: {e}");
                     }
+
+                    // Close live subscriptions so connected clients drop the
+                    // archived channel immediately (CLOSED is in the client's
+                    // drop-set → no reconnect storm). Offline clients are caught
+                    // by the archived=true skip in discover_channels on reconnect.
+                    buzz_relay::handlers::side_effects::evict_all_channel_subscriptions(
+                        &reaper_state,
+                        *channel_id,
+                    )
+                    .await;
+                }
+            }
+        });
+    }
+
+    // NIP-ER reminder scheduler — polls for due reminders and publishes them
+    // to Redis pub/sub for cross-pod fan-out. Each pod's existing
+    // subscribe_local consumer picks them up and applies the author-only gate.
+    // Mirrors the channel reaper pattern. Cross-pod dedup via `delivered_at`
+    // column: only the pod that wins the atomic claim publishes.
+    {
+        let scheduler_state = Arc::clone(&state);
+        let scheduler_interval_secs: u64 = std::env::var("SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let scheduler_batch_limit: i64 = std::env::var("SPROUT_REMINDER_SCHEDULER_BATCH_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        tokio::spawn(async move {
+            info!(
+                interval_secs = scheduler_interval_secs,
+                batch_limit = scheduler_batch_limit,
+                "NIP-ER reminder scheduler started"
+            );
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(scheduler_interval_secs)).await;
+
+                let now_secs = chrono::Utc::now().timestamp();
+                let due = match scheduler_state
+                    .db
+                    .query_due_reminders(now_secs, scheduler_batch_limit)
+                    .await
+                {
+                    Ok(reminders) => reminders,
+                    Err(e) => {
+                        error!("Reminder scheduler tick failed: {e}");
+                        continue;
+                    }
+                };
+
+                if due.is_empty() {
+                    continue;
+                }
+
+                info!(count = due.len(), "Reminder scheduler: due reminders found");
+
+                for reminder in due {
+                    // Publish first, then claim. If publish fails the reminder
+                    // stays unclaimed and will be retried next tick. If claim
+                    // fails after a successful publish, duplicate fan-out on the
+                    // next tick is harmless (subscribers dedup by event ID).
+                    if let Err(e) = scheduler_state
+                        .pubsub
+                        .publish_event(uuid::Uuid::nil(), &reminder_to_event(&reminder))
+                        .await
+                    {
+                        error!(
+                            event_id = hex::encode(&reminder.id),
+                            "Reminder scheduler: Redis publish failed, skipping claim: {e}"
+                        );
+                        continue;
+                    }
+
+                    // Atomic cross-pod claim — only the winner marks it delivered.
+                    match scheduler_state
+                        .db
+                        .claim_due_reminder(&reminder.id, reminder.created_at)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {} // Another pod claimed it; duplicate publish is harmless.
+                        Err(e) => {
+                            warn!(
+                                event_id = hex::encode(&reminder.id),
+                                "Reminder scheduler: claim failed after publish (duplicate delivery possible): {e}"
+                            );
+                        }
+                    }
                 }
             }
         });
@@ -382,63 +499,11 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 match rx.recv().await {
                     Ok(channel_event) => {
-                        // Nil UUID is the sentinel for channel-less global events
-                        // (see event.rs `else` branch). Convert back to None so
-                        // fan_out() uses the global subscriber index instead of
-                        // looking up subscribers under Some(Uuid::nil()), which
-                        // would find nothing and silently drop every cross-node
-                        // global event.
-                        let channel_id = if channel_event.channel_id.is_nil() {
-                            None
-                        } else {
-                            Some(channel_event.channel_id)
-                        };
-                        let stored = buzz_core::StoredEvent::new(channel_event.event, channel_id);
-
-                        // Skip events that were already fanned out in-process (local echo).
-                        // The cache has TTL-based eviction (60s) so entries are bounded
-                        // regardless of subscriber health.
-                        let event_id_bytes = stored.event.id.to_bytes();
-                        if state_for_sub.local_event_ids.get(&event_id_bytes).is_some() {
-                            state_for_sub.local_event_ids.invalidate(&event_id_bytes);
-                            continue;
-                        }
-
-                        let matches = state_for_sub.sub_registry.fan_out(&stored);
-                        let matches = buzz_relay::handlers::event::filter_fanout_by_access(
+                        buzz_relay::handlers::event::fan_out_pubsub_event(
                             &state_for_sub,
-                            &stored,
-                            matches,
+                            channel_event,
                         )
                         .await;
-                        metrics::counter!("buzz_multinode_fanout_total").increment(1);
-                        if matches.is_empty() {
-                            continue;
-                        }
-
-                        let event_json = match serde_json::to_string(&stored.event) {
-                            Ok(json) => json,
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to serialize event for multi-node fan-out: {e}"
-                                );
-                                continue;
-                            }
-                        };
-                        let mut drop_count = 0u32;
-                        for (conn_id, sub_id) in &matches {
-                            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-                            if !state_for_sub.conn_manager.send_to(*conn_id, msg) {
-                                drop_count += 1;
-                            }
-                        }
-                        if drop_count > 0 {
-                            tracing::warn!(
-                                event_id = %stored.event.id.to_hex(),
-                                drop_count,
-                                "multi-node fan-out: {drop_count} connection(s) dropped"
-                            );
-                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
@@ -453,12 +518,37 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Cross-pod cache-invalidation consumer: receive cache-key drops from Redis
+    // pub/sub (published by other relay instances when membership/visibility
+    // changes) and apply the matching local moka drop. Uses the `*_local` drop
+    // variants so a received drop is never re-published.
+    {
+        let state_for_cache = Arc::clone(&state);
+        let mut rx = state_for_cache.pubsub.subscribe_cache_invalidations();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(invalidation) => {
+                        state_for_cache.apply_cache_invalidation(invalidation);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);
+                        tracing::warn!("Cache-invalidation consumer lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("Cache-invalidation broadcast channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     let router = build_router(Arc::clone(&state));
     let health_router = build_health_router(Arc::clone(&state));
 
     serve(router, health_router, Arc::clone(&state)).await?;
 
-    // ── Drain audit queue ────────────────────────────────────────────────────
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many
     // Arc<AppState> clones are still alive in background tasks.
@@ -490,7 +580,6 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
-    // ── Health listener (port 8080) ──────────────────────────────────────────
     let health_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.health_port))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
@@ -499,7 +588,6 @@ async fn serve(
         axum::serve(health_listener, health_router).await.ok();
     });
 
-    // ── Shutdown coordination ────────────────────────────────────────────────
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
     let tx = shutdown_tx.clone();
@@ -517,13 +605,11 @@ async fn serve(
         std::process::exit(1);
     });
 
-    // ── App listener (TCP) ───────────────────────────────────────────────────
     let tcp_listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
     info!(addr = %config.bind_addr, "buzz-relay TCP listening");
 
-    // ── App listener (UDS, optional) ─────────────────────────────────────────
     #[cfg(unix)]
     if let Some(ref uds_path) = config.uds_path {
         use std::os::unix::fs::FileTypeExt as _;
@@ -602,5 +688,39 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await.ok();
+    }
+}
+/// Reconstruct a `nostr::Event` from a [`DueReminder`] row for Redis pub/sub.
+fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
+    let event_json = serde_json::json!({
+        "id": hex::encode(&reminder.id),
+        "pubkey": hex::encode(&reminder.pubkey),
+        "created_at": reminder.created_at.timestamp(),
+        "kind": reminder.kind as u16,
+        "tags": reminder.tags,
+        "content": reminder.content,
+        "sig": hex::encode(&reminder.sig),
+    });
+
+    serde_json::from_value(event_json).expect("valid event JSON from DB row")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::buzz_auto_migrate_enabled;
+
+    #[test]
+    fn buzz_auto_migrate_is_opt_in() {
+        assert!(!buzz_auto_migrate_enabled(None));
+        assert!(!buzz_auto_migrate_enabled(Some("")));
+        assert!(!buzz_auto_migrate_enabled(Some("false")));
+        assert!(!buzz_auto_migrate_enabled(Some("0")));
+        assert!(!buzz_auto_migrate_enabled(Some("no")));
+
+        assert!(buzz_auto_migrate_enabled(Some("true")));
+        assert!(buzz_auto_migrate_enabled(Some("TRUE")));
+        assert!(buzz_auto_migrate_enabled(Some(" 1 ")));
+        assert!(buzz_auto_migrate_enabled(Some("yes")));
+        assert!(buzz_auto_migrate_enabled(Some("on")));
     }
 }

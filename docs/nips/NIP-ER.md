@@ -6,7 +6,7 @@ Event Reminders
 
 `draft` `optional` `relay`
 
-This NIP defines encrypted, author-only reminders as `kind:30300` addressable events. A reminder carries a public `not_before` tag that tells supporting relays when the reminder is due, while the reminder target, note, and state are encrypted to the author with [NIP-44](44.md).
+This NIP defines encrypted, author-only reminders as `kind:30300` addressable events. A pending reminder carries a public `not_before` tag that tells supporting relays when the reminder is due, while the reminder target, note, and state are encrypted to the author with [NIP-44](44.md). A reminder without `not_before` is a bookmark (saved item with no due time) or a terminal state (done/cancelled).
 
 The relay learns that an author has a reminder due at a time. It does not learn what the reminder is about.
 
@@ -55,9 +55,18 @@ Required tags for a reminder that may become due:
 ]
 ```
 
+For bookmarks (saved items) or terminal states (done/cancelled), `not_before` is omitted:
+
+```jsonc
+[
+  ["d", "<random-id>"],
+  ["alt", "Encrypted reminder"]
+]
+```
+
 `d` MUST be an opaque random value with at least 128 bits of entropy and MUST NOT be derived from the target event, reminder text, or reminder time. Events with no `d` tag, an empty `d` tag, or more than one `d` tag are invalid.
 
-`not_before` MUST be a decimal Unix timestamp string. It MUST contain only ASCII digits, with no sign, whitespace, decimal point, or leading zero except `"0"`. It MUST parse exactly as an integer in the range 0 through 9007199254740991 inclusive. Implementations MUST NOT parse it through lossy floating-point conversion, and MUST treat values outside this range or values that overflow their parser as malformed. Events MUST contain at most one `not_before` tag. Supporting relays SHOULD reject events with an invalid or duplicate `not_before` tag using `invalid: malformed not_before`. Clients MUST ignore pending reminders without exactly one valid `not_before`.
+`not_before` MUST be a decimal Unix timestamp string. It MUST contain only ASCII digits, with no sign, whitespace, decimal point, or leading zero except `"0"`. It MUST parse exactly as an integer in the range 0 through 9007199254740991 inclusive. Implementations MUST NOT parse it through lossy floating-point conversion, and MUST treat values outside this range or values that overflow their parser as malformed. Events MUST contain at most one `not_before` tag. Supporting relays SHOULD reject events with an invalid or duplicate `not_before` tag using `invalid: malformed not_before`. A pending reminder that may become due MUST include exactly one valid `not_before`. Bookmarks and terminal states (done/cancelled) MUST omit `not_before`. Clients MUST ignore pending reminders without exactly one valid `not_before`.
 
 `alt` is RECOMMENDED for [NIP-31](31.md) fallback text.
 

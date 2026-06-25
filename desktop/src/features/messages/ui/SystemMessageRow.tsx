@@ -5,6 +5,7 @@ import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
+import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -15,11 +16,16 @@ import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import {
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
+  MENTION_CHIP_PREFIX_CLASS,
+  MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { MessageTimestamp } from "./MessageTimestamp";
+
+const SYSTEM_ACTION_BUTTON_CLASS = "h-6 w-6 rounded-full p-0";
+const SYSTEM_ACTION_ICON_CLASS = "!h-4 !w-4";
 
 type SystemMessagePayload = {
   type: string;
@@ -87,7 +93,9 @@ function ProfileName({
           : "rounded-xs transition-colors hover:text-foreground",
       )}
     >
-      {highlight && !isAgentMention ? "@" : null}
+      {highlight && !isAgentMention ? (
+        <span className={MENTION_CHIP_PREFIX_CLASS}>@</span>
+      ) : null}
       {children}
     </span>
   );
@@ -129,7 +137,7 @@ function SystemMessageAvatar({
     const avatar = (
       <UserAvatar
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
-        className="!h-9 !w-9 shrink-0 text-[10px]"
+        className="!h-9 !w-9 shrink-0 text-2xs"
         displayName={actorLabel}
         testId="system-message-avatar"
       />
@@ -165,12 +173,12 @@ function SystemMessageAvatar({
     >
       <UserAvatar
         avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
-        className="!h-7 !w-7 border-2 border-background text-[9px]"
+        className="!h-7 !w-7 border-2 border-background text-2xs"
         displayName={actorLabel}
       />
       <UserAvatar
         avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
-        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-[9px]"
+        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-2xs"
         displayName={targetLabel}
       />
     </div>
@@ -329,7 +337,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 
   return (
     <div
-      className="group/message relative rounded-2xl px-3 py-2 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
+      className="group/message relative mx-1 rounded-2xl px-2 py-2 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
       data-testid="system-message-row"
     >
       <div className="flex items-start gap-2.5">
@@ -339,9 +347,9 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           profiles={profiles}
           targetPubkey={payload.target}
         />
-        <div className="min-w-0 flex-1">
+        <div className={cn(MESSAGE_MARKDOWN_CLASS, "min-w-0 flex-1")}>
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
+            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
               {description.title}
             </div>
             <MessageTimestamp
@@ -349,7 +357,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
               time={message.time}
             />
           </div>
-          <p className="mt-1 text-sm leading-snug text-muted-foreground/70">
+          <p className="mt-1 text-sm leading-snug text-foreground">
             {description.action}
           </p>
           <div>
@@ -376,7 +384,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
             ) : null}
           </div>
         </div>
-        <div className="absolute right-2 top-1 z-10">
+        <div className="absolute right-2 top-1 z-10 sm:top-0 sm:-translate-y-1/2">
           {canToggleReactions ? (
             <div
               className={cn(
@@ -399,12 +407,12 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                       <PopoverTrigger asChild>
                         <Button
                           aria-label="Open reactions"
-                          className="h-6 w-6 rounded-full p-0"
+                          className={SYSTEM_ACTION_BUTTON_CLASS}
                           size="sm"
                           type="button"
                           variant={isReactionPickerOpen ? "secondary" : "ghost"}
                         >
-                          <SmilePlus className="h-3 w-3" />
+                          <SmilePlus className={SYSTEM_ACTION_ICON_CLASS} />
                         </Button>
                       </PopoverTrigger>
                     </TooltipTrigger>
@@ -432,9 +440,14 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                         ) {
                           setBadgeBurstEmoji(value);
                         }
-                        void handleReactionSelect(value).finally(() => {
-                          setIsReactionPickerOpen(false);
-                        });
+                        void handleReactionSelect(value)
+                          .then(() => {
+                            recordQuickReactionEmoji(value);
+                          })
+                          .catch(() => {})
+                          .finally(() => {
+                            setIsReactionPickerOpen(false);
+                          });
                       }}
                     />
                   </PopoverContent>

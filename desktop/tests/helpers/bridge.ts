@@ -52,6 +52,8 @@ type MockManagedAgentSeed = {
   backend?:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockSearchProfileSeed = {
@@ -60,7 +62,18 @@ type MockSearchProfileSeed = {
   avatarUrl?: string | null;
   nip05Handle?: string | null;
   about?: string | null;
+  ownerPubkey?: string | null;
   isAgent?: boolean;
+};
+
+type MockRelayAgentSeed = {
+  pubkey: string;
+  name: string;
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
+  channelNames?: string[];
+  channelIds?: string[];
+  status?: "online" | "away" | "offline";
 };
 
 export type MockEngramEntry = {
@@ -91,15 +104,23 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  relayAgents?: MockRelayAgentSeed[];
   createManagedAgentDelayMs?: number;
   channelsReadError?: string;
   feedReadError?: string;
   canvasReadError?: string;
+  openDmDelayMs?: number;
+  /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
+  historyDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;
+  profileUpdateErrors?: string[];
   searchProfiles?: MockSearchProfileSeed[];
+  updateAvailable?: boolean;
   updateChannelDelayMs?: number;
+  updateDownloadDelayMs?: number;
+  updateVersion?: string;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
@@ -132,6 +153,7 @@ type MockBridgeOptions = {
    * generic PDF so the file-attachment flow can be exercised by default. An
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
+  uploadDelayMs?: number;
   uploadDescriptors?: {
     url: string;
     sha256: string;
@@ -472,4 +494,25 @@ export async function installRelayBridge(
     user,
     seedPreviewFeatures: options?.seedPreviewFeatures,
   });
+}
+
+// The sidebar no longer renders a "browse channels" icon button; the channel
+// browser is opened via the primary-modifier + Shift + O keyboard shortcut.
+export async function openChannelBrowser(page: Page) {
+  await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
+  const isMacBrowser = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform),
+  );
+  await page.evaluate((isMac) => {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: !isMac,
+        key: "O",
+        metaKey: isMac,
+        shiftKey: true,
+      }),
+    );
+  }, isMacBrowser);
 }

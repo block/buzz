@@ -20,7 +20,7 @@ export function CopyButton({
       type="button"
       variant="outline"
     >
-      <Copy className="h-3.5 w-3.5" />
+      <Copy className="h-4 w-4" />
       <span>{label ?? "Copy"}</span>
     </Button>
   );

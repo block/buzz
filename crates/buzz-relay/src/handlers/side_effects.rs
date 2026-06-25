@@ -75,8 +75,9 @@ async fn evict_conn_channel_subscriptions(
 
 /// Revoke live channel subscriptions held by connections whose authenticated
 /// pubkey is not a current member. Used when an open channel flips to private:
-/// non-members could have subscribed while it was open, and fan-out does not
-/// re-check membership per event, so their subscriptions must be closed.
+/// non-members could have subscribed while it was open. Fan-out now re-checks
+/// membership per event as the delivery-time safety net; this eviction closes
+/// subscriptions promptly so clients stop treating the channel as live.
 async fn evict_non_member_channel_subscriptions(
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -95,6 +96,21 @@ async fn evict_non_member_channel_subscriptions(
         }
     }
     Ok(())
+}
+
+/// Close every live subscription on a channel, for all subscribers, sending
+/// `CLOSED restricted: channel access revoked` to each.
+///
+/// Used when a channel is archived (e.g. the ephemeral-channel reaper): the
+/// channel becomes unusable for everyone, so all live subscriptions must close.
+/// The `channel access revoked` reason is in the client's drop-set, so a
+/// connected agent drops just that channel and keeps its socket — no reconnect
+/// storm. Offline/reconnecting clients are covered by the discovery-time
+/// `archived=true` skip in `discover_channels`.
+pub async fn evict_all_channel_subscriptions(state: &Arc<AppState>, channel_id: Uuid) {
+    for conn_id in state.sub_registry.channel_subscriber_conns(channel_id) {
+        evict_conn_channel_subscriptions(state, channel_id, conn_id).await;
+    }
 }
 
 /// Dispatch side effects for a stored event.
@@ -589,21 +605,27 @@ pub async fn emit_membership_notification(
         return Ok(());
     }
 
-    // Fan-out only — skip search indexing and workflow evaluation.
-    let matches = state.sub_registry.fan_out(&stored);
-    if !matches.is_empty() {
-        let event_json = match serde_json::to_string(&stored.event) {
-            Ok(json) => json,
-            Err(e) => {
-                warn!("failed to serialize membership notification for fan-out: {e}");
-                return Ok(());
-            }
-        };
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-            state.conn_manager.send_to(*target_conn_id, msg);
-        }
+    // Fan-out only — skip search indexing and workflow evaluation. Publish through
+    // Redis before local fan-out so agents connected to other relay pods receive
+    // the global membership notification and can subscribe to the new channel.
+    // Use the nil UUID sentinel for globally-scoped events, matching
+    // `dispatch_persistent_event` and `fan_out_pubsub_event`.
+    state.mark_local_event(&stored.event.id);
+    if let Err(e) = state.pubsub.publish_event(Uuid::nil(), &stored.event).await {
+        state
+            .local_event_ids
+            .invalidate(&stored.event.id.to_bytes());
+        warn!(
+            channel = %channel_id,
+            target = %target_hex,
+            kind = notification_kind,
+            "membership notification Redis publish failed: {e}"
+        );
     }
+
+    // Routed through the guarded send path for uniformity; the access gate no-ops
+    // for these globally-scoped (channel_id = None) events.
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 
     info!(
         channel = %channel_id,
@@ -684,7 +706,6 @@ pub async fn emit_group_discovery_events(
     let relay_pubkey_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
     let group_id = channel_id.to_string();
 
-    // ── kind:39000 group metadata ────────────────────────────────────────────
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
         tags.push(Tag::parse(["name", &channel.name])?);
@@ -747,7 +768,6 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    // ── kind:39001 group admins ──────────────────────────────────────────────
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
         for m in members
@@ -767,7 +787,6 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
-    // ── kind:39002 group members ─────────────────────────────────────────────
     {
         let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
         for m in &members {
@@ -789,8 +808,6 @@ pub async fn emit_group_discovery_events(
     Ok(())
 }
 
-// ── Kind:10100 Agent Profile Handler ─────────────────────────────────────────
-
 async fn handle_agent_profile(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
     let content: serde_json::Value = serde_json::from_str(&event.content)
         .map_err(|e| anyhow::anyhow!("kind:10100 content parse error: {e}"))?;
@@ -810,8 +827,6 @@ async fn handle_agent_profile(event: &Event, state: &Arc<AppState>) -> anyhow::R
     info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
     Ok(())
 }
-
-// ── NIP-01 Kind:0 Handler ────────────────────────────────────────────────────
 
 /// Kind:0 (NIP-01 profile metadata) side effect — sync profile fields to users table.
 async fn handle_kind0_profile(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
@@ -886,8 +901,6 @@ async fn handle_kind0_profile(event: &Event, state: &Arc<AppState>) -> anyhow::R
     info!(pubkey = %hex::encode(&pubkey_bytes), "kind:0 profile synced to users table");
     Ok(())
 }
-
-// ── NIP-29 Handlers ──────────────────────────────────────────────────────────
 
 async fn handle_put_user(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
     let channel_id =
@@ -1150,6 +1163,39 @@ async fn handle_edit_metadata(event: &Event, state: &Arc<AppState>) -> anyhow::R
                                 }),
                             )
                             .await?;
+
+                            // Resubscribe connected agents after restore: archiving evicts their
+                            // live subscriptions (CLOSED "channel access revoked") and unarchive
+                            // otherwise emits no signal that makes a connected agent resubscribe.
+                            // We reuse the member_added notification (44100) purely as a resubscribe
+                            // trigger — no membership actually changed here — because it flows on the
+                            // agent's always-live global membership subscription, the same path
+                            // remove/re-add uses to recover. Humans self-heal via the re-emitted
+                            // kind:39000 discovery, so this is intentionally agent-scoped.
+                            //
+                            // Known limitation: emit_membership_notification builds a created_at=now
+                            // event with no nonce, and insert_event skips fan-out on a duplicate id.
+                            // Four sub-second toggles (archive->unarchive->archive->unarchive) on the
+                            // same channel by the same actor could collide ids and skip a fan-out.
+                            // Not reachable in practice — unarchive has a single human-driven caller;
+                            // the reaper only auto-archives — so we don't engineer around it.
+                            for member in state.db.get_members(channel_id).await? {
+                                if let Err(e) = emit_membership_notification(
+                                    state,
+                                    channel_id,
+                                    &member.pubkey,
+                                    &actor_bytes,
+                                    KIND_MEMBER_ADDED_NOTIFICATION,
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        channel = %channel_id,
+                                        error = %e,
+                                        "post-unarchive resubscribe notification failed"
+                                    );
+                                }
+                            }
                         }
                         _ => {} // ignore invalid values
                     }
@@ -1727,8 +1773,6 @@ async fn handle_standard_deletion_event(
     Ok(())
 }
 
-// ── Tag Helpers ──────────────────────────────────────────────────────────────
-
 /// Extract channel UUID from `h` tag (NIP-29 group ID).
 fn extract_h_tag_channel(event: &Event) -> Option<Uuid> {
     for tag in event.tags.iter() {
@@ -1826,8 +1870,6 @@ fn extract_tag_value(event: &Event, tag_name: &str) -> Option<String> {
     }
     None
 }
-
-// ── NIP-34: Git repository side effects ──────────────────────────────────────
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
 ///
@@ -2102,18 +2144,12 @@ async fn emit_initial_ref_state(
         .await
         .map_err(|e| anyhow::anyhow!("insert kind:30618: {e}"))?;
     if was_inserted {
-        let matches = state.sub_registry.fan_out(&stored);
-        for (conn_id, sub_id) in matches {
-            let _ = state.conn_manager.send_to(
-                conn_id,
-                crate::protocol::RelayMessage::event(&sub_id, &stored.event),
-            );
-        }
+        // Routed through the guarded send path for uniformity; the access gate
+        // no-ops for this globally-scoped (channel_id = None) ref-state event.
+        crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
     }
     Ok(())
 }
-
-// ── NIP-43 relay-level membership announcement events ────────────────────────
 
 /// Publish a kind:13534 relay membership list event (NIP-43).
 ///
@@ -2191,20 +2227,9 @@ async fn publish_nip43_delta(
         return Ok(());
     }
 
-    let matches = state.sub_registry.fan_out(&stored);
-    if !matches.is_empty() {
-        let event_json = match serde_json::to_string(&stored.event) {
-            Ok(json) => json,
-            Err(e) => {
-                warn!("failed to serialize kind:{kind} for fan-out: {e}");
-                return Ok(());
-            }
-        };
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-            state.conn_manager.send_to(*target_conn_id, msg);
-        }
-    }
+    // Routed through the guarded send path for uniformity; the access gate
+    // no-ops for this globally-scoped (channel_id = None) NIP-43 event.
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 
     info!(
         target = %target_pubkey_hex,
@@ -2290,8 +2315,6 @@ pub async fn reconcile_channel_events(state: &Arc<AppState>) -> anyhow::Result<(
     }
     Ok(())
 }
-
-// ── NIP-IA relay-level identity archive announcement events ──────────────────
 
 /// Publish a kind:13535 archived identities list event (NIP-IA).
 ///

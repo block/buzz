@@ -355,7 +355,22 @@ subscription. Navigate to the channel first (triggers subscription), then away
 (so unread indicators appear), then inject.
 
 **Animation timing:** Radix components animate in via CSS. `toBeVisible()`
-resolves mid-animation — wait for completion before screenshotting:
+resolves mid-animation — wait for completion before screenshotting. Use the
+shared helper (mandatory before any `page.screenshot()` or
+`locator.screenshot()` in specs):
+
+```ts
+import { waitForAnimations } from "../helpers/animations";
+
+// ... after the element is visible but before capturing:
+await waitForAnimations(page);
+await page.screenshot({ path: "...", clip: { ... } });
+```
+
+The `just desktop-screenshot` path (`screenshot.mjs`) calls
+`waitForAnimations` automatically — no manual step needed there.
+
+For per-element waits (rare — prefer the page-level helper above):
 
 ```ts
 await menuItem.evaluate((el) =>
@@ -411,6 +426,40 @@ organized under `desktop/src/features/`. Biome handles linting and formatting.
 just desktop-dev   # web-only dev server (faster iteration)
 just dev           # full Tauri app with native shell
 ```
+
+### Text sizing & zoom (use rem, never px)
+
+The desktop app implements Cmd +/- zoom by scaling the root `<html>`
+font-size (`desktop/src/app/useWebviewZoomShortcuts.ts`) and pinning the native
+webview zoom. **Only rem-based text scales with zoom — hardcoded px text sizes
+are frozen.**
+
+So for any readable text, reach for rem-based Tailwind tokens, never arbitrary
+px:
+
+- ✅ Stock rem tokens (`text-base`, `text-sm`, `text-xs`, …). **Chat body/author
+  text === `text-base` (16px) — chat is the app's base type size**, and the
+  surrounding timeline elements (timestamps, system rows, code, reactions) are
+  deliberate steps on that same stock ramp.
+- ✅ The `text-2xs` (0.6875rem / 11px) and `text-3xs` (0.5rem / 8px) meta-text
+  tokens (in `desktop/tailwind.config.js` under `theme.extend.fontSize`) for the
+  sub-`text-xs` ramp — timestamps, count badges, tracking labels, tiny glyphs.
+  These replaced the dozens of arbitrary `text-[…rem]` literals that had drifted
+  apart pixel-by-pixel; keep meta text on these two tokens, not new arbitrary
+  values.
+- ❌ `text-[15px]`, `text-[13px]`, CSS `font-size: 15px` — px froze against zoom
+  and caused the message-timeline regression (PR #891).
+- ❌ Arbitrary rem literals too: `text-[0.6875rem]`, `text-[0.9rem]`, etc. They
+  zoom fine but re-fragment the scale we consolidated. Use a named token.
+
+Prefer stock tokens — they're rem and zoom-safe. Only if a design genuinely
+needs a size the stock/`2xs`/`3xs` scale can't express should you **add a
+rem-based token** (in `desktop/tailwind.config.js` under `theme.extend.fontSize`)
+rather than an arbitrary literal. A CI guard (`pnpm check:px-text`, in
+`desktop/scripts/check-px-text.mjs`) scans all of `desktop/src` and fails on any
+new arbitrary text-size literal — px **or** rem/em. Genuinely decorative glyphs
+(e.g. the `text-[6rem]` avatar emoji) are allowlisted by `path:line` in that
+script.
 
 ### Workspace Switching
 
@@ -503,5 +552,5 @@ just mobile-dev
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / API endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
-- [RELEASING.md](RELEASING.md) — release process: `just release`, auto-tag, internal builds
+- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `release-mobile`, auto-tag, internal builds
 - [README.md](README.md) — project overview and quick start

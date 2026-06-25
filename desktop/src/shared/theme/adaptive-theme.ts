@@ -214,8 +214,22 @@ export function createThemeVars(
   // Derived colors
   const borderColor = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
   const hoverBg = elevate(0.06);
+  const huddleControlBg = isDark ? mix(hoverBg, syntaxFg, 0.14) : "#333333";
+  const huddleControlHoverBg = isDark
+    ? mix(huddleControlBg, syntaxFg, 0.08)
+    : "#3d3d3d";
+  const huddleChevronBg = isDark
+    ? mix(huddleControlBg, "#000000", 0.2)
+    : "#292929";
+  const huddleChevronHoverBg = isDark
+    ? mix(huddleChevronBg, huddleControlBg, 0.6)
+    : "#383838";
+  const huddlePopoverBg = huddleChevronBg;
+  const huddlePopoverBorder = huddleControlHoverBg;
+  const huddleTooltipBg = huddleControlBg;
   const primaryFg = hexToHsl(primaryBg);
   const textFg = hexToHsl(syntaxFg);
+  const huddleControlFg = isDark ? textFg : "0 0% 98%";
 
   return {
     isDark,
@@ -227,6 +241,16 @@ export function createThemeVars(
       "--muted": hexToHsl(hoverBg),
       "--accent": hexToHsl(hoverBg),
       "--secondary": hexToHsl(hoverBg),
+      "--huddle-drawer-surface": isDark ? hexToHsl(hoverBg) : "0 0% 0%",
+      "--huddle-control-surface": hexToHsl(huddleControlBg),
+      "--huddle-control-hover-surface": hexToHsl(huddleControlHoverBg),
+      "--huddle-control-chevron-surface": hexToHsl(huddleChevronBg),
+      "--huddle-control-chevron-hover-surface": hexToHsl(huddleChevronHoverBg),
+      "--huddle-control-foreground": huddleControlFg,
+      "--huddle-popover-surface": hexToHsl(huddlePopoverBg),
+      "--huddle-popover-border": hexToHsl(huddlePopoverBorder),
+      "--huddle-tooltip-surface": hexToHsl(huddleTooltipBg),
+      "--huddle-tooltip-foreground": huddleControlFg,
 
       // Foregrounds
       "--foreground": textFg,

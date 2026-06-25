@@ -2,6 +2,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { formatDmParticipantDisplayName } from "@/features/channels/lib/dmParticipantDisplay";
 import type { Channel } from "@/shared/api/types";
 
 function isGenericDmChannelName(name: string) {
@@ -46,5 +47,9 @@ export function resolveChannelDisplayLabel(
   );
   const uniqueLabels = [...new Set(resolvedLabels)];
 
-  return uniqueLabels.length > 0 ? uniqueLabels.join(", ") : channel.name;
+  return uniqueLabels.length > 0
+    ? formatDmParticipantDisplayName(
+        uniqueLabels.map((displayName) => ({ displayName })),
+      )
+    : channel.name;
 }

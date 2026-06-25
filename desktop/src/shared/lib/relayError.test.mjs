@@ -1,13 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  isRelayUnreachableError,
-  relayErrorDetail,
-  RELAY_UNREACHABLE_MESSAGE,
-} from "./relayError.ts";
-
-// ── isRelayUnreachableError ───────────────────────────────────────────────────
+import { isRelayUnreachableError } from "./relayError.ts";
 
 test("isRelayUnreachableError: Error with prefix returns true", () => {
   assert.equal(
@@ -35,6 +29,18 @@ test("isRelayUnreachableError: unrelated string returns false", () => {
   assert.equal(isRelayUnreachableError("something went wrong"), false);
 });
 
+test("isRelayUnreachableError: malformed-response message returns false", () => {
+  // The backend relabels a reached-but-malformed 2xx body to this exact string
+  // so it drops out of the unreachable bucket. Pin that the classifier agrees —
+  // if the backend re-prefixes it, this catches the misroute.
+  assert.equal(
+    isRelayUnreachableError(
+      "relay returned malformed response: not valid JSON",
+    ),
+    false,
+  );
+});
+
 test("isRelayUnreachableError: null returns false", () => {
   assert.equal(isRelayUnreachableError(null), false);
 });
@@ -48,35 +54,4 @@ test("isRelayUnreachableError: plain object returns false", () => {
     isRelayUnreachableError({ message: "relay unreachable: oops" }),
     false,
   );
-});
-
-// ── relayErrorDetail ──────────────────────────────────────────────────────────
-
-test("relayErrorDetail: strips prefix and trims for Error", () => {
-  const err = new Error("relay unreachable:   connection refused  ");
-  assert.equal(relayErrorDetail(err), "connection refused");
-});
-
-test("relayErrorDetail: strips prefix and trims for string", () => {
-  assert.equal(
-    relayErrorDetail("relay unreachable: 403 Forbidden from Cloudflare Access"),
-    "403 Forbidden from Cloudflare Access",
-  );
-});
-
-test("relayErrorDetail: prefix with no detail returns RELAY_UNREACHABLE_MESSAGE", () => {
-  assert.equal(
-    relayErrorDetail("relay unreachable:"),
-    RELAY_UNREACHABLE_MESSAGE,
-  );
-});
-
-test("relayErrorDetail: unrelated Error returns generic message", () => {
-  const detail = relayErrorDetail(new Error("something else"));
-  assert.equal(detail, RELAY_UNREACHABLE_MESSAGE);
-});
-
-test("relayErrorDetail: null returns generic message", () => {
-  const detail = relayErrorDetail(null);
-  assert.equal(detail, RELAY_UNREACHABLE_MESSAGE);
 });

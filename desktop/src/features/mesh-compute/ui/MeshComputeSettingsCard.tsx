@@ -15,6 +15,7 @@ import {
   SettingsOptionGroup,
   SettingsOptionRow,
 } from "@/features/settings/ui/SettingsOptionGroup";
+import { SettingsSectionHeader } from "@/features/settings/ui/SettingsSectionHeader";
 import { classifyModelRef, modelRefHintLabel } from "../classifyModelRef";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 
@@ -135,13 +136,15 @@ export function MeshComputeSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Share compute</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Share this machine with your relay. When on, other members can run
-          their agents here.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Share compute"
+        description={
+          <>
+            Share this machine with your relay. When on, other members can run
+            their agents here.
+          </>
+        }
+      />
 
       {error ? (
         <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -244,7 +247,7 @@ export function MeshComputeSettingsCard() {
           <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium text-foreground">
             <ChevronDown
               className={cn(
-                "h-3.5 w-3.5 text-muted-foreground transition-transform",
+                "h-4 w-4 text-muted-foreground transition-transform",
                 advancedOpen ? "rotate-0" : "-rotate-90",
               )}
             />

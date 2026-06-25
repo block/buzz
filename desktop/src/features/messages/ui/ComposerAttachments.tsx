@@ -1,7 +1,7 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { FileText, Play, X } from "lucide-react";
+import { FileText, HatGlasses, Play, X } from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -10,6 +10,7 @@ import {
   type UploadingAttachmentPreview,
 } from "@/features/messages/lib/useMediaUpload";
 import { cn } from "@/shared/lib/cn";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -36,39 +37,16 @@ type ComposerAttachmentsProps = {
   uploadingCount?: number;
   uploadingPreviews?: UploadingAttachmentPreview[];
   onRemove: (url: string) => void;
+  spoileredUrls?: ReadonlySet<string>;
 };
 
 const COMPOSER_MEDIA_HEIGHT_PX = 55;
-const COMPOSER_MEDIA_MAX_WIDTH_PX = 129;
-const COMPOSER_MEDIA_MIN_WIDTH_PX = 64;
+const COMPOSER_MEDIA_WIDTH_PX = 55;
 
-function aspectRatioFromDim(dim?: string): number | undefined {
-  if (!dim) return undefined;
-  const match = dim.match(/^(\d+)x(\d+)$/i);
-  if (!match) return undefined;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
-    return undefined;
-  }
-  return width / height;
-}
-
-function composerMediaStyle(dim?: string): React.CSSProperties {
-  const aspectRatio = aspectRatioFromDim(dim) ?? 16 / 9;
-  const widthPx = Math.round(
-    Math.min(
-      COMPOSER_MEDIA_MAX_WIDTH_PX,
-      Math.max(
-        COMPOSER_MEDIA_MIN_WIDTH_PX,
-        aspectRatio * COMPOSER_MEDIA_HEIGHT_PX,
-      ),
-    ),
-  );
+function composerMediaStyle(): React.CSSProperties {
   return {
-    aspectRatio: String(aspectRatio),
     height: COMPOSER_MEDIA_HEIGHT_PX,
-    width: widthPx,
+    width: COMPOSER_MEDIA_WIDTH_PX,
   };
 }
 
@@ -84,6 +62,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
   uploadingPreviews = [],
   onCancelUpload,
   onRemove,
+  spoileredUrls,
 }: ComposerAttachmentsProps) {
   if (attachments.length === 0 && !isUploading) return null;
 
@@ -107,6 +86,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
             const isVideo = attachment.type.startsWith("video/");
             const isImage = attachment.type.startsWith("image/");
             const isFile = !isVideo && !isImage;
+            const isSpoilered = spoileredUrls?.has(attachment.url) ?? false;
             const thumbUrl = attachment.thumb
               ? rewriteRelayUrl(attachment.thumb)
               : rewriteRelayUrl(attachment.url);
@@ -115,7 +95,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
               : attachment.thumb
                 ? rewriteRelayUrl(attachment.thumb)
                 : undefined;
-            const mediaStyle = composerMediaStyle(attachment.dim);
+            const mediaStyle = composerMediaStyle();
 
             // Generic file: compact chip with a file icon + filename, plus the
             // same remove button. No lightbox (nothing to preview).
@@ -135,8 +115,8 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   className="group relative"
                 >
                   <div className="flex h-5 max-w-[10rem] items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
-                    <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
-                    <span className="truncate text-[10px] text-muted-foreground">
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate text-2xs text-muted-foreground">
                       {label}
                     </span>
                   </div>
@@ -167,7 +147,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 className="group relative"
               >
                 <div
-                  className="relative h-[55px] max-w-[129px]"
+                  className="relative h-[55px] max-w-[55px]"
                   style={mediaStyle}
                 >
                   <DialogPrimitive.Root>
@@ -186,20 +166,33 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                             )}
                             <div className="absolute inset-0 bg-black/15" />
                             <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
-                              <Play className="h-3 w-3 fill-white text-white" />
+                              <Play className="h-4 w-4 fill-white text-white" />
                             </div>
                           </div>
                         ) : (
                           <img
                             src={thumbUrl}
                             alt={`Attachment ${hash}`}
-                            className="h-full w-full object-contain"
+                            className="h-full w-full object-cover"
                           />
                         )}
+                        {isSpoilered ? (
+                          <div
+                            className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
+                            data-composer-media-spoiler=""
+                          >
+                            <HatGlasses className="h-4 w-4" />
+                          </div>
+                        ) : null}
                       </div>
                     </DialogPrimitive.Trigger>
                     <DialogPrimitive.Portal>
-                      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+                      <DialogPrimitive.Overlay
+                        className={cn(
+                          "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+                          MODAL_BACKDROP_BLUR_CLASS,
+                        )}
+                      />
                       <DialogPrimitive.Content
                         className="fixed inset-0 z-50 flex items-center justify-center p-8"
                         onPointerDownOutside={(e) => e.preventDefault()}
@@ -231,7 +224,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                           />
                         )}
                         <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
-                          <X className="h-5 w-5" />
+                          <X className="h-4 w-4" />
                           <span className="sr-only">Close</span>
                         </DialogPrimitive.Close>
                       </DialogPrimitive.Content>
@@ -265,8 +258,8 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 className="group relative"
               >
                 <div
-                  className="relative h-[55px] max-w-[129px]"
-                  style={composerMediaStyle(preview.dim)}
+                  className="relative h-[55px] max-w-[55px]"
+                  style={composerMediaStyle()}
                 >
                   <div className="h-full w-full overflow-hidden rounded-2xl border border-border/70 bg-muted">
                     {preview.posterUrl ? (

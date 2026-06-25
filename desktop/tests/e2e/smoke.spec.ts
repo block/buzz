@@ -40,7 +40,7 @@ async function ensureTimelineScrollable(
   expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight + 160);
 }
 
-async function focusTopbarSearchWithShortcut(
+async function focusSidebarSearchWithShortcut(
   page: import("@playwright/test").Page,
 ) {
   const openSearchButton = page.getByTestId("open-search");
@@ -59,9 +59,8 @@ async function focusTopbarSearchWithShortcut(
       }),
     );
   });
-  await expect(openSearchButton).toBeFocused();
   await expect(page.getByTestId("search-results")).toBeVisible();
-  await expect(page.getByTestId("search-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
 }
 
 async function expectHomeView(page: import("@playwright/test").Page) {
@@ -75,7 +74,7 @@ async function selectHomeInboxFilter(
   await page
     .getByTestId("home-inbox")
     .getByRole("button", {
-      name: /^(All|Mentions|Needs Action|Activity|Agents)$/,
+      name: /^Filter inbox:/,
     })
     .click();
   await page.getByRole("menuitemradio", { name: label }).click();
@@ -116,7 +115,10 @@ test("create agent supports parallelism and system prompt overrides", async ({
 
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
   await page.getByText("Custom Agent").click();
 
   await page.getByTestId("agent-name-input").fill(agentName);
@@ -143,7 +145,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(inlineLog).toContainText("system prompt override configured");
 });
 
-test("opens a mocked channel from the home feed", async ({ page }) => {
+test("opens a mocked channel from the inbox feed", async ({ page }) => {
   const inboxList = page.getByTestId("home-inbox-list");
 
   await page.goto("/");
@@ -151,19 +153,17 @@ test("opens a mocked channel from the home feed", async ({ page }) => {
   await expectHomeView(page);
   await expect(inboxList).toContainText("Please review the release checklist.");
 
-  await inboxList
-    .getByText("Please review the release checklist.")
-    .first()
-    .click();
-  await page.getByRole("button", { name: "Open channel" }).click();
+  const releaseRow = page.getByTestId("home-inbox-item-mock-feed-mention");
+  await releaseRow.hover();
+  await releaseRow.getByRole("button", { name: "Open in channel" }).click();
 
   await expect(page).toHaveURL(
-    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
+    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50\?messageId=mock-feed-mention$/,
   );
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("home feed shows channel and agent activity sections", async ({
+test("inbox feed shows channel and agent activity sections", async ({
   page,
 }) => {
   const inboxList = page.getByTestId("home-inbox-list");
@@ -185,7 +185,7 @@ test("home feed shows channel and agent activity sections", async ({
   );
 });
 
-test("opens a mocked forum activity item from the home feed", async ({
+test("opens a mocked forum activity item from the inbox feed", async ({
   page,
 }) => {
   await page.goto("/");
@@ -203,29 +203,26 @@ test("opens a mocked forum activity item from the home feed", async ({
   );
 });
 
-test("home feed renders resolved author labels", async ({ page }) => {
+test("inbox feed renders resolved author labels", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("home-inbox-list")).toContainText("alice");
   await expect(page.getByTestId("home-inbox-list")).not.toContainText("You");
 });
 
-test("opens topbar search with the shortcut and loads the exact result", async ({
+test("opens sidebar search with the shortcut and loads the exact result", async ({
   page,
 }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("shipped");
+  await page.getByTestId("search-dialog-input").fill("shipped");
   await expect(page.getByTestId("search-results")).toContainText(
     "Engineering shipped the desktop build.",
   );
 
-  await page
-    .getByTestId("search-results")
-    .getByText("Engineering shipped the desktop build.")
-    .click();
+  await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(
     /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9\?messageId=mock-engineering-shipped$/,
@@ -239,9 +236,9 @@ test("opens topbar search with the shortcut and loads the exact result", async (
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("engineering");
+  await page.getByTestId("search-dialog-input").fill("engineering");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("engineering");
@@ -256,9 +253,12 @@ test("opens channel matches from search", async ({ page }) => {
     "search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
   );
 
-  await results
-    .getByTestId("search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9")
-    .click();
+  await expect(
+    results.getByTestId(
+      "search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
+    ),
+  ).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(
     /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9$/,
@@ -266,14 +266,49 @@ test("opens channel matches from search", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
 });
 
+test("closes sidebar search with Escape", async ({ page }) => {
+  await page.goto("/");
+
+  await focusSidebarSearchWithShortcut(page);
+  await page.getByTestId("search-dialog-input").fill("shipped");
+
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByTestId("search-results")).toHaveCount(0);
+  await expect(page.getByTestId("open-search")).toBeFocused();
+});
+
+test("reopens the collapsed sidebar when the search shortcut fires", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await expect(page.getByTestId("open-search")).toBeVisible();
+
+  const sidebarRoot = page.locator('[data-side="left"][data-state]');
+  await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
+
+  // Collapse the sidebar; its pinned-header search slides off-screen.
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
+  await expect(sidebarRoot).toHaveAttribute("data-state", "collapsed");
+
+  await focusSidebarSearchWithShortcut(page);
+
+  // The shortcut reveals the sidebar and focuses the dialog search input.
+  await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+});
+
 test("search results use your resolved profile label instead of You", async ({
   page,
 }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("welcome");
+  await page.getByTestId("search-dialog-input").fill("welcome");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("Welcome to #general");
@@ -286,9 +321,9 @@ test("opens accessible unjoined channels from search in read-only mode", async (
 }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("critique");
+  await page.getByTestId("search-dialog-input").fill("critique");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText(

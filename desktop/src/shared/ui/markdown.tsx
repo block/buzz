@@ -1,10 +1,11 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, {
   type Components,
   defaultUrlTransform,
 } from "react-markdown";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Copy, Download, FileText } from "lucide-react";
+import { Copy, Download, FileText, ZoomIn, ZoomOut } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -22,6 +23,7 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   isMessageLink,
   parseMessageLink,
+  resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -38,13 +40,23 @@ import remarkCustomEmoji, {
   type CustomEmoji,
 } from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
+import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { Button } from "@/shared/ui/button";
 import {
+  INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
+  MENTION_CHIP_PREFIX_CLASS,
+  MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
+import { SpoilerParticles } from "@/shared/ui/SpoilerParticles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import {
@@ -68,6 +80,14 @@ type ImetaEntry = {
 
 type ImetaLookup = Map<string, ImetaEntry>;
 
+type MessageLinkPillProps = {
+  channels: Channel[];
+  href: string;
+  interactive: boolean;
+  link: ParsedMessageLink;
+  onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
+
 let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
   null;
 let shikiInitPromise: Promise<void> | null = null;
@@ -78,7 +98,7 @@ const MAX_CACHE_ENTRIES = 100;
 const MAX_LOADED_LANGUAGES = 30;
 const MAX_HIGHLIGHT_LINES = 150;
 const CODE_BLOCK_CLASS =
-  "code-block-lines block min-w-full whitespace-pre font-mono text-[13px] leading-6 text-foreground";
+  "code-block-lines block min-w-full whitespace-pre font-mono text-sm font-medium text-foreground";
 const DIFF_ADD_RE = /\s*\/\/\s*\[!code\s*\+\+\]\s*$/;
 const DIFF_REMOVE_RE = /\s*\/\/\s*\[!code\s*--\]\s*$/;
 
@@ -134,6 +154,39 @@ function aspectRatioFromDim(dim?: string): number | undefined {
 }
 
 /**
+ * Parse a NIP-92 `dim` value ("WxH") into intrinsic pixel dimensions. Used to
+ * stamp explicit `width`/`height` attributes on inline images so the browser
+ * reserves aspect-ratio-correct layout space *before* the image decodes. This
+ * is what keeps the timeline from jumping when a tall image loads late — the
+ * row's height is known at first paint instead of growing from ~0 on load.
+ */
+function dimensionsFromDim(
+  dim?: string,
+): { width: number; height: number } | undefined {
+  if (!dim) return undefined;
+  const match = dim.match(/^(\d+)x(\d+)$/i);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return undefined;
+  }
+  return { width, height };
+}
+
+function isInsideHiddenSpoiler(element: Element): boolean {
+  return (
+    element.closest('.buzz-spoiler[data-spoiler][data-revealed="false"]') !==
+    null
+  );
+}
+
+/**
  * Video review context flows through React context instead of
  * `createMarkdownComponents` arguments. The component map must keep a stable
  * identity across re-renders: a new map means new element types, which makes
@@ -144,6 +197,21 @@ function aspectRatioFromDim(dim?: string): number | undefined {
 const VideoReviewMarkdownContext = React.createContext<
   VideoReviewContext | undefined
 >(undefined);
+
+type MarkdownRuntime = {
+  agentMentionPubkeysByName?: Record<string, string>;
+  channels: Channel[];
+  imetaByUrl?: ImetaLookup;
+  mentionPubkeysByName?: Record<string, string>;
+  onOpenChannel: (channelId: string) => void;
+  onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
+
+function useLatestRef<T>(value: T) {
+  const ref = React.useRef(value);
+  ref.current = value;
+  return ref;
+}
 
 function MarkdownVideoPlayer({
   alt,
@@ -201,7 +269,6 @@ function messageLinkUrlTransform(value: string, key: string): string {
 type MarkdownProps = {
   channelNames?: string[];
   className?: string;
-  compact?: boolean;
   content: string;
   customEmoji?: CustomEmoji[];
   imetaByUrl?: ImetaLookup;
@@ -210,40 +277,165 @@ type MarkdownProps = {
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
   searchQuery?: string;
-  tight?: boolean;
   videoReviewContext?: VideoReviewContext;
 };
 
-type MarkdownVariant = "default" | "compact" | "tight";
+type ImageLightboxBox = {
+  height: number;
+  left: number;
+  top: number;
+  width: number;
+};
 
-/**
- * Inline image embed with click-to-zoom lightbox and right-click download.
- *
- * IMPORTANT: this component renders the inline `<img>` with NO wrapping div
- * and drives the Dialog via controlled `open` state — *not* via Radix's
- * `<Trigger asChild>` cloning onto a wrapper div. An earlier version used
- * the Trigger-asChild pattern around a `<div>` around the `<img>`, which
- * caused a 1-2px layout reflow in the surrounding message body on hover
- * (the gap between the username header and the body would visibly grow).
- * The nested wrapper divs + Radix attribute cloning were repainting the
- * surrounding inline flow on `:hover` state changes. Keeping the `<img>`
- * bare and managing the lightbox + context menu via React state avoids it.
- */
-function ImageBlock({
-  alt,
-  resolvedSrc,
-  src,
-}: {
-  alt: string | undefined;
-  resolvedSrc: string | undefined;
-  src: string | undefined;
-}) {
-  const [lightboxOpen, setLightboxOpen] = React.useState(false);
-  const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+const IMAGE_LIGHTBOX_ENTER_MS = 260;
+const IMAGE_LIGHTBOX_EXIT_MS = 170;
+const IMAGE_LIGHTBOX_FADE_ENTER_MS = 180;
+const IMAGE_LIGHTBOX_FADE_EXIT_MS = 90;
+const IMAGE_LIGHTBOX_REDUCED_MOTION_MS = 100;
+const IMAGE_LIGHTBOX_ZOOM_TRANSITION_MS = 80;
+const IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO = 0.8;
+const IMAGE_LIGHTBOX_CONTROL_SUPPRESS_CLOSE_MS = 450;
+const IMAGE_LIGHTBOX_TRACKPAD_ZOOM_IDLE_MS = 120;
+const IMAGE_LIGHTBOX_WHEEL_ZOOM_SPEED = 0.002;
+const IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA = 0.2;
+const IMAGE_LIGHTBOX_MIN_ZOOM = 1;
+const IMAGE_LIGHTBOX_MAX_ZOOM = 3;
+const IMAGE_LIGHTBOX_ZOOM_STEP = 0.05;
+const IMAGE_LIGHTBOX_EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
+const IMAGE_LIGHTBOX_EASE_IN_OUT = "cubic-bezier(0.77, 0, 0.175, 1)";
 
+function imageLightboxBoxFromRect(rect: DOMRect): ImageLightboxBox {
+  return {
+    height: rect.height,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+  };
+}
+
+function imageLightboxTargetBox(sourceBox: ImageLightboxBox): ImageLightboxBox {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const horizontalPadding = Math.min(80, Math.max(16, viewportWidth * 0.0625));
+  const verticalPadding = Math.min(24, Math.max(16, viewportHeight * 0.033));
+  const maxWidth = Math.max(
+    1,
+    Math.min(
+      viewportWidth - horizontalPadding * 2,
+      viewportWidth * IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO,
+    ),
+  );
+  const maxHeight = Math.max(
+    1,
+    Math.min(
+      viewportHeight - verticalPadding * 2,
+      viewportHeight * IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO,
+    ),
+  );
+  const scale = Math.min(
+    maxWidth / sourceBox.width,
+    maxHeight / sourceBox.height,
+  );
+  const width = Math.max(1, sourceBox.width * scale);
+  const height = Math.max(1, sourceBox.height * scale);
+
+  return {
+    height,
+    left: (viewportWidth - width) / 2,
+    top: (viewportHeight - height) / 2,
+    width,
+  };
+}
+
+function imageLightboxStyle(box: ImageLightboxBox): React.CSSProperties {
+  return {
+    height: `${box.height}px`,
+    left: `${box.left}px`,
+    top: `${box.top}px`,
+    width: `${box.width}px`,
+  };
+}
+
+function clampImageLightboxZoom(value: number): number {
+  return Math.min(
+    IMAGE_LIGHTBOX_MAX_ZOOM,
+    Math.max(IMAGE_LIGHTBOX_MIN_ZOOM, value),
+  );
+}
+
+function normalizedWheelDeltaY(event: WheelEvent): number {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY * 16;
+  }
+
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * window.innerHeight;
+  }
+
+  return event.deltaY;
+}
+
+function imageLightboxTransform(
+  sourceBox: ImageLightboxBox,
+  targetBox: ImageLightboxBox,
+): string {
+  const scaleX = targetBox.width / Math.max(1, sourceBox.width);
+  const scaleY = targetBox.height / Math.max(1, sourceBox.height);
+  const translateX = targetBox.left - sourceBox.left;
+  const translateY = targetBox.top - sourceBox.top;
+
+  return `translate3d(${translateX}px, ${translateY}px, 0) scale(${scaleX}, ${scaleY})`;
+}
+
+function imageLightboxZoomBox(
+  targetBox: ImageLightboxBox,
+  zoom: number,
+): ImageLightboxBox {
+  const width = targetBox.width * zoom;
+  const height = targetBox.height * zoom;
+
+  return {
+    height,
+    left: targetBox.left + (targetBox.width - width) / 2,
+    top: targetBox.top + (targetBox.height - height) / 2,
+    width,
+  };
+}
+
+type WebKitGestureLikeEvent = Event & {
+  scale?: number;
+};
+
+type ImageContextMenuPosition = {
+  x: number;
+  y: number;
+};
+
+function getImageLightboxFocusableElements(
+  container: HTMLElement,
+): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      [
+        "a[href]",
+        "button:not(:disabled)",
+        "input:not(:disabled)",
+        "select:not(:disabled)",
+        "textarea:not(:disabled)",
+        "[tabindex]:not([tabindex='-1'])",
+      ].join(","),
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("disabled") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.getClientRects().length > 0,
+  );
+}
+
+function useDismissImageContextMenu(isOpen: boolean, onDismiss: () => void) {
   React.useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
+    if (!isOpen) return;
     // Defer attaching the dismiss listeners until after the current event
     // loop turn. The right-click that opens the menu (a `contextmenu` on
     // mousedown) is often followed by a trailing `click`/`pointerup` on the
@@ -254,25 +446,746 @@ function ImageBlock({
     let attached = false;
     const timer = window.setTimeout(() => {
       attached = true;
-      window.addEventListener("click", close);
-      window.addEventListener("contextmenu", close);
-      window.addEventListener("scroll", close, true);
+      window.addEventListener("click", onDismiss);
+      window.addEventListener("contextmenu", onDismiss);
+      window.addEventListener("scroll", onDismiss, true);
     }, 0);
     return () => {
       window.clearTimeout(timer);
       if (attached) {
-        window.removeEventListener("click", close);
-        window.removeEventListener("contextmenu", close);
-        window.removeEventListener("scroll", close, true);
+        window.removeEventListener("click", onDismiss);
+        window.removeEventListener("contextmenu", onDismiss);
+        window.removeEventListener("scroll", onDismiss, true);
       }
     };
-  }, [menu]);
+  }, [isOpen, onDismiss]);
+}
+
+function ImageDownloadContextMenu({
+  onDownload,
+  position,
+}: {
+  onDownload: () => void;
+  position: ImageContextMenuPosition;
+}) {
+  return (
+    <div
+      className={cn(
+        "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
+        POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+        POPOVER_SURFACE_CLASS,
+      )}
+      data-image-lightbox-controls=""
+      style={{ ...POPOVER_SHADOW_STYLE, left: position.x, top: position.y }}
+    >
+      <button
+        type="button"
+        className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
+        onClick={onDownload}
+      >
+        Download image
+      </button>
+    </div>
+  );
+}
+
+function ImageZoomOverlay({
+  alt,
+  canDownload,
+  onDownload,
+  onClose,
+  resolvedSrc,
+  sourceBox,
+}: {
+  alt: string | undefined;
+  canDownload: boolean;
+  onDownload: () => void;
+  onClose: () => void;
+  resolvedSrc: string;
+  sourceBox: ImageLightboxBox;
+}) {
+  const shouldReduceMotion = useReducedMotion();
+  const prefersReducedMotion = shouldReduceMotion === true;
+  const [phase, setPhase] = React.useState<
+    "opening" | "open" | "closing" | "fading"
+  >(() => (prefersReducedMotion ? "open" : "opening"));
+  const [hasEntered, setHasEntered] = React.useState(prefersReducedMotion);
+  const [isAdjustingZoom, setIsAdjustingZoom] = React.useState(false);
+  const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
+  const [targetBox, setTargetBox] = React.useState(() =>
+    imageLightboxTargetBox(sourceBox),
+  );
+  const [zoom, setZoom] = React.useState(IMAGE_LIGHTBOX_MIN_ZOOM);
+  const controlPointerDownRef = React.useRef(false);
+  const fadeTimerRef = React.useRef<number | null>(null);
+  const closeTimerRef = React.useRef<number | null>(null);
+  const dialogRef = React.useRef<HTMLDivElement | null>(null);
+  const descriptionId = React.useId();
+  const gestureScaleRef = React.useRef(1);
+  const previouslyFocusedElementRef = React.useRef<HTMLElement | null>(null);
+  const suppressCloseUntilRef = React.useRef(0);
+  const zoomIdleTimerRef = React.useRef<number | null>(null);
+
+  const markControlGesture = React.useCallback(() => {
+    suppressCloseUntilRef.current =
+      Date.now() + IMAGE_LIGHTBOX_CONTROL_SUPPRESS_CLOSE_MS;
+  }, []);
+  const closeMenu = React.useCallback(() => setMenu(null), []);
+
+  const finishZoomGestureSoon = React.useCallback(() => {
+    if (zoomIdleTimerRef.current != null) {
+      window.clearTimeout(zoomIdleTimerRef.current);
+    }
+    zoomIdleTimerRef.current = window.setTimeout(() => {
+      setIsAdjustingZoom(false);
+      zoomIdleTimerRef.current = null;
+    }, IMAGE_LIGHTBOX_TRACKPAD_ZOOM_IDLE_MS);
+  }, []);
+
+  const setClampedZoom = React.useCallback((nextZoom: number) => {
+    setZoom(clampImageLightboxZoom(nextZoom));
+  }, []);
+
+  const updateZoom = React.useCallback((updater: (zoom: number) => number) => {
+    setZoom((currentZoom) => clampImageLightboxZoom(updater(currentZoom)));
+  }, []);
+
+  const close = React.useCallback(() => {
+    if (closeTimerRef.current != null) return;
+
+    if (prefersReducedMotion) {
+      setPhase("fading");
+      closeTimerRef.current = window.setTimeout(() => {
+        onClose();
+      }, IMAGE_LIGHTBOX_REDUCED_MOTION_MS);
+      return;
+    }
+
+    setPhase("closing");
+    fadeTimerRef.current = window.setTimeout(() => {
+      setPhase("fading");
+    }, IMAGE_LIGHTBOX_EXIT_MS);
+    closeTimerRef.current = window.setTimeout(() => {
+      onClose();
+    }, IMAGE_LIGHTBOX_EXIT_MS + IMAGE_LIGHTBOX_FADE_EXIT_MS);
+  }, [onClose, prefersReducedMotion]);
+
+  useDismissImageContextMenu(Boolean(menu), closeMenu);
+
+  React.useEffect(() => {
+    if (prefersReducedMotion) {
+      setPhase("open");
+      return;
+    }
+
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => setPhase("open"));
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) {
+        window.cancelAnimationFrame(secondFrame);
+      }
+    };
+  }, [prefersReducedMotion]);
+
+  React.useEffect(() => {
+    if (phase !== "open") {
+      return;
+    }
+
+    if (prefersReducedMotion) {
+      setHasEntered(true);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setHasEntered(true);
+    }, IMAGE_LIGHTBOX_ENTER_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [phase, prefersReducedMotion]);
+
+  React.useEffect(() => {
+    previouslyFocusedElementRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    dialogRef.current?.focus();
+  }, []);
+
+  React.useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+
+    const siblings = Array.from(document.body.children).filter(
+      (element): element is HTMLElement =>
+        element instanceof HTMLElement && element !== dialog,
+    );
+    const previousSiblingAttributes = siblings.map((element) => ({
+      ariaHidden: element.getAttribute("aria-hidden"),
+      element,
+      inert: element.hasAttribute("inert"),
+    }));
+
+    for (const sibling of siblings) {
+      sibling.setAttribute("aria-hidden", "true");
+      sibling.setAttribute("inert", "");
+    }
+
+    return () => {
+      for (const { ariaHidden, element, inert } of previousSiblingAttributes) {
+        if (ariaHidden == null) {
+          element.removeAttribute("aria-hidden");
+        } else {
+          element.setAttribute("aria-hidden", ariaHidden);
+        }
+
+        if (!inert) {
+          element.removeAttribute("inert");
+        }
+      }
+
+      if (previouslyFocusedElementRef.current?.isConnected) {
+        previouslyFocusedElementRef.current.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const handleResize = () => setTargetBox(imageLightboxTargetBox(sourceBox));
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [sourceBox]);
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const dialog = dialogRef.current;
+      if (!dialog) {
+        return;
+      }
+
+      const focusableElements = getImageLightboxFocusableElements(dialog);
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement;
+
+      if (activeElement === dialog) {
+        event.preventDefault();
+        if (event.shiftKey) {
+          lastElement.focus();
+        } else {
+          firstElement.focus();
+        }
+        return;
+      }
+
+      if (!dialog.contains(activeElement)) {
+        event.preventDefault();
+        firstElement.focus();
+        return;
+      }
+
+      if (event.shiftKey && activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+        return;
+      }
+
+      if (!event.shiftKey && activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [close]);
+
+  React.useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || phase !== "open") {
+      return;
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      markControlGesture();
+      setIsAdjustingZoom(true);
+
+      const normalizedDelta = normalizedWheelDeltaY(event);
+      const zoomDelta = Math.max(
+        -IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA,
+        Math.min(
+          IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA,
+          -normalizedDelta * IMAGE_LIGHTBOX_WHEEL_ZOOM_SPEED,
+        ),
+      );
+      updateZoom((currentZoom) => currentZoom * (1 + zoomDelta));
+      finishZoomGestureSoon();
+    };
+
+    const handleGestureStart = (event: Event) => {
+      event.preventDefault();
+      markControlGesture();
+      setIsAdjustingZoom(true);
+      gestureScaleRef.current = 1;
+    };
+
+    const handleGestureChange = (event: Event) => {
+      event.preventDefault();
+      markControlGesture();
+      setIsAdjustingZoom(true);
+
+      const gestureEvent = event as WebKitGestureLikeEvent;
+      const nextGestureScale =
+        typeof gestureEvent.scale === "number" && gestureEvent.scale > 0
+          ? gestureEvent.scale
+          : 1;
+      const previousGestureScale = Math.max(0.01, gestureScaleRef.current);
+      gestureScaleRef.current = nextGestureScale;
+      updateZoom(
+        (currentZoom) =>
+          currentZoom * (nextGestureScale / previousGestureScale),
+      );
+      finishZoomGestureSoon();
+    };
+
+    const handleGestureEnd = (event: Event) => {
+      event.preventDefault();
+      markControlGesture();
+      gestureScaleRef.current = 1;
+      finishZoomGestureSoon();
+    };
+
+    dialog.addEventListener("wheel", handleWheel, { passive: false });
+    dialog.addEventListener("gesturestart", handleGestureStart, {
+      passive: false,
+    });
+    dialog.addEventListener("gesturechange", handleGestureChange, {
+      passive: false,
+    });
+    dialog.addEventListener("gestureend", handleGestureEnd, {
+      passive: false,
+    });
+
+    return () => {
+      dialog.removeEventListener("wheel", handleWheel);
+      dialog.removeEventListener("gesturestart", handleGestureStart);
+      dialog.removeEventListener("gesturechange", handleGestureChange);
+      dialog.removeEventListener("gestureend", handleGestureEnd);
+    };
+  }, [finishZoomGestureSoon, markControlGesture, phase, updateZoom]);
+
+  React.useEffect(() => {
+    return () => {
+      if (fadeTimerRef.current != null) {
+        window.clearTimeout(fadeTimerRef.current);
+      }
+      if (closeTimerRef.current != null) {
+        window.clearTimeout(closeTimerRef.current);
+      }
+      if (zoomIdleTimerRef.current != null) {
+        window.clearTimeout(zoomIdleTimerRef.current);
+      }
+    };
+  }, []);
+
+  const isClosing = phase === "closing";
+  const isOpen = phase === "open";
+  const isFading = phase === "fading";
+  const displayBox = imageLightboxZoomBox(targetBox, zoom);
+  // Once fully settled at 1x, drop the transform to `none` so the wrapper
+  // leaves the GPU-composited path and the <img> repaints through WebKit's
+  // high-quality paint rasterizer — matching inline-image sharpness. An
+  // identity `translate3d` would keep it composited, so it must be `none`.
+  const atRest =
+    isOpen &&
+    hasEntered &&
+    zoom === IMAGE_LIGHTBOX_MIN_ZOOM &&
+    // Holds composited through the trackpad gesture-end idle window: after a
+    // pinch settles back to exactly 1x, `isAdjustingZoom` stays true for
+    // IMAGE_LIGHTBOX_TRACKPAD_ZOOM_IDLE_MS, avoiding a demote/re-promote thrash.
+    !isAdjustingZoom;
+  const transform = atRest
+    ? "none"
+    : prefersReducedMotion || isOpen
+      ? imageLightboxTransform(targetBox, displayBox)
+      : imageLightboxTransform(targetBox, sourceBox);
+  const imageTransitionDuration = prefersReducedMotion
+    ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
+    : isClosing
+      ? IMAGE_LIGHTBOX_EXIT_MS
+      : hasEntered
+        ? isAdjustingZoom
+          ? 0
+          : IMAGE_LIGHTBOX_ZOOM_TRANSITION_MS
+        : IMAGE_LIGHTBOX_ENTER_MS;
+  const backgroundTransitionDuration = prefersReducedMotion
+    ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
+    : isFading
+      ? IMAGE_LIGHTBOX_FADE_EXIT_MS
+      : IMAGE_LIGHTBOX_FADE_ENTER_MS;
+  const zoomFillPercent =
+    ((zoom - IMAGE_LIGHTBOX_MIN_ZOOM) /
+      (IMAGE_LIGHTBOX_MAX_ZOOM - IMAGE_LIGHTBOX_MIN_ZOOM)) *
+    100;
+  const label = alt?.trim() || "Image preview";
+  const handleImageContextMenu = React.useCallback(
+    (event: React.MouseEvent<HTMLImageElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      markControlGesture();
+      if (canDownload) {
+        setMenu({ x: event.clientX, y: event.clientY });
+      }
+    },
+    [canDownload, markControlGesture],
+  );
+  const handleMenuDownload = React.useCallback(() => {
+    setMenu(null);
+    markControlGesture();
+    onDownload();
+  }, [markControlGesture, onDownload]);
+
+  return createPortal(
+    <div
+      aria-describedby={descriptionId}
+      aria-label={label}
+      aria-modal="true"
+      className="fixed inset-0 z-50 cursor-zoom-out outline-hidden"
+      onClick={(event) => {
+        if (Date.now() < suppressCloseUntilRef.current) {
+          return;
+        }
+        if (
+          event.target instanceof HTMLElement &&
+          event.target.closest("[data-image-lightbox-controls]")
+        ) {
+          markControlGesture();
+          return;
+        }
+        close();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          close();
+        }
+      }}
+      onPointerCancelCapture={() => {
+        if (controlPointerDownRef.current) {
+          markControlGesture();
+          controlPointerDownRef.current = false;
+        }
+      }}
+      onPointerDownCapture={(event) => {
+        if (
+          event.target instanceof HTMLElement &&
+          event.target.closest("[data-image-lightbox-controls]")
+        ) {
+          controlPointerDownRef.current = true;
+          markControlGesture();
+        }
+      }}
+      onPointerUpCapture={() => {
+        if (controlPointerDownRef.current) {
+          markControlGesture();
+          controlPointerDownRef.current = false;
+        }
+      }}
+      ref={dialogRef}
+      role="dialog"
+      tabIndex={-1}
+    >
+      <p className="sr-only" id={descriptionId}>
+        Full-size image preview. Press Escape or click to close.
+      </p>
+      <div
+        className={cn(
+          "absolute inset-0 bg-[#08090a] transition-opacity",
+          isOpen || isClosing ? "opacity-100" : "opacity-0",
+        )}
+        style={{
+          transitionDuration: `${backgroundTransitionDuration}ms`,
+          transitionTimingFunction: IMAGE_LIGHTBOX_EASE_OUT,
+        }}
+      />
+      <div
+        className={cn(
+          "absolute z-10 origin-top-left overflow-visible transition-[opacity,transform]",
+          // Only promote to a composited layer while animating; demoting at
+          // rest is what restores high-quality rasterization.
+          !atRest && "will-change-transform",
+        )}
+        style={{
+          ...imageLightboxStyle(targetBox),
+          opacity: prefersReducedMotion && isClosing ? 0 : 1,
+          transform,
+          transitionDuration: `${imageTransitionDuration}ms`,
+          // At rest, exclude `transform` from the transition so the swap to
+          // `none` is instantaneous — a transitioned transform-to-`none` is
+          // browser-inconsistent and can flash at the settle.
+          transitionProperty:
+            prefersReducedMotion || atRest ? "opacity" : "opacity, transform",
+          transitionTimingFunction: isClosing
+            ? IMAGE_LIGHTBOX_EASE_IN_OUT
+            : IMAGE_LIGHTBOX_EASE_OUT,
+        }}
+      >
+        <img
+          alt={alt}
+          className="h-full w-full rounded-lg object-contain shadow-2xl"
+          src={resolvedSrc}
+          onContextMenuCapture={handleImageContextMenu}
+        />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-x-0 bottom-4 z-20 flex justify-center px-4 transition-[opacity,transform]",
+          isOpen ? "translate-y-0 opacity-100" : "translate-y-1.5 opacity-0",
+        )}
+        style={{
+          transitionDuration: `${prefersReducedMotion ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS : 160}ms`,
+          transitionTimingFunction: IMAGE_LIGHTBOX_EASE_OUT,
+        }}
+      >
+        <div
+          aria-label="Image controls"
+          className="relative isolate flex min-h-11 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-xl px-2 py-1.5 text-white"
+          data-image-lightbox-controls=""
+          role="toolbar"
+        >
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 -z-10 rounded-[inherit] border border-white/10 bg-black/35 backdrop-blur-xl backdrop-saturate-150"
+          />
+          <button
+            aria-label="Download image"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white transition-colors hover:bg-white/15 outline-hidden focus-visible:ring-2 focus-visible:ring-white/60 disabled:pointer-events-none disabled:opacity-45"
+            disabled={!canDownload}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDownload();
+            }}
+          >
+            <Download className="h-4 w-4" />
+          </button>
+          <div aria-hidden="true" className="h-5 w-px shrink-0 bg-white/15" />
+          <ZoomOut aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
+          <input
+            aria-label="Image zoom"
+            className="image-zoom-slider h-3 w-32 cursor-pointer sm:w-44"
+            max={IMAGE_LIGHTBOX_MAX_ZOOM}
+            min={IMAGE_LIGHTBOX_MIN_ZOOM}
+            step={IMAGE_LIGHTBOX_ZOOM_STEP}
+            style={
+              {
+                "--image-zoom-fill": `${zoomFillPercent}%`,
+              } as React.CSSProperties
+            }
+            type="range"
+            value={zoom}
+            onBlur={() => setIsAdjustingZoom(false)}
+            onChange={(event) => {
+              markControlGesture();
+              setClampedZoom(Number(event.target.value));
+            }}
+            onPointerCancel={() => setIsAdjustingZoom(false)}
+            onPointerDown={() => {
+              markControlGesture();
+              setIsAdjustingZoom(true);
+            }}
+            onPointerUp={() => {
+              markControlGesture();
+              setIsAdjustingZoom(false);
+            }}
+          />
+          <ZoomIn aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
+          <span className="min-w-10 text-right text-xs font-medium tabular-nums text-white/90">
+            {Math.round(zoom * 100)}%
+          </span>
+        </div>
+      </div>
+      {menu && canDownload ? (
+        <ImageDownloadContextMenu
+          onDownload={handleMenuDownload}
+          position={menu}
+        />
+      ) : null}
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * Inline image embed with click-to-zoom lightbox and right-click download.
+ *
+ * IMPORTANT: the trigger is a plain button that we control ourselves — not
+ * Radix's `<Trigger asChild>` cloning onto a wrapper. An earlier version used
+ * that pattern and caused a 1-2px layout reflow in the surrounding message
+ * body on hover. Keeping the trigger stable and managing the lightbox via
+ * React state avoids that repaint.
+ */
+function ImageBlock({
+  alt,
+  dim,
+  resolvedSrc,
+  src,
+}: {
+  alt: string | undefined;
+  dim?: string;
+  resolvedSrc: string | undefined;
+  src: string | undefined;
+}) {
+  const [lightboxBox, setLightboxBox] = React.useState<ImageLightboxBox | null>(
+    null,
+  );
+  const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
+  const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
+  const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
+    height: number;
+    src: string;
+    width: number;
+  } | null>(null);
+
+  const updateSpoilerMediaSize = React.useCallback(
+    (image: HTMLImageElement) => {
+      const { naturalHeight, naturalWidth } = image;
+      if (naturalHeight <= 0 || naturalWidth <= 0) return;
+
+      const maxWidth = 384;
+      const maxHeight = 256;
+      const scale = Math.min(
+        1,
+        maxWidth / naturalWidth,
+        maxHeight / naturalHeight,
+      );
+      setSpoilerMediaSize({
+        height: Math.max(1, Math.round(naturalHeight * scale)),
+        src: resolvedSrc ?? image.currentSrc,
+        width: Math.max(1, Math.round(naturalWidth * scale)),
+      });
+    },
+    [resolvedSrc],
+  );
+
+  const imageRef = React.useCallback(
+    (image: HTMLImageElement | null) => {
+      inlineImageRef.current = image;
+      if (image?.complete) updateSpoilerMediaSize(image);
+    },
+    [updateSpoilerMediaSize],
+  );
+
+  const currentSpoilerMediaSize =
+    spoilerMediaSize?.src === resolvedSrc ? spoilerMediaSize : null;
+  const hiddenSpoilerMediaSize = isHiddenInSpoiler
+    ? currentSpoilerMediaSize
+    : null;
+
+  const spoilerMediaStyle = hiddenSpoilerMediaSize
+    ? ({
+        "--buzz-spoiler-media-aspect-ratio": `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
+        "--buzz-spoiler-media-width": `${hiddenSpoilerMediaSize.width}px`,
+        aspectRatio: `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
+        height: "auto",
+        width: `${hiddenSpoilerMediaSize.width}px`,
+      } as React.CSSProperties)
+    : undefined;
+
+  React.useLayoutEffect(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+
+    const updateHiddenState = () => {
+      setIsHiddenInSpoiler(isInsideHiddenSpoiler(trigger));
+    };
+
+    updateHiddenState();
+
+    const spoiler = trigger.closest(".buzz-spoiler[data-spoiler]");
+    if (!spoiler) return;
+
+    const observer = new MutationObserver(updateHiddenState);
+    observer.observe(spoiler, {
+      attributeFilter: ["data-revealed"],
+      attributes: true,
+    });
+
+    return () => observer.disconnect();
+  }, []);
+
+  const closeMenu = React.useCallback(() => setMenu(null), []);
+  useDismissImageContextMenu(Boolean(menu), closeMenu);
+
+  // Intrinsic dimensions from the NIP-92 `dim` tag, stamped as width/height
+  // attributes so the browser reserves aspect-ratio space before the image
+  // decodes. Without this the row grows from ~0 on load and shoves the
+  // timeline — the exact reflow the anchored-scroll restore then has to fight.
+  const intrinsicDimensions = dimensionsFromDim(dim);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    if (isInsideHiddenSpoiler(e.currentTarget)) return;
     e.stopPropagation();
     e.nativeEvent.stopImmediatePropagation();
     setMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const openLightbox = React.useCallback(
+    (image: HTMLImageElement) => {
+      if (!resolvedSrc || isInsideHiddenSpoiler(image)) {
+        return;
+      }
+
+      const rect = image.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      setMenu(null);
+      setLightboxBox(imageLightboxBoxFromRect(rect));
+    },
+    [resolvedSrc],
+  );
+
+  const handleImageTriggerClick = () => {
+    if (inlineImageRef.current) {
+      openLightbox(inlineImageRef.current);
+    }
   };
 
   const handleDownload = () => {
@@ -286,75 +1199,45 @@ function ImageBlock({
 
   return (
     <>
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: image opens lightbox on click; keyboard equivalent handled by lightbox close button */}
-      <img
-        alt={alt}
-        className="mt-1 block max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
-        src={resolvedSrc}
-        onClick={() => setLightboxOpen(true)}
+      <button
+        aria-hidden={isHiddenInSpoiler ? true : undefined}
+        aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
+        className={cn(
+          "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
+          lightboxBox && "opacity-0",
+        )}
+        data-testid="message-image-lightbox-trigger"
+        ref={triggerRef}
+        tabIndex={isHiddenInSpoiler ? -1 : undefined}
+        type="button"
+        onClick={handleImageTriggerClick}
         onContextMenuCapture={handleContextMenu}
-      />
+      >
+        <img
+          alt={alt}
+          className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-xl object-contain"
+          data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
+          height={intrinsicDimensions?.height}
+          ref={imageRef}
+          src={resolvedSrc}
+          style={spoilerMediaStyle}
+          width={intrinsicDimensions?.width}
+          onLoad={(event) => updateSpoilerMediaSize(event.currentTarget)}
+        />
+      </button>
       {menu && src ? (
-        <div
-          className="fixed z-[100] min-w-[160px] rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-          style={{ left: menu.x, top: menu.y }}
-        >
-          <button
-            type="button"
-            className="flex w-full cursor-default select-none items-center rounded-xs px-2 py-1.5 text-sm outline-hidden hover:bg-accent hover:text-accent-foreground"
-            onClick={handleDownload}
-          >
-            Download image
-          </button>
-        </div>
+        <ImageDownloadContextMenu onDownload={handleDownload} position={menu} />
       ) : null}
-      <DialogPrimitive.Root open={lightboxOpen} onOpenChange={setLightboxOpen}>
-        <DialogPrimitive.Portal>
-          <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <DialogPrimitive.Content
-            className="fixed inset-0 z-50 flex items-center justify-center p-8"
-            onPointerDownOutside={(e) => e.preventDefault()}
-            onInteractOutside={(e) => e.preventDefault()}
-          >
-            <DialogPrimitive.Title className="sr-only">
-              {alt || "Image preview"}
-            </DialogPrimitive.Title>
-            <DialogPrimitive.Description className="sr-only">
-              Full-size image preview. Press Escape or click outside the image
-              to close.
-            </DialogPrimitive.Description>
-            {/* Clicking anywhere except the image closes the dialog. */}
-            <DialogPrimitive.Close
-              className="absolute inset-0 cursor-default"
-              aria-label="Close lightbox"
-            />
-            <img
-              alt={alt}
-              className="relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
-              src={resolvedSrc}
-              onContextMenuCapture={handleContextMenu}
-            />
-            <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
-              <svg
-                aria-hidden="true"
-                xmlns="http://www.w3.org/2000/svg"
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-              <span className="sr-only">Close</span>
-            </DialogPrimitive.Close>
-          </DialogPrimitive.Content>
-        </DialogPrimitive.Portal>
-      </DialogPrimitive.Root>
+      {lightboxBox && resolvedSrc ? (
+        <ImageZoomOverlay
+          alt={alt}
+          canDownload={Boolean(src)}
+          onDownload={handleDownload}
+          onClose={() => setLightboxBox(null)}
+          resolvedSrc={resolvedSrc}
+          sourceBox={lightboxBox}
+        />
+      ) : null}
     </>
   );
 }
@@ -377,6 +1260,46 @@ function getReactNodeText(node: React.ReactNode): string {
 
 function getCodeBlockText(children: React.ReactNode) {
   return getReactNodeText(children).replace(/\n$/, "");
+}
+
+function MessageLinkPill({
+  channels,
+  href,
+  interactive,
+  link,
+  onOpenMessageLink,
+}: MessageLinkPillProps) {
+  const channel = channels.find((c) => c.id === link.channelId);
+  const channelLabel = channel?.name ?? "channel";
+  const shortId = link.messageId.slice(0, 6);
+  const label = (
+    <>
+      #{channelLabel} · {shortId}
+    </>
+  );
+
+  if (!interactive) {
+    return <span data-message-link="">{label}</span>;
+  }
+
+  return (
+    <button
+      type="button"
+      data-message-link=""
+      aria-label={`Open message in ${channelLabel}`}
+      title={href}
+      className={cn(
+        "cursor-pointer",
+        MENTION_CHIP_BASE_CLASSES,
+        MENTION_CHIP_HOVER_CLASSES,
+      )}
+      onClick={() => {
+        onOpenMessageLink(link);
+      }}
+    >
+      {label}
+    </button>
+  );
 }
 
 function InlineEmojiPopover({
@@ -520,7 +1443,7 @@ function MarkdownCodeBlock({
             type="button"
             variant="ghost"
           >
-            <Copy className="h-3.5 w-3.5" />
+            <Copy className="h-4 w-4" />
             <span className="sr-only">Copy code block</span>
           </Button>
         </TooltipTrigger>
@@ -579,7 +1502,7 @@ function FileCard({
       className="my-1 inline-flex max-w-sm items-center gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-        <FileText className="h-5 w-5" />
+        <FileText className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">
@@ -729,33 +1652,169 @@ function SyntaxHighlightedCode({
     </code>
   );
 }
+
+function SpoilerInline({
+  block = false,
+  children,
+  interactive = true,
+}: {
+  block?: boolean;
+  children?: React.ReactNode;
+  interactive?: boolean;
+}) {
+  const [revealed, setRevealed] = React.useState(false);
+  const contentRef = React.useRef<HTMLElement | null>(null);
+  const isBlock = block || hasBlockMedia(React.Children.toArray(children));
+
+  const setContentElement = React.useCallback((node: HTMLElement | null) => {
+    contentRef.current = node;
+  }, []);
+
+  const toggleRevealed = React.useCallback(() => {
+    setRevealed((value) => !value);
+  }, []);
+
+  const handlePointerDownCapture = React.useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (revealed) return;
+      event.stopPropagation();
+    },
+    [revealed],
+  );
+
+  const handleClickCapture = React.useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (revealed) return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleRevealed();
+    },
+    [revealed, toggleRevealed],
+  );
+
+  const handleClick = React.useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (revealed && isBlock && event.target !== event.currentTarget) return;
+      toggleRevealed();
+    },
+    [isBlock, revealed, toggleRevealed],
+  );
+
+  const handleKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleRevealed();
+    },
+    [toggleRevealed],
+  );
+
+  const revealProps = {
+    "aria-label": revealed ? "Hide spoiler" : "Reveal spoiler",
+    "aria-pressed": revealed,
+    onClick: handleClick,
+    onClickCapture: handleClickCapture,
+    onKeyDown: handleKeyDown,
+    onPointerDownCapture: handlePointerDownCapture,
+    role: "button",
+    tabIndex: 0,
+  } as const;
+
+  if (!interactive) {
+    if (isBlock) {
+      return (
+        <div
+          className="buzz-spoiler buzz-spoiler--block buzz-spoiler--inert"
+          data-revealed="false"
+          data-spoiler=""
+        >
+          <SpoilerParticles active contentRef={contentRef} />
+          <div className="buzz-spoiler__content" ref={setContentElement}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <span
+        className="buzz-spoiler buzz-spoiler--inert"
+        data-revealed="false"
+        data-spoiler=""
+      >
+        <SpoilerParticles active contentRef={contentRef} />
+        <span className="buzz-spoiler__content" ref={setContentElement}>
+          {children}
+        </span>
+      </span>
+    );
+  }
+
+  if (isBlock) {
+    return (
+      <div
+        {...revealProps}
+        className="buzz-spoiler buzz-spoiler--block"
+        data-revealed={revealed ? "true" : "false"}
+        data-spoiler=""
+      >
+        <SpoilerParticles active={!revealed} contentRef={contentRef} />
+        <div className="buzz-spoiler__content" ref={setContentElement}>
+          {children}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <span
+      {...revealProps}
+      className="buzz-spoiler"
+      data-revealed={revealed ? "true" : "false"}
+      data-spoiler=""
+    >
+      <SpoilerParticles active={!revealed} contentRef={contentRef} />
+      <span className="buzz-spoiler__content" ref={setContentElement}>
+        {children}
+      </span>
+    </span>
+  );
+}
+
 function createMarkdownComponents(
-  variant: MarkdownVariant,
-  channels: Channel[],
-  onOpenChannel: (channelId: string) => void,
-  onOpenMessageLink: (link: ParsedMessageLink) => void,
-  imetaByUrl?: ImetaLookup,
-  mentionPubkeysByName?: Record<string, string>,
-  agentMentionPubkeysByName?: Record<string, string>,
+  runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
 ): Components {
-  const paragraphClassName =
-    variant === "tight"
-      ? "leading-5"
-      : variant === "compact"
-        ? "leading-6"
-        : "leading-7";
-  const listItemClassName =
-    variant === "tight" ? "my-0.5 [&_p]:inline" : "my-1 [&_p]:inline";
-  const listClassName =
-    variant === "tight"
-      ? "space-y-0.5 pl-6 marker:text-muted-foreground"
-      : "space-y-1 pl-6 marker:text-muted-foreground";
+  const paragraphClassName = "leading-[inherit]";
+  const listItemClassName = "my-1 [&_p]:inline";
+  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
+    spoiler: ({
+      children,
+      ...props
+    }: {
+      "data-block-spoiler"?: string;
+      children?: React.ReactNode;
+    }) => (
+      <SpoilerInline
+        block={props["data-block-spoiler"] != null}
+        interactive={interactive}
+      >
+        {children}
+      </SpoilerInline>
+    ),
     a: ({ children, href, ...props }) => {
+      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
+      }
+
+      // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
+      // image lightbox button inside an anchor. Keep the image as the lightbox
+      // trigger and suppress the parent link activation for block media.
+      if (hasBlockMedia(React.Children.toArray(children))) {
+        return <>{children}</>;
       }
 
       // Generic file attachment: a `[filename](url)` link whose href matches an
@@ -779,10 +1838,24 @@ function createMarkdownComponents(
       // Intercept `buzz://message?channel=…&id=…` links so a click navigates
       // in-app instead of opening the URL in the OS browser. http(s) links
       // continue to use the existing target="_blank" behavior.
-      if (isMessageLink(href)) {
-        const parsed = parseMessageLink(href ?? "");
-        if (parsed.ok) {
-          const target = parsed.value;
+      if (href) {
+        const messageLinkTarget = resolveMessageLinkRenderTarget({
+          href,
+          label: getReactNodeText(children),
+        });
+        if (messageLinkTarget.kind !== "none") {
+          if (messageLinkTarget.kind === "pill") {
+            return (
+              <MessageLinkPill
+                channels={runtimeRef.current.channels}
+                href={href}
+                interactive={interactive}
+                link={messageLinkTarget.link}
+                onOpenMessageLink={onOpenMessageLink}
+              />
+            );
+          }
+
           return (
             <a
               {...props}
@@ -790,7 +1863,7 @@ function createMarkdownComponents(
               href={href}
               onClick={(event) => {
                 event.preventDefault();
-                onOpenMessageLink(target);
+                onOpenMessageLink(messageLinkTarget.link);
               }}
             >
               {children}
@@ -847,13 +1920,7 @@ function createMarkdownComponents(
       }
 
       return (
-        <code
-          {...props}
-          className={cn(
-            "rounded-md bg-muted px-1.5 py-0.5 font-mono text-[13px] text-foreground",
-            className,
-          )}
-        >
+        <code {...props} className={cn(INLINE_CODE_CHIP_CLASS, className)}>
           {children}
         </code>
       );
@@ -873,8 +1940,24 @@ function createMarkdownComponents(
         {children}
       </h3>
     ),
+    h4: ({ children }) => (
+      <h4 className="text-sm font-semibold leading-5 tracking-tight">
+        {children}
+      </h4>
+    ),
+    h5: ({ children }) => (
+      <h5 className="text-sm font-semibold leading-5 tracking-tight">
+        {children}
+      </h5>
+    ),
+    h6: ({ children }) => (
+      <h6 className="text-sm font-medium leading-5 tracking-tight text-muted-foreground">
+        {children}
+      </h6>
+    ),
     hr: () => <hr className="border-border/80" />,
     img: ({ alt, src }) => {
+      const { imetaByUrl } = runtimeRef.current;
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!interactive) {
         const fallbackLabel = resolvedSrc?.endsWith(".mp4")
@@ -897,9 +1980,15 @@ function createMarkdownComponents(
           </span>
         );
       }
+      const entry = src ? imetaByUrl?.get(src) : undefined;
       return (
-        <span data-block-media="" className="block">
-          <ImageBlock alt={alt} resolvedSrc={resolvedSrc} src={src} />
+        <span data-block-media="" className="block min-w-0 max-w-full">
+          <ImageBlock
+            alt={alt}
+            dim={entry?.dim}
+            resolvedSrc={resolvedSrc}
+            src={src}
+          />
         </span>
       );
     },
@@ -917,7 +2006,7 @@ function createMarkdownComponents(
 
       if (isImageOnlyParagraph(childArray)) {
         return (
-          <div className="mt-1 grid max-w-lg grid-cols-2 gap-1.5 [&_br]:hidden [&_[data-block-media]]:mt-0 [&_[data-block-media]]:max-w-none [&_img]:mt-0 [&_img]:w-full [&_img]:max-w-full">
+          <div className="mt-1 grid w-full min-w-0 max-w-lg grid-cols-2 gap-1.5 [&_br]:hidden [&_[data-block-media]]:mt-0 [&_[data-block-media]]:max-w-none [&_img]:mt-0 [&_img]:w-full [&_img]:max-w-full">
             {imageChildren}
           </div>
         );
@@ -971,15 +2060,23 @@ function createMarkdownComponents(
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
     mention: ({ children }: { children?: React.ReactNode }) => {
+      const { agentMentionPubkeysByName, mentionPubkeysByName } =
+        runtimeRef.current;
       const mentionText = String(children ?? "");
       const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
       const pubkey = mentionPubkeysByName?.[mentionName];
       const isAgentMention =
         pubkey !== undefined &&
         agentMentionPubkeysByName?.[mentionName] === pubkey;
-      const renderedMentionText = isAgentMention
-        ? mentionText.replace(/^@/, "")
-        : children;
+      const mentionLabel = mentionText.replace(/^@/, "");
+      const renderedMentionText = isAgentMention ? (
+        mentionLabel
+      ) : (
+        <>
+          <span className={MENTION_CHIP_PREFIX_CLASS}>@</span>
+          {mentionLabel}
+        </>
+      );
       const mentionNode = (
         <span
           data-mention=""
@@ -1017,6 +2114,7 @@ function createMarkdownComponents(
       return <InlineEmojiPopover alt={alt} resolvedSrc={resolvedSrc} />;
     },
     "channel-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenChannel } = runtimeRef.current;
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
       const channel = channels.find(
@@ -1031,7 +2129,11 @@ function createMarkdownComponents(
             type="button"
             data-channel-link=""
             aria-label={`Open channel ${channelName}`}
-            className="rounded-md bg-primary/15 px-1 py-0.5 text-sm font-medium text-primary cursor-pointer hover:bg-primary/25 transition-colors"
+            className={cn(
+              "cursor-pointer",
+              MENTION_CHIP_BASE_CLASSES,
+              MENTION_CHIP_HOVER_CLASSES,
+            )}
             onClick={() => {
               onOpenChannel(channel.id);
             }}
@@ -1042,15 +2144,13 @@ function createMarkdownComponents(
       }
 
       return (
-        <span
-          data-channel-link=""
-          className="rounded-md bg-primary/15 px-1 py-0.5 text-sm text-primary"
-        >
+        <span data-channel-link="" className={MENTION_CHIP_BASE_CLASSES}>
           {children}
         </span>
       );
     },
     "message-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenMessageLink } = runtimeRef.current;
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1059,32 +2159,14 @@ function createMarkdownComponents(
         return <span data-message-link="">{href}</span>;
       }
 
-      const { channelId, messageId } = parsed.value;
-      const channel = channels.find((c) => c.id === channelId);
-      const channelLabel = channel?.name ?? "channel";
-      const shortId = messageId.slice(0, 6);
-
-      if (!interactive) {
-        return (
-          <span data-message-link="">
-            #{channelLabel} · {shortId}
-          </span>
-        );
-      }
-
       return (
-        <button
-          type="button"
-          data-message-link=""
-          aria-label={`Open message in ${channelLabel}`}
-          title={href}
-          className="rounded-md bg-primary/15 px-1 py-0.5 text-sm font-medium text-primary cursor-pointer hover:bg-primary/25 transition-colors"
-          onClick={() => {
-            onOpenMessageLink(parsed.value);
-          }}
-        >
-          #{channelLabel} · {shortId}
-        </button>
+        <MessageLinkPill
+          channels={channels}
+          href={href}
+          interactive={interactive}
+          link={parsed.value}
+          onOpenMessageLink={onOpenMessageLink}
+        />
       );
     },
   } as Components;
@@ -1093,7 +2175,6 @@ function createMarkdownComponents(
 function MarkdownInner({
   channelNames,
   className,
-  compact = false,
   content,
   customEmoji,
   imetaByUrl,
@@ -1102,53 +2183,45 @@ function MarkdownInner({
   mentionNames,
   mentionPubkeysByName,
   searchQuery,
-  tight = false,
   videoReviewContext,
 }: MarkdownProps) {
-  const variant: MarkdownVariant = tight
-    ? "tight"
-    : compact
-      ? "compact"
-      : "default";
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
   const { goChannel } = useAppNavigation();
+  const onOpenChannel = React.useCallback(
+    (channelId: string) => {
+      void goChannel(channelId);
+    },
+    [goChannel],
+  );
+  const onOpenMessageLink = React.useCallback(
+    (link: ParsedMessageLink) => {
+      // Always route through `goChannel` with `messageId` set: the channel
+      // route already handles scroll-into-view + highlight via
+      // `useAnchoredScroll` + `getEventById` backfill, and works for
+      // both stream-message replies and forum threads. Detecting "the thread
+      // root is a forum post" up front would require an event lookup we don't
+      // currently have synchronously; the brief explicitly allows skipping
+      // that detection and falling through.
+      void goChannel(link.channelId, {
+        messageId: link.messageId,
+        threadRootId: link.threadRootId,
+      });
+    },
+    [goChannel],
+  );
+  const runtimeRef = useLatestRef<MarkdownRuntime>({
+    agentMentionPubkeysByName,
+    channels,
+    imetaByUrl,
+    mentionPubkeysByName,
+    onOpenChannel,
+    onOpenMessageLink,
+  });
 
   const components = React.useMemo(
-    () =>
-      createMarkdownComponents(
-        variant,
-        channels,
-        (channelId) => {
-          void goChannel(channelId);
-        },
-        (link) => {
-          // Always route through `goChannel` with `messageId` set: the
-          // channel route already handles scroll-into-view + highlight via
-          // `useTimelineScrollManager` + `getEventById` backfill, and works
-          // for both stream-message replies and forum threads. Detecting
-          // "the thread root is a forum post" up front would require an
-          // event lookup we don't currently have synchronously; the brief
-          // explicitly allows skipping that detection and falling through.
-          void goChannel(link.channelId, {
-            messageId: link.messageId,
-            threadRootId: link.threadRootId,
-          });
-        },
-        imetaByUrl,
-        mentionPubkeysByName,
-        agentMentionPubkeysByName,
-        interactive,
-      ),
-    [
-      goChannel,
-      variant,
-      channels,
-      imetaByUrl,
-      mentionPubkeysByName,
-      agentMentionPubkeysByName,
-      interactive,
-    ],
+    () => createMarkdownComponents(runtimeRef, interactive),
+    [runtimeRef, interactive],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
@@ -1156,6 +2229,7 @@ function MarkdownInner({
     () => [
       remarkGfm,
       remarkBreaks,
+      remarkSpoilers,
       remarkMessageLinks,
       [remarkMentions, { mentionNames }],
       [remarkChannelLinks, { channelNames }],
@@ -1198,52 +2272,21 @@ function MarkdownInner({
   return (
     <div
       className={cn(
-        tight
-          ? [
-              "max-w-none break-words text-sm leading-5 text-foreground/90",
-              // Reset first/last
-              "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-              // Base owl: p+p, list+p, etc.
-              "[&>*+*]:mt-2",
-              // Headings: flat push/pull — size does the hierarchy work
-              "[&>*+h1]:mt-2.5 [&>*+h2]:mt-2.5 [&>*+h3]:mt-2.5",
-              "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-              // Blockquotes: breathe above and below
-              "[&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3",
-              // Code blocks: breathe above and below
-              "[&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3",
-              // Tables: breathe above and below
-              "[&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3",
-              // hr: clear section divider
-              "[&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5",
-              // Lists after paragraphs: tighter to feel related
-              "[&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
-            ].join(" ")
-          : compact
-            ? [
-                "max-w-none break-words text-[15px] leading-6 text-foreground/90",
-                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-                "[&>*+*]:mt-2",
-                "[&>*+h1]:mt-3 [&>*+h2]:mt-3 [&>*+h3]:mt-3",
-                "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-                "[&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3",
-                "[&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3",
-                "[&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3",
-                "[&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5",
-                "[&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
-              ].join(" ")
-            : [
-                "max-w-none break-words text-sm leading-7 text-foreground/90",
-                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-                "[&>*+*]:mt-3",
-                "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",
-                "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-                "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
-                "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
-                "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
-                "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
-                "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
-              ].join(" "),
+        MESSAGE_MARKDOWN_CLASS,
+        [
+          "max-w-none [overflow-wrap:anywhere] text-sm leading-5 text-foreground",
+          "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+          "[&>*+*]:mt-3",
+          "[&>p+p]:mt-1.5",
+          "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5 [&>*+h4]:mt-3.5 [&>*+h5]:mt-3.5 [&>*+h6]:mt-3.5",
+          "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5 [&>h4+*]:mt-0.5 [&>h5+*]:mt-0.5 [&>h6+*]:mt-0.5",
+          "[&>h1+h2]:mt-1.5! [&>h2+h3]:mt-1.5! [&>h3+h4]:mt-1.5! [&>h4+h5]:mt-1.5! [&>h5+h6]:mt-1.5!",
+          "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
+          "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
+          "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
+          "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
+          "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
+        ].join(" "),
         className,
       )}
     >
@@ -1259,10 +2302,8 @@ export const Markdown = React.memo(
   (prev, next) =>
     prev.content === next.content &&
     prev.className === next.className &&
-    prev.compact === next.compact &&
     prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&
-    prev.tight === next.tight &&
     prev.agentMentionPubkeysByName === next.agentMentionPubkeysByName &&
     prev.mentionPubkeysByName === next.mentionPubkeysByName &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&

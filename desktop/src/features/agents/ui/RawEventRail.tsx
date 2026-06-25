@@ -12,7 +12,7 @@ export function RawEventRail({ events }: { events: ObserverEvent[] }) {
     <aside className="rounded-lg border border-border/70 bg-[#17171d] text-zinc-100">
       <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-400">
+          <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-zinc-400">
             Raw ACP
           </p>
           <p className="text-xs text-zinc-500">JSON-RPC payloads</p>
@@ -40,7 +40,7 @@ export function RawEventRail({ events }: { events: ObserverEvent[] }) {
                   <span className="font-mono text-zinc-500">#{event.seq}</span>{" "}
                   {describeRawEvent(event)}
                 </summary>
-                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-zinc-300">
+                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words text-2xs leading-5 text-zinc-300">
                   {JSON.stringify(event.payload, null, 2)}
                 </pre>
               </details>

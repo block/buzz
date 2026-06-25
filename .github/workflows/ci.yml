@@ -4,6 +4,10 @@ on:
     branches: [main, release]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
@@ -30,6 +34,8 @@ jobs:
           filters: |
             rust:
               - 'crates/**'
+              - 'migrations/**'
+              - 'schema/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -81,6 +87,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -102,6 +109,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: desktop/src-tauri
@@ -264,6 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: |
@@ -350,14 +359,6 @@ jobs:
           wait_healthy "Redis" "buzz-redis"
           wait_healthy "Typesense" "buzz-typesense"
           wait_healthy "MinIO" "buzz-minio"
-      - name: Apply database schema
-        run: ./bin/pgschema apply --file schema/schema.sql --auto-approve
-        env:
-          PGHOST: localhost
-          PGPORT: "5432"
-          PGUSER: buzz
-          PGPASSWORD: buzz_dev
-          PGDATABASE: buzz
       - name: Download relay binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -368,6 +369,7 @@ jobs:
           chmod +x ./target/ci/buzz-relay
           nohup env \
             DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+            BUZZ_AUTO_MIGRATE=true \
             REDIS_URL=redis://localhost:6379 \
             TYPESENSE_URL=http://localhost:8108 \
             TYPESENSE_API_KEY=buzz_dev_key \
@@ -376,6 +378,7 @@ jobs:
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
             BUZZ_GIT_PROBE_WRITERS=8 \
+            SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
             ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
           echo $! > /tmp/buzz-relay.pid
           for attempt in $(seq 1 60); do
@@ -429,6 +432,123 @@ jobs:
           fi
           echo "Desktop E2E Integration shards passed"
 
+  backend-integration:
+    name: Backend Integration (relay e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes, desktop-e2e-relay]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Start integration services
+        run: docker compose up -d postgres redis typesense minio minio-init
+      - name: Wait for integration services
+        run: |
+          wait_healthy() {
+            local service="$1"
+            local container="$2"
+            for attempt in $(seq 1 60); do
+              status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
+              if [ "${status}" = "healthy" ]; then
+                echo "${service} is healthy"
+                return 0
+              fi
+              sleep 2
+            done
+            docker logs "${container}" || true
+            return 1
+          }
+          wait_healthy "Postgres" "buzz-postgres"
+          wait_healthy "Redis" "buzz-redis"
+          wait_healthy "Typesense" "buzz-typesense"
+          wait_healthy "MinIO" "buzz-minio"
+      - name: Download relay binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-e2e-relay
+          path: target/ci
+      - name: Start relay
+        run: |
+          chmod +x ./target/ci/buzz-relay
+          nohup env \
+            DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+            BUZZ_AUTO_MIGRATE=true \
+            REDIS_URL=redis://localhost:6379 \
+            TYPESENSE_URL=http://localhost:8108 \
+            TYPESENSE_API_KEY=buzz_dev_key \
+            RELAY_URL=ws://localhost:3000 \
+            BUZZ_BIND_ADDR=0.0.0.0:3000 \
+            BUZZ_REQUIRE_AUTH_TOKEN=false \
+            BUZZ_RECONCILE_CHANNELS=true \
+            BUZZ_GIT_PROBE_WRITERS=8 \
+            SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1 \
+            ./target/ci/buzz-relay > /tmp/buzz-relay.log 2>&1 &
+          echo $! > /tmp/buzz-relay.pid
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat /tmp/buzz-relay.pid)" 2>/dev/null; then
+              cat /tmp/buzz-relay.log
+              exit 1
+            fi
+            status_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/_readiness || true)
+            if [ "${status_code}" = "200" ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/buzz-relay.log
+          exit 1
+      - name: NIP-ER reminder e2e
+        # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
+        # validation, author-only read filtering, and scheduler delivery against
+        # a live relay. The schema-drift / migration-version guarantee is owned
+        # by the buzz-db migration.rs unit tests, not this suite.
+        run: cargo test --profile ci -p buzz-test-client --test e2e_event_reminder -- --ignored
+        env:
+          RELAY_URL: ws://localhost:3000
+      - name: Upload relay log
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: backend-integration-relay-log
+          path: /tmp/buzz-relay.log
+          if-no-files-found: ignore
+
+  relay-e2e:
+    name: Relay E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Start relay
+        run: ./scripts/start-relay-for-tests.sh
+      - name: Relay E2E tests
+        run: cargo test -p buzz-test-client --test e2e_persona --test e2e_nostr_interop -- --ignored --nocapture
+        env:
+          RELAY_URL: ws://localhost:3000
+          GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
+      - name: Upload relay logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: relay-e2e-artifacts
+          path: /tmp/buzz-relay.log
+          if-no-files-found: ignore
+
   web:
     name: Web
     runs-on: ubuntu-latest
@@ -465,18 +585,51 @@ jobs:
   mobile:
     name: Mobile
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - name: Compute Hermit cache key
+        id: hermit-bin-hash
+        run: |
+          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+      - name: Restore Hermit package cache
+        id: hermit-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
-          channel: stable
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+          restore-keys: ${{ runner.os }}-hermit-cache-
+      - name: Prime Flutter SDK
+        run: flutter --version
+      - name: Save Hermit package cache
+        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        continue-on-error: true
+        with:
+          path: ~/.cache/hermit/pkg
+          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
+      - name: Restore pub cache
+        id: pub-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
       - name: Install dependencies
         run: cd mobile && flutter pub get
+      - name: Save pub cache
+        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        continue-on-error: true
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
       - name: Format check
         run: cd mobile && dart format --output=none --set-exit-if-changed .
       - name: Analyze
@@ -547,14 +700,152 @@ jobs:
       - name: Build server binaries
         env:
           TARGET: ${{ matrix.target }}
+          # PRs: compile + build-script gate only (no codegen/link). Main: full link gate.
+          CARGO_CMD: ${{ github.event_name == 'pull_request' && 'check' || 'build' }}
         run: |
-          cross build --release --target "$TARGET" \
+          cross "$CARGO_CMD" --release --target "$TARGET" \
             -p buzz-relay \
             -p buzz-acp \
             -p buzz-agent \
             -p buzz-dev-mcp \
             -p git-credential-nostr \
             -p git-sign-nostr
+
+  windows-rust:
+    name: Windows Rust (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    # Windows runners are slow and this compiles the workspace + Tauri crate
+    # cold across four steps; budget generously.
+    timeout-minutes: 45
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
+      # runner — hermit, used by the Linux jobs, does not provide MSVC. The
+      # toolchain (1.95.0 + clippy via profile = default) comes from the
+      # repo-root rust-toolchain.toml, which the runner's preinstalled rustup
+      # honors on demand; the host triple already is x86_64-pc-windows-msvc.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+          key: windows-msvc
+          save-if: ${{ github.event_name != 'pull_request' }}
+      # Tauri validates externalBin at compile time, so the Tauri-crate steps
+      # below fail without these stubs. Mirrors scripts/bundle-sidecars.sh's
+      # Windows naming (binaries/<bin>-<triple>.exe); empty files suffice for a
+      # type-check since nothing executes them.
+      - name: Create sidecar placeholders
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/binaries
+          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+            touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
+          done
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
+      - name: Check (workspace)
+        run: cargo check --workspace --all-targets --target $env:TARGET
+      - name: Test (buzz-dev-mcp)
+        # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
+        # only gate if this crate is tested ON Windows.
+        run: cargo test -p buzz-dev-mcp --target $env:TARGET
+      # The bundled-bash staging (PortableGit download + SFX extract of the WHOLE
+      # tree, including mingw64/) runs only in release.yml on tag — so without this
+      # step the agent's only Windows transport would ship UNEXERCISED until a
+      # tagged release hits users. Stage the tree and spawn the LAUNCHER bash
+      # (bin/bash.exe, the entry the resolver now uses) to prove all of: the SFX
+      # `-o` POSIX-path extraction works; the launcher spawns and sets up
+      # MSYSTEM/PATH; the lazily-loaded MSYS DLL closure survives; and — the whole
+      # point of bundling the full toolchain — git/jq/curl resolve from the bundled
+      # mingw64/bin and git is functional (a real commit round-trips). The launcher
+      # prepending mingw64/bin to PATH under `-c` is the load-bearing behavior that
+      # only a real Windows host can confirm; this gate is where it gets proven.
+      # (End-to-end nostr-SIGNED commits compose build_git_env's GIT_CONFIG_* with
+      # the git-sign-nostr helper — covered by buzz-dev-mcp unit tests + a bare-host
+      # check, not here, since this job stages only empty sidecar placeholders.)
+      - name: Smoke-test bundled bash + git toolchain staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage_dir="$RUNNER_TEMP/git-bash"
+          scripts/stage-windows-bash.sh "$stage_dir"
+          launcher="$stage_dir/bin/bash.exe"
+          [[ -f "$launcher" ]] || { echo "launcher bash missing: $launcher" >&2; exit 1; }
+
+          # Faithfulness to the agent: shell.rs spawns the launcher with PATH set
+          # wholesale to the shim PATH (shim tempdir + the MCP process's inherited
+          # PATH). We strip PATH down to just the Windows system dir before
+          # spawning — stricter than a bare host (ambient PATH stripped to force
+          # resolution through the launcher). This stops the runner's ambient
+          # git/jq from masking the launcher's own mingw64/bin prepend, so anything
+          # that resolves had to come from the launcher itself. The fidelity gap is
+          # benign: the real shim tempdir only ever holds rg/tree/buzz and the two
+          # nostr helpers, never git/jq/curl, so a richer real PATH cannot shadow
+          # mingw64/bin for these three tools.
+          win_root="${SYSTEMROOT:-${SystemRoot:-C:\\Windows}}"
+          bare_path="$win_root\\System32;$win_root"
+
+          # Coreutils pipeline through the launcher (the resolver's entry point).
+          out=$(PATH="$bare_path" "$launcher" -c 'echo hello | tr a-z A-Z')
+          [[ "$out" == "HELLO" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
+
+          # The full-toolchain payoff: git/jq/curl must resolve from the bundle's
+          # mingw64/bin or usr/bin. Use NON-login `-c` to match the agent's actual
+          # invocation (shell.rs spawns `bash -c`): if the launcher only fixes PATH
+          # under a login shell, `-lc` would pass here while the real agent stays
+          # broken — the exact green-but-broken trap this gate guards.
+          #
+          # Anchor to the ACTUAL staged tree, not a mount-shape: command -v reports
+          # the MSYS mount path (/mingw64/bin/git), so we cygpath -m it back to the
+          # real Windows location and assert it sits under $stage_dir. A bare
+          # `/mingw64/*` shape check would pass for any /mingw64-rooted mount; the
+          # cygpath round-trip proves the tool is literally inside the bundle we
+          # just staged. cygpath ships in the bundle's usr/bin (MSYS2 core, same
+          # tier as the `tr` proven above), so it resolves under the launcher.
+          #
+          # curl is the one tool of the three with a System32 twin
+          # (C:\Windows\System32\curl.exe, on $bare_path) — if a future PortableGit
+          # ever drops curl from mingw64/bin, the launcher would resolve the
+          # System32 twin and this REDs on a non-bug; git/jq have no such twin.
+          stage_m=$("$launcher" -c "cygpath -m '$stage_dir'")
+          for tool in git jq curl; do
+            located=$(PATH="$bare_path" "$launcher" -c "command -v $tool >/dev/null 2>&1 && cygpath -m \"\$(command -v $tool)\"" || true)
+            [[ -n "$located" ]] || { echo "$tool did not resolve in bundled bash" >&2; exit 1; }
+            case "$located" in
+              "$stage_m"/*) ;;
+              *) echo "$tool resolved outside the staged bundle: $located (stage: $stage_m)" >&2; exit 1 ;;
+            esac
+            echo "$tool -> $located"
+          done
+
+          # git is not just present but functional: a real commit round-trips,
+          # again through non-login `-c` with the bare PATH. Single-quoted on
+          # purpose — this script body runs in the launcher's shell, not ours.
+          # shellcheck disable=SC2016
+          PATH="$bare_path" "$launcher" -c '
+            set -euo pipefail
+            repo=$(mktemp -d)
+            cd "$repo"
+            git init -q
+            git -c user.name=ci -c user.email=ci@example.com commit -q --allow-empty -m smoke
+            git log -1 --format=%s | grep -qx smoke
+          ' || { echo "bundled git failed a commit round-trip" >&2; exit 1; }
+          echo "staged launcher bash spawned; git/jq/curl resolve from the bundle; git commit works"
+      - name: Check (Tauri crate)
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Test (Tauri crate)
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
   desktop-build-macos:
     name: Desktop Build (macOS)

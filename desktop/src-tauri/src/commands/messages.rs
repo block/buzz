@@ -360,19 +360,26 @@ fn event_has_client_marker(event: &Event, marker: &str) -> bool {
 
 async fn find_managed_agent_channel_message_by_marker(
     state: &AppState,
-    agent_pubkey: &str,
+    agent_pubkey: Option<&str>,
     channel_id: &str,
     marker: &str,
 ) -> Result<Option<Event>, String> {
+    let author = agent_pubkey
+        .map(str::trim)
+        .filter(|pubkey| !pubkey.is_empty())
+        .map(str::to_ascii_lowercase);
+
     let mut until: Option<u64> = None;
 
     for _ in 0..10 {
         let mut filter = serde_json::json!({
-            "authors": [agent_pubkey],
             "kinds": [buzz_core_pkg::kind::KIND_STREAM_MESSAGE],
             "#h": [channel_id],
             "limit": 500,
         });
+        if let Some(author) = author.as_deref() {
+            filter["authors"] = serde_json::json!([author]);
+        }
         if let Some(until) = until {
             filter["until"] = serde_json::json!(until);
         }
@@ -399,6 +406,16 @@ async fn find_managed_agent_channel_message_by_marker(
     }
 
     Ok(None)
+}
+
+fn marker_author_for_scope<'a>(
+    marker_scope: Option<&str>,
+    agent_pubkey: &'a str,
+) -> Option<&'a str> {
+    match marker_scope {
+        Some("channel") => None,
+        _ => Some(agent_pubkey),
+    }
 }
 
 fn stored_managed_agent_auth_tag(auth_tag: Option<&str>) -> Option<String> {
@@ -440,6 +457,7 @@ pub async fn send_managed_agent_channel_message(
     channel_id: String,
     content: String,
     marker: Option<String>,
+    marker_scope: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
@@ -480,7 +498,7 @@ pub async fn send_managed_agent_channel_message(
     if let Some(marker) = marker.as_deref() {
         if let Some(existing) = find_managed_agent_channel_message_by_marker(
             &state,
-            &record.pubkey,
+            marker_author_for_scope(marker_scope.as_deref(), &record.pubkey),
             &channel_id,
             marker,
         )
@@ -525,6 +543,30 @@ pub async fn send_managed_agent_channel_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_author_scope_defaults_to_agent() {
+        assert_eq!(
+            marker_author_for_scope(None, "agent-pubkey"),
+            Some("agent-pubkey")
+        );
+        assert_eq!(
+            marker_author_for_scope(Some("agent"), "agent-pubkey"),
+            Some("agent-pubkey")
+        );
+        assert_eq!(
+            marker_author_for_scope(Some("unknown"), "agent-pubkey"),
+            Some("agent-pubkey")
+        );
+    }
+
+    #[test]
+    fn marker_author_scope_can_dedupe_across_channel() {
+        assert_eq!(
+            marker_author_for_scope(Some("channel"), "agent-pubkey"),
+            None
+        );
+    }
 
     #[test]
     fn stored_managed_agent_auth_tag_trims_blank_values() {

@@ -28,8 +28,6 @@ use serde_json::Value;
 
 use crate::SdkError;
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
 /// Validate the `conditions` string per the NIP-OA spec.
 ///
 /// Empty string is valid. Non-empty must be `clause` or `clause&clause&...`
@@ -133,8 +131,6 @@ fn parse_json_array(s: &str) -> Result<Vec<Value>, SdkError> {
         )),
     }
 }
-
-// ── Public API ────────────────────────────────────────────────────────────────
 
 /// Compute a NIP-OA `auth` tag authorizing `agent_pubkey` under `conditions`.
 ///
@@ -301,8 +297,6 @@ pub fn parse_auth_tag(json_str: &str) -> Result<Tag, SdkError> {
     Tag::parse(["auth", owner_pubkey_hex, conditions, sig_hex])
         .map_err(|e| SdkError::InvalidInput(format!("failed to construct Tag: {e}")))
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -498,8 +492,6 @@ mod tests {
         let expected = "08cdecd55af4c28d3801fd69615dcf5cc04fab3bc134b38a840bf157197069a6";
         assert_eq!(format!("{digest:x}"), expected);
     }
-
-    // ── Conditions validation ─────────────────────────────────────────────
 
     #[test]
     fn test_valid_conditions() {

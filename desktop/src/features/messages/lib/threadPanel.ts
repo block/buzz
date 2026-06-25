@@ -26,13 +26,26 @@ export type MainTimelineEntry = {
   summary: TimelineThreadSummary | null;
 };
 
-type ThreadDescendantStats = {
+export type ThreadDescendantStats = {
   descendantCount: number;
+  unreadDescendantCount: number;
   lastReplyAt: number | null;
   recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[];
 };
 
+export type ThreadPanelIndex = {
+  directChildrenByParentId: Map<string, TimelineMessage[]>;
+  descendantStatsByMessageId: Map<string, ThreadDescendantStats>;
+  messageById: Map<string, TimelineMessage>;
+};
+
 const MAX_SUMMARY_PARTICIPANTS = 3;
+
+type SummaryParticipantCandidate = {
+  index: number;
+  participant: TimelineThreadSummaryParticipant;
+  timestamp: number;
+};
 
 function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
   return {
@@ -41,14 +54,47 @@ function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
   };
 }
 
+// Thread rows feed `MessageRow` a depth-normalized copy of each reply. Building
+// that copy fresh (`{ ...message, depth }`) on every render hands `MessageRow` a
+// new object identity every time `timelineMessages` churns (typing/presence),
+// even when the reply and its depth are byte-identical — which defeats the
+// row/markdown memo and forces a ~1.4ms/row re-parse on threads where the main
+// timeline (which passes the raw stable ref) stays cheap.
+//
+// Mirror the main list's per-id context memoization (`videoReviewContextById`):
+// cache the normalized object keyed on the source reply identity + depth, so an
+// unrelated channel churn that leaves a reply (and its tree position) intact
+// reuses the exact same object reference and the memo hits.
+//
+// Keyed on the source `reply` reference via a WeakMap: a new `timelineMessages`
+// set produces new reply objects (genuine recompute), and stale entries are
+// collected automatically when the old message set is dropped.
+const normalizedInlineReplyCache = new WeakMap<
+  TimelineMessage,
+  Map<number, TimelineMessage>
+>();
+
 function normalizeInlineReplyMessage(
   message: TimelineMessage,
   depth: number,
 ): TimelineMessage {
-  return {
+  let byDepth = normalizedInlineReplyCache.get(message);
+  if (!byDepth) {
+    byDepth = new Map<number, TimelineMessage>();
+    normalizedInlineReplyCache.set(message, byDepth);
+  }
+
+  const cached = byDepth.get(depth);
+  if (cached) {
+    return cached;
+  }
+
+  const normalized: TimelineMessage = {
     ...message,
     depth,
   };
+  byDepth.set(depth, normalized);
+  return normalized;
 }
 
 function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
@@ -67,15 +113,19 @@ function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
   return childrenByParentId;
 }
 
-function buildDescendantStatsByMessageId(
+export function buildDescendantStatsByMessageId(
   messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string> = new Set(),
+  messageById: Map<string, TimelineMessage> = new Map(
+    messages.map((message) => [message.id, message]),
+  ),
 ): Map<string, ThreadDescendantStats> {
-  const messageById = new Map(messages.map((message) => [message.id, message]));
   const descendantStatsByMessageId = new Map<string, ThreadDescendantStats>(
     messages.map((message) => [
       message.id,
       {
         descendantCount: 0,
+        unreadDescendantCount: 0,
         lastReplyAt: null,
         recentParticipantsNewestFirst: [],
       },
@@ -104,6 +154,7 @@ function buildDescendantStatsByMessageId(
     let ancestorId = message.parentId ?? null;
     let hops = 0;
     const maxHops = messages.length + 1;
+    const isUnread = unreadReplyIds.has(message.id);
 
     while (ancestorId && hops < maxHops) {
       const ancestorStats = descendantStatsByMessageId.get(ancestorId);
@@ -112,6 +163,9 @@ function buildDescendantStatsByMessageId(
       }
 
       ancestorStats.descendantCount += 1;
+      if (isUnread) {
+        ancestorStats.unreadDescendantCount += 1;
+      }
       ancestorStats.lastReplyAt = Math.max(
         ancestorStats.lastReplyAt ?? 0,
         message.createdAt,
@@ -135,6 +189,23 @@ function buildDescendantStatsByMessageId(
   return descendantStatsByMessageId;
 }
 
+export function buildThreadPanelIndex(
+  messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string> = new Set(),
+): ThreadPanelIndex {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+
+  return {
+    directChildrenByParentId: buildDirectChildrenByParentId(messages),
+    descendantStatsByMessageId: buildDescendantStatsByMessageId(
+      messages,
+      unreadReplyIds,
+      messageById,
+    ),
+    messageById,
+  };
+}
+
 function buildSummaryForDirectReplies(
   messageId: string,
   descendantStatsByMessageId: Map<string, ThreadDescendantStats>,
@@ -150,6 +221,97 @@ function buildSummaryForDirectReplies(
     lastReplyAt: descendantStats.lastReplyAt,
     participants: [...descendantStats.recentParticipantsNewestFirst].reverse(),
   };
+}
+
+function participantFromMessage(
+  message: TimelineMessage,
+): TimelineThreadSummaryParticipant {
+  return {
+    id: message.pubkey ?? message.id,
+    author: message.author,
+    avatarUrl: message.avatarUrl ?? null,
+  };
+}
+
+export function buildThreadSummaryFromVisibleEntries(
+  threadHeadId: string,
+  entries: readonly MainTimelineEntry[],
+): TimelineThreadSummary | null {
+  let replyCount = 0;
+  let lastReplyAt: number | null = null;
+  const participantCandidates: SummaryParticipantCandidate[] = [];
+
+  const addParticipantCandidate = (
+    participant: TimelineThreadSummaryParticipant,
+    timestamp: number,
+  ) => {
+    participantCandidates.push({
+      index: participantCandidates.length,
+      participant,
+      timestamp,
+    });
+  };
+
+  for (const entry of entries) {
+    replyCount += 1;
+    lastReplyAt = Math.max(lastReplyAt ?? 0, entry.message.createdAt);
+    addParticipantCandidate(
+      participantFromMessage(entry.message),
+      entry.message.createdAt,
+    );
+
+    if (entry.summary) {
+      replyCount += entry.summary.replyCount;
+      if (entry.summary.lastReplyAt != null) {
+        lastReplyAt = Math.max(lastReplyAt ?? 0, entry.summary.lastReplyAt);
+      }
+
+      const summaryTimestamp =
+        entry.summary.lastReplyAt ?? entry.message.createdAt;
+      for (const participant of entry.summary.participants) {
+        addParticipantCandidate(participant, summaryTimestamp);
+      }
+    }
+  }
+
+  if (replyCount === 0) {
+    return null;
+  }
+
+  const recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[] = [];
+  for (const candidate of [...participantCandidates].sort((left, right) => {
+    if (left.timestamp !== right.timestamp) {
+      return right.timestamp - left.timestamp;
+    }
+
+    return right.index - left.index;
+  })) {
+    if (
+      recentParticipantsNewestFirst.some(
+        (participant) => participant.id === candidate.participant.id,
+      )
+    ) {
+      continue;
+    }
+
+    recentParticipantsNewestFirst.push(candidate.participant);
+    if (recentParticipantsNewestFirst.length >= MAX_SUMMARY_PARTICIPANTS) {
+      break;
+    }
+  }
+
+  return {
+    threadHeadId,
+    replyCount,
+    lastReplyAt,
+    participants: recentParticipantsNewestFirst.reverse(),
+  };
+}
+
+export function hasNestedThreadBranches(entries: readonly MainTimelineEntry[]) {
+  return entries.some(
+    (entry) => entry.message.depth > 1 || entry.summary !== null,
+  );
 }
 
 function appendExpandedReplies(params: {
@@ -171,15 +333,15 @@ function appendExpandedReplies(params: {
   const directReplies = directChildrenByParentId.get(parentId) ?? [];
 
   for (const reply of directReplies) {
+    const isExpanded = expandedReplyIds.has(reply.id);
     entries.push({
       message: normalizeInlineReplyMessage(reply, depth),
-      summary: buildSummaryForDirectReplies(
-        reply.id,
-        descendantStatsByMessageId,
-      ),
+      summary: isExpanded
+        ? null
+        : buildSummaryForDirectReplies(reply.id, descendantStatsByMessageId),
     });
 
-    if (expandedReplyIds.has(reply.id)) {
+    if (isExpanded) {
       appendExpandedReplies({
         entries,
         parentId: reply.id,
@@ -209,7 +371,7 @@ function buildVisibleThreadReplies(params: {
   appendExpandedReplies({
     entries,
     parentId: openThreadHeadId,
-    depth: 0,
+    depth: 1,
     directChildrenByParentId,
     descendantStatsByMessageId,
     expandedReplyIds,
@@ -220,8 +382,12 @@ function buildVisibleThreadReplies(params: {
 
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string> = new Set(),
 ): MainTimelineEntry[] {
-  const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
+  const { descendantStatsByMessageId } = buildThreadPanelIndex(
+    messages,
+    unreadReplyIds,
+  );
 
   return messages
     .filter(
@@ -239,8 +405,23 @@ export function buildMainTimelineEntries(
     });
 }
 
-export function buildThreadPanelData(
-  messages: TimelineMessage[],
+/**
+ * Whether the unread "New" divider should render above the entry at `index`.
+ * The divider marks a read/unread boundary, so it only makes sense when there
+ * is a rendered message above the first unread. When the first unread is the
+ * first rendered top-level entry (index 0) — the fresh/never-read channel case
+ * — there is nothing above it to separate from, so the divider is suppressed.
+ */
+export function shouldRenderUnreadDivider(
+  index: number,
+  messageId: string,
+  firstUnreadMessageId: string | null,
+): boolean {
+  return index > 0 && messageId === firstUnreadMessageId;
+}
+
+export function buildThreadPanelDataFromIndex(
+  index: ThreadPanelIndex,
   openThreadHeadId: string | null,
   threadReplyTargetId: string | null,
   expandedReplyIds: ReadonlySet<string>,
@@ -254,7 +435,8 @@ export function buildThreadPanelData(
     };
   }
 
-  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const { directChildrenByParentId, descendantStatsByMessageId, messageById } =
+    index;
   const threadHead = messageById.get(openThreadHeadId) ?? null;
 
   if (!threadHead) {
@@ -266,8 +448,6 @@ export function buildThreadPanelData(
     };
   }
 
-  const directChildrenByParentId = buildDirectChildrenByParentId(messages);
-  const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
   const normalizedThreadHead = normalizeHeadMessage(threadHead);
   const visibleReplies = buildVisibleThreadReplies({
     openThreadHeadId,
@@ -288,4 +468,18 @@ export function buildThreadPanelData(
     visibleReplies,
     replyTargetMessage: replyTargetInBranch ?? normalizedThreadHead,
   };
+}
+
+export function buildThreadPanelData(
+  messages: TimelineMessage[],
+  openThreadHeadId: string | null,
+  threadReplyTargetId: string | null,
+  expandedReplyIds: ReadonlySet<string>,
+): ThreadPanelData {
+  return buildThreadPanelDataFromIndex(
+    buildThreadPanelIndex(messages),
+    openThreadHeadId,
+    threadReplyTargetId,
+    expandedReplyIds,
+  );
 }

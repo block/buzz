@@ -7,6 +7,7 @@ import type { Channel } from "@/shared/api/types";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
 import {
   useCreateForumPostMutation,
@@ -47,6 +48,7 @@ export function ForumView({
   targetReplyId,
 }: ForumViewProps) {
   const [isComposerOpen, setIsComposerOpen] = React.useState(false);
+  const postsScrollRef = React.useRef<HTMLDivElement>(null);
 
   const profileQuery = useProfileQuery();
   const postsQuery = useForumPostsQuery(channel);
@@ -146,7 +148,6 @@ export function ForumView({
 
   return (
     <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
-      {/* New post area */}
       <div className="border-b border-border/60 p-4">
         {isComposerOpen ? (
           <ForumComposer
@@ -181,10 +182,10 @@ export function ForumView({
         )}
       </div>
 
-      {/* Post list */}
       <div
         className="flex-1 overflow-y-auto"
         data-scroll-restoration-id={`forum-list:${channel.id}`}
+        ref={postsScrollRef}
       >
         {postsQuery.isLoading ? (
           <div className="space-y-3 p-4">
@@ -205,26 +206,32 @@ export function ForumView({
             </div>
           </div>
         ) : (
-          <div className="space-y-3 p-4">
-            {posts.map((post) => (
-              <ForumPostCard
-                canDelete={canDelete(post.pubkey, effectiveCurrentPubkey)}
-                currentPubkey={effectiveCurrentPubkey}
-                isActive={selectedPostId === post.eventId}
-                isDeleting={
-                  deletePostMutation.isPending &&
-                  deletePostMutation.variables?.eventId === post.eventId
-                }
-                key={post.eventId}
-                onClick={() => onSelectPost(post.eventId)}
-                onDelete={(eventId) => {
-                  deletePostMutation.mutate({ eventId });
-                }}
-                post={post}
-                profiles={profiles}
-              />
-            ))}
-          </div>
+          <VirtualizedList
+            estimateSize={120}
+            getItemKey={(post) => post.eventId}
+            innerClassName="p-4"
+            items={posts}
+            renderItem={(post) => (
+              <div className="pb-3">
+                <ForumPostCard
+                  canDelete={canDelete(post.pubkey, effectiveCurrentPubkey)}
+                  currentPubkey={effectiveCurrentPubkey}
+                  isActive={selectedPostId === post.eventId}
+                  isDeleting={
+                    deletePostMutation.isPending &&
+                    deletePostMutation.variables?.eventId === post.eventId
+                  }
+                  onClick={() => onSelectPost(post.eventId)}
+                  onDelete={(eventId) => {
+                    deletePostMutation.mutate({ eventId });
+                  }}
+                  post={post}
+                  profiles={profiles}
+                />
+              </div>
+            )}
+            scrollRef={postsScrollRef}
+          />
         )}
       </div>
     </div>

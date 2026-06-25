@@ -95,7 +95,7 @@ export function SoundPicker({
             <span className="truncate">{value}</span>
             <span className="flex items-center gap-1.5">
               <Waveform className="h-6 w-15 opacity-70" name={value} />
-              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
             </span>
           </Button>
         </DropdownMenuTrigger>
@@ -113,7 +113,7 @@ export function SoundPicker({
                   <span>{name}</span>
                   <span className="flex items-center gap-2">
                     {name === recommended ? (
-                      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      <span className="text-2xs uppercase tracking-wide text-muted-foreground">
                         rec.
                       </span>
                     ) : null}
@@ -135,9 +135,9 @@ export function SoundPicker({
         variant="ghost"
       >
         {isPlaying ? (
-          <Pause className="h-3 w-3" />
+          <Pause className="h-4 w-4" />
         ) : (
-          <Play className="h-3 w-3" />
+          <Play className="h-4 w-4" />
         )}
       </Button>
     </span>

@@ -18,6 +18,7 @@ import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Switch } from "@/shared/ui/switch";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
+import { SettingsSectionHeader } from "./SettingsSectionHeader";
 import { SoundPicker } from "./SoundPicker";
 
 export function NotificationSettingsCard({
@@ -60,12 +61,10 @@ export function NotificationSettingsCard({
 
   return (
     <section className="min-w-0" data-testid="settings-notifications">
-      <div className="mb-12 min-w-0">
-        <h2 className="text-2xl font-semibold tracking-tight">Notifications</h2>
-        <p className="text-base font-normal text-muted-foreground">
-          Desktop alerts are on by default. Fine-tune what gets through below.
-        </p>
-      </div>
+      <SettingsSectionHeader
+        title="Notifications"
+        description="Desktop alerts are on by default. Fine-tune what gets through below."
+      />
 
       <span className="sr-only" data-testid="notifications-desktop-state">
         {notificationPermission === "unsupported"
@@ -179,7 +178,7 @@ export function NotificationSettingsCard({
                           <span className="flex items-center gap-2 text-sm font-medium">
                             {SLOT_LABELS[slot]}
                             {comingSoon ? (
-                              <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-normal uppercase tracking-wide text-muted-foreground">
+                              <span className="rounded-full bg-muted/70 px-2 py-0.5 text-2xs font-normal uppercase tracking-wide text-muted-foreground">
                                 Coming soon
                               </span>
                             ) : null}
@@ -227,12 +226,12 @@ export function NotificationSettingsCard({
                   >
                     {showComingSoon ? (
                       <>
-                        <ChevronUp className="h-3.5 w-3.5" />
+                        <ChevronUp className="h-4 w-4" />
                         Show less
                       </>
                     ) : (
                       <>
-                        <ChevronDown className="h-3.5 w-3.5" />
+                        <ChevronDown className="h-4 w-4" />
                         View all
                       </>
                     )}

@@ -18,9 +18,7 @@ function ProjectDetailRouteComponent() {
   const { projectId } = Route.useParams();
 
   return (
-    <React.Suspense
-      fallback={<ViewLoadingFallback includeHeader kind="projects" />}
-    >
+    <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>
       <ProjectDetailScreen projectId={projectId} />
     </React.Suspense>
   );

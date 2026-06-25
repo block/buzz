@@ -166,7 +166,7 @@ export function RelayMeshAgentSection({
           ) : null}
           {overrides.length > 0 ? (
             <p className="flex items-start gap-1.5 rounded bg-warning-bg/60 px-2 py-1.5 text-xs text-warning">
-              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
                 Using Relay mesh overrides this agent's {overrides.join(", ")}.
               </span>

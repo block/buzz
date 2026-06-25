@@ -14,6 +14,20 @@ export type PersonaDialogState = {
 
 type ParsedPersonaDraft = ParsePersonaFilesResult["personas"][number];
 
+/**
+ * Whether the persona dialog's save action should be enabled.
+ *
+ * A display name is the only required field. The system prompt is optional:
+ * core memory is auto-injected at runtime, so a persona need not carry its
+ * own prompt. `isPending` blocks double-submits while a save is in flight.
+ */
+export function canSubmitPersonaDialog(args: {
+  displayName: string;
+  isPending: boolean;
+}): boolean {
+  return args.displayName.trim().length > 0 && !args.isPending;
+}
+
 export function createPersonaDialogState(): PersonaDialogState {
   return {
     title: "Create persona",

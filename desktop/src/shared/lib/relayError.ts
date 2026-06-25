@@ -32,21 +32,3 @@ export function isRelayUnreachableError(error: unknown): boolean {
   }
   return false;
 }
-
-/**
- * Returns a human-readable detail string for an error.
- *
- * When the error is classified as a relay-unreachable error, strips the
- * prefix and trims whitespace so the UI sees only the Rust-authored detail
- * (e.g. "connection refused" or "403 Forbidden from Cloudflare Access").
- *
- * Falls back to a generic connectivity message for anything unclassified.
- */
-export function relayErrorDetail(error: unknown): string {
-  if (isRelayUnreachableError(error)) {
-    const message = error instanceof Error ? error.message : (error as string);
-    const detail = message.slice(RELAY_UNREACHABLE_PREFIX.length).trim();
-    return detail || RELAY_UNREACHABLE_MESSAGE;
-  }
-  return RELAY_UNREACHABLE_MESSAGE;
-}

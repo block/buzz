@@ -1,0 +1,98 @@
+══════════════════════════════════════════════════════════════════════════════
+  Buzz {{ .Chart.AppVersion }} — release "{{ .Release.Name }}" (namespace {{ .Release.Namespace }})
+══════════════════════════════════════════════════════════════════════════════
+
+▶ Relay URL
+  {{ .Values.relayUrl }}
+
+▶ Owner pubkey
+  {{ .Values.ownerPubkey }}
+  {{- if not .Values.ownerPubkey }}
+  ⚠ ownerPubkey is empty — this is only valid when relay.requireRelayMembership=false.
+  {{- end }}
+
+▶ Health
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "buzz.fullname" . }} 8080:{{ .Values.service.healthPort }}
+  curl http://localhost:8080/_readiness
+
+{{ if not .Values.ingress.enabled }}{{ if not .Values.httproute.enabled }}
+▶ Networking
+  Neither ingress nor Gateway API HTTPRoute is enabled. Expose the relay
+  through your own gateway, then ensure clients reach .Values.relayUrl
+  ({{ .Values.relayUrl }}) over wss://. Long-lived WebSocket connections
+  require generous proxy read/send timeouts (≥ 1h).
+{{ end }}{{ end }}
+
+──────────────────────────────────────────────────────────────────────────────
+  Profile
+──────────────────────────────────────────────────────────────────────────────
+{{ if or .Values.postgresql.enabled .Values.redis.enabled .Values.minio.enabled .Values.typesense.enabled }}
+⚠ QUICKSTART / EVALUATION PROFILE
+  {{ if .Values.postgresql.enabled }}- In-cluster Postgres subchart (CloudPirates){{ end }}
+  {{ if .Values.redis.enabled }}- In-cluster Redis subchart (CloudPirates){{ end }}
+  {{ if .Values.minio.enabled }}- In-cluster MinIO (eval-only, single replica; bucket "{{ .Values.s3.bucket }}" created by post-install Job){{ end }}
+  {{ if .Values.typesense.enabled }}- In-cluster Typesense (eval-only, single replica){{ end }}
+  - Chart auto-generates secrets via the `lookup` pattern. This is NOT
+    GitOps-safe — secrets will silently rotate under ArgoCD/Flux. For
+    production, see examples/argocd-app.yaml or examples/flux-helmrelease.yaml.
+
+{{ else }}
+✓ PRODUCTION PROFILE
+  External Postgres, Redis (if enabled), Typesense, S3.
+  {{ if .Values.secrets.existingSecret }}- Secrets sourced from: {{ .Values.secrets.existingSecret }}{{ end }}
+{{ end }}
+
+──────────────────────────────────────────────────────────────────────────────
+  Backups — save these
+──────────────────────────────────────────────────────────────────────────────
+  1. BUZZ_RELAY_PRIVATE_KEY — relay identity. Rotating it = identity change;
+     federation peers will treat the relay as a new identity.
+  2. PostgreSQL database{{ if .Values.postgresql.enabled }} ({{ .Release.Name }}-postgresql PVC){{ end }}
+  3. S3 bucket "{{ .Values.s3.bucket }}" — media blobs
+  4. Git PVC ({{ include "buzz.fullname" . }}-git) — repo on-disk state
+  5. Owner private key (held by the operator, NOT the chart) — restore by
+     re-installing with the same ownerPubkey.
+
+──────────────────────────────────────────────────────────────────────────────
+  Degradation warnings
+──────────────────────────────────────────────────────────────────────────────
+{{- if not .Values.relay.requireAuthToken }}
+  ⚠ relay.requireAuthToken=false — REST API bypasses token auth. Production
+    should set this to true.
+{{- end }}
+{{- if not .Values.relay.requireRelayMembership }}
+  ⚠ relay.requireRelayMembership=false — relay is OPEN. Anyone can publish.
+{{- end }}
+{{- if not .Values.migrate.autoMigrate }}
+  ⚠ migrate.autoMigrate=false — relay startup will NOT run sqlx migrations.
+    You must run `buzz-admin migrate` against the database before every
+    `helm install` / `helm upgrade`, or pods will start against an unmigrated
+    schema. Readiness probes only verify DB connectivity, not schema freshness.
+{{- end }}
+{{- if or .Values.secrets.relayPrivateKey .Values.secrets.gitHookHmacSecret }}
+  ⚠ Inline secret values are set in values.yaml
+    ({{ if .Values.secrets.relayPrivateKey }}secrets.relayPrivateKey{{ end }}{{ if and .Values.secrets.relayPrivateKey .Values.secrets.gitHookHmacSecret }}, {{ end }}{{ if .Values.secrets.gitHookHmacSecret }}secrets.gitHookHmacSecret{{ end }}).
+    Inline overrides leak secrets into git history and CI logs. Move them to a
+    Kubernetes Secret and reference it via secrets.existingSecret — see
+    examples/secret-sample.yaml.
+{{- end }}
+{{- if and (gt (.Values.replicaCount | int) 1) (eq .Values.persistence.git.accessMode "ReadWriteOnce") }}
+  ⚠ replicaCount > 1 with ReadWriteOnce git PVC will fail at template time
+    (this message should never appear — file a bug).
+{{- end }}
+{{- if not .Values.secrets.existingSecret }}
+{{- if not (or .Values.postgresql.enabled .Values.redis.enabled) }}
+  ⚠ Chart-managed Secret is in use (no secrets.existingSecret). This is fine
+    for `helm install` / `helm upgrade` but NOT safe under GitOps tools that
+    `helm template` to render manifests — the `lookup` function returns empty
+    in that mode and secrets will silently rotate. Use existingSecret for
+    ArgoCD / Flux.
+{{- end }}
+{{- end }}
+
+──────────────────────────────────────────────────────────────────────────────
+  Useful commands
+──────────────────────────────────────────────────────────────────────────────
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }} --tail=200
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "buzz.fullname" . }}

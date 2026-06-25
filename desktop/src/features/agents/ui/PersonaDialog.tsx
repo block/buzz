@@ -25,6 +25,7 @@ import {
   getImportErrorLabel,
   IMPORT_ERROR_VISIBILITY_MS,
 } from "./personaDialogImportState";
+import { canSubmitPersonaDialog } from "./personaDialogState";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -497,12 +498,12 @@ export function PersonaDialog({
                         : undefined
                     }
                   >
-                    <Upload className="h-3.5 w-3.5" />
+                    <Upload className="h-4 w-4" />
                     <span className="max-w-[16rem] truncate">
                       {importButtonLabel}
                     </span>
                     {isImportingUpdate ? (
-                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <RefreshCw className="h-4 w-4 animate-spin" />
                     ) : null}
                   </button>
                 </>
@@ -519,11 +520,7 @@ export function PersonaDialog({
                 Cancel
               </Button>
               <Button
-                disabled={
-                  displayName.trim().length === 0 ||
-                  systemPrompt.trim().length === 0 ||
-                  isPending
-                }
+                disabled={!canSubmitPersonaDialog({ displayName, isPending })}
                 onClick={() => void handleSubmit()}
                 size="sm"
                 type="button"
