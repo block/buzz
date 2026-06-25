@@ -21,6 +21,8 @@
 //! Pool connections handle all other commands.
 //! Lagged receivers get `RecvError::Lagged`.
 
+/// Cross-pod cache-key invalidation over Redis pub/sub.
+pub mod cache_invalidation;
 /// Error types for pub/sub operations.
 pub mod error;
 /// Online/offline presence tracking in Redis.
@@ -40,6 +42,8 @@ use std::sync::Arc;
 use nostr::PublicKey;
 use tokio::sync::broadcast;
 use uuid::Uuid;
+
+use crate::cache_invalidation::{CacheInvalidation, CACHE_INVALIDATION_CHANNEL};
 
 /// A Nostr event received on a specific channel, broadcast to local subscribers.
 #[derive(Debug, Clone)]
@@ -72,17 +76,20 @@ pub struct PubSubManager {
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.
     redis_url: String,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
+    cache_invalidation_tx: broadcast::Sender<CacheInvalidation>,
 }
 
 impl PubSubManager {
     /// Creates a new `PubSubManager` connected to the given Redis URL.
     pub async fn new(redis_url: &str, pool: deadpool_redis::Pool) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
+        let (cache_invalidation_tx, _) = broadcast::channel(4096);
 
         Ok(Self {
             pool,
             redis_url: redis_url.to_string(),
             broadcast_tx,
+            cache_invalidation_tx,
         })
     }
 
@@ -94,9 +101,42 @@ impl PubSubManager {
         subscriber::run_subscriber(self.redis_url.clone(), self.broadcast_tx.clone()).await;
     }
 
+    /// Starts the cache-invalidation subscriber loop with automatic
+    /// reconnection. Runs forever — spawn this in a background task.
+    pub async fn run_cache_invalidation_subscriber(self: Arc<Self>) {
+        cache_invalidation::run_cache_invalidation_subscriber(
+            self.redis_url.clone(),
+            self.cache_invalidation_tx.clone(),
+        )
+        .await;
+    }
+
     /// Returns a new broadcast receiver for locally-published channel events.
     pub fn subscribe_local(&self) -> broadcast::Receiver<ChannelEvent> {
         self.broadcast_tx.subscribe()
+    }
+
+    /// Returns a new broadcast receiver for cross-pod cache-invalidation drops.
+    pub fn subscribe_cache_invalidations(&self) -> broadcast::Receiver<CacheInvalidation> {
+        self.cache_invalidation_tx.subscribe()
+    }
+
+    /// Publish a cache-key drop to all pods. Fire-and-forget at the call site:
+    /// the local cache is already dropped synchronously; this carries the same
+    /// drop cross-pod. A dropped publish is backstopped by the REQ denial-path
+    /// DB confirmation, so callers may spawn this without awaiting delivery.
+    pub async fn publish_cache_invalidation(
+        &self,
+        invalidation: &CacheInvalidation,
+    ) -> Result<i64, PubSubError> {
+        let mut conn = self.pool.get().await?;
+        let payload = serde_json::to_string(invalidation)?;
+        let subscriber_count: i64 = redis::cmd("PUBLISH")
+            .arg(CACHE_INVALIDATION_CHANNEL)
+            .arg(&payload)
+            .query_async(&mut conn)
+            .await?;
+        Ok(subscriber_count)
     }
 
     /// Publish an event to the Redis channel. Returns subscriber count.
@@ -200,6 +240,36 @@ mod tests {
 
         assert_eq!(received.channel_id, channel_id);
         assert_eq!(received.event.id, event_id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn test_cache_invalidation_roundtrip() {
+        let manager = make_manager().await;
+        let mut rx = manager.subscribe_cache_invalidations();
+
+        let manager_clone = manager.clone();
+        tokio::spawn(async move { manager_clone.run_cache_invalidation_subscriber().await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let channel_id = Uuid::new_v4();
+        let pubkey = Keys::generate().public_key().to_bytes().to_vec();
+        let sent = CacheInvalidation::Membership {
+            channel_id,
+            pubkey: pubkey.clone(),
+        };
+
+        manager
+            .publish_cache_invalidation(&sent)
+            .await
+            .expect("publish failed");
+
+        let received = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+
+        assert_eq!(received, sent);
     }
 
     #[tokio::test]

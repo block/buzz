@@ -187,6 +187,12 @@ async fn main() -> anyhow::Result<()> {
     let pubsub_for_sub = Arc::clone(&pubsub);
     tokio::spawn(async move { pubsub_for_sub.run_subscriber().await });
 
+    // Spawn Redis pub/sub subscriber for cross-pod cache-key invalidation.
+    // Membership / visibility changes on other pods are received here and the
+    // matching local moka caches are dropped (via the consumer loop below).
+    let pubsub_for_cache = Arc::clone(&pubsub);
+    tokio::spawn(async move { pubsub_for_cache.run_cache_invalidation_subscriber().await });
+
     let auth = AuthService::new(config.auth.clone());
 
     let search_config = SearchConfig {
@@ -506,6 +512,32 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::error!("Multi-node fan-out broadcast channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Cross-pod cache-invalidation consumer: receive cache-key drops from Redis
+    // pub/sub (published by other relay instances when membership/visibility
+    // changes) and apply the matching local moka drop. Uses the `*_local` drop
+    // variants so a received drop is never re-published.
+    {
+        let state_for_cache = Arc::clone(&state);
+        let mut rx = state_for_cache.pubsub.subscribe_cache_invalidations();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(invalidation) => {
+                        state_for_cache.apply_cache_invalidation(invalidation);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);
+                        tracing::warn!("Cache-invalidation consumer lagged by {n} messages");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::error!("Cache-invalidation broadcast channel closed");
                         break;
                     }
                 }
