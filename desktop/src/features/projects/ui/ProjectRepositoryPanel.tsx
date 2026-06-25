@@ -21,6 +21,16 @@ function compactDate(createdAt: number) {
   });
 }
 
+function formatLastChangedAt(timestamp: number | null) {
+  if (!timestamp) return "—";
+  return new Date(timestamp * 1_000).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function formatFileSize(size: number | null) {
   if (size === null) return "—";
   if (size < 1024) return `${size} B`;
@@ -236,9 +246,16 @@ function FileContentPanel({
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
           {file.path}
         </span>
-        <span className="shrink-0 text-2xs text-muted-foreground">
+        <div className="hidden shrink-0 items-center gap-3 text-2xs text-muted-foreground sm:flex">
+          <span>Last changed {formatLastChangedAt(file.lastChangedAt)}</span>
+          <span>{formatFileSize(file.size)}</span>
+        </div>
+        <span className="shrink-0 text-2xs text-muted-foreground sm:hidden">
           {formatFileSize(file.size)}
         </span>
+      </div>
+      <div className="border-border/50 border-b bg-muted/10 px-4 py-2 text-2xs text-muted-foreground sm:hidden">
+        Last changed {formatLastChangedAt(file.lastChangedAt)}
       </div>
       {file.previewContent ? (
         <pre className="max-h-[36rem] overflow-auto bg-background/60 p-4">
@@ -371,10 +388,16 @@ export function RepositoryFilesPanel({
         })}
       </div>
 
+      <div className="hidden grid-cols-[minmax(0,1fr)_9rem_5rem] gap-3 border-border/50 border-b bg-muted/10 px-4 py-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground sm:grid">
+        <span>Name</span>
+        <span>Last changed</span>
+        <span className="text-right">Size</span>
+      </div>
+
       <div className="divide-y divide-border/50">
         {currentPath ? (
           <button
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-muted/30"
+            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-muted/30 sm:grid-cols-[minmax(0,1fr)_9rem_5rem]"
             onClick={() => {
               const parent = currentPath.split("/").slice(0, -1).join("/");
               setCurrentPath(parent);
@@ -387,6 +410,7 @@ export function RepositoryFilesPanel({
                 ..
               </span>
             </div>
+            <span className="hidden shrink-0 text-xs text-muted-foreground sm:block" />
             <span className="shrink-0 text-xs text-muted-foreground">
               Parent
             </span>
@@ -398,10 +422,11 @@ export function RepositoryFilesPanel({
             entry.type === "directory"
               ? `${entry.fileCount ?? 0} files`
               : formatFileSize(entry.file?.size ?? null);
+          const lastChanged = formatLastChangedAt(entry.lastChangedAt);
 
           return (
             <button
-              className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-muted/30"
+              className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-muted/30 sm:grid-cols-[minmax(0,1fr)_9rem_5rem]"
               key={`${entry.type}:${entry.path}`}
               onClick={() => {
                 if (entry.type === "directory") {
@@ -418,7 +443,10 @@ export function RepositoryFilesPanel({
                   {entry.name}
                 </span>
               </div>
-              <span className="shrink-0 text-xs text-muted-foreground">
+              <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
+                {lastChanged}
+              </span>
+              <span className="shrink-0 text-right text-xs text-muted-foreground">
                 {meta}
               </span>
             </button>
@@ -449,8 +477,11 @@ export function ReadmePanel({ file }: { file: ProjectRepoFile | null }) {
     <section className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
       <div className="flex min-h-10 items-center gap-2 border-border/50 border-b bg-muted/20 px-4">
         <BookOpen className="h-4 w-4 text-muted-foreground" />
-        <span className="truncate text-sm font-medium text-foreground">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
           {baseName(file.path)}
+        </span>
+        <span className="hidden shrink-0 text-2xs text-muted-foreground sm:block">
+          Last changed {formatLastChangedAt(file.lastChangedAt)}
         </span>
       </div>
       <div className="p-4">
