@@ -66,6 +66,7 @@ import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePan
 import { UserProfilePersonaDialogs } from "@/features/profile/ui/UserProfilePersonaDialogs";
 import {
   deriveProfileChannels,
+  type ProfilePanelTab,
   type ProfilePanelView,
   resolveAgentInstruction,
   resolvePanelProfile,
@@ -91,7 +92,7 @@ import type {
 import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFrame";
 import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProfilePanelHeaderContent";
 
-export type { ProfilePanelView };
+export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
   canResetWidth,
@@ -103,10 +104,12 @@ export function UserProfilePanel({
   onOpenProfile,
   onResetWidth,
   onResizeStart,
+  onTabChange,
   onViewChange,
   persona,
   pubkey,
   splitPaneClamp = false,
+  tab: controlledTab,
   view: controlledView,
   widthPx,
 }: UserProfilePanelProps) {
@@ -127,6 +130,18 @@ export function UserProfilePanel({
       setInternalView(nextView);
     },
     [onViewChange],
+  );
+  const [internalTab, setInternalTab] = React.useState<ProfilePanelTab>("info");
+  const tab = controlledTab ?? internalTab;
+  const setTab = React.useCallback(
+    (nextTab: ProfilePanelTab, options?: { replace?: boolean }) => {
+      if (onTabChange) {
+        onTabChange(nextTab, options);
+        return;
+      }
+      setInternalTab(nextTab);
+    },
+    [onTabChange],
   );
   const [editAgentOpen, setEditAgentOpen] = React.useState(false);
   const [addToChannelOpen, setAddToChannelOpen] = React.useState(false);
@@ -350,7 +365,8 @@ export function UserProfilePanel({
     if (prevTargetKeyRef.current === targetKey) return;
     prevTargetKeyRef.current = targetKey;
     setView("summary", { replace: true });
-  }, [setView, targetKey]);
+    setTab("info", { replace: true });
+  }, [setTab, setView, targetKey]);
   const handleMessage = React.useCallback(() => {
     if (!effectivePubkey) return;
     onOpenDm?.([effectivePubkey]);
@@ -828,11 +844,13 @@ export function UserProfilePanel({
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
           onOpenInstructions={() => setView("instructions")}
+          onTabChange={setTab}
           onOpenDm={onOpenDm}
           presenceStatus={presenceStatus}
           profile={profile}
           pubkey={effectivePubkey}
           relayAgent={relayAgent}
+          tab={tab}
           unfollowMutation={unfollowMutation}
           userStatus={userStatus}
         />

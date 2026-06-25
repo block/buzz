@@ -22,6 +22,7 @@ import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeig
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import {
+  type ProfilePanelTab,
   type ProfilePanelView,
   UserProfilePanel,
 } from "@/features/profile/ui/UserProfilePanel";
@@ -151,7 +152,12 @@ type ChannelPaneProps = {
     view: ProfilePanelView,
     options?: { replace?: boolean },
   ) => void;
+  onProfilePanelTabChange: (
+    tab: ProfilePanelTab,
+    options?: { replace?: boolean },
+  ) => void;
   profilePanelPubkey?: string | null;
+  profilePanelTab: ProfilePanelTab;
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
@@ -238,7 +244,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   shouldShowThreadSkeleton,
   openAgentSessionPubkey,
   onProfilePanelViewChange,
+  onProfilePanelTabChange,
   profilePanelPubkey,
+  profilePanelTab,
   profilePanelView,
   targetMessageId,
   threadHeadMessage,
@@ -312,9 +320,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     isActiveWelcomeChannel,
   ]);
 
-  // Scope the edit target to the correct composer: if the message being edited
-  // lives inside the open thread (thread head or a reply), show the editing UI
-  // only in the thread panel; otherwise show it in the main channel composer.
   const isEditInThread =
     editTarget != null &&
     threadHeadMessage != null &&
@@ -323,15 +328,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
 
-  // ↑-to-edit resolvers. Find the most recent message authored by the current
-  // user in the relevant scope and enter edit mode via `onEdit`. Editability
-  // mirrors the action bar's gate (`message.pubkey === currentPubkey`); we
-  // also skip optimistic `pending` messages, which have no persisted event id
-  // to target. Both scopes are passed in chronological (oldest→newest) order,
-  // so we select by newest `createdAt` and break ties toward the later array
-  // position (`>=`) — `createdAt` is second-granularity, so a reply sent in
-  // the same second as the message before it must still win. Returns true when
-  // a target was found so MessageComposer can swallow the ArrowUp.
   const findLastOwnEditable = React.useCallback(
     (candidates: TimelineMessage[]): TimelineMessage | null => {
       if (!onEdit || !currentPubkey) return null;
@@ -362,8 +358,6 @@ export const ChannelPane = React.memo(function ChannelPane({
 
   const handleEditLastOwnThreadMessage = React.useCallback((): boolean => {
     if (!onEdit) return false;
-    // Thread scope = the open thread head plus its replies, in chronological
-    // order. The head is oldest, so append it first.
     const scope: TimelineMessage[] = [];
     if (threadHeadMessage) scope.push(threadHeadMessage);
     for (const entry of threadMessages) scope.push(entry.message);
@@ -972,9 +966,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                       onClose={onCloseProfilePanel}
                       onOpenDm={onOpenDm}
                       onOpenProfile={onOpenProfilePanel}
+                      onTabChange={onProfilePanelTabChange}
                       onViewChange={onProfilePanelViewChange}
                       pubkey={profilePanelPubkey}
                       splitPaneClamp
+                      tab={profilePanelTab}
                       view={profilePanelView}
                       widthPx={threadPanelWidthPx}
                     />

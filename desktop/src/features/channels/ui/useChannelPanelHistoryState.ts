@@ -1,6 +1,8 @@
 import * as React from "react";
 
 import {
+  profilePanelTabFromSearch,
+  type ProfilePanelTab,
   profilePanelViewFromSearch,
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
@@ -15,8 +17,8 @@ import {
  * was showing, and reloads restore the panel from the URL.
  *
  * Params: `thread` (open thread head id), `profile` (profile panel pubkey),
- * `profileView` (profile panel sub-view), `agentSession` (agent session
- * panel pubkey).
+ * `profileView` (profile panel focused view), `profileTab` (profile summary
+ * tab), `agentSession` (agent session panel pubkey).
  */
 
 export type PanelSetterOptions = HistorySearchSetterOptions;
@@ -30,6 +32,7 @@ const CHANNEL_SEARCH_KEYS = [
   "agentSession",
   "messageId",
   "profile",
+  "profileTab",
   "profileView",
   "thread",
   "threadRootId",
@@ -47,13 +50,22 @@ export function useChannelPanelHistoryState() {
   // the carried `profileView` would otherwise leak onto the next profile.
   const setProfilePanelPubkey = React.useCallback<PanelValueSetter>(
     (value, options) =>
-      applyPatch({ profile: value, profileView: null }, options),
+      applyPatch(
+        { profile: value, profileTab: null, profileView: null },
+        options,
+      ),
     [applyPatch],
   );
 
   const setProfilePanelView = React.useCallback(
     (value: ProfilePanelView, options?: PanelSetterOptions) =>
       applyPatch({ profileView: value === "summary" ? null : value }, options),
+    [applyPatch],
+  );
+
+  const setProfilePanelTab = React.useCallback(
+    (value: ProfilePanelTab, options?: PanelSetterOptions) =>
+      applyPatch({ profileTab: value === "info" ? null : value }, options),
     [applyPatch],
   );
 
@@ -73,9 +85,11 @@ export function useChannelPanelHistoryState() {
     openAgentSessionPubkey: values.agentSession,
     openThreadHeadId: values.thread,
     profilePanelPubkey: values.profile,
+    profilePanelTab: profilePanelTabFromSearch(values.profileTab),
     profilePanelView: profilePanelViewFromSearch(values.profileView),
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
+    setProfilePanelTab,
     setProfilePanelPubkey,
     setProfilePanelView,
   };

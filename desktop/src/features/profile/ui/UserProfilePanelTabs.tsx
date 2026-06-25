@@ -11,11 +11,10 @@ import {
   ProfileFieldGroup,
   ProfileFieldRows,
 } from "@/features/profile/ui/UserProfilePanelFields";
+import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtils";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-
-export type ProfileTab = "info" | "runtime" | "channels" | "memories";
 
 export function ProfileIngressRow({
   disabled,
@@ -193,10 +192,10 @@ export function ProfileTabBar({
   onTabChange,
   tabs,
 }: {
-  activeTab: ProfileTab;
-  onTabChange: (tab: ProfileTab) => void;
+  activeTab: ProfilePanelTab;
+  onTabChange: (tab: ProfilePanelTab) => void;
   tabs: Array<{
-    id: ProfileTab;
+    id: ProfilePanelTab;
     label: string;
     trailing?: React.ReactNode;
   }>;

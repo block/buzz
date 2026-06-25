@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  parseProfilePanelTab,
   parseProfilePanelView,
   personaManagedAgentUpdate,
+  profilePanelTabFromSearch,
   profilePanelViewFromSearch,
 } from "./UserProfilePanelUtils.ts";
 
@@ -175,4 +177,16 @@ test("profilePanelViewFromSearch falls back to summary for invalid values", () =
   assert.equal(parseProfilePanelView("missing"), null);
   assert.equal(profilePanelViewFromSearch("missing"), "summary");
   assert.equal(profilePanelViewFromSearch(null), "summary");
+});
+
+test("parseProfilePanelTab accepts profile summary tabs", () => {
+  for (const tab of ["info", "runtime", "channels", "memories"]) {
+    assert.equal(parseProfilePanelTab(tab), tab);
+  }
+});
+
+test("profilePanelTabFromSearch falls back to info for invalid values", () => {
+  assert.equal(parseProfilePanelTab("missing"), null);
+  assert.equal(profilePanelTabFromSearch("missing"), "info");
+  assert.equal(profilePanelTabFromSearch(null), "info");
 });

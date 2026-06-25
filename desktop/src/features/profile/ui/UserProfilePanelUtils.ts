@@ -25,6 +25,8 @@ export type ProfilePanelView =
   | "channels"
   | "logs";
 
+export type ProfilePanelTab = "info" | "runtime" | "channels" | "memories";
+
 export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
   instructions: "Instructions",
@@ -39,6 +41,13 @@ export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
 const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(
   Object.keys(PROFILE_PANEL_VIEW_TITLES) as ProfilePanelView[],
 );
+
+const PROFILE_PANEL_TABS = new Set<ProfilePanelTab>([
+  "info",
+  "runtime",
+  "channels",
+  "memories",
+]);
 
 const LEGACY_PROFILE_PANEL_VIEW_ALIASES: Record<string, ProfilePanelView> = {
   model: "configuration",
@@ -61,6 +70,22 @@ export function profilePanelViewFromSearch(value: unknown): ProfilePanelView {
   return parseProfilePanelView(value) ?? "summary";
 }
 
+export function parseProfilePanelTab(value: unknown): ProfilePanelTab | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  if (PROFILE_PANEL_TABS.has(value as ProfilePanelTab)) {
+    return value as ProfilePanelTab;
+  }
+
+  return null;
+}
+
+export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
+  return parseProfilePanelTab(value) ?? "info";
+}
+
 export type UserProfilePanelProps = {
   canResetWidth?: boolean;
   currentPubkey?: string;
@@ -71,6 +96,7 @@ export type UserProfilePanelProps = {
   onOpenProfile?: (pubkey: string) => void;
   onResetWidth?: () => void;
   onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onTabChange?: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
   onViewChange?: (
     view: ProfilePanelView,
     options?: { replace?: boolean },
@@ -78,6 +104,7 @@ export type UserProfilePanelProps = {
   persona?: AgentPersona;
   pubkey?: string;
   splitPaneClamp?: boolean;
+  tab?: ProfilePanelTab;
   view?: ProfilePanelView;
   widthPx: number;
 };

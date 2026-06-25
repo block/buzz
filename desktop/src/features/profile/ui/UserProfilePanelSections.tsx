@@ -37,13 +37,15 @@ import {
   ProfileIngressRow,
   ProfileRuntimeTabContent,
   ProfileTabBar,
-  type ProfileTab,
 } from "@/features/profile/ui/UserProfilePanelTabs";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
-import type { ProfileChannelLink } from "@/features/profile/ui/UserProfilePanelUtils";
+import type {
+  ProfileChannelLink,
+  ProfilePanelTab,
+} from "@/features/profile/ui/UserProfilePanelUtils";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -90,11 +92,13 @@ export type ProfileSummaryViewProps = {
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
+  onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
   onOpenDm?: (pubkeys: string[]) => void;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
   relayAgent: RelayAgent | undefined;
+  tab: ProfilePanelTab;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
 };
@@ -180,17 +184,18 @@ export function ProfileSummaryView({
   onOpenChannel,
   onOpenDiagnostics,
   onOpenInstructions,
+  onTabChange,
   onOpenDm,
   presenceStatus,
   profile,
   pubkey,
   relayAgent,
+  tab,
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
   const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
-  const [activeTab, setActiveTab] = React.useState<ProfileTab>("info");
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
   const showInstructionBlock =
@@ -239,7 +244,7 @@ export function ProfileSummaryView({
 
   const tabs = React.useMemo(() => {
     const items: Array<{
-      id: ProfileTab;
+      id: ProfilePanelTab;
       label: string;
       trailing?: React.ReactNode;
     }> = [];
@@ -290,15 +295,11 @@ export function ProfileSummaryView({
     showRuntimeTab,
   ]);
 
-  React.useEffect(() => {
-    if (tabs.some((tab) => tab.id === activeTab)) {
-      return;
-    }
-    setActiveTab(tabs[0]?.id ?? "info");
-  }, [activeTab, tabs]);
-
   const showTabSection = tabs.length > 0;
   const showTabBar = !(tabs.length === 1 && tabs[0]?.id === "info");
+  const activeTab = tabs.some((item) => item.id === tab)
+    ? tab
+    : (tabs[0]?.id ?? "info");
 
   return (
     <div className="flex flex-col gap-6 pt-4">
@@ -363,7 +364,7 @@ export function ProfileSummaryView({
           {showTabBar ? (
             <ProfileTabBar
               activeTab={activeTab}
-              onTabChange={setActiveTab}
+              onTabChange={onTabChange}
               tabs={tabs}
             />
           ) : null}

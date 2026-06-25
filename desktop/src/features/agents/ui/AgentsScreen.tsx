@@ -1,11 +1,21 @@
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { usePersonasQuery } from "@/features/agents/hooks";
 import { useOpenDmMutation } from "@/features/channels/hooks";
-import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
+import {
+  type ProfilePanelTab,
+  type ProfilePanelView,
+  UserProfilePanel,
+} from "@/features/profile/ui/UserProfilePanel";
+import {
+  profilePanelTabFromSearch,
+  profilePanelViewFromSearch,
+} from "@/features/profile/ui/UserProfilePanelUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { AgentPersona } from "@/shared/api/types";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
@@ -18,23 +28,81 @@ type ProfilePanelTarget =
   | { kind: "pubkey"; pubkey: string }
   | { kind: "persona"; persona: AgentPersona };
 
+const AGENTS_PROFILE_SEARCH_KEYS = [
+  "profile",
+  "profilePersona",
+  "profileTab",
+  "profileView",
+] as const;
+
 export function AgentsScreen() {
   const identityQuery = useIdentityQuery();
-  const [profilePanelTarget, setProfilePanelTarget] =
-    React.useState<ProfilePanelTarget | null>(null);
+  const personasQuery = usePersonasQuery();
+  const { applyPatch, values } = useHistorySearchState(
+    AGENTS_PROFILE_SEARCH_KEYS,
+  );
+  const profilePanelTab = profilePanelTabFromSearch(values.profileTab);
+  const profilePanelView = profilePanelViewFromSearch(values.profileView);
+  const profilePanelTarget = React.useMemo<ProfilePanelTarget | null>(() => {
+    if (values.profile) {
+      return { kind: "pubkey", pubkey: values.profile };
+    }
+
+    if (values.profilePersona) {
+      const persona = personasQuery.data?.find(
+        (candidate) => candidate.id === values.profilePersona,
+      );
+      if (persona) {
+        return { kind: "persona", persona };
+      }
+    }
+
+    return null;
+  }, [personasQuery.data, values.profile, values.profilePersona]);
   const threadPanelWidth = useThreadPanelWidth();
   const openDmMutation = useOpenDmMutation();
   const { goChannel } = useAppNavigation();
 
-  const handleOpenProfilePanel = React.useCallback((pubkey: string) => {
-    setProfilePanelTarget({ kind: "pubkey", pubkey });
-  }, []);
+  const handleOpenProfilePanel = React.useCallback(
+    (pubkey: string) => {
+      applyPatch({
+        profile: pubkey,
+        profilePersona: null,
+        profileTab: null,
+        profileView: null,
+      });
+    },
+    [applyPatch],
+  );
 
   const handleOpenPersonaProfilePanel = React.useCallback(
     (persona: AgentPersona) => {
-      setProfilePanelTarget({ kind: "persona", persona });
+      applyPatch({
+        profile: null,
+        profilePersona: persona.id,
+        profileTab: null,
+        profileView: null,
+      });
     },
-    [],
+    [applyPatch],
+  );
+  const handleCloseProfilePanel = React.useCallback(() => {
+    applyPatch({
+      profile: null,
+      profilePersona: null,
+      profileTab: null,
+      profileView: null,
+    });
+  }, [applyPatch]);
+  const handleProfilePanelViewChange = React.useCallback(
+    (view: ProfilePanelView, options?: { replace?: boolean }) =>
+      applyPatch({ profileView: view === "summary" ? null : view }, options),
+    [applyPatch],
+  );
+  const handleProfilePanelTabChange = React.useCallback(
+    (tab: ProfilePanelTab, options?: { replace?: boolean }) =>
+      applyPatch({ profileTab: tab === "info" ? null : tab }, options),
+    [applyPatch],
   );
 
   const handleOpenDm = React.useCallback(
@@ -59,11 +127,13 @@ export function AgentsScreen() {
             <UserProfilePanel
               canResetWidth={threadPanelWidth.canReset}
               currentPubkey={identityQuery.data?.pubkey}
-              onClose={() => setProfilePanelTarget(null)}
+              onClose={handleCloseProfilePanel}
               onOpenDm={handleOpenDm}
               onOpenProfile={handleOpenProfilePanel}
               onResetWidth={threadPanelWidth.onResetWidth}
               onResizeStart={threadPanelWidth.onResizeStart}
+              onTabChange={handleProfilePanelTabChange}
+              onViewChange={handleProfilePanelViewChange}
               persona={
                 profilePanelTarget.kind === "persona"
                   ? profilePanelTarget.persona
@@ -74,6 +144,8 @@ export function AgentsScreen() {
                   ? profilePanelTarget.pubkey
                   : undefined
               }
+              tab={profilePanelTab}
+              view={profilePanelView}
               widthPx={threadPanelWidth.widthPx}
             />
           ) : null}

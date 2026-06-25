@@ -2,7 +2,9 @@ import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
 import {
+  parseProfilePanelTab,
   parseProfilePanelView,
+  type ProfilePanelTab,
   type ProfilePanelView,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -11,6 +13,7 @@ type ChannelRouteSearch = {
   agentSession?: string;
   messageId?: string;
   profile?: string;
+  profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
   thread?: string;
   threadRootId?: string;
@@ -27,6 +30,7 @@ function validateChannelSearch(
     agentSession: nonEmptyString(search.agentSession),
     messageId: nonEmptyString(search.messageId),
     profile: nonEmptyString(search.profile),
+    profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
     thread: nonEmptyString(search.thread),
     threadRootId: nonEmptyString(search.threadRootId),

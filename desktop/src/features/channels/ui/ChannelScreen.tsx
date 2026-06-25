@@ -108,9 +108,11 @@ export function ChannelScreen({
     openAgentSessionPubkey,
     openThreadHeadId,
     profilePanelPubkey,
+    profilePanelTab,
     profilePanelView,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
+    setProfilePanelTab,
     setProfilePanelPubkey,
     setProfilePanelView,
   } = useChannelPanelHistoryState();
@@ -818,7 +820,9 @@ export function ChannelScreen({
                   openThreadHeadId={effectiveOpenThreadHeadId}
                   shouldShowThreadSkeleton={shouldShowThreadSkeleton}
                   onProfilePanelViewChange={setProfilePanelView}
+                  onProfilePanelTabChange={setProfilePanelTab}
                   profilePanelPubkey={profilePanelPubkey}
+                  profilePanelTab={profilePanelTab}
                   profilePanelView={profilePanelView}
                   personaLookup={personaLookup}
                   profiles={messageProfiles}
