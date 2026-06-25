@@ -248,7 +248,8 @@ async fn hints_suppressed_with_env_var() {
     h.shutdown().await;
 }
 
-/// SKILL.md files in .agents/skills/ are loaded into the system prompt.
+/// SKILL.md files in .agents/skills/ are loaded into the system prompt as metadata only.
+/// The body is NOT inlined; the agent uses `load_skill` to fetch it on demand.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skills_loaded_from_agents_skills_dir() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -276,13 +277,20 @@ async fn skills_loaded_from_agents_skills_dir() {
     let captured = llm.captured.lock().await;
     assert!(!captured.is_empty(), "no LLM request captured");
     let system = captured[0]["messages"][0]["content"].as_str().unwrap_or("");
+    // Skill name must appear in the metadata listing.
     assert!(
         system.contains("test-skill"),
         "system prompt missing skill name: {system}"
     );
+    // Body must NOT be inlined — lazy loading only.
     assert!(
-        system.contains("SKILL_BODY_MARKER_77"),
-        "system prompt missing skill body: {system}"
+        !system.contains("SKILL_BODY_MARKER_77"),
+        "skill body must not be inlined in system prompt: {system}"
+    );
+    // The load_skill instruction must be present.
+    assert!(
+        system.contains("load_skill"),
+        "system prompt missing load_skill instruction: {system}"
     );
     h.shutdown().await;
 }
@@ -372,6 +380,7 @@ async fn global_agents_md_loaded() {
 }
 
 /// Global skills from ~/.agents/skills/ are loaded; project-level wins on name conflict.
+/// Bodies are NOT inlined — only metadata (name + description) appears in the system prompt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn global_skills_loaded_and_project_wins() {
     let home_tmp = tempfile::TempDir::new().unwrap();
@@ -417,21 +426,163 @@ async fn global_skills_loaded_and_project_wins() {
     let captured = llm.captured.lock().await;
     assert!(!captured.is_empty(), "no LLM request captured");
     let system = captured[0]["messages"][0]["content"].as_str().unwrap_or("");
+    // Both skill names must appear in the metadata listing.
     assert!(
         system.contains("global-only"),
         "system prompt missing global-only skill name: {system}"
     );
     assert!(
-        system.contains("GLOBAL_SKILL_BODY_88"),
-        "system prompt missing global-only skill body: {system}"
+        system.contains("shared-name"),
+        "system prompt missing shared-name skill: {system}"
+    );
+    // Project description wins over global for the shared name.
+    assert!(
+        system.contains("Project version"),
+        "system prompt should show project description for shared-name: {system}"
     );
     assert!(
-        system.contains("PROJECT_SHARED_BODY_WIN"),
-        "system prompt missing project skill body: {system}"
+        !system.contains("Global version"),
+        "system prompt should NOT show global description for shared-name: {system}"
+    );
+    // Bodies must NOT be inlined.
+    assert!(
+        !system.contains("GLOBAL_SKILL_BODY_88"),
+        "skill body must not be inlined: {system}"
+    );
+    assert!(
+        !system.contains("PROJECT_SHARED_BODY_WIN"),
+        "skill body must not be inlined: {system}"
     );
     assert!(
         !system.contains("GLOBAL_SHARED_BODY_LOSE"),
-        "system prompt should NOT contain shadowed global skill body: {system}"
+        "shadowed skill body must not be inlined: {system}"
     );
+    h.shutdown().await;
+}
+
+/// `load_skill` tool is advertised when skills exist, and returns the skill body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_skill_tool_returns_body() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let skill_dir = cwd.join(".agents/skills/my-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: A skill\n---\nSKILL_BODY_CONTENT_99\n",
+    )
+    .unwrap();
+
+    // Round 1: LLM calls load_skill("my-skill").
+    // Round 2: LLM returns end_turn after seeing the body.
+    let load_skill_call = json!({
+        "id": "cc-ls", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{
+                    "id": "tc-1", "type": "function",
+                    "function": {
+                        "name": "load_skill",
+                        "arguments": "{\"name\":\"my-skill\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+    let end_turn = openai_text("done");
+
+    let (url, captures) = {
+        use std::collections::VecDeque;
+        use tokio::net::TcpListener;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let queue = Arc::new(Mutex::new(VecDeque::from(vec![load_skill_call, end_turn])));
+        let captures: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap2 = captures.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let queue = queue.clone();
+                let captured = cap2.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                    let headers = &buf[..header_end];
+                    let mut body_len = 0usize;
+                    for line in headers.split(|b| *b == b'\n') {
+                        let line = std::str::from_utf8(line).unwrap_or("");
+                        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            body_len = rest.trim().trim_end_matches('\r').parse().unwrap_or(0);
+                        }
+                    }
+                    while buf.len() < header_end + body_len {
+                        match sock.read(&mut tmp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                        }
+                    }
+                    if let Ok(req) = serde_json::from_slice::<Value>(&buf[header_end..]) {
+                        captured.lock().await.push(req);
+                    }
+                    let body = queue.lock().await.pop_front()
+                        .unwrap_or_else(|| json!({"error": "no response"}));
+                    let body_s = serde_json::to_string(&body).unwrap();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body_s.len(), body_s,
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (url, captures)
+    };
+
+    let mut h = Harness::spawn_with_env(&url, &[]).await;
+    let sid = init_session(&mut h, cwd.to_str().unwrap()).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"use my-skill"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+
+    // The second LLM request (round 2) should contain the skill body in tool results.
+    let reqs = captures.lock().await;
+    assert!(reqs.len() >= 2, "expected at least 2 LLM requests, got {}", reqs.len());
+    let round2 = &reqs[1];
+    let messages = round2["messages"].as_array().expect("messages array");
+    let tool_result_msg = messages.iter().find(|m| {
+        m["role"] == "tool"
+            || (m["role"] == "user"
+                && m["content"].as_array().map_or(false, |arr| {
+                    arr.iter().any(|c| c["type"] == "tool_result")
+                }))
+    });
+    // The body must appear somewhere in the second request's messages.
+    let round2_str = serde_json::to_string(round2).unwrap();
+    assert!(
+        round2_str.contains("SKILL_BODY_CONTENT_99"),
+        "load_skill result must contain skill body in round 2 request.\nGot: {round2_str}"
+    );
+    drop(tool_result_msg); // suppress unused warning
     h.shutdown().await;
 }

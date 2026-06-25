@@ -689,8 +689,13 @@ async fn description_clamping_enforced() {
 
     let captured = llm.captured.lock().await;
     let tools = captured[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 1);
-    let desc = tools[0]["function"]["description"].as_str().unwrap_or("");
+    // The MCP tool is "big__tool_0"; load_skill may also be present when
+    // global skills are discovered from HOME. Find the MCP tool by name.
+    let mcp_tool = tools
+        .iter()
+        .find(|t| t["function"]["name"].as_str() == Some("big__tool_0"))
+        .expect("big__tool_0 not found in tool list");
+    let desc = mcp_tool["function"]["description"].as_str().unwrap_or("");
     assert!(
         desc.len() <= 1024,
         "description not clamped: {} bytes (expected ≤ 1024)",

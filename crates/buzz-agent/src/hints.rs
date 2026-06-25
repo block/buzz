@@ -4,17 +4,19 @@ use std::path::{Path, PathBuf};
 use crate::mcp::truncate_at_boundary;
 
 const MAX_HINTS_BYTES: usize = 128 * 1024;
-const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
+pub const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME").ok().map(PathBuf::from)
 }
 
+#[derive(Clone)]
 pub struct SkillEntry {
     pub name: String,
     pub description: String,
-    pub body: String,
+    /// Absolute path to the SKILL.md file; used by `load_skill` to read on demand.
+    pub path: PathBuf,
 }
 
 /// Handles both normal repos (`.git/` dir) and worktrees (`.git` file).
@@ -77,15 +79,12 @@ fn load_hint_files_impl(cwd: &Path, home: Option<&Path>) -> String {
     result
 }
 
-fn parse_skill_frontmatter(content: &str) -> Option<(String, String, String)> {
+fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
     // Must start with `---`
     let rest = content.strip_prefix("---\n")?;
     // Find the closing `---`
     let close_pos = rest.find("\n---")?;
     let yaml_block = &rest[..close_pos];
-    // Everything after the closing `---\n` (or `---` at end) is the body.
-    let after_close = &rest[close_pos + 4..]; // skip "\n---"
-    let body = after_close.strip_prefix('\n').unwrap_or(after_close);
 
     let map: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(yaml_block).ok()?;
     let name = map
@@ -101,13 +100,7 @@ fn parse_skill_frontmatter(content: &str) -> Option<(String, String, String)> {
         .unwrap_or("")
         .to_string();
 
-    let body = if body.len() > MAX_SKILL_BODY_BYTES {
-        truncate_at_boundary(body, MAX_SKILL_BODY_BYTES).to_string()
-    } else {
-        body.to_string()
-    };
-
-    Some((name, description, body))
+    Some((name, description))
 }
 
 fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<SkillEntry>) {
@@ -126,7 +119,7 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
         let Ok(content) = std::fs::read_to_string(&skill_md) else {
             continue;
         };
-        let Some((name, description, body)) = parse_skill_frontmatter(&content) else {
+        let Some((name, description)) = parse_skill_frontmatter(&content) else {
             continue;
         };
         if seen.contains(&name) {
@@ -136,7 +129,7 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
         skills.push(SkillEntry {
             name,
             description,
-            body,
+            path: skill_md,
         });
     }
 }
@@ -160,6 +153,10 @@ pub fn build_hints_section(cwd: &Path) -> String {
     build_hints_section_impl(cwd, home_dir().as_deref())
 }
 
+pub fn discover_skills(cwd: &Path) -> Vec<SkillEntry> {
+    discover_skills_impl(cwd, home_dir().as_deref())
+}
+
 fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
     let hints_text = load_hint_files_impl(cwd, home);
     let skills = discover_skills_impl(cwd, home);
@@ -181,13 +178,9 @@ fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
         for skill in &skills {
             out.push_str(&format!("- {}: {}\n", skill.name, skill.description));
         }
-        for skill in &skills {
-            out.push_str(&format!("\n### {}\n", skill.name));
-            out.push_str(&skill.body);
-            if !skill.body.ends_with('\n') {
-                out.push('\n');
-            }
-        }
+        out.push_str(
+            "\nUse the `load_skill` tool to read the full content of a skill before using it.\n",
+        );
     }
 
     out
@@ -304,6 +297,11 @@ mod tests {
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"my-skill"), "missing my-skill");
         assert!(names.contains(&"other-skill"), "missing other-skill");
+        // Paths should point to the SKILL.md files.
+        for skill in &skills {
+            assert!(skill.path.exists(), "path does not exist: {:?}", skill.path);
+            assert!(skill.path.ends_with("SKILL.md"));
+        }
     }
 
     #[test]
@@ -334,7 +332,8 @@ mod tests {
             skills[0].description, "from agents",
             "first wins (.agents/)"
         );
-        assert_eq!(skills[0].body.trim(), "Agents body.");
+        // Path should point to the .agents/ version (first wins).
+        assert!(skills[0].path.to_str().unwrap().contains(".agents/skills/shared"));
     }
 
     #[test]
@@ -395,10 +394,20 @@ mod tests {
             result.contains("buzz-cli: CLI reference for Buzz managed agents"),
             "missing skill bullet"
         );
-        assert!(result.contains("### buzz-cli"), "missing skill header");
+        // Body must NOT be inlined — lazy loading only.
         assert!(
-            result.contains("Use `buzz` to manage agents."),
-            "missing skill body"
+            !result.contains("Use `buzz` to manage agents."),
+            "skill body must not be inlined in system prompt"
+        );
+        // The load_skill instruction must be present.
+        assert!(
+            result.contains("load_skill"),
+            "missing load_skill instruction"
+        );
+        // The old ### heading format must not appear.
+        assert!(
+            !result.contains("### buzz-cli"),
+            "skill body heading must not be inlined"
         );
     }
 

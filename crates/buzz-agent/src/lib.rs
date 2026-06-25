@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 mod agent;
 pub mod auth;
+mod builtin;
 mod config;
 mod handoff;
 mod hints;
@@ -19,6 +20,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 
 use crate::agent::RunCtx;
 use crate::config::{Config, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
+use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::types::HistoryItem;
@@ -36,6 +38,8 @@ struct App {
 struct Session {
     id: String,
     mcp: Arc<McpRegistry>,
+    /// Skills discovered at session creation; used by the built-in `load_skill` tool.
+    skills: Vec<SkillEntry>,
     history: Vec<HistoryItem>,
     cancel_tx: watch::Sender<bool>,
     busy: bool,
@@ -301,6 +305,11 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         }
         Arc::from(prompt)
     };
+    let skills = if app.cfg.hints_enabled {
+        hints::discover_skills(std::path::Path::new(&p.cwd))
+    } else {
+        Vec::new()
+    };
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
         Ok(m) => Arc::new(m),
         Err(e) => return reject(wire_tx, id, e.json_rpc_code(), &e.to_string()).await,
@@ -326,6 +335,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         Session {
             id: session_id.clone(),
             mcp,
+            skills,
             history: Vec::new(),
             cancel_tx,
             busy: false,
@@ -369,6 +379,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let (
         sid,
         mcp,
+        skills,
         mut history,
         mut original_task,
         mut handoff_count,
@@ -395,6 +406,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         system_prompt: &effective_system_prompt,
         llm: &app.llm,
         mcp: &mcp,
+        skills: &skills,
         wire: &wire_tx,
         cancel: &mut cancel_rx,
         history: &mut history,
@@ -433,6 +445,7 @@ async fn acquire_session(
     (
         String,
         Arc<McpRegistry>,
+        Vec<SkillEntry>,
         Vec<HistoryItem>,
         Option<String>,
         usize,
@@ -452,9 +465,13 @@ async fn acquire_session(
     s.busy = true;
     let (tx, rx) = watch::channel(false);
     s.cancel_tx = tx;
+    // Skills are read-only after session creation; clone the Vec so RunCtx
+    // can hold a reference without holding the sessions lock.
+    let skills = s.skills.clone();
     Ok((
         s.id.clone(),
         s.mcp.clone(),
+        skills,
         std::mem::take(&mut s.history),
         s.original_task.take(),
         s.handoff_count,
