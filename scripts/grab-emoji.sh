@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# grab-emoji.sh — Download custom Slack emoji and upload to Buzz
+# grab-emoji.sh — Register custom Slack emoji in Buzz
+#
+# Looks up each emoji name in your Slack workspace and registers it in Buzz
+# via `buzz emoji set`, making it available as :name: in the Buzz emoji picker.
 #
 # Usage:
 #   SLACK_TOKEN=xoxp-... ./scripts/grab-emoji.sh shipitparrot partyparrot tada
@@ -8,8 +11,8 @@
 #   SLACK_TOKEN  — Slack user token (xoxp-...) with emoji:read scope
 #
 # Output:
-#   name → buzz_url      on success
-#   name → ERROR: reason on failure (script continues to next emoji)
+#   name → registered as :name: in Buzz   on success
+#   name → ERROR: reason                  on failure (script continues to next emoji)
 
 set -euo pipefail
 
@@ -118,48 +121,11 @@ for emoji_name in "$@"; do
     continue
   }
 
-  # Determine extension from URL (default to .png if none found)
-  ext="${emoji_url##*.}"
-  # Strip any query string from extension
-  ext="${ext%%\?*}"
-  case "$ext" in
-    png|gif|jpg|jpeg|webp) ;;
-    *) ext="png" ;;
-  esac
-
-  # Download to temp file
-  tmp_file=$(mktemp "/tmp/slack-emoji-XXXXXX.${ext}")
-  trap 'rm -f "$tmp_file"' EXIT
-
-  if ! curl -sf -o "$tmp_file" "$emoji_url"; then
-    echo "${emoji_name} → ERROR: failed to download emoji from ${emoji_url}"
-    rm -f "$tmp_file"
-    trap - EXIT
-    continue
-  fi
-
-  # Upload to Buzz
-  upload_output=$(buzz upload file "$tmp_file" 2>&1) || {
-    echo "${emoji_name} → ERROR: buzz upload failed — ${upload_output}"
-    rm -f "$tmp_file"
-    trap - EXIT
+  # Register in Buzz
+  set_output=$(buzz emoji set --shortcode "$emoji_name" --url "$emoji_url" 2>&1) || {
+    echo "${emoji_name} → ERROR: buzz emoji set failed — ${set_output}"
     continue
   }
 
-  # Extract URL from BlobDescriptor output
-  # buzz upload file prints a multi-line BlobDescriptor; the url field is first
-  buzz_url=$(echo "$upload_output" | grep -E '^url:' | awk '{print $2}' | head -1)
-  if [[ -z "$buzz_url" ]]; then
-    # Fallback: try JSON parse if output is JSON
-    buzz_url=$(echo "$upload_output" | jq -r '.url // empty' 2>/dev/null || true)
-  fi
-
-  if [[ -z "$buzz_url" ]]; then
-    echo "${emoji_name} → ERROR: could not parse Buzz URL from upload output"
-  else
-    echo "${emoji_name} → ${buzz_url}"
-  fi
-
-  rm -f "$tmp_file"
-  trap - EXIT
+  echo "${emoji_name} → registered as :${emoji_name}: in Buzz"
 done
