@@ -131,6 +131,7 @@ export function usePersonaActions() {
           agentArgs: runtime.defaultArgs,
           mcpCommand: runtime.mcpCommand ?? "",
           personaId: persona.id,
+          harnessOverride: true,
           systemPrompt: persona.systemPrompt,
           avatarUrl,
           model: persona.model ?? undefined,
