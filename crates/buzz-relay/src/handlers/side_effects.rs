@@ -75,8 +75,9 @@ async fn evict_conn_channel_subscriptions(
 
 /// Revoke live channel subscriptions held by connections whose authenticated
 /// pubkey is not a current member. Used when an open channel flips to private:
-/// non-members could have subscribed while it was open, and fan-out does not
-/// re-check membership per event, so their subscriptions must be closed.
+/// non-members could have subscribed while it was open. Fan-out now re-checks
+/// membership per event as the delivery-time safety net; this eviction closes
+/// subscriptions promptly so clients stop treating the channel as live.
 async fn evict_non_member_channel_subscriptions(
     state: &Arc<AppState>,
     channel_id: Uuid,
