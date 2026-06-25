@@ -21,7 +21,11 @@ import {
   getImportErrorLabel,
   IMPORT_ERROR_VISIBILITY_MS,
 } from "./personaDialogImportState";
-import { canSubmitPersonaDialog } from "./personaDialogState";
+import {
+  canSubmitPersonaDialog,
+  formatPersonaNamePoolText,
+  parsePersonaNamePoolText,
+} from "./personaDialogState";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
 
 type PersonaDialogProps = {
@@ -185,6 +189,7 @@ export function PersonaDialog({
   const [provider, setProvider] = React.useState("");
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
+  const [namePoolText, setNamePoolText] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
@@ -213,6 +218,11 @@ export function PersonaDialog({
     setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
     setIsCustomProviderEditing(false);
+    setNamePoolText(
+      "namePool" in initialValues
+        ? formatPersonaNamePoolText(initialValues.namePool)
+        : "",
+    );
     setEnvVars("envVars" in initialValues ? (initialValues.envVars ?? {}) : {});
     setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
@@ -337,6 +347,7 @@ export function PersonaDialog({
       setIsCustomModelEditing(false);
       setProvider("");
       setIsCustomProviderEditing(false);
+      setNamePoolText("");
       setEnvVars({});
       setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
@@ -362,8 +373,13 @@ export function PersonaDialog({
       "id" in initialValues &&
       previousRuntime.length === 0 &&
       trimmedRuntime.length === 0;
-    const preservedNamePool =
-      "namePool" in initialValues ? initialValues.namePool : undefined;
+    const namePool = parsePersonaNamePoolText(namePoolText);
+    const namePoolInput =
+      namePool.length > 0
+        ? namePool
+        : "namePool" in initialValues
+          ? []
+          : undefined;
     const baseInput = {
       displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
@@ -379,7 +395,7 @@ export function PersonaDialog({
         : shouldPreserveHiddenModelProvider
           ? initialValues.provider
           : undefined,
-      namePool: preservedNamePool,
+      namePool: namePoolInput,
       envVars,
     };
 
@@ -854,6 +870,37 @@ export function PersonaDialog({
                     </div>
                   ) : null}
                 </div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-name-pool"
+              >
+                Instance name pool
+                <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+              </label>
+              <div
+                className={cn(
+                  "flex min-h-11 items-center px-3",
+                  PERSONA_FIELD_SHELL_CLASS,
+                )}
+              >
+                <Input
+                  autoCapitalize="words"
+                  autoCorrect="off"
+                  className={cn(
+                    "h-8 px-0 py-0 leading-6",
+                    PERSONA_FIELD_CONTROL_CLASS,
+                  )}
+                  disabled={isPending}
+                  id="persona-name-pool"
+                  onChange={(event) => setNamePoolText(event.target.value)}
+                  placeholder="Birch, Compass, Ridge, Thistle"
+                  spellCheck={false}
+                  value={namePoolText}
+                />
               </div>
             </div>
 

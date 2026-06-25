@@ -6,7 +6,9 @@ import {
   createPersonaDialogState,
   duplicatePersonaDialogState,
   editPersonaDialogState,
+  formatPersonaNamePoolText,
   importPersonaDialogState,
+  parsePersonaNamePoolText,
 } from "./personaDialogState.ts";
 
 test("canSubmitPersonaDialog requires a display name but not a system prompt", () => {
@@ -38,6 +40,20 @@ test("canSubmitPersonaDialog blocks while a save is pending", () => {
     canSubmitPersonaDialog({ displayName: "Coder", isPending: true }),
     false,
   );
+});
+
+test("persona name pool helpers parse, format, and clear values", () => {
+  assert.deepEqual(parsePersonaNamePoolText("Birch, Compass, , Ridge "), [
+    "Birch",
+    "Compass",
+    "Ridge",
+  ]);
+  assert.deepEqual(parsePersonaNamePoolText("   "), []);
+  assert.equal(
+    formatPersonaNamePoolText(["Birch", "Compass", "Ridge"]),
+    "Birch, Compass, Ridge",
+  );
+  assert.equal(formatPersonaNamePoolText(undefined), "");
 });
 
 test("createPersonaDialogState returns a fresh empty draft", () => {
@@ -183,6 +199,22 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
     model: "model-b",
     provider: undefined,
   });
+});
+
+test("importPersonaDialogState preserves imported name pools", () => {
+  const state = importPersonaDialogState({
+    displayName: "Named imports",
+    avatarDataUrl: null,
+    avatarRef: null,
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: ["Birch", "Compass"],
+    sourceFile: "named.persona.json",
+  });
+
+  assert.deepEqual(state.initialValues.namePool, ["Birch", "Compass"]);
 });
 
 test("importPersonaDialogState preserves Goose app-avatar refs from persona markdown", () => {

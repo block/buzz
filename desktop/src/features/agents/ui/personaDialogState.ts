@@ -57,6 +57,17 @@ export function importedAvatarUrl(persona: ImportedPersonaAvatarPreview) {
   return isSafeImportedAvatarRef(persona.avatarRef) ? persona.avatarRef : "";
 }
 
+export function formatPersonaNamePoolText(namePool: string[] | undefined) {
+  return namePool?.join(", ") ?? "";
+}
+
+export function parsePersonaNamePoolText(text: string): string[] {
+  return text
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
 export function createPersonaDialogState(): PersonaDialogState {
   return {
     title: "Create agent",
@@ -138,6 +149,7 @@ export function importPersonaDialogState(
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,
       provider: persona.provider ?? undefined,
+      ...(persona.namePool.length > 0 ? { namePool: persona.namePool } : {}),
     },
   };
 }
