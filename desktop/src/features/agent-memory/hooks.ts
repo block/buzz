@@ -12,25 +12,26 @@ export const agentMemoryQueryKey = (agentPubkey: string) =>
   ["agent-memory", agentPubkey.toLowerCase()] as const;
 
 /**
- * Synchronous gate: does this desktop manage the agent? Used by the profile
- * panel to hide the Memory section entirely for non-owners.
+ * Synchronous gate: does this desktop manage the agent (i.e. hold its
+ * seckey locally)? This is the *local fast-path* owner signal — one of two
+ * inputs to `viewerIsOwner`. The other is the declared NIP-OA owner signal
+ * (`isCurrentUserOwner`, computed in the profile panel from the agent's
+ * `kind:0`). Callers OR the two: `viewerIsOwner = isCurrentUserOwner || isOwner`.
  *
  * Returns `boolean | undefined`:
  *   - `undefined` is the *loading* state (managed-agent list still resolving).
  *     Callers should defer rendering, not show an error.
  *   - `true` / `false` once the list is known.
  *
- * Why `managed_agents` (not NIP-OA `kind:0` via `useOaOwnerQuery`)?
- * The archive button gates on `useOaOwnerQuery` because publishing a
- * `kind:9035` requires verifying NIP-OA cryptographically — the action is
- * *signing as the OA owner*. The memory viewer's question is different:
- * "do I have the seckey to decrypt this agent's engrams?" `managed_agents`
- * answers exactly that — it's the local source of truth for "agents whose
- * keys this desktop holds." NIP-OA on its own is weaker for this surface:
- * a malicious agent can forge an `auth` tag in their `kind:0` pointing at
- * any pubkey, but only the desktop that actually holds the seckey can
- * decrypt. Don't "fix" this back to `useOaOwnerQuery` — it would replace
- * a precise predicate with a weaker one and add a relay roundtrip.
+ * Why not gate the Memory section on this alone? It answers "do I hold the
+ * seckey?", which used to stand in for "am I the owner?". Those two diverge
+ * exactly for a remote-owned agent — the owner runs it on another desktop,
+ * holds no local seckey, but legitimately owns it. Engrams are NIP-44
+ * encrypted to the *owner's* pubkey and decrypted with the owner's own key
+ * (never the agent's seckey), so a declared owner can read their own memory
+ * regardless of where the agent runs. The encryption is the real boundary;
+ * this predicate is just the no-roundtrip half of the owner check. The
+ * declared-owner half (`isCurrentUserOwner`) covers the remote case.
  *
  * Lowercase compare because pubkeys can arrive from either side in mixed
  * case via Nostr libs; the underlying store stores them as-given.
@@ -49,8 +50,8 @@ export function useIsManagedAgent(
  * Fetch + decrypt the engram listing for one agent. Owner-gated at the
  * Rust layer; if the viewer isn't the agent's owner the underlying call
  * returns an `Err` (we surface it as `query.isError`). The UI must hide
- * the section for non-owners — see {@link useIsManagedAgent} — but this
- * hook is robust to a misuse there.
+ * the section for non-owners (the caller passes `viewerIsOwner` down to
+ * {@link MemorySection}), but this hook is robust to a misuse there.
  *
  * `staleTime: 30s`: engrams change rarely (each write is a deliberate
  * agent action). 30s keeps profile re-opens snappy without going so far

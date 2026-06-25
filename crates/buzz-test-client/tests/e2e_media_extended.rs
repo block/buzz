@@ -388,58 +388,78 @@ async fn test_auth_server_tag_correct() {
 
 #[tokio::test]
 #[ignore]
-async fn test_reject_svg() {
+async fn test_upload_svg_accepted_as_text_xml() {
+    // SVG with XML declaration is detected by `infer` as text/xml (not image/svg+xml),
+    // which is not in the blocked list, so it routes through the generic file path.
     let client = http_client();
     let keys = Keys::generate();
     let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
     let resp = upload(&client, &keys, svg).await;
     let status = resp.status().as_u16();
-    assert!(
-        status == 400 || status == 415,
-        "SVG must be 400 or 415, got {status}"
+    assert_eq!(
+        status, 200,
+        "SVG (undetected) should succeed via file path, got {status}"
     );
-    println!("✅ SVG → {status}");
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"].as_str().unwrap(), "text/xml");
+    println!("✅ SVG (XML declaration) → 200 as text/xml");
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_reject_pdf() {
+async fn test_upload_pdf_accepted() {
+    // PDF is detected by `infer` and is not in the blocked list, so it
+    // routes through the generic file path successfully.
     let client = http_client();
     let keys = Keys::generate();
     let pdf = b"%PDF-1.4 fake pdf content here for testing";
     let resp = upload(&client, &keys, pdf).await;
-    // PDF might be 400 (unknown) or 415 (disallowed) depending on infer detection
     let status = resp.status().as_u16();
-    assert!(
-        status == 400 || status == 415,
-        "PDF must be 400 or 415, got {status}"
+    assert_eq!(
+        status, 200,
+        "PDF should succeed via file path, got {status}"
     );
-    println!("✅ PDF → {status}");
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"].as_str().unwrap(), "application/pdf");
+    println!("✅ PDF → 200");
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_reject_zero_bytes() {
+async fn test_upload_zero_bytes_accepted() {
+    // Empty body has no magic bytes — routes through the generic file path
+    // as application/octet-stream.
     let client = http_client();
     let keys = Keys::generate();
     let resp = upload(&client, &keys, b"").await;
-    assert_eq!(resp.status(), 400, "zero bytes must be 400");
-    println!("✅ Zero bytes → 400");
+    let status = resp.status().as_u16();
+    assert_eq!(
+        status, 200,
+        "zero bytes should succeed via file path, got {status}"
+    );
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"].as_str().unwrap(), "application/octet-stream");
+    assert_eq!(desc["size"].as_u64().unwrap(), 0);
+    println!("✅ Zero bytes → 200 as octet-stream");
 }
 
 #[tokio::test]
 #[ignore]
-async fn test_reject_random_bytes() {
+async fn test_upload_random_bytes_accepted() {
+    // Random bytes with no magic signature route through the generic file
+    // path as application/octet-stream.
     let client = http_client();
     let keys = Keys::generate();
     let random: Vec<u8> = (0..1000).map(|i| (i * 37 % 256) as u8).collect();
     let resp = upload(&client, &keys, &random).await;
     let status = resp.status().as_u16();
-    assert!(
-        status == 400 || status == 415,
-        "random bytes must be rejected, got {status}"
+    assert_eq!(
+        status, 200,
+        "random bytes should succeed via file path, got {status}"
     );
-    println!("✅ Random bytes → {status}");
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"].as_str().unwrap(), "application/octet-stream");
+    println!("✅ Random bytes → 200 as octet-stream");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -499,7 +519,7 @@ async fn test_ws_valid_imeta() {
         .sign_with_keys(&keys)
         .unwrap();
     let create_resp = http
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&create_event).unwrap())
@@ -569,7 +589,7 @@ async fn test_ws_invalid_imeta_external_url() {
         .sign_with_keys(&keys)
         .unwrap();
     let create_resp = http
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&create_event).unwrap())
@@ -635,7 +655,7 @@ async fn test_ws_invalid_imeta_missing_fields() {
         .sign_with_keys(&keys)
         .unwrap();
     let create_resp = http
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&create_event).unwrap())

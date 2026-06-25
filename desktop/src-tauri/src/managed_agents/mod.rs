@@ -1,9 +1,11 @@
+pub(crate) mod agent_events;
 mod backend;
 mod discovery;
 mod env_vars;
 mod nest;
 mod persona_avatars;
 mod persona_card;
+pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
@@ -11,8 +13,10 @@ mod process_lifecycle;
 mod relay_mesh;
 mod repos;
 mod restore;
+pub mod retention;
 mod runtime;
 mod storage;
+pub(crate) mod team_events;
 mod team_repair;
 mod teams;
 mod types;

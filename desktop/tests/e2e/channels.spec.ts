@@ -9,6 +9,12 @@ import {
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
+// Relay-only agent owned by the mock viewer (see e2eBridge.ts
+// OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
+// owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
+// view-activity gate (memberIsBot && viewerIsOwner) opens for it.
+const OWNED_RELAY_AGENT_PUBKEY =
+  "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 
 type MockFeedWindow = Window & {
   __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
@@ -971,6 +977,25 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
     0,
   );
+});
+
+test("members sidebar exposes view-activity for a viewer-owned relay agent", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+
+  // nadia is a relay-only agent (no local managed record) owned by the mock
+  // viewer. The view-activity affordance must open via the declared-owner
+  // path, not the local-managed path.
+  await expect(
+    page.getByTestId(`sidebar-member-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+  await openMemberMenu(page, OWNED_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByTestId(`sidebar-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
 });
 
 test("typing indicator shows avatars and maintains stable name order", async ({

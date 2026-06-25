@@ -898,18 +898,18 @@ function ProfileIngressRow({
 
 export function MemoryFocusedView({
   agentPubkey,
-  isOwner,
+  viewerIsOwner,
 }: {
   agentPubkey: string;
-  isOwner: boolean | undefined;
+  viewerIsOwner: boolean | undefined;
 }) {
-  if (isOwner !== true) {
+  if (viewerIsOwner !== true) {
     return null;
   }
 
   return (
     <div className="pt-4">
-      <MemorySection agentPubkey={agentPubkey} />
+      <MemorySection agentPubkey={agentPubkey} viewerIsOwner={viewerIsOwner} />
     </div>
   );
 }

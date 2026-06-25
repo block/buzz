@@ -63,6 +63,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Stdio;
 
+use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{debug, warn};
@@ -256,6 +257,54 @@ async fn snapshot_workspace_state(
     Ok((refs, head))
 }
 
+fn digest_from_pack_key(key: &str) -> Result<String, CasError> {
+    key.strip_prefix("packs/")
+        .filter(|digest| digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CasError::Backend(StoreError::Backend(s3::error::S3Error::HttpFailWithBody(
+                500,
+                format!("put_pack returned non-standard key: {key}"),
+            )))
+        })
+}
+
+async fn write_idx_sidecar(
+    store: &GitStore,
+    pack_key: &str,
+    pack_bytes: &[u8],
+) -> Result<(), CasError> {
+    let pack_digest = digest_from_pack_key(pack_key)?;
+    let tempdir = TempDir::new().map_err(|e| CasError::PackCapture(format!("idx tempdir: {e}")))?;
+    let pack_path = tempdir.path().join(format!("pack-{pack_digest}.pack"));
+    tokio::fs::write(&pack_path, pack_bytes)
+        .await
+        .map_err(|e| CasError::PackCapture(format!("write idx input pack {pack_digest}: {e}")))?;
+
+    let mut cmd = Command::new("git");
+    cmd.args(["index-pack", pack_path.to_str().unwrap()])
+        .current_dir(tempdir.path());
+    super::transport::harden_git_env(&mut cmd);
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| CasError::PackCapture(format!("index-pack spawn for idx sidecar: {e}")))?;
+    if !out.status.success() {
+        return Err(CasError::PackCapture(format!(
+            "index-pack for idx sidecar failed: status={:?} stderr={}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+
+    let idx_path = pack_path.with_extension("idx");
+    let idx_bytes = tokio::fs::read(&idx_path)
+        .await
+        .map_err(|e| CasError::PackCapture(format!("read idx sidecar {pack_digest}: {e}")))?;
+    store.put_idx(&pack_digest, &idx_bytes).await?;
+    Ok(())
+}
+
 /// Capture the objects this push introduced as a single pack.
 ///
 /// Runs `git pack-objects --revs --stdout` reading rev-spec lines from
@@ -439,7 +488,15 @@ pub async fn cas_publish(
     let pack_bytes = capture_pack(repo_path, &parent_state.parent.refs, &refs_after).await?;
     let new_pack_key = if let Some(bytes) = pack_bytes {
         debug!(bytes = bytes.len(), "captured push pack");
-        Some(store.put_pack(&bytes).await?)
+        let pack_key = store.put_pack(&bytes).await?;
+        if let Err(e) = write_idx_sidecar(store, &pack_key, &bytes).await {
+            warn!(
+                pack_key = %pack_key,
+                error = %e,
+                "failed to write git pack idx sidecar; push will continue"
+            );
+        }
+        Some(pack_key)
     } else {
         debug!("no new objects in push; manifest will reuse parent packs");
         None
@@ -559,6 +616,20 @@ mod tests {
 
     // `pointer_key` is owned by `manifest.rs` and unit-tested there
     // (one source of truth — Max/Sami's centralization point).
+
+    #[test]
+    fn digest_from_pack_key_strips_prefix() {
+        let k = format!("packs/{}", "b".repeat(64));
+        let d = digest_from_pack_key(&k).unwrap();
+        assert_eq!(d, "b".repeat(64));
+    }
+
+    #[test]
+    fn digest_from_pack_key_rejects_unknown_prefix_or_bad_digest() {
+        assert!(digest_from_pack_key("manifests/abc").is_err());
+        assert!(digest_from_pack_key("packs/abc").is_err());
+        assert!(digest_from_pack_key(&format!("packs/{}", "g".repeat(64))).is_err());
+    }
 
     #[test]
     fn digest_from_key_strips_prefix() {

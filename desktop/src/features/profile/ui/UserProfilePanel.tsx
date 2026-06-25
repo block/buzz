@@ -187,7 +187,22 @@ export function UserProfilePanel({
     (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
   );
   const isBot = Boolean(relayAgent || managedAgent);
+  // Does THIS desktop hold the agent's seckey? Gates edit (which needs the key)
+  // and grants owner access when the agent is managed locally.
   const isOwner = useIsManagedAgent(isBot ? pubkey : null);
+  // Is the viewer the agent's declared owner (NIP-OA `ownerPubkey == me`)? This
+  // is the right signal for viewing owner-scoped data (activity feed, memory):
+  // the relay routes and the client decrypts those frames with the owner's OWN
+  // key, so the agent's seckey is never needed. Computed here (before the gates
+  // that consume it) so visibility keys off declared ownership, not key custody.
+  const isCurrentUserOwner =
+    currentPubkey !== undefined &&
+    ownerPubkey !== null &&
+    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  // The viewer may see owner-scoped data if they declared-own the agent OR they
+  // manage it locally (older agents may not advertise an owner pubkey). Every
+  // real boundary is server-side, so this only controls what UI we paint.
+  const viewerIsOwner = isCurrentUserOwner || isOwner === true;
 
   // Populate the active-turns store for this agent so useActiveAgentTurns works
   // even if the Agents page hasn't been visited yet.
@@ -198,15 +213,36 @@ export function UserProfilePanel({
         : [],
     [managedAgent],
   );
+  // The observer bridge subscribes on the OWNER's own pubkey and decrypts the
+  // agent's telemetry with the owner's key — no agent seckey needed. It only
+  // decrypts frames whose agent pubkey is "known", and only subscribes when an
+  // agent is running/deployed. For a remote agent we own but don't manage
+  // locally, `managedAgent` is undefined, so we seed the bridge from the relay
+  // agent (treated as "deployed") when the viewer is the declared owner. This
+  // mirrors what the composer-area ingress already does in ChannelScreen.
+  const observerBridgeAgents = React.useMemo(() => {
+    if (managedAgent) {
+      return [{ pubkey: managedAgent.pubkey, status: managedAgent.status }];
+    }
+    if (viewerIsOwner && relayAgent) {
+      return [
+        {
+          pubkey: relayAgent.pubkey,
+          status: "deployed" as ManagedAgent["status"],
+        },
+      ];
+    }
+    return [];
+  }, [managedAgent, relayAgent, viewerIsOwner]);
   useActiveAgentTurnsBridge(bridgeAgents);
-  useManagedAgentObserverBridge(bridgeAgents);
+  useManagedAgentObserverBridge(observerBridgeAgents);
   const canEditAgent = isOwner === true && managedAgent !== undefined;
   const memoryQuery = useAgentMemoryQuery(pubkey, {
-    enabled: isOwner === true,
+    enabled: viewerIsOwner,
   });
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
-  const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
+  const canViewActivity = viewerIsOwner && Boolean(onOpenAgentSession);
   const isFollowing =
     !isSelf &&
     (contactListQuery.data?.contacts.some(
@@ -282,10 +318,6 @@ export function UserProfilePanel({
     ownerProfileQuery.data,
     ownerPubkey,
   ]);
-  const isCurrentUserOwner =
-    currentPubkey !== undefined &&
-    ownerPubkey !== null &&
-    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
   const ownerDisplayName = ownerHandle
     ? isCurrentUserOwner || (!ownerPubkey && isOwner === true)
       ? `${ownerHandle} (you)`
@@ -317,8 +349,12 @@ export function UserProfilePanel({
 
   const headerActions = (
     <div className="ml-auto flex shrink-0 items-center gap-2">
-      {view === "memories" && isOwner === true ? (
-        <MemoryRefreshButton agentPubkey={pubkey} variant="outline" />
+      {view === "memories" && viewerIsOwner ? (
+        <MemoryRefreshButton
+          agentPubkey={pubkey}
+          variant="outline"
+          viewerIsOwner={viewerIsOwner}
+        />
       ) : null}
       <Button
         aria-label="Close profile"
@@ -355,7 +391,7 @@ export function UserProfilePanel({
           handleOpenActivity={handleOpenActivity}
           isBot={isBot}
           isFollowing={isFollowing}
-          isOwner={isOwner}
+          isOwner={viewerIsOwner}
           isSelf={isSelf}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
@@ -383,7 +419,7 @@ export function UserProfilePanel({
       ) : null}
 
       {view === "memories" ? (
-        <MemoryFocusedView agentPubkey={pubkey} isOwner={isOwner} />
+        <MemoryFocusedView agentPubkey={pubkey} viewerIsOwner={viewerIsOwner} />
       ) : null}
 
       {view === "channels" ? (

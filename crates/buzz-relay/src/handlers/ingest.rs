@@ -21,17 +21,18 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MUTE_LIST,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE, KIND_PROFILE,
-    KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
+    KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
+    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    RELAY_ADMIN_REMOVE_MEMBER,
 };
 use buzz_core::verification::verify_event;
 use nostr::Event;
@@ -154,7 +155,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER => Ok(Scope::UsersWrite),
+        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
+            Ok(Scope::UsersWrite)
+        }
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -344,6 +347,12 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_EVENT_REMINDER
             // Agent profile (10100): user-owned replaceable, keyed by pubkey.
             | KIND_AGENT_PROFILE
+            // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
+            | KIND_PERSONA
+            // NIP-AP: team (30176) + managed-agent (30177) definitions: owner-authored,
+            // keyed by (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
+            | KIND_TEAM
+            | KIND_MANAGED_AGENT
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -882,6 +891,56 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
     // garbage so a malformed event cannot supersede a valid head via NIP-33
     // replacement and then be silently discarded by readers.
     validate_engram_nip44_content(&event.content)?;
+    Ok(())
+}
+
+/// Validate the envelope of a kind:30175 persona event.
+///
+/// Enforces:
+/// * exactly one `d` tag with a non-empty value matching the slug grammar
+///   `^[a-z0-9][a-z0-9_-]{0,63}$`.
+///
+/// Without this, an empty d-tag collapses every persona into the
+/// `(pubkey, 30175, "")` slot — last-write-wins data loss.
+fn validate_persona_envelope(event: &Event) -> Result<(), String> {
+    let mut d_tags: Vec<&str> = Vec::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() >= 2 && parts[0].as_str() == "d" {
+            d_tags.push(&parts[1]);
+        }
+    }
+    if d_tags.len() != 1 {
+        return Err(format!(
+            "persona event must have exactly one `d` tag (got {})",
+            d_tags.len()
+        ));
+    }
+    let d = d_tags[0];
+    if d.is_empty() {
+        return Err("persona event `d` tag must not be empty".to_string());
+    }
+    // Slug grammar: ^[a-z0-9][a-z0-9_-]{0,63}$
+    if d.len() > 64 {
+        return Err(format!(
+            "persona event `d` tag too long ({} chars, max 64)",
+            d.len()
+        ));
+    }
+    let bytes = d.as_bytes();
+    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
+        return Err(
+            "persona event `d` tag must start with a lowercase letter or digit".to_string(),
+        );
+    }
+    if !bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+    {
+        return Err(
+            "persona event `d` tag must match [a-z0-9_-] after the first character".to_string(),
+        );
+    }
     Ok(())
 }
 
@@ -1483,6 +1542,12 @@ pub async fn ingest_event(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    // ── 15c. Persona envelope (kind:30175) ──────────────────────────────
+    if kind_u32 == KIND_PERSONA {
+        validate_persona_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -1867,7 +1932,8 @@ mod tests {
     use super::*;
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
-        KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF, KIND_USER_STATUS,
+        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
 
     #[test]
@@ -2036,6 +2102,9 @@ mod tests {
             KIND_EMOJI_LIST,
             KIND_AGENT_ENGRAM,
             KIND_AGENT_PROFILE,
+            KIND_PERSONA,
+            KIND_TEAM,
+            KIND_MANAGED_AGENT,
         ];
         for kind in migrated {
             assert!(
@@ -2083,6 +2152,47 @@ mod tests {
             KIND_FOLLOW_SET,
             KIND_BOOKMARK_SET,
         ] {
+            assert!(
+                is_global_only_kind(kind),
+                "kind {kind} should be global-only (never channel-scoped)"
+            );
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h-tag channel scope"
+            );
+        }
+    }
+
+    #[test]
+    fn persona_is_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PERSONA, &dummy).unwrap(),
+            Scope::UsersWrite,
+        );
+    }
+
+    #[test]
+    fn persona_is_global_only() {
+        assert!(is_global_only_kind(KIND_PERSONA));
+        assert!(!requires_h_channel_scope(KIND_PERSONA));
+    }
+
+    #[test]
+    fn team_and_managed_agent_are_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_TEAM, KIND_MANAGED_AGENT] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::UsersWrite,
+                "kind {kind} should require UsersWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn team_and_managed_agent_are_global_only() {
+        for kind in [KIND_TEAM, KIND_MANAGED_AGENT] {
             assert!(
                 is_global_only_kind(kind),
                 "kind {kind} should be global-only (never channel-scoped)"
@@ -2581,5 +2691,98 @@ mod tests {
             &[&["d", "abc"], &["d", "def"], &["not_before", "1717000000"]],
         );
         assert_eq!(validate_event_reminder(&ev), Err("duplicate d tag"));
+    }
+
+    // ── NIP-AP persona envelope validation ───────────────────────────────
+
+    fn make_persona(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x","system_prompt":"y"}"#,
+            tags,
+        )
+    }
+
+    #[test]
+    fn persona_envelope_accepts_valid_slug() {
+        let ev = make_persona(&[&["d", "my-persona-1"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_single_char() {
+        let ev = make_persona(&[&["d", "a"]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_accepts_max_length() {
+        let slug = "a".repeat(64);
+        let ev = make_persona(&[&["d", &slug]]);
+        assert!(validate_persona_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn persona_envelope_rejects_missing_d_tag() {
+        let ev = make_persona(&[]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_empty_d_tag() {
+        let ev = make_persona(&[&["d", ""]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_duplicate_d_tags() {
+        let ev = make_persona(&[&["d", "slug-a"], &["d", "slug-b"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_too_long() {
+        let slug = "a".repeat(65);
+        let ev = make_persona(&[&["d", &slug]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("too long"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_uppercase() {
+        let ev = make_persona(&[&["d", "My-Persona"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_leading_underscore() {
+        let ev = make_persona(&[&["d", "_invalid"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("start with"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_leading_hyphen() {
+        let ev = make_persona(&[&["d", "-invalid"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("start with"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_spaces() {
+        let ev = make_persona(&[&["d", "has space"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn persona_envelope_rejects_dots() {
+        let ev = make_persona(&[&["d", "has.dot"]]);
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
     }
 }
