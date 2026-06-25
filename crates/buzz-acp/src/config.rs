@@ -546,7 +546,10 @@ pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
         Ok(u) => match u.host_str() {
             Some(h) => h.to_owned(),
             None => {
-                tracing::warn!(relay_url, "codex network allowlist: no host in relay URL — skipping injection");
+                tracing::warn!(
+                    relay_url,
+                    "codex network allowlist: no host in relay URL — skipping injection"
+                );
                 return vec![];
             }
         },
@@ -1495,8 +1498,7 @@ mod tests {
     #[test]
     fn codex_network_args_full_path_codex_command() {
         // Full path like /usr/local/bin/codex-acp should be normalized.
-        let args =
-            codex_network_args("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        let args = codex_network_args("/usr/local/bin/codex-acp", "wss://relay.example.com");
         assert_eq!(
             args,
             vec![
