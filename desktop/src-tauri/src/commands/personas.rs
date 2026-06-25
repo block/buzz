@@ -167,13 +167,13 @@ pub fn create_persona(
     state: State<'_, AppState>,
 ) -> Result<PersonaRecord, String> {
     let display_name = trim_required(&input.display_name, "Display name")?;
-    let system_prompt = trim_required(&input.system_prompt, "System prompt")?;
+    // System prompt optional: core memory is auto-injected. Empty is valid.
+    let system_prompt = input.system_prompt.trim().to_string();
     let avatar_url = trim_optional(input.avatar_url);
     let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
     let provider = trim_optional(input.provider);
     let now = now_iso();
-
     let _store_guard = state
         .managed_agents_store_lock
         .lock()
@@ -217,7 +217,7 @@ pub fn update_persona(
     state: State<'_, AppState>,
 ) -> Result<PersonaRecord, String> {
     let display_name = trim_required(&input.display_name, "Display name")?;
-    let system_prompt = trim_required(&input.system_prompt, "System prompt")?;
+    let system_prompt = input.system_prompt.trim().to_string();
     let avatar_url = trim_optional(input.avatar_url);
     let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
