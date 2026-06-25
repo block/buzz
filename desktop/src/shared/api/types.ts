@@ -158,6 +158,27 @@ export type UserStatus = {
 
 export type UserStatusLookup = Record<string, UserStatus | null>;
 
+export type ProjectRepoCommit = {
+  hash: string;
+  shortHash: string;
+  authorName: string;
+  authorEmail: string;
+  timestamp: number;
+  subject: string;
+};
+
+export type ProjectRepoFile = {
+  path: string;
+  kind: string;
+  size: number | null;
+  previewContent: string | null;
+};
+
+export type ProjectRepoSnapshot = {
+  latestCommit: ProjectRepoCommit | null;
+  files: ProjectRepoFile[];
+};
+
 export type RelayEvent = {
   id: string;
   /** Local-only render identity for optimistic events that are later acknowledged. */

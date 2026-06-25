@@ -747,6 +747,7 @@ pub fn run() {
             get_user_profile,
             get_users_batch,
             get_user_notes,
+            get_project_repo_snapshot,
             search_users,
             get_presence,
             get_default_relay_url,

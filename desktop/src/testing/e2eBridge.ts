@@ -6593,6 +6593,47 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
+      case "get_project_repo_snapshot":
+        return {
+          latest_commit: {
+            hash: "0123456789abcdef0123456789abcdef01234567",
+            short_hash: "0123456",
+            author_name: "Brain",
+            author_email: "brain@example.com",
+            timestamp: Math.floor(Date.now() / 1000) - 600,
+            subject: "Add Trello board workflow details",
+          },
+          files: [
+            {
+              path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+              kind: "blob",
+              size: 18420,
+              preview_content:
+                'export function ProjectDetailScreen() {\n  return <WorkspaceTabs defaultValue="files" />;\n}\n',
+            },
+            {
+              path: "desktop/src/features/projects/ui/ProjectsView.tsx",
+              kind: "blob",
+              size: 16412,
+              preview_content:
+                "export function ProjectsView() {\n  return <ProjectsToolbar />;\n}\n",
+            },
+            {
+              path: "desktop/src/features/projects/hooks.ts",
+              kind: "blob",
+              size: 9520,
+              preview_content:
+                "export function useProjectRepoSnapshotQuery(project) {\n  return useQuery({ queryKey: [project.id, 'repo-snapshot'] });\n}\n",
+            },
+            {
+              path: "crates/buzz-relay/src/api/git/transport.rs",
+              kind: "blob",
+              size: 33120,
+              preview_content:
+                "// Smart HTTP git transport\n// Handles upload-pack and receive-pack for Buzz git repos.\n",
+            },
+          ],
+        };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
