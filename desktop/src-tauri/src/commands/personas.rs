@@ -1,4 +1,4 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 use super::export_util::save_json_with_dialog;
@@ -442,6 +442,10 @@ pub fn reconcile_inbound_persona_event(
     }
     try_regenerate_nest(&app);
 
+    // Signal the live UI to refetch agents data — inbound relay events otherwise
+    // land on disk silently, leaving the Agents tab stale until restart.
+    let _ = app.emit("agents-data-changed", ());
+
     Ok(())
 }
 
@@ -538,6 +542,10 @@ fn reconcile_inbound_tombstone(
         _ => unreachable!("target kind gated above"),
     }
     try_regenerate_nest(app);
+
+    // Refresh the live UI on inbound deletion — a removal is as user-visible as
+    // an upsert and the Agents tab must drop the tombstoned record without restart.
+    let _ = app.emit("agents-data-changed", ());
 
     Ok(())
 }

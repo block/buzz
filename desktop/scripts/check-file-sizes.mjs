@@ -54,8 +54,9 @@ const overrides = new Map([
   // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
   // event_d_tag/parse_deletion_coordinate helpers, and the preserve/overwrite +
   // secret-injection + tombstone test coverage. Load-bearing feature growth,
-  // queued to split with the list.
-  ["src-tauri/src/commands/personas.rs", 1271],
+  // queued to split with the list. The two `agents-data-changed` emits (live
+  // UI refresh on inbound reconcile + tombstone) add the latest growth.
+  ["src-tauri/src/commands/personas.rs", 1279],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the

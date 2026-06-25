@@ -69,6 +69,7 @@ export default defineConfig({
         "**/sidebar-relay-card.spec.ts",
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
+        "**/persona-sync.spec.ts",
         "**/mesh-compute.spec.ts",
       ],
       use: {
