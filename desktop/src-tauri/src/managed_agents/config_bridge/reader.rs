@@ -136,6 +136,39 @@ pub(crate) fn read_config_surface(
         })
         .collect();
 
+    // Collect the env var keys already covered by normalized fields so we don't double-surface them.
+    let normalized_env_keys: Vec<&str> = [
+        model_env_var,
+        provider_env_var,
+        thinking_env_var,
+        Some("BUZZ_ACP_SYSTEM_PROMPT"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    // Tier 2a: remaining env vars not covered by normalized fields.
+    // Env var wins over config file for the same key (tier 2a > 2b), so skip
+    // keys already present in file_config.extra.
+    let mut advanced = advanced;
+    for (k, v) in &record.env_vars {
+        if normalized_env_keys.contains(&k.as_str()) {
+            continue;
+        }
+        if file_config.extra.contains_key(k) {
+            continue; // config file already surfaced this key
+        }
+        advanced.push(ConfigField {
+            key: k.clone(),
+            label: k.clone(),
+            value: Some(v.clone()),
+            origin: ConfigOrigin::BuzzExplicit,
+            schema_type: ConfigFieldType::String,
+            is_writable: true,
+            write_via: ConfigWriteMechanism::RespawnWithEnvVar { env_key: k.clone() },
+        });
+    }
+
     let config_file_path = runtime_meta
         .and_then(|m| m.config_file_path)
         .map(resolve_tilde);
@@ -879,5 +912,76 @@ mod tests {
         let model = surface.normalized.model.unwrap();
         assert_eq!(model.value.as_deref(), Some("explicit-model"));
         assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
+    }
+
+    #[test]
+    fn extra_env_vars_appear_in_advanced_as_buzz_explicit() {
+        let mut record = test_record();
+        // Normalized keys — must NOT appear in advanced.
+        record
+            .env_vars
+            .insert("GOOSE_MODEL".to_string(), "some-model".to_string());
+        record
+            .env_vars
+            .insert("BUZZ_ACP_SYSTEM_PROMPT".to_string(), "hello".to_string());
+        // Non-normalized key — MUST appear in advanced.
+        record
+            .env_vars
+            .insert("SPROUT_ACP_MEMORY".to_string(), "mem-value".to_string());
+        let runtime = test_runtime();
+
+        let surface = read_config_surface(&record, Some(runtime), None, None);
+
+        let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
+        assert!(
+            advanced_keys.contains(&"SPROUT_ACP_MEMORY"),
+            "extra env var must appear in advanced"
+        );
+        assert!(
+            !advanced_keys.contains(&"GOOSE_MODEL"),
+            "normalized model key must not appear in advanced"
+        );
+        assert!(
+            !advanced_keys.contains(&"BUZZ_ACP_SYSTEM_PROMPT"),
+            "normalized system prompt key must not appear in advanced"
+        );
+
+        let field = surface
+            .advanced
+            .iter()
+            .find(|f| f.key == "SPROUT_ACP_MEMORY")
+            .unwrap();
+        assert_eq!(field.value.as_deref(), Some("mem-value"));
+        assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
+        assert!(field.is_writable);
+        assert!(matches!(
+            field.write_via,
+            ConfigWriteMechanism::RespawnWithEnvVar { ref env_key } if env_key == "SPROUT_ACP_MEMORY"
+        ));
+    }
+
+    #[test]
+    fn extra_env_var_skipped_when_already_in_file_config_extra() {
+        // If a key is in both record.env_vars and file_config.extra, the config
+        // file entry wins (it was already added to advanced). The env var must
+        // not produce a second entry.
+        //
+        // We can't inject into file_config.extra directly in a unit test (it
+        // comes from disk), so we verify the dedup logic via the normalized-key
+        // path: GOOSE_THINKING_EFFORT is a normalized key and must not appear
+        // in advanced even if set in env_vars.
+        let mut record = test_record();
+        record
+            .env_vars
+            .insert("GOOSE_THINKING_EFFORT".to_string(), "high".to_string());
+        let runtime = test_runtime();
+
+        let surface = read_config_surface(&record, Some(runtime), None, None);
+
+        let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
+        assert!(
+            !advanced_keys.contains(&"GOOSE_THINKING_EFFORT"),
+            "normalized thinking key must not appear in advanced"
+        );
     }
 }

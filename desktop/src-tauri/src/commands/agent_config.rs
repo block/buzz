@@ -12,7 +12,7 @@ use crate::{
             },
             writer::plan_config_write,
         },
-        known_acp_runtime, load_managed_agents, load_personas,
+        effective_agent_command, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
     },
@@ -156,7 +156,12 @@ pub async fn get_agent_config_surface(
     };
 
     let personas = load_personas(&app).unwrap_or_default();
-    let runtime_meta = known_acp_runtime(&record.agent_command);
+    let effective_cmd = effective_agent_command(
+        record.persona_id.as_deref(),
+        &personas,
+        record.agent_command_override.as_deref(),
+    );
+    let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&pubkey);
 
     Ok(resolve_config_surface(
@@ -195,7 +200,12 @@ pub async fn write_agent_config_field(
         .ok_or_else(|| format!("agent {} not found", request.pubkey))?;
 
     let personas = load_personas(&app).unwrap_or_default();
-    let runtime_meta = known_acp_runtime(&record.agent_command);
+    let effective_cmd = effective_agent_command(
+        record.persona_id.as_deref(),
+        &personas,
+        record.agent_command_override.as_deref(),
+    );
+    let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&request.pubkey);
     let surface = resolve_config_surface(record, &personas, runtime_meta, session_cache.as_ref());
 
