@@ -1,7 +1,6 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
 const CLAUDE_SCHEMA: &str = include_str!("schemas/claude-code-settings.schema.json");
-const VERSIONS_JSON: &str = include_str!("schemas/versions.json");
 
 /// Read Claude Code config from `~/.claude/settings.json` and `~/.claude.json`.
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
@@ -28,7 +27,7 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
         let skip = &["model", "effortLevel"];
         cfg.extra = super::schema_walker::extract_schema_fields(CLAUDE_SCHEMA, s, skip);
 
-        cfg.schema_version = parse_claude_schema_version();
+        cfg.schema_version = super::schema_walker::schema_version("claude");
     }
 
     // MCP servers from ~/.claude.json
@@ -47,20 +46,11 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     cfg.extensions = extensions;
 
     // Provider is always Anthropic for Claude Code.
+    // Buzz-synthesized annotation — not a field from the user's config file.
     cfg.extra
         .insert("provider_locked".to_string(), "true".to_string());
 
     Some(cfg)
-}
-
-/// Extract the claude schema version from the embedded versions.json.
-fn parse_claude_schema_version() -> Option<String> {
-    let versions: serde_json::Value = serde_json::from_str(VERSIONS_JSON).ok()?;
-    versions
-        .get("claude")
-        .and_then(|v| v.get("fetched_at"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
 }
 
 fn read_json_file(path: &std::path::Path) -> Option<serde_json::Value> {

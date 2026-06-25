@@ -1,7 +1,6 @@
 use super::types::{ExtensionEntry, RuntimeFileConfig};
 
 const CODEX_SCHEMA: &str = include_str!("schemas/codex.config.schema.json");
-const VERSIONS_JSON: &str = include_str!("schemas/versions.json");
 
 /// Read Codex config from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`).
 pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
@@ -54,7 +53,7 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
         }
     }
 
-    let schema_version = parse_codex_schema_version();
+    let schema_version = super::schema_walker::schema_version("codex");
 
     Some(RuntimeFileConfig {
         model,
@@ -68,16 +67,6 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
         extra,
         schema_version,
     })
-}
-
-/// Extract the codex schema version from the embedded versions.json.
-fn parse_codex_schema_version() -> Option<String> {
-    let versions: serde_json::Value = serde_json::from_str(VERSIONS_JSON).ok()?;
-    versions
-        .get("codex")
-        .and_then(|v| v.get("fetched_at"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
 }
 
 fn parse_mcp_servers(table: &toml::Table) -> Vec<ExtensionEntry> {

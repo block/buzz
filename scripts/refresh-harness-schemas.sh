@@ -24,6 +24,10 @@ FETCHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 CODEX_SHA="$(shasum -a 256 "${CODEX_FILE}" | awk '{print $1}')"
 CLAUDE_SHA="$(shasum -a 256 "${CLAUDE_FILE}" | awk '{print $1}')"
 
+# Read previous SHAs for change detection (may be absent on first run)
+OLD_CODEX_SHA="$(python3 -c "import json,sys; d=json.load(open('${VERSIONS_FILE}')); print(d['codex']['sha256'])" 2>/dev/null || echo '')"
+OLD_CLAUDE_SHA="$(python3 -c "import json,sys; d=json.load(open('${VERSIONS_FILE}')); print(d['claude']['sha256'])" 2>/dev/null || echo '')"
+
 cat > "${VERSIONS_FILE}" << JSON
 {
   "codex": {
@@ -38,6 +42,13 @@ cat > "${VERSIONS_FILE}" << JSON
   }
 }
 JSON
+
+if [ -n "${OLD_CODEX_SHA}" ] && [ "${OLD_CODEX_SHA}" != "${CODEX_SHA}" ]; then
+  echo "⚠️  codex schema changed: ${OLD_CODEX_SHA} → ${CODEX_SHA}"
+fi
+if [ -n "${OLD_CLAUDE_SHA}" ] && [ "${OLD_CLAUDE_SHA}" != "${CLAUDE_SHA}" ]; then
+  echo "⚠️  claude schema changed: ${OLD_CLAUDE_SHA} → ${CLAUDE_SHA}"
+fi
 
 echo ""
 echo "==> Updated versions.json:"

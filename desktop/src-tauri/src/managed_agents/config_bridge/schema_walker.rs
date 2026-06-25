@@ -1,12 +1,28 @@
 use std::collections::BTreeMap;
 
+const VERSIONS_JSON: &str = include_str!("schemas/versions.json");
+
+/// Return the `fetched_at` timestamp for `harness` ("codex" or "claude") from
+/// the embedded `versions.json`, or `None` if the entry is absent.
+pub(super) fn schema_version(harness: &str) -> Option<String> {
+    let versions: serde_json::Value = serde_json::from_str(VERSIONS_JSON).ok()?;
+    versions
+        .get(harness)
+        .and_then(|v| v.get("fetched_at"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
 /// Walk a JSON Schema's top-level `properties` and extract every key that is
 /// present in `config`. Returns a flat `BTreeMap<String, String>` suitable for
 /// `RuntimeFileConfig::extra`.
 ///
 /// - Scalar values (string, number, bool) → their string representation
 /// - Arrays → "[N items]"
-/// - Objects → flatten one level deep as "key.subkey = value"; deeper nesting → "{...}"
+/// - Objects → flatten one level deep as "key.subkey = value"; deeper nesting → "{...}".
+///   Note: object subkeys are iterated from the config value, not filtered against the
+///   schema's nested properties — so all subkeys the user has set are surfaced regardless
+///   of whether the schema defines them (intentional: supports arbitrary keys like env vars).
 /// - Keys in `skip` are excluded (used to avoid double-counting normalized fields)
 pub(super) fn extract_schema_fields(
     schema_json: &str,
