@@ -57,12 +57,22 @@
 (*       sanitized alphabet -> Inv_SanitizedErrors/NI breaks.                *)
 (*   M7: Direct ids lookup ignores ctx and resolves scope from the row/global *)
 (*       id index -> a B-scoped observation can carry an A-labeled row.       *)
+(*   M8: WriteInsert/AuthCheck/WriteDuplicate drop the host/channel agreement   *)
+(*       fence (accept/report when HostCommunity[host] # ChannelCommunity[ch]) ->*)
+(*       an A-host op (insert, authz, OR duplicate-probe) on a B-channel is      *)
+(*       accepted/allowed/reported -> Inv_HostBindingFence breaks (an accepted   *)
+(*       write or recorded duplicate carries a host whose mapping # its stamp).  *)
+(*       Confirmed red: Inv_HostBindingFence violated by a 2-state trace         *)
+(*       (Init -> WriteInsert) for the insert path and a 3-state trace            *)
+(*       (Init -> WriteInsert -> WriteDuplicate) for the duplicate path.  (Trace  *)
+(*       length, not TLC's run-dependent "depth of complete graph search" line.)  *)
 (***************************************************************************)
 EXTENDS FiniteSets, Naturals, TLC
 
 CONSTANTS
     Communities,       \* finite set of community ids
     Channels,          \* finite set of channel ids
+    Hosts,             \* finite set of connection hostnames/URLs (the community selector)
     Actors,            \* finite set of pubkeys/actors
     Workers,           \* finite set of relay worker/process ids
     MsgIds,            \* finite set of event ids (model bound)
@@ -73,6 +83,11 @@ CONSTANTS
     ChanA2,            \* model value: community-A channel in TLC config
     ChanB1,            \* model value: community-B channel in TLC config
     ChanB2,            \* model value: community-B channel in TLC config
+    HostA,             \* model value: host bound to community A
+    HostB,             \* model value: host bound to community B
+    HostBad,           \* model value: unmapped host (resolves to NoCommunity)
+    NoChannel,         \* model value: sentinel channel for channel-less events
+    NoCommunity,       \* model value: sentinel for an unmapped host (fail-closed)
     SanitizedErrors    \* fixed WebSocket-reachable sanitized error alphabet
 
 ObsKinds == {"ResultRows", "WriteResult", "SanitizedError", "AuditHead", "AuthVerdict"}
@@ -83,6 +98,36 @@ NoError == "NoError"
 NoAudit == "NoAudit"
 
 ChannelCommunity == [ch \in Channels |-> IF ch \in {ChanA1, ChanA2} THEN CommA ELSE CommB]
+
+\* resolve_host (P-RESOLVE-HOST): the connection's host is authoritative for the
+\* community, exactly as a relay URL is authoritative for the relay today, lifted
+\* one level up to community.  A host maps to exactly one community, or to the
+\* NoCommunity sentinel (an unmapped/unknown host) -> the connection fails closed
+\* and no channel-less write may derive a community from it.  This is the upstream
+\* of ResolveTenant: ctx.community is *derived* from the host, never free-chosen.
+HostCommunity == [h \in Hosts |->
+                    CASE h = HostA -> CommA
+                      [] h = HostB -> CommB
+                      [] OTHER     -> NoCommunity]
+
+\* ResolveTenant: the single resolver generalizing P-RESOLVE / L1 over both
+\* channel-bearing and channel-less events.  For a channel-bearing op the
+\* community is the server-owned channel mapping (and an h-cross-check requires it
+\* to agree with the host community, see WriteInsert).  For a channel-less op
+\* (channel = NoChannel) the community is the host-derived community.
+ResolveTenant(host, ch) ==
+    IF ch = NoChannel THEN HostCommunity[host] ELSE ChannelCommunity[ch]
+
+\* Channel-or-sentinel: data rows and write/observation records may be channel-
+\* less (channel = NoChannel), in which case the community comes from the host.
+ChannelsExt == Channels \cup {NoChannel}
+
+\* Every accepted write and recorded duplicate stamps its real originating host
+\* (host \in Hosts): channel-less writes resolve the community from the host, and
+\* channel-bearing writes/duplicates stamp the host on agreement (fail-closed on
+\* disagreement, so no record carries a host that does not map to its community).
+\* This lets Inv_HostBindingFence check that every record's stored community equals
+\* its host's mapping -- i.e. the binding is enforced, not defaulted.
 
 Symmetry ==
     Permutations(Actors) \cup
@@ -107,7 +152,7 @@ vars == <<messages, projections, memberships, openChannels, auditHeads,
 DataRows == [
     id        : MsgIds,
     community : Communities,
-    channel   : Channels,
+    channel   : ChannelsExt,
     author    : Actors,
     source    : {"message", "projection"}
 ]
@@ -125,7 +170,8 @@ AcceptedWriteRows == [
     worker           : Workers,
     id               : MsgIds,
     community        : Communities,
-    channel          : Channels,
+    channel          : ChannelsExt,
+    host             : Hosts,
     author           : Actors,
     claimedCommunity : Communities
 ]
@@ -134,7 +180,8 @@ DuplicateWriteRows == [
     worker           : Workers,
     id               : MsgIds,
     community        : Communities,
-    channel          : Channels,
+    channel          : ChannelsExt,
+    host             : Hosts,
     author           : Actors,
     claimedCommunity : Communities
 ]
@@ -143,7 +190,7 @@ Observations == [
     worker    : Workers,
     actor     : Actors,
     community : Communities,          \* resolved/request TenantContext community
-    channel   : Channels,             \* target channel for channel-scoped ops
+    channel   : ChannelsExt,          \* target channel; NoChannel for channel-less ops
     kind      : ObsKinds,
     labels    : SUBSET Communities,   \* taint labels influencing this observation
     rows      : SUBSET DataRows,       \* row/projection dependencies, if any
@@ -193,11 +240,16 @@ TypeOK ==
     /\ MsgIds # {}
     /\ AuditVals # {}
     /\ ChannelCommunity \in [Channels -> Communities]
+    /\ HostCommunity \in [Hosts -> Communities \cup {NoCommunity}]
     /\ CommA \in Communities
     /\ CommB \in Communities
     /\ CommA # CommB
     /\ {ChanA1, ChanA2, ChanB1, ChanB2} \subseteq Channels
     /\ ChanA1 # ChanB1
+    /\ {HostA, HostB, HostBad} \subseteq Hosts
+    /\ NoChannel \notin Channels
+    /\ NoCommunity \notin Communities
+    /\ HostCommunity[HostBad] = NoCommunity
     /\ SanitizedErrors # {}
     /\ NoError \notin SanitizedErrors
     /\ NoAudit \notin AuditVals
@@ -212,11 +264,18 @@ TypeOK ==
     /\ duplicateWrites \subseteq DuplicateWriteRows
     /\ queryFaults \subseteq QueryFaultRows
     \* Tenant-scoped control plane: a membership row's community agrees with
-    \* the server-owned channel -> community mapping.
+    \* the server-owned channel -> community mapping. Memberships are always
+    \* channel-scoped (no channel-less memberships).
     /\ \A m \in memberships : m.community = ChannelCommunity[m.channel]
-    \* Message/projection rows are stamped with the server-owned channel mapping.
-    /\ \A m \in messages : m.community = ChannelCommunity[m.channel]
-    /\ \A p \in projections : p.community = ChannelCommunity[p.channel]
+    \* Message/projection rows are stamped with the resolved community: the
+    \* server-owned channel mapping for channel-bearing rows, and a real
+    \* (never-sentinel) community for channel-less rows (host-resolved at write).
+    /\ \A m \in messages :
+        IF m.channel = NoChannel THEN m.community \in Communities
+                                 ELSE m.community = ChannelCommunity[m.channel]
+    /\ \A p \in projections :
+        IF p.channel = NoChannel THEN p.community \in Communities
+                                 ELSE p.community = ChannelCommunity[p.channel]
 
 Init ==
     /\ messages = {}
@@ -270,43 +329,133 @@ UnscopedDirectIdRows(actor, id) ==
 
 RLSRows(community, rows) == {r \in rows : r.community = community}
 
+\* Channel-bearing write.  The community is resolved server-side from the h tag
+\* (real == ChannelCommunity[ch]), never the claimed community.  But the host is
+\* *also* authoritative: an A-host connection presenting a B-channel event is a
+\* confused deputy on the host axis (URL-is-community is the admission boundary),
+\* so the op fails closed unless HostCommunity[host] = ChannelCommunity[ch].
+\* Disagreement (incl. an unmapped HostBad whose mapping is NoCommunity, which can
+\* never equal a real channel community) writes nothing, emits a sanitized error,
+\* and records a query fault.  Never acts as the channel's community.
 WriteInsert(w) ==
     /\ Cardinality(observations) < MaxObservations
-    /\ \E id \in MsgIds, ch \in Channels, a \in Actors, claimed \in Communities :
+    /\ \E id \in MsgIds, ch \in Channels, host \in Hosts, a \in Actors, claimed \in Communities :
         LET real == ChannelCommunity[ch]
-            key == [community |-> real, id |-> id]
-            row == MessageRow(id, real, ch, a)
-            obs == [worker |-> w, actor |-> a, community |-> real, channel |-> ch,
-                    kind |-> "WriteResult", labels |-> {real}, rows |-> {row},
-                    error |-> NoError, result |-> "Inserted", verdict |-> "None", audit |-> NoAudit]
-            wr  == [worker |-> w, id |-> id, community |-> real,
-                    channel |-> ch, author |-> a, claimedCommunity |-> claimed]
         IN
-            /\ key \notin MessageKeys
-            /\ messages' = messages \cup {row}
-            /\ observations' = observations \cup {obs}
-            /\ acceptedWrites' = acceptedWrites \cup {wr}
-            /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
-                          duplicateWrites, queryFaults>>
+            IF HostCommunity[host] # real
+            THEN \* fail-closed: host/channel disagreement (A-host + B-channel).
+                LET obs == [worker |-> w, actor |-> a, community |-> claimed,
+                            channel |-> ch, kind |-> "SanitizedError",
+                            labels |-> {}, rows |-> {}, error |-> "restricted",
+                            result |-> "None", verdict |-> "None", audit |-> NoAudit]
+                    fault == [worker |-> w, actor |-> a, community |-> claimed,
+                              reason |-> "missing_tenant_context"]
+                IN
+                    /\ observations' = observations \cup {obs}
+                    /\ queryFaults' = queryFaults \cup {fault}
+                    /\ UNCHANGED <<messages, projections, memberships, openChannels,
+                                  auditHeads, acceptedWrites, duplicateWrites>>
+            ELSE \* host agrees with the channel mapping: accept, stamp the host.
+                LET key == [community |-> real, id |-> id]
+                    row == MessageRow(id, real, ch, a)
+                    obs == [worker |-> w, actor |-> a, community |-> real, channel |-> ch,
+                            kind |-> "WriteResult", labels |-> {real}, rows |-> {row},
+                            error |-> NoError, result |-> "Inserted", verdict |-> "None", audit |-> NoAudit]
+                    wr  == [worker |-> w, id |-> id, community |-> real,
+                            channel |-> ch, host |-> host, author |-> a, claimedCommunity |-> claimed]
+                IN
+                    /\ key \notin MessageKeys
+                    /\ messages' = messages \cup {row}
+                    /\ observations' = observations \cup {obs}
+                    /\ acceptedWrites' = acceptedWrites \cup {wr}
+                    /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
+                                  duplicateWrites, queryFaults>>
 
+\* Channel-less write (kind:0 profiles, 1059 DMs, 30023/30174/30315/30078, lists).
+\* There is no h tag to resolve, so the community is derived from the connection's
+\* host (P-RESOLVE-HOST / ResolveTenant): the row is stamped channel = NoChannel,
+\* community = HostCommunity[host].  The claimed community is adversary-controlled
+\* and ignored -- host wins (the confused-deputy fence, lifted to the host).
+\* An unmapped host (HostCommunity[host] = NoCommunity) fails closed: no row is
+\* written, the connection sees only a sanitized error, and a query fault is
+\* recorded.  Never a default tenant.
+WriteInsertGlobal(w) ==
+    /\ Cardinality(observations) < MaxObservations
+    /\ \E id \in MsgIds, host \in Hosts, a \in Actors, claimed \in Communities :
+        LET resolved == HostCommunity[host]
+        IN
+            IF resolved = NoCommunity
+            THEN \* fail-closed: unmapped/unknown host, write nothing.
+                LET obs == [worker |-> w, actor |-> a, community |-> claimed,
+                            channel |-> NoChannel, kind |-> "SanitizedError",
+                            labels |-> {}, rows |-> {}, error |-> "restricted",
+                            result |-> "None", verdict |-> "None", audit |-> NoAudit]
+                    fault == [worker |-> w, actor |-> a, community |-> claimed,
+                              reason |-> "missing_tenant_context"]
+                IN
+                    /\ observations' = observations \cup {obs}
+                    /\ queryFaults' = queryFaults \cup {fault}
+                    /\ UNCHANGED <<messages, projections, memberships, openChannels,
+                                  auditHeads, acceptedWrites, duplicateWrites>>
+            ELSE \* mapped host: stamp the host-resolved community, channel-less.
+                LET key == [community |-> resolved, id |-> id]
+                    row == [id |-> id, community |-> resolved, channel |-> NoChannel,
+                            author |-> a, source |-> "message"]
+                    obs == [worker |-> w, actor |-> a, community |-> resolved,
+                            channel |-> NoChannel, kind |-> "WriteResult",
+                            labels |-> {resolved}, rows |-> {row}, error |-> NoError,
+                            result |-> "Inserted", verdict |-> "None", audit |-> NoAudit]
+                    wr  == [worker |-> w, id |-> id, community |-> resolved,
+                            channel |-> NoChannel, host |-> host, author |-> a, claimedCommunity |-> claimed]
+                IN
+                    /\ key \notin MessageKeys
+                    /\ messages' = messages \cup {row}
+                    /\ observations' = observations \cup {obs}
+                    /\ acceptedWrites' = acceptedWrites \cup {wr}
+                    /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
+                                  duplicateWrites, queryFaults>>
+
+\* Duplicate / no-op write outcome (scoped conflict on (community_id, id)).  This
+\* is client-observable write surface -- the "Duplicate" WriteResult exposes the
+\* scoped existence/conflict rows -- so it carries the SAME host-axis obligation as
+\* WriteInsert.  The community is resolved server-side from the h tag (real ==
+\* ChannelCommunity[ch]); the host is *also* authoritative.  An A-host presenting a
+\* B-channel id is a confused deputy on the host axis: it must NOT learn whether
+\* that id already exists in B.  So the op fails closed (sanitized error + query
+\* fault, no Duplicate result, nothing recorded) unless HostCommunity[host] = real.
 WriteDuplicate(w) ==
     /\ Cardinality(observations) < MaxObservations
-    /\ \E id \in MsgIds, ch \in Channels, a \in Actors, claimed \in Communities :
+    /\ \E id \in MsgIds, ch \in Channels, host \in Hosts, a \in Actors, claimed \in Communities :
         LET real == ChannelCommunity[ch]
-            key == [community |-> real, id |-> id]
-            conflicts == ScopedConflictRows(real, id)
-            obs == [worker |-> w, actor |-> a, community |-> real, channel |-> ch,
-                    kind |-> "WriteResult", labels |-> RowLabels(conflicts), rows |-> conflicts,
-                    error |-> NoError, result |-> "Duplicate", verdict |-> "None", audit |-> NoAudit]
-            wr  == [worker |-> w, id |-> id, community |-> real,
-                    channel |-> ch, author |-> a, claimedCommunity |-> claimed]
         IN
-            /\ key \in MessageKeys
-            /\ messages' = messages
-            /\ observations' = observations \cup {obs}
-            /\ duplicateWrites' = duplicateWrites \cup {wr}
-            /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
-                          acceptedWrites, queryFaults>>
+            IF HostCommunity[host] # real
+            THEN \* fail-closed: host/channel disagreement (A-host + B-channel).
+                LET obs == [worker |-> w, actor |-> a, community |-> claimed,
+                            channel |-> ch, kind |-> "SanitizedError",
+                            labels |-> {}, rows |-> {}, error |-> "restricted",
+                            result |-> "None", verdict |-> "None", audit |-> NoAudit]
+                    fault == [worker |-> w, actor |-> a, community |-> claimed,
+                              reason |-> "missing_tenant_context"]
+                IN
+                    /\ observations' = observations \cup {obs}
+                    /\ queryFaults' = queryFaults \cup {fault}
+                    /\ UNCHANGED <<messages, projections, memberships, openChannels,
+                                  auditHeads, acceptedWrites, duplicateWrites>>
+            ELSE \* host agrees with the channel mapping: report the scoped duplicate.
+                LET key == [community |-> real, id |-> id]
+                    conflicts == ScopedConflictRows(real, id)
+                    obs == [worker |-> w, actor |-> a, community |-> real, channel |-> ch,
+                            kind |-> "WriteResult", labels |-> RowLabels(conflicts), rows |-> conflicts,
+                            error |-> NoError, result |-> "Duplicate", verdict |-> "None", audit |-> NoAudit]
+                    wr  == [worker |-> w, id |-> id, community |-> real,
+                            channel |-> ch, host |-> host, author |-> a, claimedCommunity |-> claimed]
+                IN
+                    /\ key \in MessageKeys
+                    /\ messages' = messages
+                    /\ observations' = observations \cup {obs}
+                    /\ duplicateWrites' = duplicateWrites \cup {wr}
+                    /\ UNCHANGED <<projections, memberships, openChannels, auditHeads,
+                                  acceptedWrites, queryFaults>>
 
 ReadMessageRows(w) ==
     /\ Cardinality(observations) < MaxObservations
@@ -385,11 +534,16 @@ SanitizedError(w) ==
             /\ UNCHANGED <<messages, projections, memberships, openChannels,
                           auditHeads, acceptedWrites, duplicateWrites, queryFaults>>
 
+\* Channel-bearing authorization.  Community resolves from the channel mapping;
+\* the host is also authoritative.  Host/channel disagreement (A-host + B-channel)
+\* is denied -- the host axis of the confused-deputy fence.  Even if the actor is
+\* a member of the B-channel, an A-host connection cannot drive a B-channel verdict.
 AuthCheck(w) ==
     /\ Cardinality(observations) < MaxObservations
-    /\ \E ch \in Channels, a \in Actors, claimed \in Communities :
+    /\ \E ch \in Channels, host \in Hosts, a \in Actors, claimed \in Communities :
         LET real == ChannelCommunity[ch]
-            allowed == ch \in ScopedAccessible(real, a)
+            hostAgrees == HostCommunity[host] = real
+            allowed == hostAgrees /\ ch \in ScopedAccessible(real, a)
             verdict == IF allowed THEN "Allow" ELSE "Deny"
             obs == [worker |-> w, actor |-> a, community |-> real, channel |-> ch,
                     kind |-> "AuthVerdict", labels |-> {real}, rows |-> {},
@@ -457,6 +611,7 @@ CloseChannel(w) ==
 Next ==
     \E w \in Workers :
         \/ WriteInsert(w)
+        \/ WriteInsertGlobal(w)
         \/ WriteDuplicate(w)
         \/ ReadMessageRows(w)
         \/ ReadProjectionRows(w)
@@ -503,13 +658,48 @@ Inv_ReadConfinement ==
         o.kind = "ResultRows" => \A r \in o.rows : r.community = o.community
 
 \* I2 resolution fence: persisted messages and write/auth observations are
-\* labeled by the server-owned channel->community mapping, not by a client h tag.
+\* labeled by the *resolved* community, never a client-supplied claim.  For a
+\* channel-bearing op the resolver is the server-owned channel->community mapping
+\* (the h tag is not the source).  For a channel-less op (channel = NoChannel) the
+\* resolver is the connection's host (P-RESOLVE-HOST): the stamped community is a
+\* real community derived from the host, never the NoCommunity sentinel and never
+\* the adversary-controlled claimedCommunity.  At N=1 (one host -> one community)
+\* the two branches coincide.
 Inv_ResolutionFence ==
-    /\ \A m \in messages : m.community = ChannelCommunity[m.channel]
-    /\ \A w \in acceptedWrites : w.community = ChannelCommunity[w.channel]
-    /\ \A w \in duplicateWrites : w.community = ChannelCommunity[w.channel]
+    /\ \A m \in messages :
+        IF m.channel = NoChannel THEN m.community \in Communities
+                                 ELSE m.community = ChannelCommunity[m.channel]
+    /\ \A w \in acceptedWrites :
+        IF w.channel = NoChannel THEN w.community \in Communities
+                                 ELSE w.community = ChannelCommunity[w.channel]
+    /\ \A w \in duplicateWrites :
+        IF w.channel = NoChannel THEN w.community \in Communities
+                                 ELSE w.community = ChannelCommunity[w.channel]
     /\ \A o \in observations :
-        o.kind \in {"WriteResult", "AuthVerdict"} => o.community = ChannelCommunity[o.channel]
+        o.kind \in {"WriteResult", "AuthVerdict"} =>
+            (IF o.channel = NoChannel THEN o.community \in Communities
+                                      ELSE o.community = ChannelCommunity[o.channel])
+
+\* I2-host fail-closed binding: EVERY accepted write -- channel-bearing or
+\* channel-less -- AND every observable duplicate/no-op outcome carries the host it
+\* came in on, and that host's mapping is a real community equal to the write's
+\* stored community (P-RESOLVE-HOST).  For channel-less writes this is the
+\* host->community derivation; for channel-bearing writes and duplicate/no-op
+\* outcomes it is the host/channel agreement fence (HostCommunity[host] =
+\* ChannelCommunity[ch]).  This makes BOTH "an unmapped host defaults to a tenant"
+\* and "an A-host can drive a B-channel op (insert OR duplicate-probe)" CAUGHT
+\* mutations: the fail-closed branches of WriteInsert/WriteInsertGlobal/WriteDuplicate
+\* write/record nothing on disagreement, so no accepted write and no recorded
+\* duplicate can carry a host whose mapping is NoCommunity or disagrees with the stamp.
+Inv_HostBindingFence ==
+    /\ \A w \in acceptedWrites :
+        /\ w.host \in Hosts
+        /\ HostCommunity[w.host] \in Communities
+        /\ w.community = HostCommunity[w.host]
+    /\ \A w \in duplicateWrites :
+        /\ w.host \in Hosts
+        /\ HostCommunity[w.host] \in Communities
+        /\ w.community = HostCommunity[w.host]
 
 \* I3a append persistence: every accepted append remains present in the shared log.
 Inv_AcceptedWritesPersist ==
@@ -542,6 +732,7 @@ Safety ==
     /\ Inv_LabelPropagation
     /\ Inv_ReadConfinement
     /\ Inv_ResolutionFence
+    /\ Inv_HostBindingFence
     /\ Inv_AcceptedWritesPersist
     /\ Inv_MessageKeyUnique
     /\ Inv_NoTenantContextFailsClosed

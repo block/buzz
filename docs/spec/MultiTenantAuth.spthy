@@ -189,13 +189,45 @@ rule Leak_Token:
 
 // Token use resolves the target community server-side from the requested channel.
 // There is intentionally no client-supplied community or h-tag in this rule.
+// The connection's HOST is *also* authoritative: the rule only fires when the
+// host's bound community equals the channel's resolved community, so an A-host
+// presenting a B-channel-bearing request cannot authorize (the confused-deputy
+// fence on the host axis, mirroring the channel-less case). The combined witness
+// ChannelBearingResolved(tok, used_comm, host, host_comm) is emitted by this SAME
+// rule firing so the agreement lemma is a single-fact assertion -- no second-fact
+// lookup, so the M8 mutation falsifies in one rule instance.
 rule Use_Token:
-  [ In(tok), !Token(tok, client, comm), !ChannelCommunity(chan, comm) ]
+  [ In(tok), !Token(tok, client, comm), !ChannelCommunity(chan, comm),
+    !HostCommunity(host, comm) ]
   --[
       ActionAuthorized(tok, client, comm, chan),
+      HostBoundFor(host, comm),
+      ChannelBearingResolved(tok, comm, host, comm),
       TokenUsedForCommunity(tok, comm)
     ]->
   [ ]
+
+// Non-vacuity mutation M8 (DO NOT ENABLE in the real model): the relay authorizes
+// a channel-bearing op from the channel mapping while ignoring the host binding,
+// so an A-host can drive a B-channel op (host/channel disagreement accepted).
+//
+// rule MUTATION_Use_Token_Ignore_Host:
+//   [ In(tok), !Token(tok, client, comm), !ChannelCommunity(chan, comm),
+//     !HostCommunity(host, host_comm) ]
+//   --[
+//       Neq(comm, host_comm),
+//       ActionAuthorized(tok, client, comm, chan),
+//       HostBoundFor(host, host_comm),
+//       ChannelBearingResolved(tok, comm, host, host_comm),
+//       TokenUsedForCommunity(tok, comm)
+//     ]->
+//   [ ]
+//
+// Expected mutation result: `channelbearing_use_agrees_with_host` goes red. The
+// lemma reads a SINGLE ChannelBearingResolved(tok, used, host, host_comm) fact and
+// asserts used = host_comm; the mutation emits used = comm, host_comm under
+// Neq(comm, host_comm), so the counterexample is one rule instance. Confirmed:
+// falsified with a 14-step trace on Tamarin 1.12.0 / Maude 3.5.1.
 
 // Non-vacuity mutation for S1 (DO NOT ENABLE in the real model): this is the
 // tempting confused-deputy bug where the relay authorizes from a client-supplied
@@ -223,6 +255,85 @@ rule Probe_Cross_Community_Token_Use:
   --[
       Neq(minted_comm, resolved_comm),
       CrossCommunityUseAttempt(tok, client, minted_comm, resolved_comm, chan)
+    ]->
+  [ ]
+
+// ============================================================================
+// Host -> community binding (P-RESOLVE-HOST) and channel-less token use
+// ============================================================================
+//
+// Channel-less operations (kind:0 profiles, 1059 DMs, 30023/30174/30315/30078,
+// lists) carry no h tag, so the community cannot be resolved from a channel.
+// Per Tyler's ruling, the connection's HOST is authoritative for the community,
+// exactly as a relay URL is authoritative for a relay today, lifted one level up.
+// A host binds to exactly one community; an unmapped host has no binding and so
+// no channel-less op can resolve (fail-closed -- modeled by the absence of a
+// !HostCommunity fact, so Use_Token_ChannelLess simply cannot fire).
+
+rule Bind_Host:
+  [ !Community(comm), Fr(~host) ]
+  --[
+      HostBound(~host, comm)
+    ]->
+  [
+      !HostCommunity(~host, comm),
+      Out(~host)
+  ]
+
+// Channel-less token use. The target community is resolved server-side from the
+// connection's host, NOT from a client-supplied community/h tag and NOT from the
+// token's stamp. The token must AGREE with the host-derived community: the rule
+// only fires when !Token(tok, client, comm) and !HostCommunity(host, comm) share
+// the same comm. Host wins; a token stamped for a different community cannot
+// authorize here (see Probe_Host_Token_Mismatch). This is the confused-deputy
+// fence (I2) lifted from channel to host. The HostBoundFor action witnesses the
+// host's binding at the authorization point so the confinement lemma can join on
+// the (single-source) host binding rather than reconstructing adversary state.
+rule Use_Token_ChannelLess:
+  [ In(tok), !Token(tok, client, comm), !HostCommunity(host, comm) ]
+  --[
+      ChannelLessAuthorized(tok, client, comm, host),
+      HostBoundFor(host, comm),
+      // Single combined witness: the community actually used (1st arg) alongside
+      // the host's resolved community (3rd arg), emitted by the SAME rule firing.
+      // In the real rule both are `comm` (host wins), so the confinement lemma is
+      // a single-fact assertion -- no second-fact lookup, no source ambiguity, so
+      // the mutation that breaks the equality falsifies in one rule instance.
+      ChannelLessResolved(tok, comm, host, comm),
+      TokenUsedForCommunity(tok, comm)
+    ]->
+  [ ]
+
+// Non-vacuity mutation for S1-host (DO NOT ENABLE in the real model): the relay
+// authorizes a channel-less op from the token's stamp while ignoring the host
+// binding, so a B-stamped token authorizes on an A-host.
+//
+// rule MUTATION_Use_Token_ChannelLess_Ignore_Host:
+//   [ In(tok), !Token(tok, client, minted_comm), !HostCommunity(host, host_comm) ]
+//   --[
+//       Neq(minted_comm, host_comm),
+//       ChannelLessAuthorized(tok, client, minted_comm, host),
+//       HostBoundFor(host, host_comm),
+//       ChannelLessResolved(tok, minted_comm, host, host_comm),
+//       TokenUsedForCommunity(tok, minted_comm)
+//     ]->
+//   [ ]
+//
+// Expected mutation result: `channelless_use_confined_to_host_community` goes red.
+// The confinement lemma reads a SINGLE ChannelLessResolved(tok, used, host,
+// host_comm) fact and asserts used = host_comm; the mutation emits that fact with
+// used = minted_comm, host_comm = host_comm under Neq(minted_comm, host_comm), so
+// the counterexample is one rule instance with no second-fact lookup or adversary
+// reconstruction. Confirmed: falsified fast on Tamarin 1.12.0.
+
+// Probe rule: the adversary presents a token stamped for one community over a
+// connection whose host is bound to a different community. The real model records
+// the attempt but does not authorize it (host wins / token must agree with host).
+rule Probe_Host_Token_Mismatch:
+  [ In(tok), !Token(tok, client, minted_comm), !HostCommunity(host, host_comm) ]
+  --[
+      Neq(minted_comm, host_comm),
+      HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host)
     ]->
   [ ]
 
@@ -332,6 +443,50 @@ lemma cross_community_use_attempts_are_not_authorized:
       CrossCommunityUseAttempt(tok, client, minted_comm, resolved_comm, chan) @ i
     ==> not (Ex #j. ActionAuthorized(tok, client, resolved_comm, chan) @ j)"
 
+// S1-host: a channel-less authorization is confined to the community bound to the
+// connection's HOST. The lemma reads a single ChannelLessResolved(tok, used_comm,
+// host, host_comm) fact -- emitted by the authorizing rule and carrying both the
+// community actually used and the host's resolved community -- and asserts they
+// are equal. A single-fact assertion means a counterexample is one rule instance,
+// not a multi-fact join or adversary reconstruction. Host wins over the token's
+// stamp: enabling MUTATION_Use_Token_ChannelLess_Ignore_Host falsifies this fast.
+lemma channelless_use_confined_to_host_community:
+  "All tok used_comm host host_comm #i.
+      ChannelLessResolved(tok, used_comm, host, host_comm) @ i
+    ==> used_comm = host_comm"
+
+// S1-host (channel-bearing): a channel-BEARING authorization is confined to the
+// community bound to the connection's HOST -- the host axis of the confused-deputy
+// fence. Today the relay resolves a channel-bearing op's community from the h tag
+// (the channel mapping) alone; this lemma proves that the host must ALSO agree, so
+// an A-host presenting a B-channel-bearing request cannot authorize as B. Like the
+// channel-less case it reads a single ChannelBearingResolved(tok, used_comm, host,
+// host_comm) fact, so a counterexample is one rule instance. Enabling
+// MUTATION_Use_Token_Ignore_Host (which accepts host/channel disagreement)
+// falsifies this fast.
+lemma channelbearing_use_agrees_with_host:
+  "All tok used_comm host host_comm #i.
+      ChannelBearingResolved(tok, used_comm, host, host_comm) @ i
+    ==> used_comm = host_comm"
+
+// The token presented for a channel-less op must agree with the host-derived
+// community: the real rule only fires when the token's stamp equals the host's
+// community, so any recorded channel-less authorization carries a token whose
+// mint stamp matches the used community.
+lemma channelless_token_agrees_with_host:
+  "All tok client used_comm host minted_comm #i #j.
+      ChannelLessAuthorized(tok, client, used_comm, host) @ i
+    & TokenMinted(tok, client, minted_comm) @ j
+    ==> used_comm = minted_comm"
+
+// A token stamped for one community presented over a host bound to a different
+// community (the host/token mismatch) is never channel-less authorized for the
+// token's stamped community over that host.
+lemma host_token_mismatch_not_authorized:
+  "All tok client minted_comm host_comm host #i.
+      HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host) @ i
+    ==> not (Ex #j. ChannelLessAuthorized(tok, client, minted_comm, host) @ j)"
+
 // S2: every minted token has exactly one stamped community, and every requested
 // channel recorded for that mint resolved to that stamp.
 lemma minted_token_channels_match_stamp:
@@ -422,5 +577,20 @@ lemma executable_signing_key_compromise:
 lemma executable_audit_append:
   exists-trace
   "Ex comm prev next #i. AuditAppended(comm, prev, next) @ i"
+
+// Host-binding reachability probes (anti-vacuity for the S1-host lemmas).
+lemma executable_host_bound:
+  exists-trace
+  "Ex host comm #i. HostBound(host, comm) @ i"
+
+lemma executable_channelless_use:
+  exists-trace
+  "Ex tok client comm host #i.
+      ChannelLessAuthorized(tok, client, comm, host) @ i"
+
+lemma executable_host_token_mismatch_attempt:
+  exists-trace
+  "Ex tok client minted_comm host_comm host #i.
+      HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host) @ i"
 
 end

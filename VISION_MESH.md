@@ -2,9 +2,9 @@
 
 > A small team runs their project on one Buzz relay. Three of them have GPUs that sit idle most of the day — a gaming PC, a laptop, a workstation under a desk. One flips a toggle: *Share compute.* The others point their agents at it. Now the whole team's coding agents answer from a capable model running on hardware they already own. No API keys. No cloud bill. Every prompt runs inside the relay community they already chose to trust.
 
-A Buzz relay is a trust group. The people in it already know each other — that shared membership is a decision they've already made. Buzz Mesh turns that decision into shared AI compute: the idle GPUs scattered across your community become one pool, usable by every agent on the relay, gated by the membership you already have. And because the pool is many machines, not one, the community can run models larger and more capable than any one member could load alone. More intelligence becomes reachable when the group works as a group.
+A Buzz community is a trust group. The people in it already know each other — that shared membership is a decision they've already made. Buzz Mesh turns that decision into shared AI compute: the idle GPUs scattered across your community become one pool, usable by every agent in the community, gated by the membership you already have. And because the pool is many machines, not one, the community can run models larger and more capable than any one member could load alone. More intelligence becomes reachable when the group works as a group.
 
-Nothing here is new on its own. Pooling GPUs across machines is solved. Nostr identity is solved. Relay-gated membership is how Buzz already works. The insight is that the tool that pools the GPUs already speaks the same protocol Buzz is built on — so the mesh's admission gate and your relay's membership gate are the same gate.
+Nothing here is new on its own. Pooling GPUs across machines is solved. Nostr identity is solved. Community-gated membership is how Buzz already works. The insight is that the tool that pools the GPUs already speaks the same protocol Buzz is built on — so the mesh's admission gate and your community's membership gate are the same gate. The boundary is the community, never the deployment: a community on shared infrastructure pools only its own members' compute, and a co-tenant community can't find it, join it, or serve to it.
 
 Each piece is boring. The combination is the thing.
 
@@ -34,7 +34,7 @@ This is why it matters most for agents. An agent on your relay isn't reaching ou
 
 ## Honest Costs
 
-Your prompts go to people, not a vendor. For a trust group that's a feature — far better than handing them to a stranger's cloud — but it is a different promise than "your data never leaves your machine," and the consent screen says so plainly. A relay is only as private as its membership is trustworthy.
+Your prompts go to people, not a vendor. For a trust group that's a feature — far better than handing them to a stranger's cloud — but it is a different promise than "your data never leaves your machine," and the consent screen says so plainly. A community is only as private as its membership is trustworthy.
 
 The mesh is opt-in, so it's only as capable as your community's participation. A relay where nobody shares compute has an empty mesh. That's the right default — you give willingly or not at all — but the value compounds with how many people turn it on.
 

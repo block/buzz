@@ -3,3 +3,4 @@
 states/
 *.st
 *.fp
+tla2tools.jar
