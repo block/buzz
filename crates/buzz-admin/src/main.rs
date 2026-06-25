@@ -228,8 +228,8 @@ async fn cmd_list_members() -> Result<i32> {
     }
 
     println!(
-        "{:<66} {:<8} {:<66} {}",
-        "pubkey", "role", "added_by", "created_at"
+        "{:<66} {:<8} {:<66} created_at",
+        "pubkey", "role", "added_by"
     );
     println!("{}", "-".repeat(160));
     for m in &members {
