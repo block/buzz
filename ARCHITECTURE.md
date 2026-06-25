@@ -718,10 +718,13 @@ Subcommands:
 
 | Subcommand | Purpose |
 |------------|---------|
-| `add-member` | Add a pubkey to the relay membership list (`--pubkey`, `--role`) |
+| `add-member` | Add a pubkey to the relay membership list (`--pubkey`, `--role`); accepts npub or hex; publishes kind:13534 roster |
+| `remove-member` | Remove a pubkey from the relay membership list (`--pubkey`, optional `--role` guard); publishes kind:13534 roster |
 | `list-members` | List all relay members |
 | `generate-key` | Generate a new Nostr keypair (for bootstrapping) |
 | `reconcile-channels` | Emit kind:39000/39002 discovery events for channels missing them (idempotent) |
+
+The `buzz-admin` binary is shipped in the relay Docker image (`/usr/local/bin/buzz-admin`) and is the recommended way to manage relay membership in production. Use `./run.sh add-member`, `./run.sh remove-member`, and `./run.sh list-members` in Docker Compose deployments.
 
 ---
 

@@ -738,14 +738,23 @@ name = "buzz-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buzz-audit",
  "buzz-auth",
  "buzz-core",
  "buzz-db",
+ "buzz-media",
+ "buzz-pubsub",
+ "buzz-search",
+ "buzz-workflow",
  "clap",
+ "deadpool-redis",
  "hex",
  "nostr",
  "serde_json",
+ "sqlx",
  "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
