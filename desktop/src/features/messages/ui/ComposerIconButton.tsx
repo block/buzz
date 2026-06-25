@@ -28,10 +28,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
  *
  * `disableHoverableContent` turns off Radix's "safe bridge" — the keep-alive
  * window that normally lets the cursor slide off the trigger onto the popup
- * and persist it. Without it these label tooltips would camp open (and even be
- * text-selectable) while the pointer hovers the popup; with it they dismiss the
- * instant the cursor leaves the trigger. Scoped to this composer Root only —
- * the shared TooltipProvider keeps its app-wide default.
+ * and persist it. Scoped to this composer Root only — the shared
+ * TooltipProvider keeps its app-wide default.
+ *
+ * The `data-composer-tooltip` marker is what actually defeats the camp: Radix
+ * wraps TooltipContent in a positioned [data-radix-popper-content-wrapper] DIV
+ * that it styles with `pointer-events: auto` and never exposes to React props.
+ * That wrapper overlaps the trigger, so a real cursor sliding off the trigger
+ * lands on it and keeps the tooltip alive — `pointer-events-none` on the inner
+ * content (below) is one level too shallow. A scoped rule in globals.css keys
+ * off this marker via `:has()` to kill pointer-events/select on the wrapper
+ * itself. The inner `pointer-events-none select-none` stays as belt-and-
+ * suspenders.
  */
 export interface ComposerIconButtonProps extends ButtonProps {
   /** Short, non-interactive label shown in the click-through tooltip. */
@@ -52,7 +60,10 @@ const ComposerIconButton = React.forwardRef<
       <TooltipTrigger asChild>
         <Button ref={ref} size={size} type={type} {...props} />
       </TooltipTrigger>
-      <TooltipContent className={cn("pointer-events-none", tooltipClassName)}>
+      <TooltipContent
+        data-composer-tooltip
+        className={cn("pointer-events-none select-none", tooltipClassName)}
+      >
         {tooltip}
       </TooltipContent>
     </Tooltip>

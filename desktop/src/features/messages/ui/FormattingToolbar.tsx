@@ -291,16 +291,22 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
               <item.icon className="h-4 w-4" />
             </button>
           </TooltipTrigger>
-          {/* pointer-events-none keeps these label tooltips click-through so
-              they don't block the message textarea floating beneath them,
-              matching ComposerIconButton. Content only — the trigger button
-              keeps its pointer/focus behavior (WCAG content-on-hover-or-focus).
-              disableHoverableContent (on the Root above) kills Radix's
-              hover-to-persist safe bridge so the tooltip dismisses the instant
-              the cursor leaves the trigger. These formatting buttons are raw
+          {/* pointer-events-none + select-none keep these label tooltips
+              click-through and non-selectable so they don't block the message
+              textarea floating beneath them, matching ComposerIconButton.
+              Content only — the trigger button keeps its pointer/focus behavior
+              (WCAG content-on-hover-or-focus). disableHoverableContent (on the
+              Root above) kills Radix's hover-to-persist safe bridge; the
+              data-composer-tooltip marker lets a scoped globals.css rule reach
+              the positioned [data-radix-popper-content-wrapper] (pe:auto,
+              overlaps the trigger) that's the real camp surface — see
+              ComposerIconButton's doc comment. These formatting buttons are raw
               <button>s with custom active styling, so we apply the overrides
               here rather than swap in ComposerIconButton. */}
-          <TooltipContent className="pointer-events-none">
+          <TooltipContent
+            data-composer-tooltip
+            className="pointer-events-none select-none"
+          >
             {"shortcut" in item
               ? `${item.label} (${item.shortcut})`
               : item.label}
