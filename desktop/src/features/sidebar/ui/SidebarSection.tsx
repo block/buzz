@@ -234,7 +234,9 @@ export function ChannelMenuButton({
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
-      <span className="min-w-0 flex-1 truncate">{resolvedLabel}</span>
+      <span className="min-w-0 flex-1 select-none truncate">
+        {resolvedLabel}
+      </span>
       {ephemeralDisplay ? (
         <EphemeralChannelBadge
           display={ephemeralDisplay}
@@ -410,12 +412,9 @@ export function SidebarSection({
                   </SidebarMenuItem>
                 );
 
-                const hasContextAction =
-                  (unreadChannelIds.has(channel.id) && onMarkChannelRead) ||
-                  (!unreadChannelIds.has(channel.id) && onMarkChannelUnread) ||
-                  (onMuteChannel && onUnmuteChannel);
-
-                return hasContextAction ? (
+                // The shared menu always renders copy actions, so every row
+                // gets a context menu regardless of read/mute availability.
+                return (
                   <ContextMenu key={channel.id}>
                     <ContextMenuTrigger asChild>{menuItem}</ContextMenuTrigger>
                     <ContextMenuContent>
@@ -430,8 +429,6 @@ export function SidebarSection({
                       />
                     </ContextMenuContent>
                   </ContextMenu>
-                ) : (
-                  menuItem
                 );
               })}
             </SidebarMenu>
