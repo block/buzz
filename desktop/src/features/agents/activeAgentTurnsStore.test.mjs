@@ -4,6 +4,7 @@ import { describe, it, beforeEach, afterEach, mock } from "node:test";
 import {
   syncAgentTurnsFromEvents,
   getActiveTurnsForAgent,
+  getActiveTurnsByChannel,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
 } from "./activeAgentTurnsStore.ts";
@@ -11,6 +12,8 @@ import { formatElapsed } from "./ui/agentSessionUtils.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+const AGENT_2 =
+  "dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321dcba4321";
 
 /** Channel-id Set view of the summary array — keeps legacy assertions terse. */
 function channelIdsOf(turns) {
@@ -160,6 +163,60 @@ describe("activeAgentTurnsStore", () => {
       assert.ok(!channels.has("c1"), "oldest turn should be evicted");
       assert.ok(channels.has("c2"));
       assert.ok(channels.has("c5"));
+    });
+  });
+
+  describe("channel aggregation", () => {
+    it("collapses active turns by channel across agents", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "agent-1-early",
+          channelId: "shared",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          turnId: "agent-1-late",
+          channelId: "shared",
+          timestamp: "2024-01-01T00:01:00Z",
+        }),
+      ]);
+      syncAgentTurnsFromEvents(AGENT_2, [
+        makeEvent({
+          seq: 1,
+          turnId: "agent-2",
+          channelId: "shared",
+          timestamp: "2024-01-01T00:02:00Z",
+        }),
+      ]);
+
+      const summaries = getActiveTurnsByChannel();
+      assert.deepEqual(
+        summaries.map(({ channelId, agentCount }) => ({
+          channelId,
+          agentCount,
+        })),
+        [{ channelId: "shared", agentCount: 2 }],
+      );
+      assert.equal(
+        summaries[0].anchorAt,
+        getActiveTurnsForAgent(AGENT)[0].anchorAt,
+      );
+    });
+
+    it("removes a channel summary when the last active turn ends", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+        }),
+      ]);
+
+      assert.deepEqual(getActiveTurnsByChannel(), []);
     });
   });
 

@@ -44,6 +44,7 @@ import {
   SECTION_ACTION_VISIBILITY_CLASS,
   SECTION_ICON_BUTTON_CLASS,
 } from "@/features/sidebar/ui/sidebarSectionStyles";
+import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -301,6 +302,7 @@ export function ChannelGroupSection({
   hasUnread,
   isCollapsed,
   isActiveChannel,
+  activeWorkingByChannelId,
   items,
   listTestId,
   onBrowseClick,
@@ -332,6 +334,7 @@ export function ChannelGroupSection({
   groupClassName?: string;
   isCollapsed: boolean;
   isActiveChannel: boolean;
+  activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   items: Channel[];
   listTestId: string;
   onBrowseClick?: () => void;
@@ -374,6 +377,7 @@ export function ChannelGroupSection({
                   <DraggableChannelRow channelId={channel.id}>
                     <ChannelMenuButton
                       channel={channel}
+                      activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       hasUnread={unreadChannelIds.has(channel.id)}
                       unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
@@ -386,6 +390,7 @@ export function ChannelGroupSection({
                 ) : (
                   <ChannelMenuButton
                     channel={channel}
+                    activeWorking={activeWorkingByChannelId?.get(channel.id)}
                     hasUnread={unreadChannelIds.has(channel.id)}
                     unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                     isMuted={mutedChannelIds?.has(channel.id)}
@@ -475,6 +480,7 @@ export function CustomChannelSection({
   hasUnread,
   isCollapsed,
   isActiveChannel,
+  activeWorkingByChannelId,
   selectedChannelId,
   unreadChannelCounts,
   unreadChannelIds,
@@ -506,6 +512,7 @@ export function CustomChannelSection({
   hasUnread: boolean;
   isCollapsed: boolean;
   isActiveChannel: boolean;
+  activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   selectedChannelId: string | null;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
@@ -651,6 +658,9 @@ export function CustomChannelSection({
                             <DraggableChannelRow channelId={channel.id}>
                               <ChannelMenuButton
                                 channel={channel}
+                                activeWorking={activeWorkingByChannelId?.get(
+                                  channel.id,
+                                )}
                                 hasUnread={unreadChannelIds.has(channel.id)}
                                 unreadCount={
                                   unreadChannelCounts.get(channel.id) ?? 0

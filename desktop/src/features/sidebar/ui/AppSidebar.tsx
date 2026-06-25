@@ -20,6 +20,7 @@ import {
   useChannelSections,
   type ChannelSection,
 } from "@/features/sidebar/lib/useChannelSections";
+import { useActiveWorkingChannelsById } from "@/features/sidebar/lib/useActiveWorkingChannelsById";
 import { useDmSidebarMetadata } from "@/features/sidebar/useDmSidebarMetadata";
 import { sortDmChannelsByLabel } from "@/features/sidebar/lib/dmSidebarSort";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
@@ -239,6 +240,7 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
+  const activeWorkingByChannelId = useActiveWorkingChannelsById();
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
   const sidebarRelayConnectionCard = useSidebarRelayConnectionCard(
@@ -661,6 +663,7 @@ export function AppSidebar({
                   )}
                   isCollapsed={collapsedGroups.starred}
                   isActiveChannel={selectedView === "channel"}
+                  activeWorkingByChannelId={activeWorkingByChannelId}
                   items={starredChannels}
                   listTestId="starred-list"
                   onMarkAllRead={() => {
@@ -704,6 +707,7 @@ export function AppSidebar({
                     }
                     isCollapsed={collapsedSections[section.id] ?? false}
                     isActiveChannel={selectedView === "channel"}
+                    activeWorkingByChannelId={activeWorkingByChannelId}
                     selectedChannelId={selectedChannelId}
                     unreadChannelCounts={unreadChannelCounts}
                     unreadChannelIds={unreadChannelIds}
@@ -744,6 +748,7 @@ export function AppSidebar({
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.channels}
                   isActiveChannel={selectedView === "channel"}
+                  activeWorkingByChannelId={activeWorkingByChannelId}
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
                   onBrowseClick={onBrowseChannels}
@@ -776,6 +781,7 @@ export function AppSidebar({
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.forums}
                   isActiveChannel={selectedView === "channel"}
+                  activeWorkingByChannelId={activeWorkingByChannelId}
                   items={forumChannels}
                   listTestId="forum-list"
                   onCreateClick={() => openCreateDialog("forum")}
@@ -814,6 +820,7 @@ export function AppSidebar({
                 dmParticipantsByChannelId={dmParticipantsByChannelId}
                 isCollapsed={collapsedGroups.directMessages}
                 isActiveChannel={selectedView === "channel"}
+                activeWorkingByChannelId={activeWorkingByChannelId}
                 items={sortedDirectMessages}
                 channelLabels={dmChannelLabels}
                 onHideDm={onHideDm}
