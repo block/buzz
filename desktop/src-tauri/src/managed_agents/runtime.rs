@@ -40,6 +40,12 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "buzz_dev_mcp",
 ];
 
+/// Script interpreters that may host managed agent wrappers (e.g. npm shims).
+/// A process whose name matches here is NOT immediately claimed — it must also
+/// carry `BUZZ_MANAGED_AGENT` in its environment (checked by the caller via
+/// `process_has_buzz_marker()`). This avoids sweeping unrelated node processes.
+pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
+
 /// Check if a process name matches any of our known agent binaries.
 /// Uses exact match or prefix-with-separator to avoid false positives
 /// (e.g. `"goose"` must not match `"mongoose"`).
@@ -52,6 +58,13 @@ fn name_matches_known_binary(name: &str) -> bool {
             }
         }
     })
+}
+
+/// Check if a process name is a known script interpreter that may be hosting
+/// a managed agent wrapper (e.g. `node` running an npm shim for `codex-acp`).
+/// Callers must additionally verify `BUZZ_MANAGED_AGENT` ownership.
+fn name_matches_interpreter(name: &str) -> bool {
+    KNOWN_SCRIPT_INTERPRETERS.iter().any(|&interp| name == interp)
 }
 
 #[cfg(unix)]
@@ -89,7 +102,9 @@ pub(crate) fn process_belongs_to_us(pid: u32) -> bool {
         return false;
     }
     let name = String::from_utf8_lossy(&buf[..len as usize]);
-    name_matches_known_binary(&name)
+    // Fall through for script interpreters (e.g. `node` hosting an npm shim):
+    // the caller's `process_has_buzz_marker()` check decides true ownership.
+    name_matches_known_binary(&name) || name_matches_interpreter(&name)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -101,13 +116,18 @@ pub(crate) fn process_belongs_to_us(pid: u32) -> bool {
         if name_matches_known_binary(name.trim()) {
             return true;
         }
+        // Interpreter check: `node` is 4 bytes, never truncated.
+        if name_matches_interpreter(name.trim()) {
+            return true;
+        }
     }
 
     // Fallback: read /proc/<pid>/exe which is a symlink to the full binary path.
     // This is not subject to the 15-byte truncation limit.
     if let Ok(exe_path) = std::fs::read_link(format!("/proc/{pid}/exe")) {
         if let Some(basename) = exe_path.file_name().and_then(|n| n.to_str()) {
-            return name_matches_known_binary(basename);
+            // Fall through for script interpreters — caller checks the marker.
+            return name_matches_known_binary(basename) || name_matches_interpreter(basename);
         }
     }
 
