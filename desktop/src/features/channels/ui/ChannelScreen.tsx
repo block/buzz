@@ -684,6 +684,11 @@ export function ChannelScreen({
           return;
         }
 
+        if (channelManagementOpen) {
+          setChannelManagementOpen(false);
+          return;
+        }
+
         setOpenThreadHeadId(null);
         setExpandedThreadReplyIds(new Set());
         setThreadScrollTargetId(null);
