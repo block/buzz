@@ -368,12 +368,12 @@ lemma system_event_acceptance_requires_same_community_key_or_compromise:
       | (Ex #k. CommunityKeyCompromised(comm) @ k & #k < #i)"
 
 lemma other_community_key_compromise_does_not_authorize:
-  "All commA commB kind group msg #i #j.
+  "All commA commB kind group msg #i #j #k.
       CommunityKeyCompromised(commB) @ i
     & SystemEventAccepted(commA, kind, group, msg) @ j
-    & Neq(commA, commB) @ i
-    ==> (Ex #k. SystemEventSigned(commA, kind, group, msg) @ k & #k < #j)
-      | (Ex #l. CommunityKeyCompromised(commA) @ l & #l < #j)"
+    & Neq(commA, commB) @ k
+    ==> (Ex #l. SystemEventSigned(commA, kind, group, msg) @ l & #l < #j)
+      | (Ex #m. CommunityKeyCompromised(commA) @ m & #m < #j)"
 
 // S4 shape: every audit append advances a head for the same community and the
 // next hash binds that community id, so another community's head cannot be used
@@ -398,6 +398,22 @@ lemma leaked_token_can_authorize_within_its_community:
   "Ex tok client comm chan #i #j.
       TokenLeaked(tok, client, comm) @ i
     & ActionAuthorized(tok, client, comm, chan) @ j"
+
+lemma executable_system_event_acceptance:
+  exists-trace
+  "Ex comm kind group msg #i. SystemEventAccepted(comm, kind, group, msg) @ i"
+
+lemma executable_other_key_compromise_plus_system_accept:
+  exists-trace
+  "Ex commA commB kind group msg #i #j #k.
+      CommunityKeyCompromised(commB) @ i
+    & SystemEventAccepted(commA, kind, group, msg) @ j
+    & Neq(commA, commB) @ k"
+
+lemma executable_cross_community_audit_splice_attempt:
+  exists-trace
+  "Ex commA commB prevA prevB forged #i.
+      CrossCommunityAuditSpliceAttempt(commA, commB, prevA, prevB, forged) @ i"
 
 lemma executable_signing_key_compromise:
   exists-trace

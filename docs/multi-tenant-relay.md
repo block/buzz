@@ -416,18 +416,37 @@ adversary cannot circumvent. A-RLS-1..5 are the load-bearing *backstop*.
 Each Tamarin lemma is paired with an exists-trace sanity lemma (the honest
 protocol can run), the Tamarin analog of the mutation test.
 
-**Verification status (this draft).** S1 and S2 are **machine-verified green** on
-Tamarin 1.12.0 / Maude 3.5.1 (`token_confinement`,
+**Verification status.** S1–S4 are **machine-verified green** on
+Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 20 lemmas in
+5.89s with zero `analyzed` failures. S1/S2: `token_confinement`,
 `cross_community_use_attempts_are_not_authorized`, the two
 `minted_*_channels_match_stamp` lemmas, `token_stamp_matches_mint`,
 `cross_community_mint_yields_no_token_for_that_request`, and the
 `leaked_token_blast_radius_contained` / `leaked_token_can_authorize_within_its_community`
-containment pair), each with its exists-trace sanity lemma also verified, and the
-`MUTATION_Use_Token_Claimed_Community` mutation confirmed red
-(`falsified — found trace`). S3 and S4 lemmas are **authored in the model but not
-yet verified**; this draft claims S1/S2 as the proven milestone and tracks S3/S4
-as the next proof round. The committed `.spthy` is byte-identical
-(SHA-256 `1e7fb042…aceaacf24`) to the artifact behind the green S1/S2 run.
+containment pair, with `MUTATION_Use_Token_Claimed_Community` confirmed red
+(`falsified — found trace`). S3:
+`system_event_acceptance_requires_same_community_key_or_compromise` (21 steps) and
+`other_community_key_compromise_does_not_authorize` (126 steps). S4:
+`audit_append_advances_same_community_head` (2 steps) and
+`cross_community_audit_splice_attempt_is_not_append` (1 step). Each safety lemma is
+paired with a verified exists-trace sanity lemma, and the S3/S4 mutations are
+confirmed red: the bad-accept-with-other-community-key mutation falsifies both S3
+lemmas (5 / 16 steps) and the splice-as-append mutation falsifies the S4 splice
+lemma (8 steps).
+
+The S3/S4 round corrected one vacuity bug in the committed
+`1e7fb042…aceaacf24` artifact: `other_community_key_compromise_does_not_authorize`
+bound `Neq(commA, commB)` to the *same* timepoint as `CommunityKeyCompromised(commB)`,
+but no rule emits `Neq` at the compromise point, so that premise was unsatisfiable —
+the lemma verified vacuously and asserted nothing. (Independently confirmed: an
+exists-trace probe of the old premise returns `no trace found`.) The fix decouples
+the inequality onto a separate witness timepoint `#k`; a new exists-trace lemma
+`executable_other_key_compromise_plus_system_accept` (16 steps, verified) proves the
+corrected premise is satisfiable, so the 126-step proof is non-vacuous. This is the
+same hygiene class as F1/F3/F4 — an artifact relying on a fact the model never makes
+reachable — but caught inside a safety lemma's premise rather than a comment. The
+committed `.spthy` for this milestone is byte-identical (SHA-256
+`0ad53184…d644b94d85`) to the artifact behind the green S1–S4 run.
 
 ## Conformance
 
@@ -536,12 +555,13 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   actors, and ids explodes the space; symmetry + bounded observations keep the
   core isolation surface exhaustively checkable.
 - **`docs/spec/MultiTenantAuth.spthy`** — the Tamarin authorization model. Run:
-  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. S1/S2 lemmas verify
-  green (Tamarin 1.12.0 / Maude 3.5.1) — each paired with a verified exists-trace
-  sanity lemma, and the commented `MUTATION_Use_Token_Claimed_Community` (authorize
-  from a client-supplied tag) confirmed to falsify `token_confinement` when
-  uncommented. S3/S4 lemmas are authored but not yet verified (see §Authorization
-  soundness). The committed file is SHA-256 `1e7fb042…aceaacf24`.
+  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 20 lemmas (S1–S4)
+  verify green (Tamarin 1.12.0 / Maude 3.5.1, 5.89s) — each safety lemma paired with
+  a verified exists-trace sanity lemma, and the documented mutations
+  (`MUTATION_Use_Token_Claimed_Community` for S1, plus the S3 bad-accept and S4
+  splice-as-append mutations) confirmed red. See §Authorization soundness for the
+  full lemma list and the corrected `other_community_key_compromise_does_not_authorize`
+  vacuity fix. The committed file is SHA-256 `0ad53184…d644b94d85`.
 
   **Machine-check hygiene.** S1–S4 lemmas close by two distinct shapes.
   **Rule-shape closure** means the lemma's conclusion follows by unification on a
