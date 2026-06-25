@@ -689,12 +689,9 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
 
   await page.getByTestId("user-profile-diagnostics-ingress").click();
   await expect(
-    page.getByRole("heading", { level: 2, name: "Diagnostics" }),
+    page.getByRole("heading", { level: 2, name: "Harness Log" }),
   ).toBeVisible();
-  await page.getByTestId(`user-profile-agent-logs-${agentPubkey}`).click();
-  await expect(
-    page.getByRole("heading", { level: 2, name: "Harness log" }),
-  ).toBeVisible();
+  await expect(page.getByTestId("user-profile-agent-status")).toHaveCount(0);
   await expect(page.getByTestId("managed-agent-log-content")).toBeVisible();
   await page.getByTestId("user-profile-panel-back").click();
   await expect(

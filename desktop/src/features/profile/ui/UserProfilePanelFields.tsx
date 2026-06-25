@@ -128,17 +128,8 @@ export function useProfileFieldBuckets({
           })
         : []),
     ];
-    const diagnosticsFields =
-      bucketProfileFields(metadataFields).diagnosticsFields;
-
     return {
       ...bucketProfileFields(metadataFields),
-      diagnosticsSummary:
-        diagnosticsFields.find((field) => field.label === "Status")
-          ?.displayValue ??
-        diagnosticsFields.find((field) => field.label === "Last error")
-          ?.displayValue ??
-        null,
       modelLabel: managedAgent?.model ?? persona?.model ?? "Auto",
     };
   }, [

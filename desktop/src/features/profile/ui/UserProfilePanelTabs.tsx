@@ -361,7 +361,7 @@ export function ProfileRuntimeTabContent({
       {showDiagnosticsIngress ? (
         <ProfileIngressRow
           icon={Activity}
-          label="Diagnostics"
+          label="Harness Log"
           onClick={onOpenDiagnostics}
           testId="user-profile-diagnostics-ingress"
           trailing={diagnosticsSummary}

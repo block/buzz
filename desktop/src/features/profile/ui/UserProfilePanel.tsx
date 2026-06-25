@@ -756,7 +756,6 @@ export function UserProfilePanel({
     agentInfoFields,
     agentSettingsFields,
     diagnosticsFields,
-    diagnosticsSummary,
     modelLabel,
   } = useProfileFieldBuckets({
     isBot,
@@ -860,7 +859,6 @@ export function UserProfilePanel({
           agentInfoFields={agentInfoFields}
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
-          diagnosticsSummary={diagnosticsSummary}
           onAddToChannel={() => setAddToChannelOpen(true)}
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}

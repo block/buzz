@@ -82,7 +82,6 @@ export type ProfileSummaryViewProps = {
   agentInfoFields: ProfileField[];
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
-  diagnosticsSummary: string | null;
   onAddToChannel: () => void;
   onOpenActivity: () => void;
   onOpenChannel: (channelId: string) => void;
@@ -126,7 +125,6 @@ export function ProfileSummaryView({
   agentInfoFields,
   agentSettingsFields,
   diagnosticsFields,
-  diagnosticsSummary,
   onAddToChannel,
   onOpenActivity,
   onOpenChannel,
@@ -165,7 +163,8 @@ export function ProfileSummaryView({
       diagnosticsFields.length > 0 ||
       canOpenAgentLogs);
   const showDiagnosticsIngress =
-    diagnosticsFields.length > 0 || canOpenAgentLogs;
+    diagnosticsFields.some((field) => field.label !== "Status") ||
+    canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
   const showInfoTab =
     showInstructionBlock ||
@@ -173,9 +172,6 @@ export function ProfileSummaryView({
     showActivityIngress ||
     !showRuntimeTab;
 
-  const diagnosticsStatusField = diagnosticsFields.find(
-    (field) => field.label === "Status",
-  );
   const diagnosticsErrorField = diagnosticsFields.find(
     (field) => field.label === "Last error",
   );
@@ -185,7 +181,7 @@ export function ProfileSummaryView({
         Error
       </Badge>
     ) : (
-      (diagnosticsStatusField?.displayNode ?? diagnosticsSummary ?? "View")
+      "View"
     );
 
   const tabs = React.useMemo(() => {
@@ -814,9 +810,11 @@ export function DiagnosticsFocusedView({
 }) {
   const hasLog = canOpenAgentLogs && managedAgent !== undefined;
   const lastErrorField = fields.find((field) => field.label === "Last error");
-  const detailFields = fields.filter((field) => field.label !== "Last error");
+  const detailFields = fields.filter(
+    (field) => field.label !== "Last error" && field.label !== "Status",
+  );
 
-  if (fields.length === 0 && !hasLog) {
+  if (!lastErrorField && detailFields.length === 0 && !hasLog) {
     return null;
   }
 

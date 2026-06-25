@@ -28,10 +28,10 @@ export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   summary: "Profile",
   info: "Agent info",
   configuration: "Runtime",
-  diagnostics: "Diagnostics",
+  diagnostics: "Harness Log",
   memories: "Memories",
   channels: "Channels",
-  logs: "Harness log",
+  logs: "Harness Log",
 };
 
 const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(

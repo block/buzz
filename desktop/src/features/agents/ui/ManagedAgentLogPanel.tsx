@@ -41,7 +41,7 @@ export function ManagedAgentLogPanel({
         <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h3 className="text-sm font-semibold tracking-tight">
-              Harness log
+              Harness Log
             </h3>
             <p className="text-sm text-muted-foreground">
               Select a local agent to inspect recent output.
@@ -133,7 +133,7 @@ function HarnessLogHeader({
     <div className="flex min-h-12 items-center justify-between gap-3 border-b border-white/10 px-3 py-2">
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="min-w-0 truncate text-2xs font-semibold uppercase tracking-[0.18em] text-zinc-300">
-          Harness log
+          Harness Log
         </span>
         <span
           className="min-w-0 truncate font-mono text-2xs text-zinc-500"
