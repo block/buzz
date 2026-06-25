@@ -45,12 +45,7 @@ import {
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
-import { UserProfileAgentActions } from "@/features/profile/ui/UserProfileAgentActions";
-import type {
-  AgentPersona,
-  ManagedAgent,
-  RelayAgent,
-} from "@/shared/api/types";
+import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -71,12 +66,8 @@ export type ProfileSummaryViewProps = {
   canInstantiateAgent: boolean;
   agentInstruction: string | null;
   handleAgentPrimaryAction: () => void;
-  handleDeletePersona?: () => void;
-  handleDuplicatePersona?: () => void;
-  handleDeleteAgent: () => void;
   handleEditAgent: () => void;
   handleEditPersona?: () => void;
-  handleExportPersona?: () => void;
   handleInstantiateAgent: () => void;
   handleMessage: () => void;
   isBot: boolean;
@@ -97,8 +88,6 @@ export type ProfileSummaryViewProps = {
   onOpenDiagnostics: () => void;
   onOpenMemories: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
-  onToggleAutoStart: () => void;
-  persona?: AgentPersona;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string | null;
@@ -119,12 +108,8 @@ export function ProfileSummaryView({
   canInstantiateAgent,
   agentInstruction,
   handleAgentPrimaryAction,
-  handleDeletePersona,
-  handleDuplicatePersona,
-  handleDeleteAgent,
   handleEditAgent,
   handleEditPersona,
-  handleExportPersona,
   handleInstantiateAgent,
   handleMessage,
   isBot,
@@ -145,8 +130,6 @@ export function ProfileSummaryView({
   onOpenDiagnostics,
   onOpenMemories,
   onOpenDm,
-  onToggleAutoStart,
-  persona,
   presenceStatus,
   profile,
   pubkey,
@@ -202,7 +185,6 @@ export function ProfileSummaryView({
       field.label === "Owned by & responds to",
   );
   const showTopLevelAgentInfo = topLevelAgentInfoFields.length > 0;
-  const personaActionKey = persona?.id;
 
   return (
     <div className="flex flex-col gap-6 pt-4">
@@ -332,27 +314,6 @@ export function ProfileSummaryView({
             </div>
           ) : null}
         </section>
-      ) : null}
-
-      {isOwner === true && managedAgent ? (
-        <UserProfileAgentActions
-          isPending={isAgentActionPending}
-          managedAgent={managedAgent}
-          onDelete={handleDeleteAgent}
-          onDuplicatePersona={handleDuplicatePersona}
-          onExportPersona={handleExportPersona}
-          onToggleAutoStart={onToggleAutoStart}
-          personaActionKey={personaActionKey}
-        />
-      ) : null}
-      {canInstantiateAgent ? (
-        <UserProfileAgentActions
-          isPending={isAgentActionPending}
-          onDelete={handleDeletePersona}
-          onDuplicatePersona={handleDuplicatePersona}
-          onExportPersona={handleExportPersona}
-          personaActionKey={personaActionKey}
-        />
       ) : null}
     </div>
   );
