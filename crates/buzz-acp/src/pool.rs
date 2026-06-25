@@ -1627,6 +1627,24 @@ fn collect_prompt_pubkeys(
     pubkeys
 }
 
+/// Detect whether a kind:0 profile event belongs to an owned agent.
+///
+/// Agents carry a NIP-OA `["auth", owner_pk, conditions, sig]` tag in their
+/// profile; humans do not. This checks for the tag's presence/shape only — a
+/// cheap routing heuristic for reply anchoring, not a verified security gate
+/// (the signing path in `lib.rs::check_sibling_via_profile` does full
+/// verification where it matters).
+fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
+    ev.get("tags")
+        .and_then(|t| t.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array()
+                    .is_some_and(|parts| parts.len() == 4 && parts[0].as_str() == Some("auth"))
+            })
+        })
+}
+
 /// Parse kind:0 profile events into a `PromptProfileLookup`.
 ///
 /// Each kind:0 event has `pubkey` and JSON `content` with optional fields:
@@ -1649,11 +1667,13 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
                     .get("nip05")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let is_agent = profile_event_is_agent(ev);
                 lookup.insert(
                     pk.to_ascii_lowercase(),
                     PromptProfile {
                         display_name,
                         nip05_handle,
+                        is_agent,
                     },
                 );
             }
@@ -2784,8 +2804,31 @@ mod tests {
             Some(&PromptProfile {
                 display_name: Some("Wes".into()),
                 nip05_handle: Some("wes@example.com".into()),
+                is_agent: false,
             })
         );
+    }
+
+    #[test]
+    fn test_profile_event_is_agent_detects_nip_oa_auth_tag() {
+        // Agent profile carries a 4-element NIP-OA ["auth", owner, cond, sig] tag.
+        let agent_ev = json!({
+            "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "tags": [["auth", "owner_pk", "conditions", "sig"]],
+        });
+        assert!(profile_event_is_agent(&agent_ev));
+
+        // Human profile: no auth tag.
+        let human_ev = json!({ "pubkey": "bbbb", "tags": [["t", "topic"]] });
+        assert!(!profile_event_is_agent(&human_ev));
+
+        // Empty / missing tags → not an agent.
+        assert!(!profile_event_is_agent(&json!({ "tags": [] })));
+        assert!(!profile_event_is_agent(&json!({})));
+
+        // Malformed auth tag (wrong arity) → not treated as an agent.
+        let malformed = json!({ "tags": [["auth", "owner_pk"]] });
+        assert!(!profile_event_is_agent(&malformed));
     }
 
     #[test]
