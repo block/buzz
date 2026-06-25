@@ -263,6 +263,18 @@ export function buildOwnerFields({
     : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerPubkey);
+  const ownerContent = (
+    <>
+      <UserAvatar
+        avatarUrl={ownerAvatarUrl}
+        className="shrink-0"
+        displayName={ownerHandle ?? ownerDisplayName ?? ""}
+        size="xs"
+        testId="user-profile-owner-avatar"
+      />
+      <span className="truncate">{ownerDisplayName}</span>
+    </>
+  );
 
   if (ownerDisplayName) {
     fields.push({
@@ -282,16 +294,13 @@ export function buildOwnerFields({
           title={ownerDisplayName}
           type="button"
         >
-          <UserAvatar
-            avatarUrl={ownerAvatarUrl}
-            className="shrink-0"
-            displayName={ownerHandle ?? ownerDisplayName}
-            size="xs"
-            testId="user-profile-owner-avatar"
-          />
-          <span className="truncate">{ownerDisplayName}</span>
+          {ownerContent}
         </button>
-      ) : undefined,
+      ) : (
+        <span className="inline-flex max-w-full items-center gap-2">
+          {ownerContent}
+        </span>
+      ),
       icon: UserRound,
       label: combinesOwnerRespondTo ? "Owned by & responds to" : "Owned by",
       testId: "user-profile-owned-by",

@@ -714,6 +714,9 @@ export function UserProfilePanel({
       ? `${ownerHandle} (you)`
       : ownerHandle
     : null;
+  const ownerAvatarProfile = ownerPubkey
+    ? ownerProfileQuery.data
+    : currentProfileQuery.data;
   const memoryCount =
     memoryQuery.data &&
     (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length;
@@ -760,7 +763,7 @@ export function UserProfilePanel({
     isOwner,
     managedAgent,
     onOpenProfile,
-    ownerAvatarUrl: ownerProfileQuery.data?.avatarUrl ?? null,
+    ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,
     ownerDisplayName,
     ownerHandle,
     ownerPubkey,
@@ -771,7 +774,6 @@ export function UserProfilePanel({
     pubkey: effectivePubkey,
     relayAgent,
   });
-
   const headerLeftContent = (
     <AuxiliaryPanelHeaderGroup>
       {view !== "summary" ? (
@@ -792,7 +794,6 @@ export function UserProfilePanel({
       </AuxiliaryPanelTitle>
     </AuxiliaryPanelHeaderGroup>
   );
-
   const headerActions = (
     <div className="ml-auto flex shrink-0 items-center gap-2">
       {view === "memories" && viewerIsOwner && effectivePubkey ? (
