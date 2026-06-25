@@ -556,6 +556,7 @@ export function PersonaDialog({
             avatarUrl={previewAvatarUrl}
             disabled={isPending || isAvatarUploadPending}
             label={previewLabel}
+            onClearAvatar={() => setAvatarUrl("")}
             onUploadPendingChange={setIsAvatarUploadPending}
             onSelectAvatar={setAvatarUrl}
           />

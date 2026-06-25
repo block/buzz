@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Upload } from "lucide-react";
+import { Upload, X } from "lucide-react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
@@ -14,12 +14,14 @@ export function AgentCreationPreview({
   avatarUrl,
   disabled = false,
   label,
+  onClearAvatar,
   onUploadPendingChange,
   onSelectAvatar,
 }: {
   avatarUrl: string | null;
   disabled?: boolean;
   label: string;
+  onClearAvatar?: () => void;
   onUploadPendingChange?: (isPending: boolean) => void;
   onSelectAvatar: (avatarUrl: string) => void;
 }) {
@@ -143,7 +145,7 @@ export function AgentCreationPreview({
           </p>
         ) : null}
 
-        <div className="absolute inset-x-3 bottom-3 flex justify-center">
+        <div className="absolute inset-x-3 bottom-3 flex justify-center gap-2">
           <button
             className="inline-flex h-8 translate-y-1 items-center justify-center gap-1.5 rounded-full border border-border/70 bg-background/90 px-3 text-xs font-medium text-foreground opacity-0 shadow-xs transition-[background-color,opacity,transform] duration-150 hover:bg-muted focus-visible:translate-y-0 focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring group-hover/avatar-preview:translate-y-0 group-hover/avatar-preview:opacity-100 group-focus-within/avatar-preview:translate-y-0 group-focus-within/avatar-preview:opacity-100"
             disabled={disabled || isUploading}
@@ -160,6 +162,18 @@ export function AgentCreationPreview({
             )}
             {isUploading ? "Uploading..." : "Edit avatar"}
           </button>
+          {avatarUrl && onClearAvatar ? (
+            <button
+              className="inline-flex h-8 translate-y-1 items-center justify-center gap-1.5 rounded-full border border-border/70 bg-background/90 px-3 text-xs font-medium text-foreground opacity-0 shadow-xs transition-[background-color,opacity,transform] duration-150 hover:bg-muted focus-visible:translate-y-0 focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring group-hover/avatar-preview:translate-y-0 group-hover/avatar-preview:opacity-100 group-focus-within/avatar-preview:translate-y-0 group-focus-within/avatar-preview:opacity-100"
+              disabled={disabled || isUploading}
+              onClick={onClearAvatar}
+              title="Remove avatar"
+              type="button"
+            >
+              <X className="h-3.5 w-3.5" />
+              Remove
+            </button>
+          ) : null}
         </div>
       </fieldset>
     </div>
