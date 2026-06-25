@@ -44,6 +44,7 @@ const DEFAULT_ACCENT = "#3b82f6";
 
 type ThemeContextValue = {
   themeName: string;
+  selectedThemeName: string;
   isDark: boolean;
   isLoading: boolean;
   accentColor: string;
@@ -266,8 +267,8 @@ export function ThemeProvider({
 }: ThemeProviderProps) {
   // Apply cached vars synchronously before first render
   const [selectedTheme, setSelectedTheme] = useState<string>(() => {
-    const cached = applyCachedVars();
-    return cached ?? readStoredTheme(defaultTheme);
+    applyCachedVars();
+    return readStoredTheme(defaultTheme);
   });
   const [isDark, setIsDark] = useState<boolean>(() => {
     return document.documentElement.classList.contains("dark");
@@ -280,13 +281,13 @@ export function ThemeProvider({
   const [followSystem, setFollowSystemState] = useState<boolean>(() => {
     return window.localStorage.getItem(FOLLOW_SYSTEM_KEY) === "true";
   });
+  const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
 
   // Resolve the effective theme based on follow-system preference
   const effectiveTheme = (() => {
     if (!followSystem || !isValidThemeName(selectedTheme)) return selectedTheme;
-    const systemIsDark = window.matchMedia(
-      "(prefers-color-scheme: dark)",
-    ).matches;
     return resolveSystemTheme(selectedTheme as SyntaxThemeName, systemIsDark);
   })();
 
@@ -322,40 +323,14 @@ export function ThemeProvider({
     if (!followSystem) return;
 
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const handler = () => {
-      // Force a re-render by toggling a state update — effectiveTheme
-      // is derived and will recalculate on next render
-      setFollowSystemState((prev) => {
-        // No-op toggle to trigger re-render with new media query value
-        return prev;
-      });
-      // Directly resolve and apply the theme for immediate response
-      if (isValidThemeName(selectedTheme)) {
-        const resolved = resolveSystemTheme(
-          selectedTheme as SyntaxThemeName,
-          mq.matches,
-        );
-        if (isValidThemeName(resolved)) {
-          const thisTheme = resolved;
-          loadingRef.current = thisTheme;
-          setIsLoading(true);
-          applyTheme(resolved as SyntaxThemeName).then(({ isDark: dark }) => {
-            if (loadingRef.current === thisTheme) {
-              setIsDark(dark);
-              setIsLoading(false);
-              applyAccentColor(
-                window.localStorage.getItem(ACCENT_STORAGE_KEY) ??
-                  DEFAULT_ACCENT,
-              );
-            }
-          });
-        }
-      }
+    const handler = (event: MediaQueryListEvent) => {
+      setSystemIsDark(event.matches);
     };
 
+    setSystemIsDark(mq.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
-  }, [followSystem, selectedTheme]);
+  }, [followSystem]);
 
   // Apply accent color changes
   useEffect(() => {
@@ -380,6 +355,7 @@ export function ThemeProvider({
 
   const value: ThemeContextValue = {
     themeName: effectiveTheme,
+    selectedThemeName: selectedTheme,
     isDark,
     isLoading,
     accentColor,

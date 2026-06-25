@@ -31,15 +31,10 @@ import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
   NEUTRAL_ACCENT,
-  THEME_STORAGE_KEY,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
-import {
-  SYNTAX_THEMES,
-  type SyntaxThemeName,
-  getThemePair,
-  isLightTheme,
-} from "@/shared/theme/theme-loader";
+import { SYNTAX_THEMES, isLightTheme } from "@/shared/theme/theme-loader";
+import { Switch } from "@/shared/ui/switch";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
@@ -198,11 +193,11 @@ function ThemeSettingsCard() {
   const {
     setTheme,
     themeName,
+    selectedThemeName,
     isDark,
     accentColor,
     setAccentColor,
     followSystem,
-    hasPair,
     setFollowSystem,
   } = useTheme();
   const [search, setSearch] = useState("");
@@ -214,10 +209,7 @@ function ThemeSettingsCard() {
     }
   };
 
-  // Read the user's selected theme from localStorage (not the effective/resolved one)
-  const selectedTheme = useMemo(() => {
-    return window.localStorage.getItem(THEME_STORAGE_KEY) ?? themeName;
-  }, [themeName]);
+  const selectedTheme = selectedThemeName;
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
@@ -225,50 +217,17 @@ function ThemeSettingsCard() {
     return SYNTAX_THEMES.filter((name) => name.includes(q));
   }, [search]);
 
-  // Determine the paired theme name for the hint text
-  const pairName = useMemo(() => {
-    if (!hasPair) return null;
-    const pair = getThemePair(selectedTheme as SyntaxThemeName);
-    return pair ? formatThemeLabel(pair) : null;
-  }, [selectedTheme, hasPair]);
-
   return (
-    <section className="min-w-0" data-testid="settings-theme">
+    <section
+      className="flex min-h-0 flex-1 flex-col"
+      data-testid="settings-theme"
+    >
       <SettingsSectionHeader
         title="Appearance"
         description="Choose a theme for Buzz."
       />
 
-      {/* Follow System toggle */}
-      <label
-        className="mb-3 flex cursor-pointer items-center gap-3 rounded-lg border border-border/70 bg-background/70 px-3 py-2.5"
-        data-testid="follow-system-toggle"
-      >
-        <Monitor className="h-4 w-4 shrink-0 text-muted-foreground" />
-        <div className="flex-1 min-w-0">
-          <span className="text-sm font-medium">Follow system</span>
-          {followSystem && pairName && (
-            <p className="text-xs text-muted-foreground truncate">
-              Switches to {pairName} in{" "}
-              {isLightTheme(selectedTheme) ? "dark" : "light"} mode
-            </p>
-          )}
-          {followSystem && !hasPair && (
-            <p className="text-xs text-muted-foreground">
-              No paired theme available — select a theme with a light/dark
-              counterpart
-            </p>
-          )}
-        </div>
-        <input
-          checked={followSystem}
-          className="h-4 w-4 rounded border-border accent-primary"
-          onChange={(e) => setFollowSystem(e.target.checked)}
-          type="checkbox"
-        />
-      </label>
-
-      <div className="relative mb-3">
+      <div className="relative mb-3 shrink-0">
         <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <input
           autoCapitalize="none"
@@ -282,7 +241,7 @@ function ThemeSettingsCard() {
         />
       </div>
 
-      <div className="max-h-72 overflow-y-auto rounded-lg border border-border/70 bg-background/70">
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-border/70 bg-background/70">
         {filtered.length === 0 ? (
           <p className="px-3 py-4 text-center text-sm text-muted-foreground">
             No themes match your search.
@@ -330,38 +289,53 @@ function ThemeSettingsCard() {
         )}
       </div>
 
-      <div className="mt-4">
-        <h3 className="mb-2 text-sm font-medium">Accent Color</h3>
-        <div className="flex gap-2">
-          {ACCENT_COLORS.map((color) => {
-            const isNeutral = color.value === NEUTRAL_ACCENT;
-            const swatchColor = isNeutral
-              ? "hsl(var(--foreground))"
-              : color.value;
-            const checkClassName =
-              isNeutral && isDark ? "text-black" : "text-white";
+      <div className="mt-4 flex shrink-0 flex-col gap-3 pb-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <h3 className="mb-2 text-sm font-medium">Accent color</h3>
+          <div className="flex flex-wrap gap-2">
+            {ACCENT_COLORS.map((color) => {
+              const isNeutral = color.value === NEUTRAL_ACCENT;
+              const swatchColor = isNeutral
+                ? "hsl(var(--foreground))"
+                : color.value;
+              const checkClassName =
+                isNeutral && isDark ? "text-black" : "text-white";
 
-            return (
-              <button
-                className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
-                  accentColor === color.value &&
-                    "ring-2 ring-ring ring-offset-2 ring-offset-background",
-                )}
-                data-testid={`accent-color-${color.name.toLowerCase()}`}
-                key={color.value}
-                onClick={() => setAccentColor(color.value)}
-                style={{ backgroundColor: swatchColor }}
-                title={color.name}
-                type="button"
-              >
-                {accentColor === color.value && (
-                  <Check className={cn("h-4 w-4", checkClassName)} />
-                )}
-              </button>
-            );
-          })}
+              return (
+                <button
+                  className={cn(
+                    "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
+                    accentColor === color.value &&
+                      "ring-2 ring-ring ring-offset-2 ring-offset-background",
+                  )}
+                  data-testid={`accent-color-${color.name.toLowerCase()}`}
+                  key={color.value}
+                  onClick={() => setAccentColor(color.value)}
+                  style={{ backgroundColor: swatchColor }}
+                  title={color.name}
+                  type="button"
+                >
+                  {accentColor === color.value && (
+                    <Check className={cn("h-4 w-4", checkClassName)} />
+                  )}
+                </button>
+              );
+            })}
+          </div>
         </div>
+
+        <label
+          className="flex cursor-pointer items-center gap-3 text-sm font-medium text-foreground"
+          htmlFor="follow-system-switch"
+        >
+          <span className="min-w-0 truncate">Use system setting</span>
+          <Switch
+            checked={followSystem}
+            data-testid="follow-system-toggle"
+            id="follow-system-switch"
+            onCheckedChange={setFollowSystem}
+          />
+        </label>
       </div>
     </section>
   );
