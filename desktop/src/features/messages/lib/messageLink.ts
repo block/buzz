@@ -102,3 +102,34 @@ export function isMessageLink(href: string | undefined | null): boolean {
   if (!href) return false;
   return href.startsWith("buzz://message?") || href === "buzz://message";
 }
+
+type MessageLinkRenderInput = {
+  href: string;
+  label: string;
+};
+
+export type MessageLinkRenderTarget =
+  | { kind: "pill"; link: ParsedMessageLink }
+  | { kind: "label"; link: ParsedMessageLink }
+  | { kind: "none" };
+
+/**
+ * Centralizes how markdown-rendered anchors map to message-link UI. Both
+ * CommonMark autolinks (`<buzz://message?...>`) and explicitly labeled links
+ * arrive as anchors; autolinks have label === href and should render as pills,
+ * while intentionally labeled links keep their label.
+ */
+export function resolveMessageLinkRenderTarget({
+  href,
+  label,
+}: MessageLinkRenderInput): MessageLinkRenderTarget {
+  if (!isMessageLink(href)) return { kind: "none" };
+
+  const parsed = parseMessageLink(href);
+  if (!parsed.ok) return { kind: "none" };
+
+  return {
+    kind: label === href ? "pill" : "label",
+    link: parsed.value,
+  };
+}

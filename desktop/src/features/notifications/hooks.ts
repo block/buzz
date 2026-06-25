@@ -1,10 +1,6 @@
 import * as React from "react";
 
 import { useHomeFeedQuery } from "@/features/home/hooks";
-import {
-  getThreadReference,
-  isThreadReply,
-} from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
@@ -30,6 +26,7 @@ import {
 } from "./use-feed-desktop-notifications";
 import {
   buildHomeBadgeFeedItems,
+  isHomeBadgeFeedItemUnread,
   shouldCountTowardHomeBadgeSubtotal,
 } from "./lib/homeBadge";
 
@@ -374,6 +371,11 @@ export function useHomeFeedNotificationState(
     rootId: string,
     channelId?: string | null,
   ) => number | null = () => null,
+  // Per-message read marker lookup, shared with channel thread badges. When
+  // provided, a thread activity row is treated as read if the specific reply
+  // has been revealed in-channel, even if the aggregate `thread:<root>` marker
+  // has not been advanced by opening Home.
+  getMessageReadAt: (messageId: string) => number | null = () => null,
 ) {
   useFeedDesktopNotifications(
     feed,
@@ -442,27 +444,13 @@ export function useHomeFeedNotificationState(
       ) {
         continue;
       }
-      const threadRootId = isThreadReply(item.tags)
-        ? getThreadReference(item.tags).rootId
-        : null;
-      let isUnread: boolean;
-      if (isLocallyUnread) {
-        isUnread = true;
-      } else if (threadRootId) {
-        const readAt = getThreadReadAt(threadRootId, item.channelId);
-        isUnread =
-          readAt !== null
-            ? item.createdAt > readAt
-            : !seenFeedIdSet.has(item.id);
-      } else if (item.channelId) {
-        const readAt = getChannelReadAt(item.channelId);
-        isUnread =
-          readAt !== null
-            ? item.createdAt > readAt
-            : !seenFeedIdSet.has(item.id);
-      } else {
-        isUnread = !seenFeedIdSet.has(item.id);
-      }
+      const isUnread = isHomeBadgeFeedItemUnread(item, {
+        getChannelReadAt,
+        getMessageReadAt,
+        getThreadReadAt,
+        isLocallyUnread,
+        seenFeedIdSet,
+      });
       if (!isUnread) continue;
       total++;
       if (
@@ -482,6 +470,7 @@ export function useHomeFeedNotificationState(
   }, [
     currentFeedItems,
     getChannelReadAt,
+    getMessageReadAt,
     getThreadReadAt,
     highPriorityChannelIds,
     isHomeActive,

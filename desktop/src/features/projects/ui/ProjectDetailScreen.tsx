@@ -13,8 +13,6 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useProjectQuery } from "@/features/projects/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import { topChromeInset } from "@/shared/layout/chromeLayout";
-import { cn } from "@/shared/lib/cn";
 import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -126,12 +124,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div
-        className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4",
-          topChromeInset.padding,
-        )}
-      >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
         <div className="mb-4">
           <Button
             className="gap-1.5 text-muted-foreground"

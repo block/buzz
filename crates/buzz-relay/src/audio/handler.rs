@@ -788,27 +788,11 @@ async fn emit_participant_event(
     //    double-delivery when the event echoes back through the subscriber loop.
     state.mark_local_event(&event.id);
 
-    // 3. Local fan-out to WS subscribers on this node (same pattern as
+    // 3. Local fan-out to WS subscribers on this node, through the guarded send
+    //    path so a stale subscription on a removed/non-member connection cannot
+    //    receive this channel's audio lifecycle event (same gate as
     //    dispatch_persistent_event in the ingest handler).
-    let matches = state.sub_registry.fan_out(&stored);
-    if !matches.is_empty() {
-        let event_json = serde_json::to_string(&event)
-            .expect("nostr::Event serialization is infallible for well-formed events");
-        let mut drop_count = 0u32;
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-            if !state.conn_manager.send_to(*target_conn_id, msg) {
-                drop_count += 1;
-            }
-        }
-        if drop_count > 0 {
-            warn!(
-                event_id = %event_id_hex,
-                drop_count,
-                "audio lifecycle fan-out: {drop_count} connection(s) dropped"
-            );
-        }
-    }
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 
     // 4. Cross-node broadcast via Redis pub/sub.
     if let Err(e) = state.pubsub.publish_event(parent_channel_id, &event).await {

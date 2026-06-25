@@ -75,8 +75,9 @@ async fn evict_conn_channel_subscriptions(
 
 /// Revoke live channel subscriptions held by connections whose authenticated
 /// pubkey is not a current member. Used when an open channel flips to private:
-/// non-members could have subscribed while it was open, and fan-out does not
-/// re-check membership per event, so their subscriptions must be closed.
+/// non-members could have subscribed while it was open. Fan-out now re-checks
+/// membership per event as the delivery-time safety net; this eviction closes
+/// subscriptions promptly so clients stop treating the channel as live.
 async fn evict_non_member_channel_subscriptions(
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -604,21 +605,10 @@ pub async fn emit_membership_notification(
         return Ok(());
     }
 
-    // Fan-out only — skip search indexing and workflow evaluation.
-    let matches = state.sub_registry.fan_out(&stored);
-    if !matches.is_empty() {
-        let event_json = match serde_json::to_string(&stored.event) {
-            Ok(json) => json,
-            Err(e) => {
-                warn!("failed to serialize membership notification for fan-out: {e}");
-                return Ok(());
-            }
-        };
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-            state.conn_manager.send_to(*target_conn_id, msg);
-        }
-    }
+    // Fan-out only — skip search indexing and workflow evaluation. Routed
+    // through the guarded send path for uniformity; the access gate no-ops for
+    // these globally-scoped (channel_id = None) events.
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 
     info!(
         channel = %channel_id,
@@ -2150,13 +2140,9 @@ async fn emit_initial_ref_state(
         .await
         .map_err(|e| anyhow::anyhow!("insert kind:30618: {e}"))?;
     if was_inserted {
-        let matches = state.sub_registry.fan_out(&stored);
-        for (conn_id, sub_id) in matches {
-            let _ = state.conn_manager.send_to(
-                conn_id,
-                crate::protocol::RelayMessage::event(&sub_id, &stored.event),
-            );
-        }
+        // Routed through the guarded send path for uniformity; the access gate
+        // no-ops for this globally-scoped (channel_id = None) ref-state event.
+        crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
     }
     Ok(())
 }
@@ -2239,20 +2225,9 @@ async fn publish_nip43_delta(
         return Ok(());
     }
 
-    let matches = state.sub_registry.fan_out(&stored);
-    if !matches.is_empty() {
-        let event_json = match serde_json::to_string(&stored.event) {
-            Ok(json) => json,
-            Err(e) => {
-                warn!("failed to serialize kind:{kind} for fan-out: {e}");
-                return Ok(());
-            }
-        };
-        for (target_conn_id, sub_id) in &matches {
-            let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-            state.conn_manager.send_to(*target_conn_id, msg);
-        }
-    }
+    // Routed through the guarded send path for uniformity; the access gate
+    // no-ops for this globally-scoped (channel_id = None) NIP-43 event.
+    crate::handlers::event::fan_out_event_to_local_subscribers(state, &stored).await;
 
     info!(
         target = %target_pubkey_hex,

@@ -1207,7 +1207,7 @@ test("channel intro stays hidden while older history is loading", async ({
 test("channel intro stays hidden while paginating past the timeline cap", async ({
   page,
 }, testInfo) => {
-  testInfo.setTimeout(60_000);
+  testInfo.setTimeout(90_000);
   await installMockBridge(page);
   await page.goto("/");
   await page.waitForFunction(

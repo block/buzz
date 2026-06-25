@@ -52,6 +52,7 @@ type MembersSidebarMemberCardProps = {
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
+  viewerIsOwner: boolean;
 };
 
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
@@ -111,12 +112,13 @@ export function MembersSidebarMemberCard({
   onViewActivity,
   presenceStatus,
   profileAvatarUrl,
+  viewerIsOwner,
 }: MembersSidebarMemberCardProps) {
   const roleLabel = formatRoleLabel(member, memberIsBot);
   const disabled = isActionPending || isArchived;
   const canViewActivity =
     memberIsBot &&
-    managedAgent?.backend.type === "local" &&
+    (viewerIsOwner || managedAgent?.backend.type === "local") &&
     Boolean(onViewActivity);
   const hasActions = memberIsBot
     ? Boolean(managedAgent) || canRemoveMember || canViewActivity

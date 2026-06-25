@@ -11,6 +11,7 @@ mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
 mod relay;
+mod secret_store;
 mod templates;
 mod util;
 
@@ -109,7 +110,7 @@ use huddle::{
     speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
-    ensure_nest, kill_stale_tracked_processes, load_managed_agents,
+    backfill_persona_snapshots, ensure_nest, kill_stale_tracked_processes, load_managed_agents,
     restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
     try_regenerate_nest, BackendKind, ManagedAgentProcess,
 };
@@ -520,29 +521,35 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
 
-            // Copy legacy app data into the Buzz app data directory
-            // before any state is loaded from disk.
-            migration::migrate_legacy_app_data_dir(&app_handle);
-
-            // Sync shared agent data from the canonical dev data directory to
-            // this worktree's data directory. Must run before
-            // restore_managed_agents_on_launch (which reads managed-agents.json).
-            migration::sync_shared_agent_data(&app_handle);
-            migration::migrate_packs_to_teams(&app_handle);
-            migration::reconcile_persona_team_dirs(&app_handle);
-            migration::migrate_persona_provider_to_runtime(&app_handle);
-            migration::reconcile_legacy_command_names(&app_handle);
-            migration::reconcile_provider_mcp_commands(&app_handle);
-
-            if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
-                eprintln!("buzz-desktop: sync-team-personas: {e}");
-            }
+            // Run all pre-identity data migrations before state loads from disk.
+            migration::run_boot_migrations(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
             // that will be lost on restart, as that silently breaks channel
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
+            resolve_persisted_identity(&app_handle, &state)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+            // Sync team-dir edits and reconcile persona/team events. Needs the
+            // resolved owner keys, so it runs after identity resolution.
+            let owner_keys = state
+                .keys
+                .lock()
+                .map(|k| k.clone())
+                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            migration::run_event_sync(&app_handle, &owner_keys);
+
+            // Backfill the pinned persona snapshot for any pre-existing agent
+            // that predates the record-authoritative-spawn cutover (persona_id
+            // set but no source_version). Must run before
+            // restore_managed_agents_on_launch so no agent spawns from an empty
+            // snapshot. Synchronous and best-effort — a failure here must not
+            // block launch, but a missing persona is logged loudly inside.
+            if let Err(e) = backfill_persona_snapshots(&app_handle) {
+                eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
+            }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
@@ -550,9 +557,6 @@ pub fn run() {
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
             }
-
-            resolve_persisted_identity(&app_handle, &state)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
             // Bring up the runtime-owned relay-mesh call-me-now listener now,
             // before any saved agent restore can request a connection. Its
@@ -585,6 +589,21 @@ pub fn run() {
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
+
+            // Resolve the REPOS symlink from the persisted repos_dir BEFORE
+            // agents are restored below, and decide whether restore is safe.
+            // The frontend's apply_workspace runs only after React mounts —
+            // later than the async agent restore — so without this an agent
+            // could clone into the empty real REPOS dir, and once REPOS is
+            // non-empty ensure_repos_symlink refuses forever. resolve_repos_at_boot
+            // fails closed: if a repos_dir was configured but its symlink could
+            // not be resolved (transiently unavailable external volume), it
+            // returns false so we skip restore this launch rather than let an
+            // agent clone into the wrong REPOS. See managed_agents::repos.
+            let restore_agents = match managed_agents::nest_dir() {
+                Some(nest) => managed_agents::resolve_repos_at_boot(&nest),
+                None => true,
+            };
 
             // Carry the agent's knowledge from the legacy nest (~/.sprout) into
             // the live nest (~/.buzz) after it exists. Must run after
@@ -637,14 +656,20 @@ pub fn run() {
             }
 
             // Keep launch-time agent restoration off the synchronous setup path
-            // so the frontend can mount and reveal the window promptly.
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) =
-                    restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref()).await
-                {
-                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
-                }
-            });
+            // so the frontend can mount and reveal the window promptly. Gated on
+            // the boot-time repos symlink result (see restore_agents above):
+            // skip when a configured repos_dir could not be resolved, so no
+            // agent clones into a REPOS that isn't the user's target.
+            if restore_agents {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) =
+                        restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
+                            .await
+                    {
+                        eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+                    }
+                });
+            }
 
             // Periodic sweep: reap orphaned agents from dead instances every 60s.
             // Catches agents that escaped both the Justfile trap and boot-time
@@ -682,6 +707,32 @@ pub fn run() {
                     .await
                     .unwrap_or_default();
                     prev_orphans = new_orphans;
+                }
+            });
+
+            // Drain events the retention store flagged `pending_sync` (UI
+            // create/edit, delete tombstones, launch reconcile) to the relay.
+            // One loop is the sole publisher for persona, team, and managed-
+            // agent writers; a relay-unreachable tick leaves rows pending for
+            // the next sweep.
+            let flush_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use std::time::Duration;
+                use tauri::Manager;
+                let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
+                    .map(|d| d.join("retention.db"))
+                else {
+                    eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
+                    return;
+                };
+                loop {
+                    let state = flush_handle.state::<AppState>();
+                    if let Err(e) =
+                        managed_agents::persona_events::flush_pending_events(&db_path, &state).await
+                    {
+                        eprintln!("buzz-desktop: event-flush: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             });
 
@@ -785,6 +836,7 @@ pub fn run() {
             update_persona,
             delete_persona,
             set_persona_active,
+            reconcile_inbound_persona_event,
             list_channel_templates,
             create_channel_template,
             update_channel_template,
@@ -844,6 +896,7 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            validate_repos_dir,
             get_active_workspace,
             set_prevent_sleep_active,
             get_agent_memory,

@@ -546,7 +546,7 @@ export function AppSidebar({
           />
         ) : null}
         <div
-          className="mt-(--buzz-top-chrome-height,2.5rem) shrink-0 px-2 pt-2"
+          className="shrink-0 px-2 pt-2.5"
           data-testid="sidebar-pinned-header"
         >
           <TopbarSearch
@@ -562,7 +562,7 @@ export function AppSidebar({
             suggestionChannels={channels}
           />
           <SidebarHeader
-            className="cursor-default select-none px-0 pb-0 pt-2"
+            className="cursor-default select-none px-0 pb-0 pt-2.5"
             data-tauri-drag-region
           >
             <SidebarMenu>

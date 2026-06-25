@@ -95,6 +95,7 @@ import type {
   Channel,
   CreateManagedAgentInput,
   CreatePersonaInput,
+  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -249,7 +250,22 @@ export function UserProfilePanel({
   );
   const isBot = Boolean(relayAgent || managedAgent || resolvedPersona);
   const managedAgentOwner = useIsManagedAgent(isBot ? effectivePubkey : null);
+  // Does THIS desktop hold the agent's seckey (or is this an editable persona)?
+  // Gates edit (which needs the key) and grants owner access when managed locally.
   const isOwner = resolvedPersona ? true : managedAgentOwner;
+  // Is the viewer the agent's declared owner (NIP-OA `ownerPubkey == me`)? This
+  // is the right signal for viewing owner-scoped data (activity feed, memory):
+  // the relay routes and the client decrypts those frames with the owner's OWN
+  // key, so the agent's seckey is never needed. Computed here (before the gates
+  // that consume it) so visibility keys off declared ownership, not key custody.
+  const isCurrentUserOwner =
+    currentPubkey !== undefined &&
+    ownerPubkey !== null &&
+    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  // The viewer may see owner-scoped data if they declared-own the agent OR they
+  // manage it locally (older agents may not advertise an owner pubkey). Every
+  // real boundary is server-side, so this only controls what UI we paint.
+  const viewerIsOwner = isCurrentUserOwner || isOwner === true;
 
   // Populate the active-turns store for this agent so useActiveAgentTurns works
   // even if the Agents page hasn't been visited yet.
@@ -260,21 +276,42 @@ export function UserProfilePanel({
         : [],
     [managedAgent],
   );
+  // The observer bridge subscribes on the OWNER's own pubkey and decrypts the
+  // agent's telemetry with the owner's key — no agent seckey needed. It only
+  // decrypts frames whose agent pubkey is "known", and only subscribes when an
+  // agent is running/deployed. For a remote agent we own but don't manage
+  // locally, `managedAgent` is undefined, so we seed the bridge from the relay
+  // agent (treated as "deployed") when the viewer is the declared owner. This
+  // mirrors what the composer-area ingress already does in ChannelScreen.
+  const observerBridgeAgents = React.useMemo(() => {
+    if (managedAgent) {
+      return [{ pubkey: managedAgent.pubkey, status: managedAgent.status }];
+    }
+    if (viewerIsOwner && relayAgent) {
+      return [
+        {
+          pubkey: relayAgent.pubkey,
+          status: "deployed" as ManagedAgent["status"],
+        },
+      ];
+    }
+    return [];
+  }, [managedAgent, relayAgent, viewerIsOwner]);
   useActiveAgentTurnsBridge(bridgeAgents);
-  useManagedAgentObserverBridge(bridgeAgents);
+  useManagedAgentObserverBridge(observerBridgeAgents);
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined ||
       (resolvedPersona !== undefined && !resolvedPersona.isBuiltIn));
   const memoryQuery = useAgentMemoryQuery(effectivePubkey, {
-    enabled: isOwner === true && Boolean(effectivePubkey),
+    enabled: viewerIsOwner && Boolean(effectivePubkey),
   });
   const isSelf =
     currentPubkey !== undefined &&
     pubkeyLower.length > 0 &&
     pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity =
-    isOwner === true && Boolean(onOpenAgentSession) && Boolean(effectivePubkey);
+    viewerIsOwner && Boolean(onOpenAgentSession) && Boolean(effectivePubkey);
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
@@ -680,10 +717,6 @@ export function UserProfilePanel({
     ownerProfileQuery.data,
     ownerPubkey,
   ]);
-  const isCurrentUserOwner =
-    currentPubkey !== undefined &&
-    ownerPubkey !== null &&
-    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
   const ownerDisplayName = ownerHandle
     ? isCurrentUserOwner || (!ownerPubkey && isOwner === true)
       ? `${ownerHandle} (you)`
@@ -746,8 +779,12 @@ export function UserProfilePanel({
 
   const headerActions = (
     <div className="ml-auto flex shrink-0 items-center gap-2">
-      {view === "memories" && isOwner === true && effectivePubkey ? (
-        <MemoryRefreshButton agentPubkey={effectivePubkey} variant="outline" />
+      {view === "memories" && viewerIsOwner && effectivePubkey ? (
+        <MemoryRefreshButton
+          agentPubkey={effectivePubkey}
+          variant="outline"
+          viewerIsOwner={viewerIsOwner}
+        />
       ) : null}
       <Button
         aria-label="Close profile"
@@ -767,7 +804,7 @@ export function UserProfilePanel({
       className={cn(
         "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
+        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
     >
       {view === "summary" ? (
@@ -800,7 +837,7 @@ export function UserProfilePanel({
           isBot={isBot}
           isAgentActionPending={isAgentActionPending}
           isFollowing={isFollowing}
-          isOwner={isOwner}
+          isOwner={viewerIsOwner}
           isSelf={isSelf}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
@@ -829,7 +866,10 @@ export function UserProfilePanel({
       ) : null}
 
       {view === "memories" && effectivePubkey ? (
-        <MemoryFocusedView agentPubkey={effectivePubkey} isOwner={isOwner} />
+        <MemoryFocusedView
+          agentPubkey={effectivePubkey}
+          viewerIsOwner={viewerIsOwner}
+        />
       ) : null}
 
       {view === "instructions" ? (
@@ -1001,7 +1041,7 @@ export function UserProfilePanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[4.75rem] bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[3.25rem] bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
           />
         ) : null}
 
@@ -1009,10 +1049,10 @@ export function UserProfilePanel({
           className={cn(
             "flex cursor-default select-none items-center",
             isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[4.75rem] min-h-[4.75rem] shrink-0 gap-2.5 bg-transparent pb-1 pl-4 pr-2 pt-[2.625rem] sm:pl-6 sm:pr-3`
+              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-transparent px-4 py-2 sm:pl-6 sm:pr-3`
               : isOverlay
-                ? "relative z-50 min-h-14 shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : "absolute inset-x-0 top-[2.625rem] z-50 min-h-8 gap-3 bg-transparent px-3 py-1 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
+                ? "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+                : "absolute inset-x-0 top-0 z-50 min-h-[3.25rem] gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
           )}
           data-tauri-drag-region
         >

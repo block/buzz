@@ -40,7 +40,40 @@ const snapshotByAgent = new Map<string, ObserverSnapshot>();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
+//
+// This set is the *union* of every active subscriber's contribution. Multiple
+// callers of `useManagedAgentObserverBridge` (e.g. the channel screen and the
+// profile panel) can be mounted at once, each tracking a different agent list.
+// We key each subscriber's contribution in `knownAgentsBySubscription` and
+// recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
+const knownAgentsBySubscription = new Map<string, Set<string>>();
+
+function recomputeKnownAgentPubkeys() {
+  knownAgentPubkeys.clear();
+  for (const subscriptionAgents of knownAgentsBySubscription.values()) {
+    for (const pubkey of subscriptionAgents) {
+      knownAgentPubkeys.add(pubkey);
+    }
+  }
+}
+
+function registerKnownAgents(
+  subscriptionId: string,
+  pubkeys: readonly string[],
+) {
+  knownAgentsBySubscription.set(
+    subscriptionId,
+    new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey))),
+  );
+  recomputeKnownAgentPubkeys();
+}
+
+function unregisterKnownAgents(subscriptionId: string) {
+  if (knownAgentsBySubscription.delete(subscriptionId)) {
+    recomputeKnownAgentPubkeys();
+  }
+}
 
 let connectionState: ConnectionState = "idle";
 let errorMessage: string | null = null;
@@ -275,6 +308,7 @@ export function getAgentTranscript(
 export function useManagedAgentObserverBridge(
   agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
 ) {
+  const subscriptionId = React.useId();
   const hasActiveAgent = React.useMemo(
     () =>
       agents.some(
@@ -283,13 +317,20 @@ export function useManagedAgentObserverBridge(
     [agents],
   );
 
-  // Keep the trusted-pubkey set in sync with the current managed agent list.
+  const agentPubkeys = React.useMemo(
+    () => agents.map((agent) => agent.pubkey),
+    [agents],
+  );
+
+  // Keep this subscriber's slice of the trusted-pubkey set in sync with its
+  // own agent list. The store recomputes the union across all subscribers, so
+  // a co-mounted caller no longer wipes out this caller's agents.
   React.useEffect(() => {
-    knownAgentPubkeys.clear();
-    for (const agent of agents) {
-      knownAgentPubkeys.add(normalizePubkey(agent.pubkey));
-    }
-  }, [agents]);
+    registerKnownAgents(subscriptionId, agentPubkeys);
+    return () => {
+      unregisterKnownAgents(subscriptionId);
+    };
+  }, [subscriptionId, agentPubkeys]);
 
   React.useEffect(() => {
     if (!hasActiveAgent) {
@@ -309,6 +350,7 @@ export function resetAgentObserverStore() {
   transcriptByAgent.clear();
   snapshotByAgent.clear();
   knownAgentPubkeys.clear();
+  knownAgentsBySubscription.clear();
   connectionState = "idle";
   errorMessage = null;
   notifyListeners();

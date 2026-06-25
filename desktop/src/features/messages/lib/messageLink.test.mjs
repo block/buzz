@@ -5,6 +5,7 @@ import {
   buildMessageLink,
   isMessageLink,
   parseMessageLink,
+  resolveMessageLinkRenderTarget,
 } from "./messageLink.ts";
 
 const CHANNEL = "f570339f-8f8a-4e08-a779-8d954aa44109";
@@ -117,4 +118,32 @@ test("isMessageLink matches buzz://message and legacy buzz://message", () => {
   assert.equal(isMessageLink("https://example.com"), false);
   assert.equal(isMessageLink(undefined), false);
   assert.equal(isMessageLink(""), false);
+});
+
+test("resolveMessageLinkRenderTarget distinguishes autolinks from labeled links", () => {
+  const href = `buzz://message?channel=${CHANNEL}&id=${MESSAGE}`;
+
+  assert.deepEqual(resolveMessageLinkRenderTarget({ href, label: href }), {
+    kind: "pill",
+    link: {
+      channelId: CHANNEL,
+      messageId: MESSAGE,
+      threadRootId: null,
+    },
+  });
+  assert.deepEqual(resolveMessageLinkRenderTarget({ href, label: "message" }), {
+    kind: "label",
+    link: {
+      channelId: CHANNEL,
+      messageId: MESSAGE,
+      threadRootId: null,
+    },
+  });
+  assert.deepEqual(
+    resolveMessageLinkRenderTarget({
+      href: "https://example.com",
+      label: href,
+    }),
+    { kind: "none" },
+  );
 });

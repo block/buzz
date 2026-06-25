@@ -764,24 +764,38 @@ async fn test_kind0_nip05_sync() {
     // Give the relay a moment to process the side effect.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Step 2: Verify the profile has the NIP-05 handle via REST GET.
+    // Step 2: Verify the kind:0 content was stored via POST /query.
     let http_client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [0],
+        "authors": [&pubkey_hex],
+        "limit": 1,
+    }]);
     let profile_resp = http_client
-        .get(format!("{}/api/users/{}/profile", http, pubkey_hex))
+        .post(format!("{}/query", http))
         .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
         .send()
         .await
-        .expect("GET profile");
-    assert_eq!(
-        profile_resp.status(),
-        200,
-        "profile should exist after kind:0"
+        .expect("query kind:0");
+    assert!(
+        profile_resp.status().is_success(),
+        "kind:0 query failed: {}",
+        profile_resp.status()
     );
-    let profile: serde_json::Value = profile_resp.json().await.expect("profile json");
+    let events: Vec<serde_json::Value> = profile_resp.json().await.expect("kind:0 json");
+    assert!(
+        !events.is_empty(),
+        "kind:0 event should exist after publishing"
+    );
+    let kind0_stored: serde_json::Value =
+        serde_json::from_str(events[0]["content"].as_str().unwrap_or("{}"))
+            .expect("parse kind:0 content");
     assert_eq!(
-        profile["nip05_handle"].as_str(),
+        kind0_stored["nip05"].as_str(),
         Some(valid_handle.as_str()),
-        "nip05_handle should be synced from kind:0"
+        "nip05 should be stored in kind:0 content"
     );
 
     // Step 3: Verify NIP-05 resolves via /.well-known/nostr.json.
@@ -803,6 +817,8 @@ async fn test_kind0_nip05_sync() {
     );
 
     // Step 4: Publish another kind:0 with an off-domain nip05 (should be cleared).
+    // Sleep to ensure a strictly newer created_at (second-level granularity).
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let off_domain_content = serde_json::json!({
         "display_name": "Kind0 Test User",
         "nip05": format!("{}@evil.com", unique_name),
@@ -825,23 +841,9 @@ async fn test_kind0_nip05_sync() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Step 5: Verify the handle was CLEARED (not set to the off-domain value).
-    let profile_resp2 = http_client
-        .get(format!("{}/api/users/{}/profile", http, pubkey_hex))
-        .header("X-Pubkey", &pubkey_hex)
-        .send()
-        .await
-        .expect("GET profile after off-domain kind:0");
-    assert_eq!(profile_resp2.status(), 200);
-    let profile2: serde_json::Value = profile_resp2.json().await.expect("profile json");
-    let handle_after = profile2["nip05_handle"].as_str().unwrap_or("");
-    assert!(
-        handle_after.is_empty() || handle_after == "null",
-        "nip05_handle should be cleared after off-domain kind:0, got: {:?}",
-        profile2["nip05_handle"]
-    );
-
-    // Step 6: Confirm NIP-05 no longer resolves.
+    // Step 5: Verify the handle was CLEARED — NIP-05 should no longer resolve
+    // after the off-domain kind:0 was accepted. The relay's side effect clears
+    // the nip05_handle in the users table when the domain doesn't match.
     let nip05_resp2 = http_client
         .get(format!(
             "{}/.well-known/nostr.json?name={}",
@@ -979,19 +981,27 @@ async fn test_nip29_put_user_nobody_blocks() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "nobody" via REST.
+    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
     let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
     let resp = http_client
-        .put(format!(
-            "{}/api/users/me/channel-add-policy",
-            relay_http_url()
-        ))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
-        .json(&serde_json::json!({ "channel_add_policy": "nobody" }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
         .send()
         .await
         .expect("set policy request");
-    assert_eq!(resp.status(), 200, "set policy failed");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
 
     // Create a channel owned by channel_owner (not the agent).
     let channel_id = create_test_channel(&channel_owner_keys).await;
@@ -1033,19 +1043,27 @@ async fn test_nip29_put_user_self_add_bypasses_policy() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "nobody" via REST.
+    // Set agent's channel_add_policy to "nobody" via kind:10100 event.
     let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "nobody" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
     let resp = http_client
-        .put(format!(
-            "{}/api/users/me/channel-add-policy",
-            relay_http_url()
-        ))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
-        .json(&serde_json::json!({ "channel_add_policy": "nobody" }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
         .send()
         .await
         .expect("set policy request");
-    assert_eq!(resp.status(), 200, "set policy failed");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
 
     // Create a channel where the agent is the owner.
     let channel_id = create_test_channel(&agent_keys).await;
@@ -1059,6 +1077,7 @@ async fn test_nip29_put_user_self_add_bypasses_policy() {
     let h_tag = nostr::Tag::parse(["h", &channel_id]).expect("h tag");
     let p_tag = nostr::Tag::parse(["p", &agent_pubkey_hex]).expect("p tag");
     let event = nostr::EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
         .tags([h_tag, p_tag])
         .sign_with_keys(&agent_keys)
         .expect("sign kind 9000");
@@ -1084,19 +1103,27 @@ async fn test_nip29_put_user_owner_only_blocks() {
     let agent_keys = Keys::generate();
     let agent_pubkey_hex = agent_keys.public_key().to_hex();
 
-    // Set agent's channel_add_policy to "owner_only" via REST.
+    // Set agent's channel_add_policy to "owner_only" via kind:10100 event.
     let http_client = reqwest::Client::new();
+    let policy_event = EventBuilder::new(
+        Kind::Custom(10100),
+        serde_json::json!({ "channel_add_policy": "owner_only" }).to_string(),
+    )
+    .sign_with_keys(&agent_keys)
+    .expect("sign kind:10100");
     let resp = http_client
-        .put(format!(
-            "{}/api/users/me/channel-add-policy",
-            relay_http_url()
-        ))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &agent_pubkey_hex)
-        .json(&serde_json::json!({ "channel_add_policy": "owner_only" }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&policy_event).unwrap())
         .send()
         .await
         .expect("set policy request");
-    assert_eq!(resp.status(), 200, "set policy failed");
+    assert!(
+        resp.status().is_success(),
+        "set policy failed: {}",
+        resp.status()
+    );
 
     // Create a channel owned by channel_owner (not the agent).
     let channel_id = create_test_channel(&channel_owner_keys).await;

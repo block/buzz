@@ -70,6 +70,23 @@ function UnreadCountBadge({
   );
 }
 
+function UnreadDotBadge({
+  channelName,
+  className,
+}: {
+  channelName: string;
+  className?: string;
+}) {
+  return (
+    <span
+      className={cn("h-2 w-2 shrink-0 rounded-full bg-primary", className)}
+      data-testid={`channel-unread-dot-${channelName}`}
+    >
+      <span className="sr-only">unread</span>
+    </span>
+  );
+}
+
 export type SidebarDmParticipant = {
   avatarUrl: string | null;
   label: string;
@@ -233,15 +250,16 @@ export function ChannelMenuButton({
           )}
         />
       ) : null}
-      {hasUnread &&
-      unreadCount > 0 &&
-      !isActive &&
-      channel.channelType !== "dm" ? (
-        <UnreadCountBadge
-          channelName={channel.name}
-          className="ml-auto"
-          count={Math.max(unreadCount, 1)}
-        />
+      {hasUnread && !isActive && channel.channelType !== "dm" ? (
+        unreadCount > 0 ? (
+          <UnreadCountBadge
+            channelName={channel.name}
+            className="ml-auto"
+            count={unreadCount}
+          />
+        ) : (
+          <UnreadDotBadge channelName={channel.name} className="ml-auto" />
+        )
       ) : null}
     </SidebarMenuButton>
   );

@@ -1443,7 +1443,8 @@
 }
 
 .buzz-spoiler--block img[data-spoiler-media-size] {
-  height: var(--buzz-spoiler-media-height);
+  aspect-ratio: var(--buzz-spoiler-media-aspect-ratio);
+  height: auto;
   width: var(--buzz-spoiler-media-width);
 }
 

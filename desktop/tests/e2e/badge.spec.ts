@@ -105,6 +105,7 @@ test("regular message bolds inactive channel without numeric badge", async ({
     "600",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
+  await expect(page.getByTestId("channel-unread-dot-random")).toBeVisible();
   await waitForBadgeState(page, withDotOnlyBadge(baselineBadge));
 });
 
@@ -134,6 +135,7 @@ test("numeric badge increments for @mention in inactive channel", async ({
   );
 
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-dot-random")).toHaveCount(0);
   await waitForBadgeState(page, withAdditionalBadgeCount(baselineBadge, 1));
 });
 

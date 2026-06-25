@@ -6,7 +6,7 @@ export function HomeLoadingState() {
       <div className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]">
         <div className="relative overflow-hidden bg-background/60 after:absolute after:bottom-0 after:right-0 after:top-10 after:w-px after:bg-border/70 after:content-['']">
           <div className="px-5 py-2">
-            <div className="flex min-h-10 min-w-0 items-center justify-between gap-3">
+            <div className="flex min-h-9 min-w-0 items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-[6px]">
                 <Skeleton className="h-4 w-4 shrink-0 rounded-md" />
                 <Skeleton className="h-4 w-14" />
@@ -22,7 +22,7 @@ export function HomeLoadingState() {
                 key={row}
               >
                 <div className="relative shrink-0">
-                  <Skeleton className="h-8 w-8 rounded-full" />
+                  <Skeleton className="h-9 w-9 rounded-full" />
                   {row === "first" || row === "third" ? (
                     <Skeleton className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full" />
                   ) : null}
@@ -52,7 +52,7 @@ export function HomeLoadingState() {
 
         <div className="relative flex min-h-0 flex-col overflow-hidden bg-background/60">
           <div className="px-5 py-2">
-            <div className="flex min-h-10 min-w-0 items-center justify-between gap-3">
+            <div className="flex min-h-9 min-w-0 items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-[4px]">
                 <Skeleton className="h-4 w-4 shrink-0 rounded-md" />
                 <Skeleton className="h-4 w-40" />
@@ -71,7 +71,7 @@ export function HomeLoadingState() {
                   <div className="mx-1 mb-3 border-t border-border/60" />
                 ) : null}
                 <article className="relative flex items-start gap-2.5">
-                  <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
+                  <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0">
                       <Skeleton className="h-4 w-24" />

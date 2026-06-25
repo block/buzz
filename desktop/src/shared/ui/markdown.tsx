@@ -23,6 +23,7 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   isMessageLink,
   parseMessageLink,
+  resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -78,6 +79,14 @@ type ImetaEntry = {
 };
 
 type ImetaLookup = Map<string, ImetaEntry>;
+
+type MessageLinkPillProps = {
+  channels: Channel[];
+  href: string;
+  interactive: boolean;
+  link: ParsedMessageLink;
+  onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
 
 let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
   null;
@@ -1109,9 +1118,10 @@ function ImageBlock({
 
   const spoilerMediaStyle = hiddenSpoilerMediaSize
     ? ({
-        "--buzz-spoiler-media-height": `${hiddenSpoilerMediaSize.height}px`,
+        "--buzz-spoiler-media-aspect-ratio": `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
         "--buzz-spoiler-media-width": `${hiddenSpoilerMediaSize.width}px`,
-        height: `${hiddenSpoilerMediaSize.height}px`,
+        aspectRatio: `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
+        height: "auto",
         width: `${hiddenSpoilerMediaSize.width}px`,
       } as React.CSSProperties)
     : undefined;
@@ -1193,7 +1203,7 @@ function ImageBlock({
         aria-hidden={isHiddenInSpoiler ? true : undefined}
         aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
         className={cn(
-          "mt-1 inline-block max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
+          "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
           lightboxBox && "opacity-0",
         )}
         data-testid="message-image-lightbox-trigger"
@@ -1205,7 +1215,7 @@ function ImageBlock({
       >
         <img
           alt={alt}
-          className="block max-h-64 max-w-sm rounded-xl object-contain"
+          className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-xl object-contain"
           data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
           height={intrinsicDimensions?.height}
           ref={imageRef}
@@ -1250,6 +1260,46 @@ function getReactNodeText(node: React.ReactNode): string {
 
 function getCodeBlockText(children: React.ReactNode) {
   return getReactNodeText(children).replace(/\n$/, "");
+}
+
+function MessageLinkPill({
+  channels,
+  href,
+  interactive,
+  link,
+  onOpenMessageLink,
+}: MessageLinkPillProps) {
+  const channel = channels.find((c) => c.id === link.channelId);
+  const channelLabel = channel?.name ?? "channel";
+  const shortId = link.messageId.slice(0, 6);
+  const label = (
+    <>
+      #{channelLabel} · {shortId}
+    </>
+  );
+
+  if (!interactive) {
+    return <span data-message-link="">{label}</span>;
+  }
+
+  return (
+    <button
+      type="button"
+      data-message-link=""
+      aria-label={`Open message in ${channelLabel}`}
+      title={href}
+      className={cn(
+        "cursor-pointer",
+        MENTION_CHIP_BASE_CLASSES,
+        MENTION_CHIP_HOVER_CLASSES,
+      )}
+      onClick={() => {
+        onOpenMessageLink(link);
+      }}
+    >
+      {label}
+    </button>
+  );
 }
 
 function InlineEmojiPopover({
@@ -1788,10 +1838,24 @@ function createMarkdownComponents(
       // Intercept `buzz://message?channel=…&id=…` links so a click navigates
       // in-app instead of opening the URL in the OS browser. http(s) links
       // continue to use the existing target="_blank" behavior.
-      if (isMessageLink(href)) {
-        const parsed = parseMessageLink(href ?? "");
-        if (parsed.ok) {
-          const target = parsed.value;
+      if (href) {
+        const messageLinkTarget = resolveMessageLinkRenderTarget({
+          href,
+          label: getReactNodeText(children),
+        });
+        if (messageLinkTarget.kind !== "none") {
+          if (messageLinkTarget.kind === "pill") {
+            return (
+              <MessageLinkPill
+                channels={runtimeRef.current.channels}
+                href={href}
+                interactive={interactive}
+                link={messageLinkTarget.link}
+                onOpenMessageLink={onOpenMessageLink}
+              />
+            );
+          }
+
           return (
             <a
               {...props}
@@ -1799,7 +1863,7 @@ function createMarkdownComponents(
               href={href}
               onClick={(event) => {
                 event.preventDefault();
-                onOpenMessageLink(target);
+                onOpenMessageLink(messageLinkTarget.link);
               }}
             >
               {children}
@@ -1918,7 +1982,7 @@ function createMarkdownComponents(
       }
       const entry = src ? imetaByUrl?.get(src) : undefined;
       return (
-        <span data-block-media="" className="block">
+        <span data-block-media="" className="block min-w-0 max-w-full">
           <ImageBlock
             alt={alt}
             dim={entry?.dim}
@@ -1942,7 +2006,7 @@ function createMarkdownComponents(
 
       if (isImageOnlyParagraph(childArray)) {
         return (
-          <div className="mt-1 grid max-w-lg grid-cols-2 gap-1.5 [&_br]:hidden [&_[data-block-media]]:mt-0 [&_[data-block-media]]:max-w-none [&_img]:mt-0 [&_img]:w-full [&_img]:max-w-full">
+          <div className="mt-1 grid w-full min-w-0 max-w-lg grid-cols-2 gap-1.5 [&_br]:hidden [&_[data-block-media]]:mt-0 [&_[data-block-media]]:max-w-none [&_img]:mt-0 [&_img]:w-full [&_img]:max-w-full">
             {imageChildren}
           </div>
         );
@@ -2095,36 +2159,14 @@ function createMarkdownComponents(
         return <span data-message-link="">{href}</span>;
       }
 
-      const { channelId, messageId } = parsed.value;
-      const channel = channels.find((c) => c.id === channelId);
-      const channelLabel = channel?.name ?? "channel";
-      const shortId = messageId.slice(0, 6);
-
-      if (!interactive) {
-        return (
-          <span data-message-link="">
-            #{channelLabel} · {shortId}
-          </span>
-        );
-      }
-
       return (
-        <button
-          type="button"
-          data-message-link=""
-          aria-label={`Open message in ${channelLabel}`}
-          title={href}
-          className={cn(
-            "cursor-pointer",
-            MENTION_CHIP_BASE_CLASSES,
-            MENTION_CHIP_HOVER_CLASSES,
-          )}
-          onClick={() => {
-            onOpenMessageLink(parsed.value);
-          }}
-        >
-          #{channelLabel} · {shortId}
-        </button>
+        <MessageLinkPill
+          channels={channels}
+          href={href}
+          interactive={interactive}
+          link={parsed.value}
+          onOpenMessageLink={onOpenMessageLink}
+        />
       );
     },
   } as Components;

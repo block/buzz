@@ -17,6 +17,7 @@ use buzz_auth::AuthService;
 use buzz_core::event::StoredEvent;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
+use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
@@ -448,7 +449,22 @@ impl AppState {
     }
 
     /// Invalidate caches after a membership change (add/remove member).
+    ///
+    /// Drops the local moka entries AND fire-and-forget publishes the same drop
+    /// to every other pod over Redis (see [`apply_cache_invalidation`]). The
+    /// publish is spawned, not awaited: the local drop is already done, and a
+    /// dropped publish is backstopped by the REQ denial-path DB confirmation.
     pub fn invalidate_membership(&self, channel_id: Uuid, pubkey: &[u8]) {
+        self.invalidate_membership_local(channel_id, pubkey);
+        self.spawn_cache_invalidation(CacheInvalidation::Membership {
+            channel_id,
+            pubkey: pubkey.to_vec(),
+        });
+    }
+
+    /// Local-only membership drop. The cross-pod consumer calls this directly so
+    /// applying a received drop never re-publishes it.
+    pub(crate) fn invalidate_membership_local(&self, channel_id: Uuid, pubkey: &[u8]) {
         self.membership_cache
             .invalidate(&(channel_id, pubkey.to_vec()));
         self.accessible_channels_cache.invalidate(&pubkey.to_vec());
@@ -456,11 +472,23 @@ impl AppState {
 
     /// Invalidate all users' accessible-channels cache (e.g. new open channel created).
     pub fn invalidate_all_accessible_channels(&self) {
+        self.invalidate_all_accessible_channels_local();
+        self.spawn_cache_invalidation(CacheInvalidation::AccessibleAll);
+    }
+
+    /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
+    pub(crate) fn invalidate_all_accessible_channels_local(&self) {
         self.accessible_channels_cache.invalidate_all();
     }
 
     /// Invalidate the cached visibility for a single channel (e.g. after a flip).
     pub fn invalidate_channel_visibility(&self, channel_id: Uuid) {
+        self.invalidate_channel_visibility_local(channel_id);
+        self.spawn_cache_invalidation(CacheInvalidation::Visibility { channel_id });
+    }
+
+    /// Local-only visibility drop. See [`invalidate_membership_local`].
+    pub(crate) fn invalidate_channel_visibility_local(&self, channel_id: Uuid) {
         self.channel_visibility_cache.invalidate(&channel_id);
     }
 
@@ -471,9 +499,46 @@ impl AppState {
     /// keys, and stale `is_member=true` entries for a deleted channel would bypass
     /// the DB's `deleted_at IS NULL` guard.
     pub fn invalidate_channel_deleted(&self) {
+        self.invalidate_channel_deleted_local();
+        self.spawn_cache_invalidation(CacheInvalidation::ChannelDeleted);
+    }
+
+    /// Local-only channel-deleted drop. See [`invalidate_membership_local`].
+    pub(crate) fn invalidate_channel_deleted_local(&self) {
         self.membership_cache.invalidate_all();
         self.accessible_channels_cache.invalidate_all();
         self.channel_visibility_cache.invalidate_all();
+    }
+
+    /// Fire-and-forget publish of a cache-key drop to all other pods. Failures
+    /// are logged and swallowed — the REQ denial-path DB confirmation is the
+    /// backstop, so a missed publish degrades to a <=10s TTL wait, never a leak.
+    fn spawn_cache_invalidation(&self, invalidation: CacheInvalidation) {
+        let pubsub = Arc::clone(&self.pubsub);
+        tokio::spawn(async move {
+            if let Err(e) = pubsub.publish_cache_invalidation(&invalidation).await {
+                tracing::warn!("Failed to publish cache invalidation {invalidation:?}: {e}");
+            }
+        });
+    }
+
+    /// Apply a cache-key drop received from another pod. Calls the local-only
+    /// drop variants so a received drop is never re-published (no fan-out loop).
+    pub fn apply_cache_invalidation(&self, invalidation: CacheInvalidation) {
+        match invalidation {
+            CacheInvalidation::Membership { channel_id, pubkey } => {
+                self.invalidate_membership_local(channel_id, &pubkey);
+            }
+            CacheInvalidation::AccessibleAll => {
+                self.invalidate_all_accessible_channels_local();
+            }
+            CacheInvalidation::Visibility { channel_id } => {
+                self.invalidate_channel_visibility_local(channel_id);
+            }
+            CacheInvalidation::ChannelDeleted => {
+                self.invalidate_channel_deleted_local();
+            }
+        }
     }
 
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.

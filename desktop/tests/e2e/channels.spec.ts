@@ -8,6 +8,12 @@ import {
 } from "../helpers/bridge";
 
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
+// Relay-only agent owned by the mock viewer (see e2eBridge.ts
+// OWNED_RELAY_AGENT_PUBKEY). Classified as a bot via mockRelayAgents and
+// owned-by-viewer via its mockProfiles owner_pubkey, so the sidebar
+// view-activity gate (memberIsBot && viewerIsOwner) opens for it.
+const OWNED_RELAY_AGENT_PUBKEY =
+  "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 
 async function openChannelManagement(
   page: import("@playwright/test").Page,
@@ -951,6 +957,25 @@ test("shows and clears activity indicators for active channel agents", async ({
   );
 });
 
+test("members sidebar exposes view-activity for a viewer-owned relay agent", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+
+  // nadia is a relay-only agent (no local managed record) owned by the mock
+  // viewer. The view-activity affordance must open via the declared-owner
+  // path, not the local-managed path.
+  await expect(
+    page.getByTestId(`sidebar-member-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+  await openMemberMenu(page, OWNED_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByTestId(`sidebar-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+});
+
 test("typing indicator shows avatars and maintains stable name order", async ({
   page,
 }) => {
@@ -1389,6 +1414,60 @@ test("channel header omits the add agent action", async ({ page }) => {
   await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
+});
+
+test("members sidebar collapses same-persona managed agents", async ({
+  page,
+}) => {
+  const inChannelAgentPubkey =
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const outOfChannelAgentPubkey =
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: outOfChannelAgentPubkey,
+        name: "Pinky",
+        personaId: "builtin:fizz",
+        status: "stopped",
+      },
+      {
+        pubkey: inChannelAgentPubkey,
+        name: "Pinky",
+        personaId: "builtin:fizz",
+        status: "running",
+        channelNames: ["general"],
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: outOfChannelAgentPubkey,
+        displayName: "Pinky",
+        ownerPubkey: MOCK_IDENTITY_PUBKEY,
+        isAgent: true,
+      },
+      {
+        pubkey: inChannelAgentPubkey,
+        displayName: "Pinky",
+        ownerPubkey: MOCK_IDENTITY_PUBKEY,
+        isAgent: true,
+      },
+    ],
+    userSearchDelayMs: 1_000,
+  });
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+
+  await page.getByTestId("channel-management-search-users").fill("pi");
+
+  await expect(
+    page.getByTestId(`channel-user-search-result-${inChannelAgentPubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId(`channel-user-search-result-${outOfChannelAgentPubkey}`),
+  ).toHaveCount(0);
+  await expect(page.getByText("Pinky", { exact: true })).toHaveCount(1);
 });
 
 test("private-channel members can add members and bots without admin", async ({
