@@ -6,6 +6,7 @@ import {
   KIND_AGENT_CONVERSATION,
   KIND_AGENT_CONVERSATION_COMPAT,
 } from "@/shared/constants/kinds";
+import { parseAgentConversationLink } from "./agentConversationLink";
 import {
   collectConversationContextMessages,
   deriveTitleFromContext,
@@ -98,6 +99,19 @@ export function agentConversationsStorageKey(
   workspaceScope: string | null | undefined,
 ): string {
   return `${AGENT_CONVERSATIONS_STORAGE_PREFIX}:${normalizeAgentConversationStorageScope(workspaceScope)}:${pubkey}`;
+}
+
+export function getAgentConversationMarkerTitleForHref(
+  markers: readonly AgentConversationMarker[] | undefined,
+  href: string,
+) {
+  const parsed = parseAgentConversationLink(href);
+  if (!parsed.ok) return undefined;
+  return markers?.find(
+    (marker) =>
+      marker.channelId === parsed.value.channelId &&
+      marker.agentReplyId === parsed.value.agentReplyId,
+  )?.title;
 }
 
 export function readHiddenAgentConversationIds(

@@ -2,7 +2,10 @@ import * as React from "react";
 import { Bot, ChevronRight, Copy, createLucideIcon } from "lucide-react";
 import { toast } from "sonner";
 
-import { buildAgentConversationLink } from "@/features/agents/agentConversationLink";
+import {
+  buildAgentConversationLink,
+  parseAgentConversationLink,
+} from "@/features/agents/agentConversationLink";
 import {
   buildAgentConversationMarkers,
   buildAgentConversationRecap,
@@ -686,6 +689,21 @@ export function AgentConversationScreen({
       toast.error("Failed to copy task link");
     }
   }, [channel?.id, conversation.agentReply.id, conversation.channelId]);
+  const getAgentConversationTitleForHref = React.useCallback(
+    (href: string) => {
+      const parsed = parseAgentConversationLink(href);
+      if (
+        !parsed.ok ||
+        parsed.value.channelId !== conversation.channelId ||
+        parsed.value.agentReplyId !== conversation.agentReply.id
+      ) {
+        return undefined;
+      }
+
+      return conversation.title;
+    },
+    [conversation.agentReply.id, conversation.channelId, conversation.title],
+  );
   const headerTitleTrailingContent = (
     <>
       <ChevronRight
@@ -788,6 +806,7 @@ export function AgentConversationScreen({
       >
         <div className="pointer-events-auto">
           <MessageComposer
+            agentConversationTitleForHref={getAgentConversationTitleForHref}
             channelId={channel?.id ?? conversation.channelId}
             channelName={channel?.name ?? conversation.channelName}
             channelType={channel?.channelType ?? "stream"}

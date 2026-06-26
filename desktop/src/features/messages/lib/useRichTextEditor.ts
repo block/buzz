@@ -22,6 +22,7 @@ import {
   mentionHighlightKey,
 } from "./mentionHighlightExtension";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
+import { AgentConversationLinkNode } from "./agentConversationLinkNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
@@ -60,6 +61,8 @@ export type RichTextEditorOptions = {
   channelNames?: string[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
+  /** Resolve task-link titles for composer task cards. */
+  agentConversationTitleForHref?: (href: string) => string | undefined;
   /** Called on plain Enter (submit). Handled inside Tiptap's extension system
    *  so it fires *before* ProseMirror's default splitBlock behaviour. */
   onSubmit?: () => void;
@@ -111,6 +114,7 @@ export function useRichTextEditor({
   agentMentionNames,
   channelNames,
   customEmoji,
+  agentConversationTitleForHref,
   onSubmit,
   onEditLastOwnMessage,
   isAutocompleteOpen,
@@ -138,6 +142,18 @@ export function useRichTextEditor({
   // Custom-emoji atom node wiring (config + src re-resolve). Kept in a sibling
   // hook so this file stays focused on generic editor setup.
   const customEmojiWiring = useComposerCustomEmoji(customEmoji);
+  const agentConversationTitleForHrefRef = React.useRef(
+    agentConversationTitleForHref,
+  );
+  agentConversationTitleForHrefRef.current = agentConversationTitleForHref;
+  const agentConversationLinkExtension = React.useMemo(
+    () =>
+      AgentConversationLinkNode.configure({
+        titleForHref: (href) =>
+          agentConversationTitleForHrefRef.current?.(href),
+      }),
+    [],
+  );
 
   const editor = useEditor(
     {
@@ -323,6 +339,7 @@ export function useRichTextEditor({
         SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
+        agentConversationLinkExtension,
         Placeholder.configure({
           placeholder: () => placeholderRef.current ?? "Write a message…",
         }),
@@ -410,7 +427,7 @@ export function useRichTextEditor({
         onUpdateRef.current?.({ markdown, text });
       },
     },
-    [],
+    [agentConversationLinkExtension],
   );
 
   // Toggle editable without destroying the editor instance.

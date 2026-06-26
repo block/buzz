@@ -6,6 +6,7 @@ import {
   isAgentConversationLink,
   parseAgentConversationLink,
   resolveAgentConversationLinkRenderTarget,
+  trimAgentConversationLinkMatch,
 } from "./agentConversationLink.ts";
 
 const CHANNEL = "f570339f-8f8a-4e08-a779-8d954aa44109";
@@ -105,4 +106,21 @@ test("resolveAgentConversationLinkRenderTarget distinguishes cards from labels",
     }),
     { kind: "none" },
   );
+});
+
+test("trimAgentConversationLinkMatch keeps sentence punctuation outside links", () => {
+  const href = `buzz://task?channel=${CHANNEL}&reply=${REPLY}`;
+
+  assert.deepEqual(trimAgentConversationLinkMatch(`${href}.`), {
+    value: href,
+    trailing: ".",
+  });
+  assert.deepEqual(trimAgentConversationLinkMatch(`${href})`), {
+    value: href,
+    trailing: ")",
+  });
+  assert.deepEqual(trimAgentConversationLinkMatch(`${href}]`), {
+    value: href,
+    trailing: "]",
+  });
 });
