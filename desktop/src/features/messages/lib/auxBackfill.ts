@@ -84,6 +84,10 @@ export async function backfillAuxForMessages(
   queryClient: QueryClient,
   channelId: string,
   historyEvents: RelayEvent[],
+  decryptBatch: (events: RelayEvent[]) => Promise<RelayEvent[]> = async (
+    events,
+  ) => events,
+  selfPubkey?: string,
 ): Promise<void> {
   const messageIds = collectMessageIdsForAuxBackfill(historyEvents);
   if (messageIds.length === 0) {
@@ -91,7 +95,7 @@ export async function backfillAuxForMessages(
   }
 
   try {
-    const cacheKey = channelMessagesKey(channelId);
+    const cacheKey = channelMessagesKey(channelId, selfPubkey);
     const cachedEvents = queryClient.getQueryData<RelayEvent[]>(cacheKey) ?? [];
     const auxEvents = await relayClient.fetchAuxEventsByReference(
       channelId,
@@ -109,8 +113,13 @@ export async function backfillAuxForMessages(
       return;
     }
 
+    // Edit events (kind 40003) carry an encrypted DM body the renderer overlays
+    // onto the original message — decrypt them before they reach the cache so
+    // the overlay shows plaintext. A no-op outside 2-party DMs.
+    const decryptedAuxEvents = await decryptBatch(mergedAuxEvents);
+
     queryClient.setQueryData<RelayEvent[]>(cacheKey, (current = []) =>
-      sortMessages([...current, ...mergedAuxEvents]),
+      sortMessages([...current, ...decryptedAuxEvents]),
     );
   } catch (error) {
     console.error(

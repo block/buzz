@@ -748,6 +748,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_identity,
+            // NOTE: `get_nsec` returns the raw bech32 private key to any frontend
+            // caller. The "private key never leaves Rust" property stated in the
+            // NIP-44 DM command design applies to the `nip44_encrypt_to_peer` /
+            // `nip44_decrypt_from_peer` API boundary — those commands accept
+            // plaintext/ciphertext and return only the result. `get_nsec` is a
+            // separate, pre-existing escape hatch used by identity import/export
+            // flows. Removing or access-gating `get_nsec` is tracked as a
+            // follow-on hardening item.
             get_nsec,
             import_identity,
             get_profile,
@@ -772,6 +780,8 @@ pub fn run() {
             create_auth_event,
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
+            nip44_encrypt_to_peer,
+            nip44_decrypt_from_peer,
             get_channels,
             create_channel,
             open_dm,

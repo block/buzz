@@ -62,6 +62,13 @@ pub struct ChannelRecord {
     pub ttl_seconds: Option<i32>,
     /// Deadline by which a new message must arrive or the channel is auto-archived.
     pub ttl_deadline: Option<DateTime<Utc>>,
+    /// Point from which messages in this channel MUST be NIP-44 v2 ciphertext.
+    ///
+    /// The tamper-evident encryption-start marker for hybrid E2E. Relay-owned:
+    /// set by the relay (at DM creation) and never writable by a client, so the
+    /// boundary cannot be forged or backdated. `None` means the channel is not
+    /// E2E (legacy plaintext stays readable).
+    pub encryption_activated_at: Option<DateTime<Utc>>,
 }
 
 /// A channel membership row as returned from the database.
@@ -143,7 +150,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, encryption_activated_at
         FROM channels WHERE id = $1
         "#,
     )
@@ -234,7 +241,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, encryption_activated_at
         FROM channels WHERE id = $1
         "#,
     )
@@ -257,7 +264,7 @@ pub async fn get_channel(pool: &PgPool, channel_id: Uuid) -> Result<ChannelRecor
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, encryption_activated_at
         FROM channels WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -583,7 +590,7 @@ pub async fn list_channels(pool: &PgPool, visibility: Option<&str>) -> Result<Ve
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, encryption_activated_at
             FROM channels
             WHERE deleted_at IS NULL AND visibility::text = $1
             ORDER BY created_at DESC
@@ -602,7 +609,7 @@ pub async fn list_channels(pool: &PgPool, visibility: Option<&str>) -> Result<Ve
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, encryption_activated_at
             FROM channels
             WHERE deleted_at IS NULL
             ORDER BY created_at DESC
@@ -646,7 +653,7 @@ async fn get_channel_tx(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, encryption_activated_at
         FROM channels WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -735,7 +742,7 @@ pub async fn get_accessible_channels(
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,
                c.purpose, c.purpose_set_by, c.purpose_set_at,
-               c.ttl_seconds, c.ttl_deadline,
+               c.ttl_seconds, c.ttl_deadline, c.encryption_activated_at,
                (cm.channel_id IS NOT NULL) AS is_member
         FROM channels c
         LEFT JOIN channel_members cm
@@ -860,6 +867,8 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
     let purpose_set_at: Option<DateTime<Utc>> = row.try_get("purpose_set_at").unwrap_or(None);
     let ttl_seconds: Option<i32> = row.try_get("ttl_seconds").unwrap_or(None);
     let ttl_deadline: Option<DateTime<Utc>> = row.try_get("ttl_deadline").unwrap_or(None);
+    let encryption_activated_at: Option<DateTime<Utc>> =
+        row.try_get("encryption_activated_at").unwrap_or(None);
 
     Ok(ChannelRecord {
         id,
@@ -884,6 +893,7 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         purpose_set_at,
         ttl_seconds,
         ttl_deadline,
+        encryption_activated_at,
     })
 }
 

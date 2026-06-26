@@ -1,13 +1,21 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
+import { makeDmIngestDecryptor } from "@/features/messages/lib/dmCrypto";
 import { pageOlderMessagesUntilRowFloor } from "@/features/messages/lib/pageOlderMessages";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
-export function useFetchOlderMessages(channel: Channel | null) {
+export function useFetchOlderMessages(
+  channel: Channel | null,
+  selfPubkey?: string,
+) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
+  const decryptIngested = useMemo(
+    () => makeDmIngestDecryptor(channel, selfPubkey),
+    [channel, selfPubkey],
+  );
   const [isFetchingOlder, setIsFetchingOlder] = useState(false);
   const [hasOlderMessages, setHasOlderMessages] = useState(true);
   const isFetchingOlderRef = useRef(false);
@@ -29,7 +37,7 @@ export function useFetchOlderMessages(channel: Channel | null) {
       return;
     }
 
-    const queryKey = channelMessagesKey(channelId);
+    const queryKey = channelMessagesKey(channelId, selfPubkey);
     const currentMessages =
       queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
     if (currentMessages.length === 0) {
@@ -45,6 +53,8 @@ export function useFetchOlderMessages(channel: Channel | null) {
         queryClient,
         channelId,
         () => previousChannelIdRef.current === channelId,
+        decryptIngested,
+        selfPubkey,
       );
       if (!more) {
         hasOlderMessagesRef.current = false;
@@ -56,7 +66,7 @@ export function useFetchOlderMessages(channel: Channel | null) {
       isFetchingOlderRef.current = false;
       setIsFetchingOlder(false);
     }
-  }, [channelId, queryClient]);
+  }, [channelId, queryClient, decryptIngested, selfPubkey]);
 
   return { fetchOlder, isFetchingOlder, hasOlderMessages };
 }

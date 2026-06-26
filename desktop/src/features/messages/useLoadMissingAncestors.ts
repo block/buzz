@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import { mergeMessages } from "@/features/messages/hooks";
+import { makeDmIngestDecryptor } from "@/features/messages/lib/dmCrypto";
 import {
   getChannelIdFromTags,
   getThreadReference,
@@ -10,22 +11,57 @@ import {
 import { getEventById } from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
+/** The scope that the requested-ancestor dedup set is valid for. */
+interface AncestorScope {
+  channelId: string | null;
+  selfPubkey: string | undefined;
+}
+
+/**
+ * Whether the requested-ancestor dedup tracking must reset.
+ *
+ * The dedup set keys "ancestor already fetched" by id, but a fetched ancestor
+ * lands in `channelMessagesKey(channelId, selfPubkey)` — a bucket scoped by
+ * BOTH channel AND identity. So the set is only valid within a single
+ * (channel, identity) scope. On a cold start an ancestor fetched while
+ * `selfPubkey` is undefined no-op-decrypts into the orphaned `[...,null]`
+ * bucket yet gets recorded as done; without resetting on the identity flip the
+ * effect would skip re-fetching it into the live `[...,pubkey]` bucket and the
+ * ancestor would silently go missing from the thread.
+ */
+export function shouldResetAncestorTracking(
+  previous: AncestorScope,
+  next: AncestorScope,
+): boolean {
+  return (
+    previous.channelId !== next.channelId ||
+    previous.selfPubkey !== next.selfPubkey
+  );
+}
+
 export function useLoadMissingAncestors(
   activeChannel: Channel | null,
   resolvedMessages: RelayEvent[],
+  selfPubkey?: string,
 ) {
   const queryClient = useQueryClient();
   const requestedAncestorIdsRef = React.useRef<Set<string>>(new Set());
-  const previousChannelIdRef = React.useRef<string | null>(null);
+  const previousScopeRef = React.useRef<AncestorScope>({
+    channelId: null,
+    selfPubkey: undefined,
+  });
 
   React.useEffect(() => {
-    const activeChannelId = activeChannel?.id ?? null;
-    if (previousChannelIdRef.current === activeChannelId) {
+    const scope: AncestorScope = {
+      channelId: activeChannel?.id ?? null,
+      selfPubkey,
+    };
+    if (!shouldResetAncestorTracking(previousScopeRef.current, scope)) {
       return;
     }
-    previousChannelIdRef.current = activeChannelId;
+    previousScopeRef.current = scope;
     requestedAncestorIdsRef.current.clear();
-  }, [activeChannel?.id]);
+  }, [activeChannel?.id, selfPubkey]);
 
   React.useEffect(() => {
     if (!activeChannel || activeChannel.channelType === "forum") {
@@ -77,6 +113,8 @@ export function useLoadMissingAncestors(
 
     let isCancelled = false;
 
+    const decryptIngested = makeDmIngestDecryptor(activeChannel, selfPubkey);
+
     void Promise.all(
       [...missingAncestorIds].map(async (eventId) => {
         try {
@@ -89,9 +127,15 @@ export function useLoadMissingAncestors(
             return;
           }
 
+          // Decrypt before caching: a DM ancestor is a NIP-44 v2 ciphertext
+          // body, so it must route through the same decryptor as every other
+          // ingest site or it lands raw in the rendered bucket (the decryptor
+          // is a no-op outside a 2-party DM, so this is uniform/safe).
+          const [decrypted] = await decryptIngested([event]);
+
           queryClient.setQueryData<RelayEvent[]>(
-            channelMessagesKey(activeChannel.id),
-            (current = []) => mergeMessages(current, event),
+            channelMessagesKey(activeChannel.id, selfPubkey),
+            (current = []) => mergeMessages(current, decrypted),
           );
         } catch (error) {
           console.error("Failed to load ancestor event", eventId, error);
@@ -102,5 +146,5 @@ export function useLoadMissingAncestors(
     return () => {
       isCancelled = true;
     };
-  }, [activeChannel, queryClient, resolvedMessages]);
+  }, [activeChannel, queryClient, resolvedMessages, selfPubkey]);
 }

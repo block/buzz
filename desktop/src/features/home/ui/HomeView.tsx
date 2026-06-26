@@ -185,7 +185,10 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
-  const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
+  const channelMessagesQuery = useChannelMessagesQuery(
+    selectedChannel,
+    currentPubkey,
+  );
   const toggleReactionMutation = useToggleReactionMutation();
   const channelMessages = channelMessagesQuery.data;
   const threadContext = useInboxThreadContext(

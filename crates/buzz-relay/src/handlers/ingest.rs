@@ -408,6 +408,44 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
     )
 }
 
+/// Channel-scoped kinds that carry a free-text display body. In a latched E2E
+/// DM these bodies MUST be NIP-44 ciphertext (rule 15c), or the relay would
+/// silently store plaintext — the exact leak the latch exists to prevent.
+///
+/// This is the content-bearing half of the relay's channel-scoped acceptance
+/// surface. The `e2e_drift_guard` test derives the full surface directly —
+/// `required_scope_for_kind(..).is_ok() && !is_global_only_kind(..)` — and
+/// asserts every channel-scoped kind lands in exactly one bucket: gated here,
+/// bodyless, or (for kinds that short-circuit before the 15c gate) enforced at
+/// the command path. The guard fails if a new channel-scoped kind is added
+/// without classification, so this list cannot silently drift behind the
+/// acceptance surface (the bug that left 40003-40007, then the command kinds,
+/// ungated across earlier passes).
+///
+/// 40004 (pinned) and 40005 (bookmarked) are gated despite having no SDK builder
+/// or relay-side schema: they are named "a stream message that has been
+/// pinned/bookmarked" and are accepted as persisted channel events with no
+/// structure constraining their content, so a client can place free text in the
+/// body. With no proof they are bodyless (unlike forum vote's `+`/`-`) and no
+/// legitimate plaintext producer to break, fail-visible rejection is the safe
+/// default for the latch boundary.
+pub(crate) fn is_e2e_enforced_content_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_V2
+            | KIND_STREAM_MESSAGE_EDIT
+            | KIND_STREAM_MESSAGE_PINNED
+            | KIND_STREAM_MESSAGE_BOOKMARKED
+            | KIND_STREAM_MESSAGE_SCHEDULED
+            | KIND_STREAM_REMINDER
+            | KIND_STREAM_MESSAGE_DIFF
+            | KIND_FORUM_COMMENT
+            | KIND_FORUM_POST
+            | KIND_CANVAS
+    )
+}
+
 /// Check channel membership: member OR open-visibility channel.
 ///
 /// Returns `Ok(())` if allowed, `Err(reason)` if denied.
@@ -934,73 +972,14 @@ fn validate_persona_envelope(event: &Event) -> Result<(), String> {
 
 /// Validate that `content` is a syntactically plausible NIP-44 v2 ciphertext.
 ///
-/// Checks:
-/// - Non-empty.
-/// - Standard base64 alphabet only (A-Z, a-z, 0-9, +, /, =), with padding only
-///   at the end and total length a multiple of 4.
-/// - Decoded length >= 99 bytes (1 version + 32 nonce + 32 MAC + minimum 34
-///   bytes of length-prefixed padded ciphertext required by NIP-44 v2).
-/// - First decoded byte is `0x02` (NIP-44 version 2).
-///
-/// This is an envelope sanity check, not full validation: the MAC and actual
-/// decryption happen at the reader. The intent is to refuse obvious junk so a
-/// malformed event cannot win NIP-33 replacement against a valid head and then
-/// be silently skipped by `validate_and_decrypt`. Mirrors the validator in
-/// `buzz-pair-relay::validate_nip44_content`.
+/// Delegates to [`buzz_core::observer::validate_nip44_v2`] — the single source
+/// of truth for the NIP-44 v2 envelope check — and prefixes the error with
+/// engram context. We do not (and cannot) verify the MAC at the relay, but we
+/// reject obvious garbage so a malformed event cannot supersede a valid head
+/// via NIP-33 replacement and then be silently discarded by readers.
 fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
-    if content.is_empty() {
-        return Err("agent-engram content must not be empty (NIP-44 ciphertext)".to_string());
-    }
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    if !len.is_multiple_of(4) {
-        return Err("agent-engram content is not valid base64 (length)".to_string());
-    }
-    let mut pad_count = 0usize;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' => {
-                if pad_count > 0 {
-                    return Err("agent-engram content is not valid base64".to_string());
-                }
-            }
-            b'=' => {
-                if i < len - 2 {
-                    return Err("agent-engram content is not valid base64".to_string());
-                }
-                pad_count += 1;
-                if pad_count > 2 {
-                    return Err("agent-engram content is not valid base64".to_string());
-                }
-            }
-            _ => return Err("agent-engram content is not valid base64".to_string()),
-        }
-    }
-    let decoded_len = (len / 4) * 3 - pad_count;
-    if decoded_len < 99 {
-        return Err("agent-engram content too short for NIP-44 v2".to_string());
-    }
-    let b64_val = |c: u8| -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    };
-    let v0 =
-        b64_val(bytes[0]).ok_or_else(|| "agent-engram content is not valid base64".to_string())?;
-    let v1 =
-        b64_val(bytes[1]).ok_or_else(|| "agent-engram content is not valid base64".to_string())?;
-    let first_byte = (v0 << 2) | (v1 >> 4);
-    if first_byte != 0x02 {
-        return Err(
-            "agent-engram content is not NIP-44 v2 (expected 0x02 version prefix)".to_string(),
-        );
-    }
-    Ok(())
+    buzz_core::observer::validate_nip44_v2(content)
+        .map_err(|e| format!("agent-engram content invalid: {e}"))
 }
 
 /// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
@@ -1505,6 +1484,61 @@ pub async fn ingest_event(
     if kind_u32 == KIND_PERSONA {
         validate_persona_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    // ── 15c. E2E DM ciphertext enforcement (D2) ──────────────────────────
+    // A DM channel with the encryption latch set (`encryption_activated_at`)
+    // is end-to-end encrypted. The relay cannot decrypt, so it enforces the
+    // boundary syntactically: in a latched channel, EVERY incoming channel
+    // message that carries a free-text display body (see
+    // `is_e2e_enforced_content_kind`) MUST be NIP-44 v2 ciphertext, or it is
+    // rejected fail-visible — never silently stored as plaintext. We use the
+    // strong validator, not the length-only check, or a long plaintext message
+    // in range would pass.
+    //
+    // The gate spans the full channel-message-kind set, not kind:9 alone:
+    // edits (40003), v2 messages (40002), diffs (40008), and forum comments
+    // (45003) all carry a display body and an `h` tag, so a plaintext one would
+    // otherwise land in a latched channel and defeat the latch — the exact leak
+    // this guard prevents.
+    //
+    // Enforcement is latch-PRESENCE only — it deliberately does NOT compare the
+    // event's `created_at` against the latch timestamp. A `created_at >= latch`
+    // comparator at ingest would be backdateable: the relay clamps `created_at`
+    // to ±15 min of server time, and `proxy:submit` events skip that clamp
+    // entirely, so a member could backdate a plaintext message below the latch
+    // and dodge enforcement. Since legacy plaintext is already stored and
+    // nothing new should legitimately land pre-latch, "latched ⇒ must be
+    // NIP-44" is the safe, time-independent rule. The `created_at >= latch`
+    // comparison belongs to the read/render path (deciding how to display
+    // already-stored events), where untrusted client time is harmless.
+    //
+    // Fail-visible on lookup error: a genuine DB error must NOT let the message
+    // through, or plaintext could be silently stored into a latched channel —
+    // the exact leak this guard prevents. A `ChannelNotFound` is different: the
+    // channel cannot have a latch, and the event is rejected downstream at
+    // insert, so it falls through here to keep that existing not-found behavior.
+    if is_e2e_enforced_content_kind(kind_u32) {
+        if let Some(ch_id) = channel_id {
+            match state.channel_is_encrypted_cached(ch_id).await {
+                Ok(true) => {
+                    buzz_core::observer::validate_nip44_v2(&event.content).map_err(|_| {
+                        IngestError::Rejected(
+                            "invalid: private-channel content must be NIP-44 encrypted".into(),
+                        )
+                    })?;
+                }
+                Ok(false) => {}
+                Err(buzz_db::DbError::ChannelNotFound(_)) => {}
+                Err(e) => {
+                    return Err(IngestError::Internal(format!("database error: {e}")));
+                }
+            }
+        }
+        // channel_id == None: channel-less events cannot be latched (the latch is
+        // set at create_dm time and keyed to a channel row). A channel-scoped kind
+        // with no `h` tag is rejected downstream at insert regardless, so skipping
+        // the latch check here is safe. The explicit arm keeps this intentional.
     }
 
     // Track pre-created channel UUID for compensation on insert failure.
@@ -2256,6 +2290,176 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    // ── 15c gate: content-bearing channel-message kinds ──────────────────
+
+    #[test]
+    fn e2e_gate_covers_all_channel_message_kinds() {
+        // The latch-enforcement gate must span every channel-scoped kind that
+        // carries a free-text display body — not kind:9 alone. A plaintext edit
+        // (40003), v2 message (40002), diff (40008), forum comment (45003),
+        // forum post (45001), canvas (40100), scheduled message (40006),
+        // reminder (40007), pinned (40004), or bookmarked (40005) into a latched
+        // DM is the exact leak the latch exists to prevent.
+        for kind in [
+            KIND_STREAM_MESSAGE,
+            KIND_STREAM_MESSAGE_V2,
+            KIND_STREAM_MESSAGE_EDIT,
+            KIND_STREAM_MESSAGE_PINNED,
+            KIND_STREAM_MESSAGE_BOOKMARKED,
+            KIND_STREAM_MESSAGE_SCHEDULED,
+            KIND_STREAM_REMINDER,
+            KIND_STREAM_MESSAGE_DIFF,
+            KIND_FORUM_COMMENT,
+            KIND_FORUM_POST,
+            KIND_CANVAS,
+        ] {
+            assert!(
+                is_e2e_enforced_content_kind(kind),
+                "kind {kind} carries a display body and must be E2E-enforced in a latched channel"
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_gate_excludes_uncovered_kinds() {
+        // Reactions, deletions, and forum votes carry no free-text body (emoji,
+        // empty, or "+"/"-" respectively), and profiles are global-only — none
+        // can leak readable user content into a latched channel, so gating them
+        // would only reject legitimate events. The boundary is "free-text body",
+        // not membership in any one enumeration of channel kinds.
+        for kind in [KIND_REACTION, KIND_DELETION, KIND_FORUM_VOTE, KIND_PROFILE] {
+            assert!(
+                !is_e2e_enforced_content_kind(kind),
+                "kind {kind} carries no free-text body and must not be E2E-gated"
+            );
+        }
+    }
+
+    /// Channel-scoped kinds whose body is structurally bodyless — they carry no
+    /// free-text user content, so they are deliberately NOT E2E-gated. Each must
+    /// be justified by its content shape, not by absence from an enumeration:
+    /// - forum vote: "+"/"-" only;
+    /// - NIP-29 admin (put/remove user, edit metadata, delete event/group,
+    ///   leave request): membership/admin commands, empty or structured content;
+    /// - huddle lifecycle (started/joined/left/ended/guidelines): structured
+    ///   session state, no message body;
+    /// - deletion (kind:5): references targets by `e` tag; any reason text is
+    ///   not channel-display content, and gating would break deletes in a DM;
+    /// - reaction (kind:7): emoji or "+"/"-"; resolves its channel via
+    ///   `derive_reaction_channel`, and gating would break DM reactions;
+    /// - gift wrap (kind:1059): NIP-59 sealed envelope, already ciphertext;
+    /// - NIP-29 create-group (9007) / join-request (9021): channel-lifecycle
+    ///   commands, structured/empty content, no message body.
+    ///
+    /// This list is the test's accounting of the bodyless half of the
+    /// channel-scoped surface; `e2e_drift_guard` asserts every channel-scoped
+    /// kind lands in exactly one classification bucket, so a new kind can't slip
+    /// in unclassified.
+    const BODYLESS_CHANNEL_SCOPED_KINDS: &[u32] = &[
+        KIND_FORUM_VOTE,
+        KIND_NIP29_PUT_USER,
+        KIND_NIP29_REMOVE_USER,
+        KIND_NIP29_EDIT_METADATA,
+        KIND_NIP29_DELETE_EVENT,
+        KIND_NIP29_DELETE_GROUP,
+        KIND_NIP29_LEAVE_REQUEST,
+        KIND_HUDDLE_STARTED,
+        KIND_HUDDLE_PARTICIPANT_JOINED,
+        KIND_HUDDLE_PARTICIPANT_LEFT,
+        KIND_HUDDLE_ENDED,
+        KIND_HUDDLE_GUIDELINES,
+        KIND_DELETION,
+        KIND_REACTION,
+        KIND_GIFT_WRAP,
+        KIND_NIP29_CREATE_GROUP,
+        KIND_NIP29_JOIN_REQUEST,
+    ];
+
+    /// Command kinds whose body carries free text the relay reads in plaintext
+    /// (workflow YAML, trigger JSON inputs, approval note). They short-circuit at
+    /// the `is_command_kind` branch in `handle_event` BEFORE the 15c gate, so
+    /// they CANNOT be E2E-gated there. The latched-channel boundary is enforced
+    /// for them at the command path instead (`enforce_latched_body` /
+    /// `enforce_latched_approval_note` in `command_executor`), via the body-shape
+    /// rule "empty or NIP-44, else reject" — not a per-kind list, so it cannot
+    /// drift.
+    const COMMAND_CONTENT_BEARING_KINDS: &[u32] = &[
+        KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
+        KIND_APPROVAL_GRANT,
+        KIND_APPROVAL_DENY,
+    ];
+
+    /// Command kinds that carry no free-text body — DM management commands keyed
+    /// by tags (member pubkey, channel ref), structured/empty content. They also
+    /// short-circuit before the 15c gate; the command-path body-shape rule admits
+    /// their empty content unchanged, so they are never gated.
+    const COMMAND_EMPTY_BODY_KINDS: &[u32] = &[KIND_DM_OPEN, KIND_DM_ADD_MEMBER, KIND_DM_HIDE];
+
+    #[test]
+    fn e2e_drift_guard_classifies_every_channel_scoped_kind() {
+        // Structural fix for the kind-set-drift bug class: the E2E gate
+        // (`is_e2e_enforced_content_kind`) is a hand-written list that ran
+        // parallel to a NARROWER proxy (`requires_h_channel_scope`) than the
+        // relay's actual channel-scoped acceptance surface, and drifted from it —
+        // leaving command content kinds (WORKFLOW_DEF, APPROVAL_*) ungated. This
+        // guard derives directly from the REAL surface: a kind that resolves a
+        // `channel_id` and is accepted (`required_scope_for_kind(..).is_ok()`) and
+        // is not global-only. Every such kind MUST land in exactly one bucket:
+        //   1. 15c-gated (free-text body, reaches the 15c gate);
+        //   2. bodyless (no free-text content);
+        //   3. command content-bearing (free-text body, gated at the command path);
+        //   4. command empty-body (structured command, no body).
+        // Adding a new accepted channel-scoped kind without classifying it here
+        // fails this test — so the gate can't silently drift behind the surface.
+        let dummy = make_dummy_event();
+        for kind in 0u32..=50_000 {
+            let channel_scoped =
+                required_scope_for_kind(kind, &dummy).is_ok() && !is_global_only_kind(kind);
+            if !channel_scoped {
+                continue;
+            }
+            let buckets = [
+                is_e2e_enforced_content_kind(kind),
+                BODYLESS_CHANNEL_SCOPED_KINDS.contains(&kind),
+                COMMAND_CONTENT_BEARING_KINDS.contains(&kind),
+                COMMAND_EMPTY_BODY_KINDS.contains(&kind),
+            ];
+            let matched = buckets.iter().filter(|b| **b).count();
+            assert_eq!(
+                matched, 1,
+                "channel-scoped kind {kind} must land in EXACTLY ONE classification \
+                 bucket [15c-gated, bodyless, command-content-bearing, \
+                 command-empty-body] — matched {matched}: {buckets:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_drift_guard_command_kinds_partitioned() {
+        // The 7 command kinds partition into content-bearing (latch-enforced at
+        // the command path) XOR empty-body — no overlap, full coverage. This
+        // pins the command-path side of the surface independently of the 15c
+        // gate, which command kinds never reach.
+        for kind in [
+            KIND_WORKFLOW_DEF,
+            KIND_WORKFLOW_TRIGGER,
+            KIND_APPROVAL_GRANT,
+            KIND_APPROVAL_DENY,
+            KIND_DM_OPEN,
+            KIND_DM_ADD_MEMBER,
+            KIND_DM_HIDE,
+        ] {
+            let content = COMMAND_CONTENT_BEARING_KINDS.contains(&kind);
+            let empty = COMMAND_EMPTY_BODY_KINDS.contains(&kind);
+            assert!(
+                content ^ empty,
+                "command kind {kind} must be exactly one of content-bearing or \
+                 empty-body — got content={content}, empty={empty}"
+            );
+        }
     }
 
     fn make_dummy_event() -> Event {

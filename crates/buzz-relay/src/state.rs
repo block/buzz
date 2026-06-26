@@ -225,6 +225,11 @@ pub struct AppState {
     /// Per-channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<Uuid, String>>,
+    /// Per-channel E2E-encryption state (`encryption_activated_at.is_some()`),
+    /// used to gate content-reading side effects (D1: search index + workflow
+    /// match). The latch is write-once at DM creation and never moves, so both
+    /// `true` and `false` are safe to cache for the TTL.
+    pub channel_encryption_cache: Arc<moka::sync::Cache<Uuid, bool>>,
 
     /// Bounded channel for search indexing — prevents OOM if Typesense is slow/down.
     /// Capacity 1000: at ~1KB/event that's ~1MB of backlog before we start dropping.
@@ -394,6 +399,14 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
+            // Longer TTL than visibility: the latch is write-once at creation
+            // and never moves, so a cached value can never go stale.
+            channel_encryption_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
             search_index_tx,
             audit_tx,
             media_storage: Arc::new(media_storage),
@@ -508,6 +521,7 @@ impl AppState {
         self.membership_cache.invalidate_all();
         self.accessible_channels_cache.invalidate_all();
         self.channel_visibility_cache.invalidate_all();
+        self.channel_encryption_cache.invalidate_all();
     }
 
     /// Fire-and-forget publish of a cache-key drop to all other pods. Failures
@@ -579,6 +593,35 @@ impl AppState {
                 .insert(channel_id, visibility.clone());
         }
         Ok(visibility)
+    }
+
+    /// Whether a channel's E2E-encryption latch is set, with a 5-minute cache.
+    ///
+    /// Gates content-reading side effects (D1): a latched channel's message
+    /// content is NIP-44 ciphertext, so search-indexing it stores unreadable
+    /// bytes and content-matching workflow rules cannot fire. The latch — not
+    /// channel visibility — is the encryption boundary: a `private` group
+    /// channel is plaintext (it has no group key in Phase 1), so keying this on
+    /// the latch keeps access-controlled search/workflows working for private
+    /// group members while still skipping genuinely-encrypted DMs.
+    ///
+    /// Fails open to `false` is NOT acceptable here, so callers handle the
+    /// `Err` themselves (D1 treats a lookup failure as encrypted = skip).
+    pub async fn channel_is_encrypted_cached(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<bool, buzz_db::DbError> {
+        if let Some(cached) = self.channel_encryption_cache.get(&channel_id) {
+            return Ok(cached);
+        }
+        let encrypted = self
+            .db
+            .get_channel(channel_id)
+            .await?
+            .encryption_activated_at
+            .is_some();
+        self.channel_encryption_cache.insert(channel_id, encrypted);
+        Ok(encrypted)
     }
 }
 

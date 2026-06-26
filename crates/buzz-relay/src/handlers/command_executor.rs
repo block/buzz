@@ -67,6 +67,75 @@ enum PersistResult {
     Inserted(sqlx::Transaction<'static, sqlx::Postgres>),
 }
 
+/// Disposition of a command body submitted into a latched (E2E-encrypted)
+/// channel. Mirrors the 15c ingest gate's invariant — "private-channel content
+/// must be NIP-44 encrypted" — but for the command path, which short-circuits
+/// at `ingest.rs` BEFORE that gate (`is_command_kind` → `handle_command`), so
+/// command bodies never reach it. This is the choke-point equivalent.
+///
+/// The rule is body-shape, NOT per-kind: classifying by kind would re-create
+/// the drift-guard footgun this fix exists to close. A nominally-structured
+/// command that smuggles plaintext is caught for free.
+///
+/// - empty → Ok: structured commands (DM_OPEN/ADD_MEMBER/HIDE, and
+///   TRIGGER/APPROVAL with no inputs/note) legitimately carry no body.
+/// - valid NIP-44 v2 → Ok: an encrypted body is the encrypted boundary holding.
+/// - non-empty plaintext → Err: the leak — reject fail-visible.
+///
+/// `validate_nip44_v2("")` returns `Err(Empty)`, so empty MUST be special-cased
+/// here rather than delegated to the validator wholesale.
+fn latched_body_disposition(content: &str) -> Result<(), IngestError> {
+    if content.is_empty() {
+        return Ok(());
+    }
+    buzz_core::observer::validate_nip44_v2(content).map_err(|_| {
+        IngestError::Rejected("invalid: private-channel content must be NIP-44 encrypted".into())
+    })
+}
+
+/// Enforce [`latched_body_disposition`] when the resolved target channel is
+/// latched (`encryption_activated_at.is_some()`). A `None` channel or a
+/// not-found channel passes through (cannot be latched, mirrors the 15c gate's
+/// `ChannelNotFound` fall-through); a genuine DB error is fail-VISIBLE — it must
+/// not let plaintext slip into a latched channel.
+async fn enforce_latched_body(
+    state: &Arc<AppState>,
+    content: &str,
+    channel_id: Option<Uuid>,
+) -> Result<(), IngestError> {
+    let Some(ch_id) = channel_id else {
+        return Ok(());
+    };
+    match state.channel_is_encrypted_cached(ch_id).await {
+        Ok(true) => latched_body_disposition(content),
+        Ok(false) => Ok(()),
+        Err(buzz_db::DbError::ChannelNotFound(_)) => Ok(()),
+        Err(e) => Err(IngestError::Internal(format!("database error: {e}"))),
+    }
+}
+
+/// Resolve an approval's target channel via its workflow, then enforce the
+/// latched-body rule on the approval note. Approvals reference no `h` tag of
+/// their own — the channel is the workflow's (`get_workflow().channel_id`).
+/// A workflow with no channel (global) cannot be latched, so it passes through.
+///
+/// The `get_workflow` lookup honors the same fail-VISIBLE posture as
+/// [`enforce_latched_body`]: a missing workflow (`NotFound`) cannot be latched
+/// and passes, but a genuine DB error rejects rather than silently skipping the
+/// check — otherwise a transient pool blip would let a plaintext note slip into
+/// a latched channel.
+async fn enforce_latched_approval_note(
+    state: &Arc<AppState>,
+    content: &str,
+    workflow_id: Uuid,
+) -> Result<(), IngestError> {
+    match state.db.get_workflow(workflow_id).await {
+        Ok(w) => enforce_latched_body(state, content, w.channel_id).await,
+        Err(buzz_db::DbError::NotFound(_)) => Ok(()),
+        Err(e) => Err(IngestError::Internal(format!("database error: {e}"))),
+    }
+}
+
 /// Persist a command event inside a transaction. Returns the OPEN transaction
 /// as an idempotency guard — if the event was already stored, `Duplicate` is
 /// returned and the handler skips execution.
@@ -579,6 +648,10 @@ async fn handle_workflow_def(
         ));
     }
 
+    // Latched-channel boundary: reject plaintext YAML into an E2E DM BEFORE
+    // parsing — a 64KB plaintext body must not be parsed, only refused.
+    enforce_latched_body(state, &event.content, Some(channel_id)).await?;
+
     // 3. Parse YAML from event.content
     let (def, definition_json_str) = buzz_workflow::WorkflowEngine::parse_yaml(&event.content)
         .map_err(|e| IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}")))?;
@@ -684,6 +757,10 @@ async fn handle_workflow_trigger(
             "forbidden: not authorized to trigger this workflow".into(),
         ));
     }
+
+    // Latched-channel boundary: trigger inputs (event.content, parsed as JSON
+    // below) must be empty or NIP-44 in a latched channel — never plaintext.
+    enforce_latched_body(state, &event.content, workflow.channel_id).await?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, event).await? {
@@ -860,6 +937,10 @@ async fn handle_approval_grant(
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
+    // Latched-channel boundary: the approval note (event.content) must be empty
+    // or NIP-44 in the workflow's latched channel — never plaintext.
+    enforce_latched_approval_note(state, &event.content, approval.workflow_id).await?;
+
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, event).await? {
         PersistResult::Duplicate => {
@@ -966,6 +1047,10 @@ async fn handle_approval_deny(
 
     // 4. Validate caller is authorized approver
     check_approver_spec(&approval.approver_spec, &self_hex)?;
+
+    // Latched-channel boundary: the approval note (event.content) must be empty
+    // or NIP-44 in the workflow's latched channel — never plaintext.
+    enforce_latched_approval_note(state, &event.content, approval.workflow_id).await?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(state, event).await? {
@@ -1146,4 +1231,67 @@ async fn resume_workflow_after_approval(
     )
     .await;
     engine.finalize_run(run_id, result, existing_trace).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The leak: a plaintext workflow YAML body in a latched channel must be
+    /// REJECTED, not silently stored. Pre-fix this body reached `parse_yaml` and
+    /// was persisted as plaintext — the CRITICAL leak this fix closes.
+    #[test]
+    fn test_latched_workflow_def_plaintext_yaml_is_rejected() {
+        let yaml = "name: leak\non: manual\nsteps:\n  - run: echo hi\n".repeat(1000);
+        assert!(matches!(
+            latched_body_disposition(&yaml),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    /// A plaintext approval note in a latched channel must be REJECTED.
+    #[test]
+    fn test_latched_approval_plaintext_note_is_rejected() {
+        let note = "approved because the deploy looked fine to me";
+        assert!(matches!(
+            latched_body_disposition(note),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    /// Plaintext JSON trigger inputs in a latched channel must be REJECTED.
+    /// JSON braces/quotes/spaces fall outside the base64 alphabet, so the strong
+    /// validator refuses them.
+    #[test]
+    fn test_latched_workflow_trigger_plaintext_inputs_are_rejected() {
+        let inputs = r#"{"env": "prod", "force": true}"#;
+        assert!(matches!(
+            latched_body_disposition(inputs),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    /// A structured command with no body (DM_ADD_MEMBER, an empty-inputs TRIGGER,
+    /// a no-note APPROVAL) is ACCEPTED in a latched channel — the inverse-failure
+    /// guard: the rule must not over-block legitimate empty-body commands.
+    #[test]
+    fn test_latched_empty_body_command_is_accepted() {
+        assert!(latched_body_disposition("").is_ok());
+    }
+
+    /// A genuinely NIP-44 v2 encrypted body is ACCEPTED in a latched channel —
+    /// the encrypted boundary holding is the success path.
+    #[test]
+    fn test_latched_nip44_ciphertext_body_is_accepted() {
+        let sender = nostr::Keys::generate();
+        let recipient = nostr::Keys::generate();
+        let ciphertext = nostr::nips::nip44::encrypt(
+            sender.secret_key(),
+            &recipient.public_key(),
+            "encrypted approval note",
+            nostr::nips::nip44::Version::V2,
+        )
+        .expect("encrypt");
+        assert!(latched_body_disposition(&ciphertext).is_ok());
+    }
 }

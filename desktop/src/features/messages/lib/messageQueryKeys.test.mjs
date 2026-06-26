@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  channelMessagesKey,
   mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
 } from "./messageQueryKeys.ts";
+import { makeDmIngestDecryptor } from "./dmCrypto.ts";
 
 const CHANNEL_ID = "timeline-window-test";
 const PUBKEY = "a".repeat(64);
@@ -230,4 +232,112 @@ test("sortMessages tiebreaks same-second events on id, order-independent", () =>
 
   assert.deepEqual(forward, reverse);
   assert.deepEqual(forward, [a.id, b.id, c.id]);
+});
+
+// ── Identity-load cold-start race: ciphertext must never render ───────────────
+//
+// On a cold start where channels resolve from warm cache BEFORE the identity
+// IPC resolves, ChannelScreen mounts with selfPubkey===undefined. The DM
+// history query then fetches ciphertext, "decrypts" it via the no-op decryptor
+// (no peer without selfPubkey), and caches RAW ciphertext. When identity
+// resolves the query must re-fetch + re-decrypt so the rendered cache ends with
+// plaintext — never the raw v2 ciphertext. The mechanism that forces the
+// re-fetch is selfPubkey being part of the query key, so the resolved-identity
+// query is a DISTINCT key React Query treats as a fresh fetch.
+
+// Minimal valid NIP-44 v2 envelope: base64(0x02 + 98 zero bytes), 99 decoded
+// bytes. Mirrors the relay's validate_nip44_v2 floor, so the ingest decryptor
+// treats it as "encrypted DM body to decrypt" rather than legacy plaintext.
+const V2_CIPHERTEXT =
+  "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const DM_CHANNEL = {
+  id: "dm-channel-id",
+  channelType: "dm",
+  participantPubkeys: ["a".repeat(64), "b".repeat(64)],
+};
+const SELF = "a".repeat(64);
+
+function dmEvent(content) {
+  return {
+    id: "evt".padEnd(64, "0"),
+    pubkey: "b".repeat(64),
+    created_at: 5_000,
+    kind: 9,
+    tags: [["h", DM_CHANNEL.id]],
+    content,
+    sig: "mocksig".repeat(20).slice(0, 128),
+  };
+}
+
+// Mirror useChannelMessagesQuery.queryFn's cache population for a given identity
+// against a simple key->value store, so a key change is a fresh cache bucket
+// exactly as React Query would treat it.
+async function runHistoryFetch(store, channel, selfPubkey, fetchedEvents) {
+  const decryptIngested = makeDmIngestDecryptor(channel, selfPubkey);
+  const key = JSON.stringify(channelMessagesKey(channel.id, selfPubkey));
+  const history = await decryptIngested(fetchedEvents);
+  const current = store.get(key) ?? [];
+  const merged = mergeTimelineHistoryMessages(current, history);
+  store.set(key, merged);
+  return key;
+}
+
+test("cold-start identity-load race does not leave ciphertext in the rendered DM cache", async () => {
+  const store = new Map();
+
+  // 1. Cold start: identity not yet resolved (selfPubkey undefined). The query
+  //    runs with a no-op decryptor and caches the raw v2 ciphertext.
+  const preIdentityKey = await runHistoryFetch(store, DM_CHANNEL, undefined, [
+    dmEvent(V2_CIPHERTEXT),
+  ]);
+  assert.equal(
+    store.get(preIdentityKey)[0].content,
+    V2_CIPHERTEXT,
+    "pre-identity fetch caches ciphertext under the undefined-identity key",
+  );
+
+  // 2. Identity resolves. The query key now includes selfPubkey, so this is a
+  //    DISTINCT bucket React Query refetches into. With selfPubkey===undefined
+  //    NOT in the key, this would land in the SAME bucket and never refetch —
+  //    leaving the ciphertext from step 1 rendered.
+  const resolvedKey = await runHistoryFetch(
+    store,
+    DM_CHANNEL,
+    SELF,
+    // Identity-resolved decryptor would decrypt; here we stand in the
+    // plaintext the real Tauri decrypt would produce.
+    [dmEvent("hey, lunch at noon?")],
+  );
+
+  assert.notEqual(
+    resolvedKey,
+    preIdentityKey,
+    "resolved-identity query key must differ from the undefined-identity key " +
+      "so React Query refetches+re-decrypts instead of serving stale ciphertext",
+  );
+  assert.equal(
+    store.get(resolvedKey)[0].content,
+    "hey, lunch at noon?",
+    "the rendered (resolved-identity) cache bucket holds plaintext, not ciphertext",
+  );
+});
+
+test("channelMessagesKey isolates two identities so one peer's ciphertext is never served to another", () => {
+  const a = channelMessagesKey(DM_CHANNEL.id, "a".repeat(64));
+  const b = channelMessagesKey(DM_CHANNEL.id, "b".repeat(64));
+  assert.notDeepEqual(
+    a,
+    b,
+    "distinct identities must key into distinct DM caches",
+  );
+});
+
+test("channelMessagesKey normalizes selfPubkey casing so a re-cased identity reuses its cache", () => {
+  const lower = channelMessagesKey(DM_CHANNEL.id, "a".repeat(64));
+  const upper = channelMessagesKey(DM_CHANNEL.id, "A".repeat(64));
+  assert.deepEqual(
+    lower,
+    upper,
+    "casing variants of the same pubkey must produce the same key (no cache split)",
+  );
 });

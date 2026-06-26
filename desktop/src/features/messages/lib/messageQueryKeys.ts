@@ -14,8 +14,25 @@ import {
 
 const MAX_TIMELINE_MESSAGES = 2_000;
 
-export function channelMessagesKey(channelId: string) {
-  return ["channel-messages", channelId] as const;
+/**
+ * The timeline cache key for a channel, scoped to the viewing identity.
+ *
+ * `selfPubkey` is part of the key because a DM's cached bodies are decrypted
+ * for a specific identity at ingest. Keying on it means a cold start that
+ * mounts before the identity IPC resolves (selfPubkey undefined → no-op
+ * decryptor → raw ciphertext) caches under a DISTINCT key from the resolved
+ * identity — so when identity arrives React Query refetches and re-decrypts
+ * instead of rendering the stale ciphertext for 5 minutes. It also isolates
+ * identities so one account's decrypted DM bodies are never served to another.
+ *
+ * Normalized to lowercase so a re-cased pubkey reuses the same cache bucket.
+ */
+export function channelMessagesKey(channelId: string, selfPubkey?: string) {
+  return [
+    "channel-messages",
+    channelId,
+    selfPubkey ? selfPubkey.toLowerCase() : null,
+  ] as const;
 }
 
 export function dedupeMessagesById(messages: RelayEvent[]) {

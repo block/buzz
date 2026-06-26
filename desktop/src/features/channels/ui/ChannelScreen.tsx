@@ -44,6 +44,7 @@ import {
   resolveTimelineLoadingLatch,
   selectTimelineLoadingState,
 } from "@/features/messages/lib/timelineLoadingState";
+import { useDecryptedTargetMessageEvents } from "@/features/messages/useDecryptedTargetMessageEvents";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -172,12 +173,18 @@ export function ChannelScreen({
         : current;
     });
   }, [activeChannelId, openThreadHeadId]);
-  const messagesQuery = useChannelMessagesQuery(activeChannel);
-  useChannelSubscription(activeChannel);
+  const messagesQuery = useChannelMessagesQuery(activeChannel, currentPubkey);
+  useChannelSubscription(activeChannel, currentPubkey);
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
-    useFetchOlderMessages(activeChannel);
-  // Newest top-level message only: opening a channel should clear the timeline
-  // without clearing unread thread replies.
+    useFetchOlderMessages(activeChannel, currentPubkey);
+  // Newest TOP-LEVEL message only. The channel read-marker must clear the
+  // channel timeline without clearing its threads (NIP-RS Option 1): thread
+  // replies are kind-9 channel events, so taking the last message outright
+  // would advance the channel frontier past unread replies and the hierarchical
+  // effective(thread) = max(thread, channel) would silently clear every thread
+  // badge on channel entry. Scanning from the end for the last message with no
+  // reply tag keeps the frontier at the last top-level message, leaving thread
+  // badges intact until the thread itself is read.
   const latestActiveMessage = React.useMemo(() => {
     const messages = messagesQuery.data;
     if (!messages) return null;
@@ -237,16 +244,31 @@ export function ChannelScreen({
     currentIdentity,
   );
   const toggleReactionMutation = useToggleReactionMutation();
-  const deleteMessageMutation = useDeleteMessageMutation(activeChannel);
-  const editMessageMutation = useEditMessageMutation(activeChannel);
+  const deleteMessageMutation = useDeleteMessageMutation(
+    activeChannel,
+    currentPubkey,
+  );
+  const editMessageMutation = useEditMessageMutation(
+    activeChannel,
+    currentPubkey,
+  );
   const joinChannelMutation = useJoinChannelMutation(activeChannelId);
+  // Decrypt deep-link / search-hit targets before the rendered merge: they
+  // arrive raw, so for a DM the ciphertext would render garbled and clobber the
+  // decrypted cache copy on an id collision. This is the single choke point for
+  // every target contributor.
+  const decryptedTargetMessageEvents = useDecryptedTargetMessageEvents(
+    activeChannel,
+    targetMessageEvents,
+    currentPubkey,
+  );
   const resolvedMessages = React.useMemo(() => {
     const currentMessages = messagesQuery.data ?? [];
-    if (!activeChannel || targetMessageEvents.length === 0) {
+    if (!activeChannel || decryptedTargetMessageEvents.length === 0) {
       return currentMessages;
     }
-    return targetMessageEvents.reduce(mergeMessages, currentMessages);
-  }, [activeChannel, messagesQuery.data, targetMessageEvents]);
+    return decryptedTargetMessageEvents.reduce(mergeMessages, currentMessages);
+  }, [activeChannel, messagesQuery.data, decryptedTargetMessageEvents]);
   const messageAuthorPubkeys = React.useMemo(
     () => collectMessageAuthorPubkeys(resolvedMessages),
     [resolvedMessages],
@@ -622,7 +644,7 @@ export function ChannelScreen({
     threadReplyTargetMessage,
   ]);
 
-  useLoadMissingAncestors(activeChannel, resolvedMessages);
+  useLoadMissingAncestors(activeChannel, resolvedMessages, currentPubkey);
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||

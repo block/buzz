@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
+import { makeDmIngestDecryptor } from "@/features/messages/lib/dmCrypto";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
@@ -248,18 +249,37 @@ export function useLiveChannelUpdates(
 
     // Merge into the timeline cache for the active channel.
     // useChannelSubscription also writes to this cache, but there's a
-    // race window where it hasn't connected yet. Writes are idempotent
-    // (mergeTimelineCacheMessages deduplicates by event ID).
-    queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
-      (current) => {
-        if (!current) {
-          return current;
-        }
+    // race window where it hasn't connected yet (PR #410). Writes are
+    // idempotent (mergeTimelineCacheMessages deduplicates by event ID).
+    //
+    // Keyed on the same selfPubkey (currentPubkey) as useChannelMessagesQuery
+    // so this write lands in the identity-scoped bucket the renderer reads —
+    // not a stale 2-element key that would orphan the event. The `if (!current)`
+    // guard means this only appends to an already-populated cache, so it never
+    // seeds a DM bucket ahead of the decrypting subscription path.
+    //
+    // Decrypt before merge: a DM body is NIP-44 v2 ciphertext, and this path
+    // catches the same CHANNEL_EVENT_KINDS/#h events as the decrypting
+    // useChannelSubscription. Without decryption a raw event arriving here
+    // *after* the decrypting path wrote plaintext-X would CLOBBER it on the
+    // id collision (mergeMessagesWithNormalizer keeps the last writer). The
+    // decryptor is a no-op outside a 2-party DM, so this is uniform/safe.
+    const dmChannel = dmChannelMap.get(channelId) ?? null;
+    void makeDmIngestDecryptor(
+      dmChannel,
+      options.currentPubkey,
+    )([event]).then(([decrypted]) => {
+      queryClient.setQueryData<RelayEvent[]>(
+        channelMessagesKey(channelId, options.currentPubkey),
+        (current) => {
+          if (!current) {
+            return current;
+          }
 
-        return mergeTimelineCacheMessages(current, event);
-      },
-    );
+          return mergeTimelineCacheMessages(current, decrypted);
+        },
+      );
+    });
   });
 
   const handleMentionEvent = React.useEffectEvent((event: RelayEvent) => {

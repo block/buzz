@@ -284,12 +284,37 @@ pub(crate) async fn dispatch_persistent_event(
         );
     }
 
+    // Encryption latch gates content-reading side effects (D1). A latched
+    // channel's kind:9 content is NIP-44 ciphertext, so indexing it (`index.rs`
+    // stores raw content) would store unreadable bytes into Typesense, and
+    // workflow rules matching on content cannot fire. The encryption boundary
+    // is the latch (`encryption_activated_at`), NOT channel visibility: a
+    // `private` group channel has no group key in Phase 1 and is plaintext, so
+    // keying this skip on visibility would silently drop access-controlled
+    // search/workflows for private-group members (search is already
+    // membership-gated at query time, so indexing their plaintext was never a
+    // leak). Fail closed: if the latch state can't be determined, treat as
+    // encrypted so we never index a possibly-ciphertext channel's content.
+    let channel_is_encrypted = match stored_event.channel_id {
+        Some(channel_id) => match state.channel_is_encrypted_cached(channel_id).await {
+            Ok(encrypted) => encrypted,
+            Err(e) => {
+                warn!(%channel_id, "index/workflow skip: latch lookup failed, treating as encrypted: {e}");
+                true
+            }
+        },
+        None => false,
+    };
+
     // Skip search indexing for NIP-17 gift wraps (ciphertext), NIP-DV
     // visibility snapshots (per-viewer private hide state, owner-gated reads),
-    // and author-only kinds (ciphertext not useful in search, defense in depth).
+    // author-only kinds (ciphertext not useful in search, defense in depth),
+    // and any latched E2E channel (ciphertext content — see channel_is_encrypted
+    // above).
     if kind_u32 != KIND_GIFT_WRAP
         && kind_u32 != buzz_core::kind::KIND_DM_VISIBILITY
         && !AUTHOR_ONLY_KINDS.contains(&kind_u32)
+        && !channel_is_encrypted
         && state
             .search_index_tx
             .try_send(stored_event.clone())
@@ -331,6 +356,7 @@ pub(crate) async fn dispatch_persistent_event(
         && !buzz_core::kind::is_command_kind(kind_u32)
         && !is_relay_workflow_msg
         && kind_u32 != KIND_GIFT_WRAP
+        && !channel_is_encrypted
     {
         let workflow_engine = Arc::clone(&state.workflow_engine);
         let workflow_event = stored_event.clone();
