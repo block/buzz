@@ -504,10 +504,9 @@ impl AcpClient {
     /// non-cancelling mid-turn delivery.
     ///
     /// Called by the dispatch path immediately before
-    /// [`session_prompt_with_idle_timeout`] for goose-capable agents
-    /// (`OwnedAgent.supports_goose_steer == true`). The matching `Sender`
-    /// is stored in `TaskMeta.steer_tx` for the main loop's mode-gate
-    /// fork to drive.
+    /// [`session_prompt_with_idle_timeout`] for all prompt tasks.
+    /// The matching `Sender` is stored in `TaskMeta.steer_tx` for the
+    /// main loop's mode-gate fork to drive.
     ///
     /// Panics if a receiver is already installed — there is exactly one
     /// turn per `AcpClient` at a time, and stacking receivers would
@@ -1106,8 +1105,13 @@ impl AcpClient {
                                     // arrives.
                                     let (_, ack_tx) = pending_steer.take().expect("just checked");
                                     let ack = if let Some(error) = msg.get("error") {
+                                        let code = error
+                                            .get("code")
+                                            .and_then(|c| c.as_i64())
+                                            .unwrap_or(-1);
+                                        let message = error.to_string();
                                         crate::pool::SteerAck::Err(
-                                            crate::pool::SteerError::AgentError(error.to_string()),
+                                            crate::pool::SteerError::AgentError { code, message },
                                         )
                                     } else {
                                         crate::pool::SteerAck::Success

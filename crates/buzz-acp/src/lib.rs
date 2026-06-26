@@ -880,8 +880,8 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 struct RespawnResult {
     index: usize,
     /// Tuple: (initialized client, protocol version, supports_goose_steer).
-    /// The third element gates the `_goose/unstable/session/steer` delivery
-    /// path; see [`detect_goose_agent`].
+    /// The third element is always `true` — the supervisor uses
+    /// try-and-tolerate for the steer extension.
     result: Result<(AcpClient, u32, bool)>,
 }
 
@@ -1045,13 +1045,16 @@ async fn tokio_main() -> Result<()> {
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-                        let supports_goose_steer = detect_goose_agent(&init_result);
-                        if supports_goose_steer {
-                            tracing::info!(
-                                agent = i,
-                                "agent advertises as goose — `_goose/unstable/session/steer` delivery enabled"
-                            );
-                        }
+                        tracing::info!(
+                            agent = i,
+                            name = init_result
+                                .get("agentInfo")
+                                .or_else(|| init_result.get("serverInfo"))
+                                .and_then(|info| info.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown"),
+                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                        );
                         acp.observe(
                             "agent_initialized",
                             serde_json::json!({
@@ -1066,7 +1069,6 @@ async fn tokio_main() -> Result<()> {
                             model_capabilities: None,
                             desired_model: config.model.clone(),
                             protocol_version,
-                            supports_goose_steer,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -1493,7 +1495,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, supports_goose_steer)) => {
+                Ok((acp, protocol_version, _)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1501,7 +1503,6 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         protocol_version,
-                        supports_goose_steer,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -1883,20 +1884,19 @@ async fn tokio_main() -> Result<()> {
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {
-                                    // Goose-native fork: when the mode wants a
-                                    // Steer and the in-flight agent is goose,
-                                    // try the non-cancelling path first. On
-                                    // accept, withhold the queued event and
-                                    // spawn an ack watcher; the main loop's
+                                    // Try-and-tolerate fork: when the mode
+                                    // wants a Steer, attempt the non-cancelling
+                                    // path first for any agent. On accept,
+                                    // withhold the queued event and spawn an
+                                    // ack watcher; the main loop's
                                     // `PoolEvent::SteerAck` arm decides
-                                    // success/release/fallback. On reject,
-                                    // fall through to the universal
-                                    // cancel+merge `Steer` signal so the
-                                    // event still reaches the agent.
+                                    // success/release/fallback. On reject
+                                    // (including `-32601 method_not_found`
+                                    // from agents that don't implement the
+                                    // extension), fall through to the universal
+                                    // cancel+merge `Steer` signal so the event
+                                    // still reaches the agent.
                                     let native_attempted = matches!(signal, ControlSignal::Steer)
-                                        && pool.task_supports_goose_steer(
-                                            buzz_event.channel_id,
-                                        )
                                         && try_native_steer(
                                             &mut pool,
                                             &mut queue,
@@ -2085,14 +2085,21 @@ async fn tokio_main() -> Result<()> {
                 //     queue front AND issue the cancel+merge fallback so
                 //     the message still reaches the agent.
                 //
-                //   Err(AgentError)
+                //   Err(AgentError { code: -32601, .. })
+                //     The agent returned method_not_found — it does not
+                //     implement the steer extension. Release withheld AND
+                //     fire the cancel+merge fallback so the message still
+                //     reaches the agent via the universal path.
+                //
+                //   Err(AgentError { code: other, .. })
                 //     The write landed and the agent returned a JSON-RPC
-                //     error. The agent's turn is still running (or just
-                //     completed). Release withheld for normal dispatch;
-                //     do NOT fire the fallback signal — the agent already
-                //     saw the steer attempt. If the turn is still running,
-                //     normal dispatch re-delivers when it completes. If
-                //     the turn already ended, there is nothing to cancel.
+                //     error at the application level (e.g. wrong run id).
+                //     The agent's turn is still running (or just completed).
+                //     Release withheld for normal dispatch; do NOT fire the
+                //     fallback signal — the agent already saw the steer
+                //     attempt. If the turn is still running, normal dispatch
+                //     re-delivers when it completes. If the turn already
+                //     ended, there is nothing to cancel.
                 //
                 //   PromptCompletedNeutral
                 //     The read loop wrote the steer (or was preparing to)
@@ -2118,11 +2125,20 @@ async fn tokio_main() -> Result<()> {
                 //     the withheld event in `withheld_native_steer`.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
                     Ok(pool::SteerAck::Success) => (false, true, false),
+                    // -32601 = method_not_found: agent does not implement the
+                    // steer extension. Fire cancel+merge so the message still
+                    // reaches the agent.
+                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. }))
+                        if *code == -32601 =>
+                    {
+                        (true, false, true)
+                    }
                     // AgentError: write landed, agent rejected it at the
-                    // application level. Release for normal dispatch; no
-                    // fallback signal (the turn is still running or just
-                    // ended — either way there is nothing to cancel).
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError(_))) => {
+                    // application level (e.g. wrong run id). Release for
+                    // normal dispatch; no fallback signal (the turn is still
+                    // running or just ended — either way there is nothing to
+                    // cancel).
+                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
                         (true, false, false)
                     }
                     // Transport / ExpectedRunIdMissing: write never landed.
@@ -2351,11 +2367,8 @@ fn signal_in_flight_task(
 ///   via [`EventQueue::push`] — its `event.id` must still be locatable
 ///   there so [`EventQueue::mark_native_steer_pending`] can move it to the
 ///   side table.
-/// - The in-flight task for `channel_id` is goose
-///   (`pool::TaskMeta::supports_goose_steer == true`); the caller's
-///   responsibility to check via [`AgentPool::task_supports_goose_steer`].
 /// - `multiple_event_handling` resolved to `ControlSignal::Steer`; this
-///   function is the goose-native fork of that signal.
+///   function is the non-cancelling fork of that signal.
 ///
 /// Returns `true` if the native attempt was accepted by the read loop
 /// (capacity-1 mpsc `try_send` succeeded, event withheld synchronously,
@@ -2502,20 +2515,12 @@ fn dispatch_pending(
         // (see the `if accepted && queue.is_channel_in_flight(...)` block
         // in the relay event branch of the main `select!` loop) can drive
         // it via the matching sender stored in `TaskMeta.steer_tx`.
-        // Capacity 1: the main loop must observe an `ack` before issuing
-        // the next steer, so the channel never legitimately backs up;
-        // `Full` from a `try_send` signals a logic bug and is mapped to a
-        // Transport error by `pool::AgentPool::send_steer`. Non-goose
-        // agents leave both fields unset, preserving the universal
-        // cancel+merge `Steer` path.
-        let supports_goose_steer = agent.supports_goose_steer;
-        let steer_tx = if supports_goose_steer {
-            let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
-            agent.acp.install_steer_rx(rx);
-            Some(tx)
-        } else {
-            None
-        };
+        // Install the steer channel for every prompt task — the supervisor
+        // uses try-and-tolerate: it attempts the steer for any agent and
+        // treats `-32601 method_not_found` as "fall back to cancel+merge".
+        let (tx, rx) = tokio::sync::mpsc::channel::<pool::SteerRequest>(1);
+        agent.acp.install_steer_rx(rx);
+        let steer_tx = Some(tx);
 
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
@@ -2541,7 +2546,6 @@ fn dispatch_pending(
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
-                supports_goose_steer,
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -2924,7 +2928,7 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
-            supports_goose_steer: false,
+
         },
     );
     *heartbeat_in_flight = true;
@@ -3008,99 +3012,6 @@ fn spawn_respawn_task(
 }
 
 // ── spawn_and_init ────────────────────────────────────────────────────────────
-
-/// Returns `true` if the agent's `initialize` response identifies it as goose.
-///
-/// Inspects `agentInfo.name` (or `serverInfo.name` per the ACP-spec MCP
-/// heritage — see [`run_models`] for the same dual-key lookup). A `true`
-/// result gates the non-standard `_goose/unstable/session/steer` delivery
-/// path for mid-turn mentions; `false` agents fall through to the universal
-/// cancel+merge `Steer` path.
-///
-/// Conservative-by-default: only `"goose"` matches. If a future agent ships
-/// a compatible mid-turn injection method under a different name, the
-/// try-and-tolerate fallback in the supervisor (sending the steer request
-/// and accepting method-not-found as "fall back") widens the gate without
-/// requiring a name list here.
-fn detect_goose_agent(init_result: &serde_json::Value) -> bool {
-    init_result
-        .get("agentInfo")
-        .or_else(|| init_result.get("serverInfo"))
-        .and_then(|info| info.get("name"))
-        .and_then(|v| v.as_str())
-        == Some("goose")
-}
-
-#[cfg(test)]
-mod detect_goose_agent_tests {
-    use super::*;
-
-    #[test]
-    fn matches_agent_info_name_goose() {
-        let init = serde_json::json!({
-            "protocolVersion": 1,
-            "agentInfo": {"name": "goose", "version": "1.0.0"},
-            "agentCapabilities": {},
-        });
-        assert!(detect_goose_agent(&init));
-    }
-
-    #[test]
-    fn matches_server_info_name_goose_as_fallback() {
-        // Some agents put it under serverInfo instead of agentInfo.
-        let init = serde_json::json!({
-            "protocolVersion": 1,
-            "serverInfo": {"name": "goose", "version": "1.0.0"},
-            "agentCapabilities": {},
-        });
-        assert!(detect_goose_agent(&init));
-    }
-
-    #[test]
-    fn does_not_match_other_agent_names() {
-        let init = serde_json::json!({
-            "protocolVersion": 1,
-            "agentInfo": {"name": "claude-code", "version": "2.0"},
-            "agentCapabilities": {},
-        });
-        assert!(!detect_goose_agent(&init));
-    }
-
-    #[test]
-    fn does_not_match_when_name_missing() {
-        let init = serde_json::json!({
-            "protocolVersion": 1,
-            "agentCapabilities": {},
-        });
-        assert!(!detect_goose_agent(&init));
-    }
-
-    #[test]
-    fn does_not_match_when_name_is_non_string() {
-        let init = serde_json::json!({
-            "protocolVersion": 1,
-            "agentInfo": {"name": 42},
-            "agentCapabilities": {},
-        });
-        assert!(!detect_goose_agent(&init));
-    }
-
-    #[test]
-    fn agent_info_takes_precedence_over_server_info() {
-        // If both are present, agentInfo wins (the .or_else fallback only
-        // fires when agentInfo is absent, not when its name doesn't match).
-        let init = serde_json::json!({
-            "protocolVersion": 1,
-            "agentInfo": {"name": "claude-code"},
-            "serverInfo": {"name": "goose"},
-        });
-        assert!(
-            !detect_goose_agent(&init),
-            "agentInfo.name=claude-code must win over serverInfo.name=goose"
-        );
-    }
-}
-
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
@@ -3121,7 +3032,6 @@ async fn spawn_and_init(
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-            let supports_goose_steer = detect_goose_agent(&init_result);
             acp.observe(
                 "agent_initialized",
                 serde_json::json!({
@@ -3129,7 +3039,7 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok((acp, protocol_version, supports_goose_steer))
+            Ok((acp, protocol_version, true))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -3462,7 +3372,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
-                supports_goose_steer: false,
+    
             },
         );
 
@@ -3963,7 +3873,7 @@ mod error_outcome_emission_tests {
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
-            supports_goose_steer: false,
+
         }
     }
 
@@ -3986,7 +3896,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
-                supports_goose_steer: false,
+    
             },
         );
 

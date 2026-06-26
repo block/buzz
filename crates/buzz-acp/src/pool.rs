@@ -52,18 +52,13 @@ pub struct TaskMeta {
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
-    /// Steer request channel for goose-native non-cancelling mid-turn
-    /// delivery. Capacity-1; `try_send` from the main loop fails on
-    /// `Full`/`Closed`, in which case the caller must fall back to the
-    /// universal `ControlSignal::Steer` cancel+merge path. `None` for
-    /// heartbeat tasks and for prompt tasks whose agent does not declare
-    /// `supports_goose_steer`.
+    /// Steer request channel for non-cancelling mid-turn delivery.
+    /// Capacity-1; `try_send` from the main loop fails on `Full`/`Closed`,
+    /// in which case the caller must fall back to the universal
+    /// `ControlSignal::Steer` cancel+merge path. `None` for heartbeat
+    /// tasks only — all prompt tasks install a steer channel regardless
+    /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
-    /// Snapshot of `OwnedAgent.supports_goose_steer` at dispatch time.
-    /// Read by the main loop's mode-gate fork after the agent has been
-    /// moved into the task, so we must capture the flag eagerly. `false`
-    /// for non-goose agents and for heartbeat tasks.
-    pub supports_goose_steer: bool,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -147,17 +142,6 @@ pub struct OwnedAgent {
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
-    /// Whether this agent is goose, gating the non-standard
-    /// `_goose/unstable/session/steer` delivery path for mid-turn mentions.
-    ///
-    /// Inferred from `agentInfo.name == "goose"` (or `serverInfo.name` per the
-    /// ACP-spec MCP heritage) in the `initialize` response. Other agents will
-    /// have this `false`; callers that observe `false` must use the universal
-    /// cancel+merge `Steer` path. Conservative-by-default: when a future agent
-    /// ships a compatible non-interrupting method under a different name, the
-    /// try-and-tolerate fallback in `pool.rs` keeps the gate from becoming a
-    /// hard exclusion list.
-    pub supports_goose_steer: bool,
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -267,15 +251,24 @@ pub struct SteerRequest {
 
 /// Why a goose-native steer failed.
 ///
-/// String fields are intentionally `Debug`-only — read by `tracing` macros
-/// in the main loop's `PoolEvent::SteerAck` arm via `?ack`. The dead-code
-/// lint can't see that path because it doesn't trace through `Debug`
-/// derives, hence the `#[allow]`.
+/// String and integer fields are intentionally `Debug`-only — read by
+/// `tracing` macros in the main loop's `PoolEvent::SteerAck` arm via
+/// `?ack`. The dead-code lint can't see that path because it doesn't
+/// trace through `Debug` derives, hence the `#[allow]`.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum SteerError {
-    /// The agent returned a JSON-RPC error response.
-    AgentError(String),
+    /// The agent returned a JSON-RPC error response to the steer request.
+    ///
+    /// `code` is the JSON-RPC error code:
+    /// - `-32601` (`method_not_found`): the agent does not implement the
+    ///   steer extension. The main loop should fire the cancel+merge
+    ///   fallback so the message still reaches the agent.
+    /// - Any other code: the write landed and the agent rejected it at the
+    ///   application level (e.g. wrong run id). Release the withheld event
+    ///   for normal dispatch; do NOT fire the fallback — the turn is still
+    ///   running or just ended.
+    AgentError { code: i64, message: String },
     /// Transport-level failure: write error, read EOF, JSON-RPC framing
     /// violation, etc. The string carries the underlying `AcpError`'s display.
     Transport(String),
@@ -468,24 +461,6 @@ impl AgentPool {
 
     pub fn task_map_mut(&mut self) -> &mut HashMap<tokio::task::Id, TaskMeta> {
         &mut self.task_map
-    }
-
-    /// Whether the in-flight task for `channel_id` declared
-    /// `supports_goose_steer` at dispatch time. Used by the main loop's
-    /// mode-gate fork to decide whether to attempt the goose-native
-    /// non-cancelling steer path before falling back to the universal
-    /// cancel+merge `ControlSignal::Steer`.
-    ///
-    /// Returns `false` if no task is in flight for the channel, or the
-    /// task's agent is not goose. Stable to call concurrently with
-    /// `send_steer` because both read from `task_map`; the main loop is
-    /// the only writer.
-    pub fn task_supports_goose_steer(&self, channel_id: Uuid) -> bool {
-        self.task_map
-            .values()
-            .find(|m| m.channel_id == Some(channel_id))
-            .map(|m| m.supports_goose_steer)
-            .unwrap_or(false)
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
