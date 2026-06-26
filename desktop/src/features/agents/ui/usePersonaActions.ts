@@ -33,6 +33,48 @@ import { usePersonaImportActions } from "./usePersonaImportActions";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
+const PERSONA_CATALOG_VISIBILITY_STORAGE_KEY =
+  "buzz-persona-catalog-visibility-v1";
+
+function readSharedCatalogPersonaIds(): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(
+      PERSONA_CATALOG_VISIBILITY_STORAGE_KEY,
+    );
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((id): id is string => typeof id === "string");
+  } catch {
+    return [];
+  }
+}
+
+function writeSharedCatalogPersonaIds(ids: string[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      PERSONA_CATALOG_VISIBILITY_STORAGE_KEY,
+      JSON.stringify(ids),
+    );
+  } catch {
+    // Catalog visibility is a local convenience setting; ignore storage failures.
+  }
+}
+
 export function usePersonaActions() {
   const queryClient = useQueryClient();
   const personasQuery = usePersonasQuery();
@@ -51,7 +93,12 @@ export function usePersonaActions() {
     React.useState<PersonaDialogState | null>(null);
   const [personaToDelete, setPersonaToDelete] =
     React.useState<AgentPersona | null>(null);
+  const [personaToShare, setPersonaToShare] =
+    React.useState<AgentPersona | null>(null);
   const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
+  const [sharedCatalogPersonaIds, setSharedCatalogPersonaIds] = React.useState<
+    string[]
+  >(readSharedCatalogPersonaIds);
   const [batchImportResult, setBatchImportResult] =
     React.useState<ParsePersonaFilesResult | null>(null);
   const [batchImportFileName, setBatchImportFileName] = React.useState("");
@@ -65,10 +112,27 @@ export function usePersonaActions() {
     React.useState<PersonaFeedbackSurface>("library");
 
   const personas = personasQuery.data ?? [];
-  const { catalogPersonas, libraryPersonas, personaLabelsById } = React.useMemo(
-    () => getPersonaLibraryState(personas),
-    [personas],
+  const sharedCatalogPersonaIdSet = React.useMemo(
+    () => new Set(sharedCatalogPersonaIds),
+    [sharedCatalogPersonaIds],
   );
+  const { catalogPersonas, libraryPersonas, personaLabelsById } = React.useMemo(
+    () => getPersonaLibraryState(personas, sharedCatalogPersonaIdSet),
+    [personas, sharedCatalogPersonaIdSet],
+  );
+
+  React.useEffect(() => {
+    if (sharedCatalogPersonaIds.length === 0) {
+      return;
+    }
+
+    const personaIds = new Set(personas.map((persona) => persona.id));
+    const next = sharedCatalogPersonaIds.filter((id) => personaIds.has(id));
+    if (next.length !== sharedCatalogPersonaIds.length) {
+      setSharedCatalogPersonaIds(next);
+      writeSharedCatalogPersonaIds(next);
+    }
+  }, [personas, sharedCatalogPersonaIds]);
 
   const personaImportActions = usePersonaImportActions(personas, {
     clearPersonaFeedback: () => clearFeedback("library"),
@@ -213,6 +277,31 @@ export function usePersonaActions() {
     setPersonaToDelete(persona);
   }
 
+  function openShare(persona: AgentPersona) {
+    clearFeedback("library");
+    setPersonaToShare(persona);
+  }
+
+  function setPersonaCatalogVisibility(persona: AgentPersona, visible: boolean) {
+    if (persona.isBuiltIn) {
+      return;
+    }
+
+    clearFeedback("library");
+    setSharedCatalogPersonaIds((current) => {
+      const next = new Set(current);
+      if (visible) {
+        next.add(persona.id);
+      } else {
+        next.delete(persona.id);
+      }
+
+      const ids = Array.from(next);
+      writeSharedCatalogPersonaIds(ids);
+      return ids;
+    });
+  }
+
   const isPending =
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
@@ -234,6 +323,8 @@ export function usePersonaActions() {
     setPersonaDialogState,
     personaToDelete,
     setPersonaToDelete,
+    personaToShare,
+    setPersonaToShare,
     isCatalogDialogOpen,
     setIsCatalogDialogOpen,
     batchImportResult,
@@ -254,6 +345,9 @@ export function usePersonaActions() {
     openDuplicate,
     openCatalog,
     openDelete,
+    openShare,
+    setPersonaCatalogVisibility,
+    sharedCatalogPersonaIdSet,
     clearFeedback,
   };
 }

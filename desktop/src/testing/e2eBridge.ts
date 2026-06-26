@@ -58,6 +58,15 @@ type MockRelayAgentSeed = {
   status?: PresenceStatus;
 };
 
+type MockPersonaSeed = {
+  id?: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  systemPrompt: string;
+  isActive?: boolean;
+  envVars?: Record<string, string>;
+};
+
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -79,6 +88,7 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    personas?: MockPersonaSeed[];
     relayAgents?: MockRelayAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     createManagedAgentDelayMs?: number;
@@ -1103,21 +1113,97 @@ function resetMockManagedAgents(config?: E2eConfig) {
   syncMockRelayAgentsFromManagedAgents();
 }
 
+const BUILT_IN_PERSONA_AVATAR_URLS = {
+  angelica:
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcT1MGeCxaWcvoonCISYyuhWfjngmSE8cyJhfQ&s",
+  bart:
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcShI3uwQ-mSgRdv5WYBibPyo2I3X7ybsYmrVQ&s",
+  chucky:
+    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ_cxY4ocdqIGx5JVRuZjlCvyhlhEWV5MXWDw&s",
+  marge:
+    "https://static0.srcdn.com/wordpress/wp-content/uploads/2023/05/the-simpsons-season-34-marge-blue-hair.jpg",
+  ned: "https://i1.sndcdn.com/artworks-000362506068-4i6lyp-t500x500.jpg",
+  tommy:
+    "https://i.redd.it/the-slight-redesigns-of-tommy-pickles-back-in-the-90s-v0-ii3f8rsmv1cf1.jpg?width=1290&format=pjpg&auto=webp&s=e9901c8661d5b3a00e49704d12d02fef87c5947e",
+} as const;
+
 function resetMockPersonas(config?: E2eConfig) {
   const now = new Date().toISOString();
   const activePersonaIds = new Set(config?.mock?.activePersonaIds ?? []);
-  mockPersonas = [
+  const builtInPersonas = [
+    {
+      id: "builtin:angelica",
+      display_name: "Angelica",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.angelica,
+      system_prompt:
+        "You are Angelica. You help turn broad ideas into clear product and design direction.\n\n# Focus\n\nClarify the goal, identify the audience, and call out the tradeoffs that matter.",
+    },
+    {
+      id: "builtin:bart",
+      display_name: "Bart",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.bart,
+      system_prompt:
+        "You are Bart. You are a fast-moving implementation partner who helps turn scoped plans into working changes.\n\n# Focus\n\nPrefer small, direct edits that follow the existing codebase.",
+    },
+    {
+      id: "builtin:chucky",
+      display_name: "Chucky",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.chucky,
+      system_prompt:
+        "You are Chucky. You are a careful QA and edge-case agent who looks for the ways a change might break.\n\n# Focus\n\nInspect state transitions, empty states, permissions, accessibility, and failure paths.",
+    },
     {
       id: "builtin:fizz",
       display_name: "Fizz",
       avatar_url: null,
       system_prompt: "You are Fizz.",
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:fizz"),
-      created_at: now,
-      updated_at: now,
+    },
+    {
+      id: "builtin:marge",
+      display_name: "Marge",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.marge,
+      system_prompt:
+        "You are Marge. You are a calm coordination agent who keeps multi-step work organized and grounded.\n\n# Focus\n\nTrack goals, dependencies, and follow-ups.",
+    },
+    {
+      id: "builtin:ned",
+      display_name: "Ned",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.ned,
+      system_prompt:
+        "You are Ned. You are a friendly support and onboarding agent who helps people feel oriented quickly.\n\n# Focus\n\nExplain unfamiliar flows plainly, surface the next useful step, and keep guidance reassuring without becoming verbose.",
+    },
+    {
+      id: "builtin:tommy",
+      display_name: "Tommy",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.tommy,
+      system_prompt:
+        "You are Tommy. You are an exploratory product-thinking agent who helps turn uncertainty into experiments.\n\n# Focus\n\nBreak big questions into small trials, name what would prove or disprove an idea, and keep momentum through ambiguity.",
     },
   ];
+  mockPersonas = builtInPersonas.map((persona) => ({
+    id: persona.id,
+    display_name: persona.display_name,
+    avatar_url: persona.avatar_url,
+    system_prompt: persona.system_prompt,
+    is_builtin: true,
+    is_active: activePersonaIds.has(persona.id),
+    created_at: now,
+    updated_at: now,
+  }));
+
+  for (const persona of config?.mock?.personas ?? []) {
+    mockPersonas.push({
+      id: persona.id ?? crypto.randomUUID(),
+      display_name: persona.displayName,
+      avatar_url: persona.avatarUrl ?? null,
+      system_prompt: persona.systemPrompt,
+      is_builtin: false,
+      is_active: persona.isActive ?? true,
+      env_vars: { ...(persona.envVars ?? {}) },
+      created_at: now,
+      updated_at: now,
+    });
+  }
 }
 
 function resetMockTeams() {
@@ -4875,7 +4961,7 @@ function ensureMockPersonaIsActive(personaId: string) {
   }
   if (!persona.is_active) {
     throw new Error(
-      `${persona.display_name} is not in My Agents. Choose it from Persona Catalog first.`,
+      `${persona.display_name} is not in My Agents. Choose it from Agent Catalog first.`,
     );
   }
 }

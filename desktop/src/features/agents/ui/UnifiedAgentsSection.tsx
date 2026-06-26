@@ -67,8 +67,7 @@ type UnifiedAgentsSectionProps = {
   onCreatePersona: () => void;
   onChooseCatalog: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
-  onExportPersona: (persona: AgentPersona) => void;
+  onSharePersona: (persona: AgentPersona) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
   onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
@@ -140,8 +139,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onCreatePersona,
     onChooseCatalog,
     onDuplicatePersona,
-    onEditPersona,
-    onExportPersona,
+    onSharePersona,
     onDeactivatePersona,
     onDeletePersona,
     onImportPersonaFile,
@@ -282,8 +280,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       isPending={isPersonasPending}
                       persona={g.persona}
                       onDuplicate={onDuplicatePersona}
-                      onEdit={onEditPersona}
-                      onExport={onExportPersona}
+                      onShare={onSharePersona}
                       onDeactivate={onDeactivatePersona}
                       onDelete={onDeletePersona}
                     />

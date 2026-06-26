@@ -76,6 +76,15 @@ type MockRelayAgentSeed = {
   status?: "online" | "away" | "offline";
 };
 
+type MockPersonaSeed = {
+  id?: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  systemPrompt: string;
+  isActive?: boolean;
+  envVars?: Record<string, string>;
+};
+
 export type MockEngramEntry = {
   slug: string;
   body: string;
@@ -104,6 +113,7 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  personas?: MockPersonaSeed[];
   relayAgents?: MockRelayAgentSeed[];
   createManagedAgentDelayMs?: number;
   channelsReadError?: string;

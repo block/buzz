@@ -20,20 +20,37 @@ export function getActivePersonas(personas: readonly AgentPersona[]) {
   return personas.filter(isPersonaActive);
 }
 
-export function getCatalogPersonas(personas: readonly AgentPersona[]) {
+export function getLibraryPersonas(personas: readonly AgentPersona[]) {
+  return getActivePersonas(personas);
+}
+
+export function isPersonaVisibleInCatalog(
+  persona: AgentPersona,
+  sharedCatalogPersonaIds: ReadonlySet<string> = new Set(),
+) {
+  return persona.isBuiltIn || sharedCatalogPersonaIds.has(persona.id);
+}
+
+export function getCatalogPersonas(
+  personas: readonly AgentPersona[],
+  sharedCatalogPersonaIds: ReadonlySet<string> = new Set(),
+) {
   return personas
-    .filter((persona) => persona.isBuiltIn)
+    .filter((persona) =>
+      isPersonaVisibleInCatalog(persona, sharedCatalogPersonaIds),
+    )
     .sort((left, right) => left.displayName.localeCompare(right.displayName));
 }
 
 export function isCatalogPersonaSelected(persona: AgentPersona) {
-  return persona.isBuiltIn && persona.isActive;
+  return persona.isActive;
 }
 
 export function getCatalogSelectionState(
   personas: readonly AgentPersona[],
+  sharedCatalogPersonaIds: ReadonlySet<string> = new Set(),
 ): CatalogSelectionState {
-  const catalogPersonas = getCatalogPersonas(personas);
+  const catalogPersonas = getCatalogPersonas(personas, sharedCatalogPersonaIds);
 
   return {
     catalogPersonas,
@@ -52,9 +69,13 @@ export function getPersonaLabelsById(personas: readonly AgentPersona[]) {
 
 export function getPersonaLibraryState(
   personas: readonly AgentPersona[],
+  sharedCatalogPersonaIds: ReadonlySet<string> = new Set(),
 ): PersonaLibraryState {
-  const libraryPersonas = getActivePersonas(personas);
-  const { catalogPersonas } = getCatalogSelectionState(personas);
+  const libraryPersonas = getLibraryPersonas(personas);
+  const { catalogPersonas } = getCatalogSelectionState(
+    personas,
+    sharedCatalogPersonaIds,
+  );
 
   return {
     catalogPersonas,

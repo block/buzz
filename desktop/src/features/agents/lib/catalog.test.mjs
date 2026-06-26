@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getCatalogPersonas,
   getCatalogSelectionState,
+  getLibraryPersonas,
   getPersonaLabelsById,
   getPersonaLibraryState,
   isCatalogPersonaSelected,
@@ -80,7 +81,7 @@ test("getCatalogPersonas keeps chooser order stable when selection changes", () 
   );
 });
 
-test("isCatalogPersonaSelected only treats active built-ins as selected", () => {
+test("isCatalogPersonaSelected treats active catalog personas as selected", () => {
   assert.equal(
     isCatalogPersonaSelected(
       createPersona("builtin:fizz", "Fizz", {
@@ -101,7 +102,7 @@ test("isCatalogPersonaSelected only treats active built-ins as selected", () => 
   );
   assert.equal(
     isCatalogPersonaSelected(createPersona("custom:builder", "Builder")),
-    false,
+    true,
   );
 });
 
@@ -134,4 +135,22 @@ test("getPersonaLibraryState keeps the working library and full catalog in one p
     ["builtin:fizz"],
   );
   assert.equal(state.personaLabelsById["builtin:fizz"], "Fizz");
+});
+
+test("getLibraryPersonas keeps active custom personas even when catalog entries are similar", () => {
+  const avatarUrl = "https://example.test/marge.png";
+  const personas = [
+    createPersona("builtin:marge", "Marge", {
+      avatarUrl,
+      isBuiltIn: true,
+      isActive: false,
+    }),
+    createPersona("custom:marge", "Marge", { avatarUrl, isActive: true }),
+    createPersona("custom:builder", "Builder", { isActive: true }),
+  ];
+
+  assert.deepEqual(
+    getLibraryPersonas(personas).map((persona) => persona.id),
+    ["custom:marge", "custom:builder"],
+  );
 });
