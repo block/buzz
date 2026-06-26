@@ -522,6 +522,8 @@ export type NormalizedField = {
   writeVia: ConfigWriteMechanism;
   overriddenValue: string | null;
   overriddenOrigin: ConfigOrigin | null;
+  /** True if this field must be set for the harness to function. */
+  isRequired: boolean;
 };
 
 export type ConfigFieldType =

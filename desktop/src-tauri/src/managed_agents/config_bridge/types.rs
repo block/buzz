@@ -62,6 +62,9 @@ pub struct NormalizedField {
     /// When this field overrides a lower-precedence value, show what it overrode.
     pub overridden_value: Option<String>,
     pub overridden_origin: Option<ConfigOrigin>,
+    /// True if this field must be set for the harness to function.
+    /// Populated from `KnownAcpRuntime::required_normalized_fields`.
+    pub is_required: bool,
 }
 
 /// Normalized cross-runtime config concepts (~8 fields that span all runtimes).

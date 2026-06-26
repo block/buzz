@@ -87,6 +87,7 @@ mod tests {
                     },
                     overridden_value: None,
                     overridden_origin: None,
+                    is_required: false,
                 }),
                 provider: None,
                 mode: None,
@@ -138,6 +139,7 @@ mod tests {
             },
             overridden_value: None,
             overridden_origin: None,
+            is_required: false,
         });
         let result = plan_config_write(&surface, &WriteConfigTarget::Model);
         assert!(result.success);

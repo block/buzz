@@ -458,6 +458,7 @@ mod tests {
             config_file_format: Some("yaml"),
             supports_acp_native_config: true,
             thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+            required_normalized_fields: &["model", "provider"],
         }
     }
 

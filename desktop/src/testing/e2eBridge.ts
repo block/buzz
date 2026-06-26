@@ -1029,6 +1029,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "acpSetSessionModel" },
         overriddenValue: "gpt-4o-mini",
         overriddenOrigin: "configFile",
+        isRequired: false,
       },
       provider: {
         value: "openai",
@@ -1037,6 +1038,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       mode: {
         value: "auto",
@@ -1045,6 +1047,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       thinkingEffort: {
         value: "medium",
@@ -1056,6 +1059,7 @@ function buildMockConfigSurface(pubkey: string): {
         },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1112,6 +1116,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "acpSetConfigOption", configId: "model" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       provider: {
         value: "anthropic",
@@ -1120,6 +1125,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       mode: {
         value: "code",
@@ -1128,6 +1134,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "acpSetConfigOption", configId: "mode" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       thinkingEffort: {
         value: "high",
@@ -1139,6 +1146,7 @@ function buildMockConfigSurface(pubkey: string): {
         },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       maxOutputTokens: {
         value: "16384",
@@ -1150,6 +1158,7 @@ function buildMockConfigSurface(pubkey: string): {
         },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       contextLimit: null,
       systemPrompt: null,
@@ -1177,6 +1186,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       provider: {
         value: "openai",
@@ -1185,6 +1195,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       mode: {
         value: null,
@@ -1193,6 +1204,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       thinkingEffort: {
         value: null,
@@ -1201,6 +1213,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1229,6 +1242,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "respawnWithEnvVar", envKey: "CODEX_MODEL" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       provider: {
         value: "openai",
@@ -1237,6 +1251,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       mode: {
         value: "suggest / auto-edit",
@@ -1245,6 +1260,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "respawnWithEnvVar", envKey: "CODEX_MODE" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       thinkingEffort: null,
       maxOutputTokens: null,
@@ -1301,6 +1317,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "acpSetSessionModel" },
         overriddenValue: "gpt-4o",
         overriddenOrigin: "personaDefault",
+        isRequired: false,
       },
       provider: {
         value: "anthropic",
@@ -1309,6 +1326,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       mode: {
         value: "auto",
@@ -1317,6 +1335,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       thinkingEffort: {
         value: "high",
@@ -1328,6 +1347,7 @@ function buildMockConfigSurface(pubkey: string): {
         },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1359,6 +1379,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "acpSetSessionModel" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       provider: {
         value: "openai",
@@ -1367,6 +1388,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "readOnly" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       mode: {
         value: "auto",
@@ -1375,6 +1397,7 @@ function buildMockConfigSurface(pubkey: string): {
         writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       thinkingEffort: {
         value: "medium",
@@ -1386,6 +1409,7 @@ function buildMockConfigSurface(pubkey: string): {
         },
         overriddenValue: null,
         overriddenOrigin: null,
+        isRequired: false,
       },
       maxOutputTokens: null,
       contextLimit: null,
