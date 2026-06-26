@@ -1,5 +1,6 @@
 import * as React from "react";
-import { RefreshCw, Upload } from "lucide-react";
+import { ChevronDown, RefreshCw, Upload } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import type {
   AcpRuntimeCatalogEntry,
@@ -14,6 +15,7 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { PersonaDropdownField } from "./PersonaDropdownField";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   getImportButtonLabel,
@@ -26,6 +28,24 @@ import {
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
 } from "./personaDialogState";
+import {
+  AUTO_MODEL_DROPDOWN_VALUE,
+  AUTO_PROVIDER_DROPDOWN_VALUE,
+  CUSTOM_MODEL_DROPDOWN_VALUE,
+  CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  formatRuntimeOptionLabel,
+  getDefaultPersonaRuntime,
+  getModelSelectValue,
+  getPersonaModelOptions,
+  getPersonaProviderOptions,
+  getRuntimePersonaModelOptions,
+  hasPersonaModelOption,
+  NO_RUNTIME_DROPDOWN_VALUE,
+  type PersonaDropdownOption,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+  shouldClearKnownModelForSelectionScope,
+} from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
 
 type PersonaDialogProps = {
@@ -48,122 +68,12 @@ type PersonaDialogProps = {
   ) => Promise<void>;
 };
 
-const PERSONA_FIELD_SHELL_CLASS =
-  "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
-const PERSONA_FIELD_CONTROL_CLASS =
-  "border-0 bg-transparent text-muted-foreground shadow-none outline-none ring-0 transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-muted-foreground focus:outline-hidden focus-visible:ring-0";
 const PERSONA_LABEL_OPTIONAL_CLASS =
   "ml-1 text-xs font-normal text-muted-foreground/50";
-const AUTO_MODEL_DROPDOWN_VALUE = "__auto_model__";
-const CUSTOM_MODEL_DROPDOWN_VALUE = "__custom_model__";
-const AUTO_PROVIDER_DROPDOWN_VALUE = "__auto_provider__";
-const CUSTOM_PROVIDER_DROPDOWN_VALUE = "__custom_provider__";
-
-type PersonaModelOption = {
-  id: string;
-  label: string;
-};
-
-const AUTO_MODEL_OPTION: PersonaModelOption = {
-  id: "",
-  label: "Auto (provider default)",
-};
-
-const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
-  { id: "", label: "Auto (runtime default)" },
-  { id: "anthropic", label: "Anthropic" },
-  { id: "openai", label: "OpenAI" },
-  { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "databricks", label: "Databricks" },
-];
-
-const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
-  string,
-  readonly PersonaModelOption[]
-> = {
-  goose: [
-    AUTO_MODEL_OPTION,
-    { id: "goose-claude-4-6-opus", label: "Claude Opus 4.6" },
-    { id: "goose-claude-4-6-sonnet", label: "Claude Sonnet 4.6" },
-    { id: "gpt-5", label: "GPT-5" },
-    { id: "gpt-5-mini", label: "GPT-5 mini" },
-    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  ],
-  "buzz-agent": [
-    AUTO_MODEL_OPTION,
-    { id: "goose-claude-4-6-opus", label: "Claude Opus 4.6" },
-    { id: "goose-claude-4-6-sonnet", label: "Claude Sonnet 4.6" },
-    { id: "gpt-5", label: "GPT-5" },
-    { id: "gpt-5-mini", label: "GPT-5 mini" },
-    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  ],
-  claude: [AUTO_MODEL_OPTION],
-  codex: [AUTO_MODEL_OPTION],
-};
-
-function getPersonaModelOptions(
-  runtimeId: string,
-): readonly PersonaModelOption[] {
-  return PERSONA_MODEL_OPTIONS_BY_RUNTIME[runtimeId] ?? [AUTO_MODEL_OPTION];
-}
-
-function hasPersonaModelOption(
-  options: readonly PersonaModelOption[],
-  modelId: string,
-) {
-  const trimmedModel = modelId.trim();
-  return (
-    trimmedModel.length === 0 ||
-    options.some((option) => option.id === trimmedModel)
-  );
-}
-
-function getModelSelectValue({
-  isCustomModelEditing,
-  isModelCustom,
-  model,
-}: {
-  isCustomModelEditing: boolean;
-  isModelCustom: boolean;
-  model: string;
-}) {
-  if (isCustomModelEditing || isModelCustom) {
-    return CUSTOM_MODEL_DROPDOWN_VALUE;
-  }
-
-  return model.trim() || AUTO_MODEL_DROPDOWN_VALUE;
-}
-
-function getPersonaProviderOptions(
-  currentProvider: string,
-): readonly PersonaModelOption[] {
-  const trimmedProvider = currentProvider.trim();
-  if (
-    trimmedProvider.length === 0 ||
-    PERSONA_LLM_PROVIDER_OPTIONS.some((option) => option.id === trimmedProvider)
-  ) {
-    return PERSONA_LLM_PROVIDER_OPTIONS;
-  }
-
-  return [
-    ...PERSONA_LLM_PROVIDER_OPTIONS,
-    { id: trimmedProvider, label: `${trimmedProvider} (current)` },
-  ];
-}
-
-function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
-  const suffix =
-    runtime.availability === "adapter_missing"
-      ? " (adapter missing)"
-      : runtime.availability === "cli_missing"
-        ? " (CLI missing)"
-        : runtime.availability === "not_installed"
-          ? " (not installed)"
-          : "";
-  return `${runtime.label}${suffix}`;
-}
+const ADVANCED_FIELDS_MOTION_TRANSITION = {
+  duration: 0.18,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
 
 export function PersonaDialog({
   open,
@@ -191,6 +101,7 @@ export function PersonaDialog({
     React.useState(false);
   const [namePoolText, setNamePoolText] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
+  const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
@@ -204,6 +115,11 @@ export function PersonaDialog({
       ? initialValues.id
       : null;
   const canImportPersonaUpdate = isEditMode && Boolean(onImportUpdateFile);
+  const defaultRuntime = React.useMemo(
+    () => getDefaultPersonaRuntime(runtimes),
+    [runtimes],
+  );
+  const shouldReduceMotion = useReducedMotion();
 
   React.useEffect(() => {
     if (!open || !initialValues) {
@@ -218,16 +134,37 @@ export function PersonaDialog({
     setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
     setIsCustomProviderEditing(false);
-    setNamePoolText(
+    const nextNamePoolText =
       "namePool" in initialValues
         ? formatPersonaNamePoolText(initialValues.namePool)
-        : "",
+        : "";
+    const nextEnvVars =
+      "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
+    setNamePoolText(nextNamePoolText);
+    setEnvVars(nextEnvVars);
+    setShowAdvancedFields(
+      nextNamePoolText.trim().length > 0 || Object.keys(nextEnvVars).length > 0,
     );
-    setEnvVars("envVars" in initialValues ? (initialValues.envVars ?? {}) : {});
     setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
     setIsImportingUpdate(false);
   }, [initialValues, open]);
+
+  React.useEffect(() => {
+    if (
+      !open ||
+      !initialValues ||
+      "id" in initialValues ||
+      initialValues.runtime?.trim() ||
+      runtimesLoading ||
+      runtime.trim().length > 0 ||
+      defaultRuntime === null
+    ) {
+      return;
+    }
+
+    setRuntime(defaultRuntime.id);
+  }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
 
   React.useEffect(() => {
     if (!open || !canImportPersonaUpdate) {
@@ -349,6 +286,7 @@ export function PersonaDialog({
       setIsCustomProviderEditing(false);
       setNamePoolText("");
       setEnvVars({});
+      setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       setImportErrorMessage(null);
       setIsImportingUpdate(false);
@@ -427,7 +365,13 @@ export function PersonaDialog({
   });
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
-  const modelFieldVisible = runtime.trim().length > 0;
+  const llmProviderFieldVisible = runtime.trim().length > 0;
+  const modelFieldVisible =
+    llmProviderFieldVisible &&
+    (isCustomProviderEditing ||
+      provider.trim().length > 0 ||
+      model.trim().length > 0 ||
+      isCustomModelEditing);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
@@ -437,8 +381,9 @@ export function PersonaDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     !isAvatarUploadPending;
-  const modelOptions = getPersonaModelOptions(runtime);
-  const isModelCustom = !hasPersonaModelOption(modelOptions, model);
+  const modelOptions = getPersonaModelOptions(runtime, provider);
+  const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
+  const isModelCustom = !hasPersonaModelOption(runtimeModelOptions, model);
   const modelSelectValue = getModelSelectValue({
     isCustomModelEditing,
     isModelCustom,
@@ -450,21 +395,54 @@ export function PersonaDialog({
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : provider.trim() || AUTO_PROVIDER_DROPDOWN_VALUE;
-  const showCustomProviderInput = modelFieldVisible && isCustomProviderEditing;
-  const blankRuntimeOptionLabel =
-    isCreateMode && runtimesLoading
-      ? "Loading providers..."
-      : isCreateMode
-        ? "Choose a provider"
-        : "No preference (use app default)";
-  const selectedModelLabel =
-    modelOptions.find((option) => option.id === model.trim())?.label ??
-    AUTO_MODEL_OPTION.label;
-  const selectedProviderLabel =
-    providerOptions.find((option) => option.id === provider)?.label ??
-    (provider.trim()
-      ? `${provider.trim()} (current)`
-      : "Auto (runtime default)");
+  const showCustomProviderInput =
+    llmProviderFieldVisible && isCustomProviderEditing;
+  const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
+  const blankRuntimeOptionLabel = runtimesLoading
+    ? "Loading providers..."
+    : isCreateMode
+      ? "Choose a provider"
+      : "No preference (use app default)";
+  const runtimeDropdownOptions: PersonaDropdownOption[] = [
+    ...(!isCreateMode
+      ? [
+          {
+            label: blankRuntimeOptionLabel,
+            value: NO_RUNTIME_DROPDOWN_VALUE,
+          },
+        ]
+      : []),
+    ...runtimes.map((candidate) => ({
+      disabled: isCreateMode && candidate.availability !== "available",
+      label: `${formatRuntimeOptionLabel(candidate)}${
+        isCreateMode && candidate.id === defaultRuntime?.id ? " (default)" : ""
+      }`,
+      value: candidate.id,
+    })),
+  ];
+  if (
+    runtime.trim().length > 0 &&
+    !runtimeDropdownOptions.some((option) => option.value === runtime)
+  ) {
+    runtimeDropdownOptions.push({
+      label: `${runtime.trim()} (current)`,
+      value: runtime.trim(),
+    });
+  }
+  const providerDropdownOptions: PersonaDropdownOption[] = [
+    ...providerOptions.map((option) => ({
+      label: option.label,
+      value: option.id || AUTO_PROVIDER_DROPDOWN_VALUE,
+    })),
+    { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
+  ];
+  const modelDropdownOptions: PersonaDropdownOption[] = [
+    ...modelOptions.map((option) => ({
+      label: option.label,
+      value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
+    })),
+    { label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE },
+  ];
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarning =
@@ -478,6 +456,88 @@ export function PersonaDialog({
         Visit Settings &gt; Doctor to set it up.
       </p>
     ) : null;
+  const advancedFieldsTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : ADVANCED_FIELDS_MOTION_TRANSITION;
+
+  React.useEffect(() => {
+    if (
+      !open ||
+      !modelFieldVisible ||
+      isCustomModelEditing ||
+      !shouldClearKnownModelForSelectionScope({ model, provider, runtime })
+    ) {
+      return;
+    }
+
+    setModel("");
+    setIsCustomModelEditing(false);
+  }, [isCustomModelEditing, model, modelFieldVisible, open, provider, runtime]);
+
+  function handleRuntimeDropdownChange(nextValue: string) {
+    const nextRuntime =
+      nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
+    const previousRuntime = runtime;
+    setRuntime(nextRuntime);
+    if (
+      shouldClearModelForRuntimeChange(previousRuntime, nextRuntime) ||
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider,
+        runtime: nextRuntime,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+    if (nextRuntime.trim().length === 0) {
+      setIsCustomModelEditing(false);
+      setIsCustomProviderEditing(false);
+      setProvider("");
+    }
+  }
+
+  function handleProviderDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      setIsCustomProviderEditing(true);
+      setProvider("");
+      return;
+    }
+
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+    setIsCustomProviderEditing(false);
+    setProvider(nextProvider);
+    if (nextProvider.trim().length === 0) {
+      setModel("");
+      setIsCustomModelEditing(false);
+      return;
+    }
+    if (
+      !isCustomModelEditing &&
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider: nextProvider,
+        runtime,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+  }
+
+  function handleModelDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
+      setIsCustomModelEditing(true);
+      if (!isModelCustom) {
+        setModel("");
+      }
+      return;
+    }
+
+    setIsCustomModelEditing(false);
+    setModel(nextValue === AUTO_MODEL_DROPDOWN_VALUE ? "" : nextValue);
+  }
 
   return (
     <Dialog
@@ -635,280 +695,186 @@ export function PersonaDialog({
               >
                 Provider
               </label>
-              <div className={PERSONA_FIELD_SHELL_CLASS}>
-                <select
-                  className={cn(
-                    "h-11 w-full appearance-none px-3 py-2",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
-                  disabled={isPending || runtimesLoading}
-                  id="persona-runtime"
-                  onChange={(event) => {
-                    const nextRuntime = event.target.value;
-                    const previousRuntime = runtime;
-                    setRuntime(nextRuntime);
-                    if (
-                      shouldClearModelForRuntimeChange(
-                        previousRuntime,
-                        nextRuntime,
-                      )
-                    ) {
-                      setModel("");
-                      setIsCustomModelEditing(false);
-                    }
-                    if (nextRuntime.trim().length === 0) {
-                      setIsCustomModelEditing(false);
-                      setIsCustomProviderEditing(false);
-                      setProvider("");
-                    }
-                  }}
-                  value={runtime}
-                >
-                  <option disabled={isCreateMode} value="">
-                    {blankRuntimeOptionLabel}
-                  </option>
-                  {runtimes.map((candidate) => (
-                    <option
-                      disabled={
-                        isCreateMode && candidate.availability !== "available"
-                      }
-                      key={candidate.id}
-                      value={candidate.id}
-                    >
-                      {formatRuntimeOptionLabel(candidate)}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              <PersonaDropdownField
+                disabled={isPending || runtimesLoading}
+                id="persona-runtime"
+                onValueChange={handleRuntimeDropdownChange}
+                options={runtimeDropdownOptions}
+                placeholder={blankRuntimeOptionLabel}
+                value={runtimeDropdownValue}
+              />
               {runtimeWarning}
             </div>
 
-            <div
-              aria-hidden={!modelFieldVisible}
-              className={cn(
-                "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-                modelFieldVisible
-                  ? "grid-rows-[1fr] opacity-100"
-                  : "grid-rows-[0fr] opacity-0",
-              )}
-            >
-              <div className="min-h-0 overflow-hidden">
-                <div
-                  className={cn(
-                    "space-y-1.5 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-                    modelFieldVisible
-                      ? "translate-y-0 opacity-100"
-                      : "-translate-y-1 opacity-0",
-                  )}
+            {llmProviderFieldVisible ? (
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="persona-llm-provider"
                 >
-                  <label
-                    className="text-sm font-medium text-foreground"
-                    htmlFor="persona-model"
-                  >
-                    Model
-                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                      Optional
-                    </span>
-                  </label>
-                  <div className={PERSONA_FIELD_SHELL_CLASS}>
-                    <select
-                      className={cn(
-                        "h-11 w-full appearance-none px-3 py-2",
-                        PERSONA_FIELD_CONTROL_CLASS,
-                      )}
-                      disabled={isPending || !modelFieldVisible}
-                      id="persona-model"
-                      onChange={(event) => {
-                        const nextModel = event.target.value;
-                        if (nextModel === CUSTOM_MODEL_DROPDOWN_VALUE) {
-                          setIsCustomModelEditing(true);
-                          if (!isModelCustom) {
-                            setModel("");
-                          }
-                          return;
-                        }
-
-                        setIsCustomModelEditing(false);
-                        setModel(
-                          nextModel === AUTO_MODEL_DROPDOWN_VALUE
-                            ? ""
-                            : nextModel,
-                        );
-                      }}
-                      value={modelSelectValue}
-                    >
-                      <option value="" disabled>
-                        {selectedModelLabel}
-                      </option>
-                      {modelOptions.map((option) => (
-                        <option
-                          key={option.id || AUTO_MODEL_DROPDOWN_VALUE}
-                          value={option.id || AUTO_MODEL_DROPDOWN_VALUE}
-                        >
-                          {option.label}
-                        </option>
-                      ))}
-                      <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>
-                        Custom model...
-                      </option>
-                    </select>
-                  </div>
-                  {showCustomModelInput ? (
-                    <div
-                      className={cn(
-                        "mt-2 flex min-h-11 items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Custom model ID"
-                        autoCorrect="off"
-                        className={cn(
-                          "h-8 px-0 py-0 leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        disabled={isPending || !modelFieldVisible}
-                        id="persona-custom-model"
-                        onChange={(event) => setModel(event.target.value)}
-                        placeholder="Custom model ID"
-                        value={model}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div
-              aria-hidden={!modelFieldVisible}
-              className={cn(
-                "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-                modelFieldVisible
-                  ? "grid-rows-[1fr] opacity-100"
-                  : "grid-rows-[0fr] opacity-0",
-              )}
-            >
-              <div className="min-h-0 overflow-hidden">
-                <div
-                  className={cn(
-                    "space-y-1.5 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-                    modelFieldVisible
-                      ? "translate-y-0 opacity-100"
-                      : "-translate-y-1 opacity-0",
-                  )}
-                >
-                  <label
-                    className="text-sm font-medium text-foreground"
-                    htmlFor="persona-llm-provider"
-                  >
-                    LLM provider
-                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                      Optional
-                    </span>
-                  </label>
-                  <div className={PERSONA_FIELD_SHELL_CLASS}>
-                    <select
-                      className={cn(
-                        "h-11 w-full appearance-none px-3 py-2",
-                        PERSONA_FIELD_CONTROL_CLASS,
-                      )}
-                      disabled={isPending || !modelFieldVisible}
-                      id="persona-llm-provider"
-                      onChange={(event) => {
-                        const nextProvider = event.target.value;
-                        if (nextProvider === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-                          setIsCustomProviderEditing(true);
-                          setProvider("");
-                          return;
-                        }
-
-                        setIsCustomProviderEditing(false);
-                        setProvider(
-                          nextProvider === AUTO_PROVIDER_DROPDOWN_VALUE
-                            ? ""
-                            : nextProvider,
-                        );
-                      }}
-                      value={providerSelectValue}
-                    >
-                      <option value="" disabled>
-                        {selectedProviderLabel}
-                      </option>
-                      {providerOptions.map((option) => (
-                        <option
-                          key={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
-                          value={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
-                        >
-                          {option.label}
-                        </option>
-                      ))}
-                      <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
-                        Custom provider...
-                      </option>
-                    </select>
-                  </div>
-                  {showCustomProviderInput ? (
-                    <div
-                      className={cn(
-                        "mt-2 flex min-h-11 items-center px-3",
-                        PERSONA_FIELD_SHELL_CLASS,
-                      )}
-                    >
-                      <Input
-                        aria-label="Custom provider ID"
-                        autoCorrect="off"
-                        className={cn(
-                          "h-8 px-0 py-0 leading-6",
-                          PERSONA_FIELD_CONTROL_CLASS,
-                        )}
-                        disabled={isPending || !modelFieldVisible}
-                        id="persona-custom-provider"
-                        onChange={(event) => setProvider(event.target.value)}
-                        placeholder="Custom provider ID"
-                        value={provider}
-                      />
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium text-foreground"
-                htmlFor="persona-name-pool"
-              >
-                Instance name pool
-                <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-              </label>
-              <div
-                className={cn(
-                  "flex min-h-11 items-center px-3",
-                  PERSONA_FIELD_SHELL_CLASS,
-                )}
-              >
-                <Input
-                  autoCapitalize="words"
-                  autoCorrect="off"
-                  className={cn(
-                    "h-8 px-0 py-0 leading-6",
-                    PERSONA_FIELD_CONTROL_CLASS,
-                  )}
+                  LLM provider
+                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
+                </label>
+                <PersonaDropdownField
                   disabled={isPending}
-                  id="persona-name-pool"
-                  onChange={(event) => setNamePoolText(event.target.value)}
-                  placeholder="Birch, Compass, Ridge, Thistle"
-                  spellCheck={false}
-                  value={namePoolText}
+                  id="persona-llm-provider"
+                  onValueChange={handleProviderDropdownChange}
+                  options={providerDropdownOptions}
+                  placeholder="Auto (default)"
+                  value={providerSelectValue}
                 />
+                {showCustomProviderInput ? (
+                  <div
+                    className={cn(
+                      "mt-2 flex min-h-11 items-center px-3",
+                      PERSONA_FIELD_SHELL_CLASS,
+                    )}
+                  >
+                    <Input
+                      aria-label="Custom provider ID"
+                      autoCorrect="off"
+                      className={cn(
+                        "h-8 px-0 py-0 leading-6",
+                        PERSONA_FIELD_CONTROL_CLASS,
+                      )}
+                      disabled={isPending}
+                      id="persona-custom-provider"
+                      onChange={(event) => setProvider(event.target.value)}
+                      placeholder="Custom provider ID"
+                      value={provider}
+                    />
+                  </div>
+                ) : null}
               </div>
-            </div>
+            ) : null}
 
-            <EnvVarsEditor
-              disabled={isPending}
-              onChange={setEnvVars}
-              value={envVars}
-            />
+            <AnimatePresence initial={false}>
+              {modelFieldVisible ? (
+                <motion.div
+                  animate={{ height: "auto", opacity: 1, scale: 1 }}
+                  className="origin-top overflow-hidden"
+                  exit={{ height: 0, opacity: 0, scale: 0.98 }}
+                  initial={{ height: 0, opacity: 0, scale: 0.98 }}
+                  key="persona-model-field"
+                  transition={advancedFieldsTransition}
+                >
+                  <div className="space-y-1.5">
+                    <label
+                      className="text-sm font-medium text-foreground"
+                      htmlFor="persona-model"
+                    >
+                      Model
+                      <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                        Optional
+                      </span>
+                    </label>
+                    <PersonaDropdownField
+                      disabled={isPending}
+                      id="persona-model"
+                      onValueChange={handleModelDropdownChange}
+                      options={modelDropdownOptions}
+                      placeholder="Auto (default)"
+                      value={modelSelectValue}
+                    />
+                    {showCustomModelInput ? (
+                      <div
+                        className={cn(
+                          "mt-2 flex min-h-11 items-center px-3",
+                          PERSONA_FIELD_SHELL_CLASS,
+                        )}
+                      >
+                        <Input
+                          aria-label="Custom model ID"
+                          autoCorrect="off"
+                          className={cn(
+                            "h-8 px-0 py-0 leading-6",
+                            PERSONA_FIELD_CONTROL_CLASS,
+                          )}
+                          disabled={isPending}
+                          id="persona-custom-model"
+                          onChange={(event) => setModel(event.target.value)}
+                          placeholder="Custom model ID"
+                          value={model}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+
+            <div className="space-y-3">
+              <button
+                aria-expanded={showAdvancedFields}
+                className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => setShowAdvancedFields((current) => !current)}
+                type="button"
+              >
+                <span>Advanced</span>
+                <ChevronDown
+                  className={cn(
+                    "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
+                    showAdvancedFields && "rotate-180",
+                  )}
+                />
+              </button>
+
+              <AnimatePresence initial={false}>
+                {showAdvancedFields ? (
+                  <motion.div
+                    animate={{ height: "auto", opacity: 1, scale: 1 }}
+                    className="origin-top overflow-hidden"
+                    exit={{ height: 0, opacity: 0, scale: 0.98 }}
+                    initial={{ height: 0, opacity: 0, scale: 0.98 }}
+                    key="persona-advanced-fields"
+                    transition={advancedFieldsTransition}
+                  >
+                    <div className="space-y-5 pt-2">
+                      <div className="space-y-1.5">
+                        <label
+                          className="text-sm font-medium text-foreground"
+                          htmlFor="persona-name-pool"
+                        >
+                          Instance name pool
+                          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                            Optional
+                          </span>
+                        </label>
+                        <div
+                          className={cn(
+                            "flex min-h-11 items-center px-3",
+                            PERSONA_FIELD_SHELL_CLASS,
+                          )}
+                        >
+                          <Input
+                            autoCapitalize="words"
+                            autoCorrect="off"
+                            className={cn(
+                              "h-8 px-0 py-0 leading-6",
+                              PERSONA_FIELD_CONTROL_CLASS,
+                            )}
+                            disabled={isPending}
+                            id="persona-name-pool"
+                            onChange={(event) =>
+                              setNamePoolText(event.target.value)
+                            }
+                            placeholder="Birch, Compass, Ridge, Thistle"
+                            spellCheck={false}
+                            value={namePoolText}
+                          />
+                        </div>
+                      </div>
+
+                      <EnvVarsEditor
+                        disabled={isPending}
+                        onChange={setEnvVars}
+                        value={envVars}
+                      />
+                    </div>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
 
             {error ? (
               <p className="text-sm text-destructive">{error.message}</p>

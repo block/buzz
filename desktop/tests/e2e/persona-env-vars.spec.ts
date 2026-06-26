@@ -221,12 +221,15 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
 }) => {
   await gotoApp(page);
 
-  // Open the Agents view, click New > Persona to open the persona dialog.
+  // Open the Agents view, click New > New agent to open the persona dialog.
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^Persona$/ }).click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
-  // The env vars editor should be present.
+  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+  // The env vars editor should be present after opening Advanced.
   await expect(page.getByTestId("env-vars-editor")).toBeVisible();
   // Initially empty (no rows).
   await expect(page.getByTestId("env-vars-key")).toHaveCount(0);
@@ -250,4 +253,65 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   // Remove the first row to verify per-row removal still works.
   await page.getByTestId("env-vars-remove").first().click();
   await expect(keys).toHaveCount(2);
+});
+
+test("persona model options follow the selected LLM provider", async ({
+  page,
+}) => {
+  await gotoApp(page);
+
+  await page.getByTestId("open-agents-view").click();
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+
+  const provider = page.locator("#persona-runtime");
+  const llmProvider = page.locator("#persona-llm-provider");
+  const model = page.locator("#persona-model");
+  await expect(provider).toContainText("Goose (default)");
+  await expect(llmProvider).toBeVisible();
+  await expect(model).toHaveCount(0);
+
+  await llmProvider.click();
+  await page
+    .getByRole("menuitemradio", { name: "OpenAI", exact: true })
+    .click();
+  await expect(model).toBeVisible();
+  await model.click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("menuitemradio", { name: /Claude/ })).toHaveCount(
+    0,
+  );
+  await page.getByRole("menuitemradio", { name: "GPT-5", exact: true }).click();
+  await expect(model).toContainText("GPT-5");
+
+  await llmProvider.click();
+  await page
+    .getByRole("menuitemradio", { name: "Anthropic", exact: true })
+    .click();
+  await expect(model).toContainText("Auto (default)");
+
+  await model.click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }).click();
+  await expect(model).toContainText("Claude Sonnet 4.6");
+
+  await llmProvider.click();
+  const llmProviderMenu = page.getByRole("menu").filter({
+    has: page.getByRole("menuitemradio", { name: "OpenAI", exact: true }),
+  });
+  await llmProviderMenu
+    .last()
+    .getByRole("menuitemradio", { name: "Auto (default)", exact: true })
+    .click();
+  await expect(model).toHaveCount(0);
 });
