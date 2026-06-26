@@ -612,6 +612,7 @@ export function MessageThreadPanel({
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
+      data-buzz-conversation-scroll
       data-testid="message-thread-body"
       onScroll={onScroll}
       ref={threadBodyRef}

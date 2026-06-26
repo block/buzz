@@ -52,6 +52,7 @@ export default defineConfig({
         "**/reminders.spec.ts",
         "**/virtualization.spec.ts",
         "**/scroll-history.spec.ts",
+        "**/overscroll-boundary.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
