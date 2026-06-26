@@ -136,7 +136,7 @@ fn set_ptt_inactive(app: &AppHandle, state: &AppState) {
     let _ = app.emit("ptt-state", false);
 }
 
-fn should_register(state: &AppState) -> bool {
+pub(crate) fn should_handle_shortcut_event(state: &AppState) -> bool {
     if !state.ptt_shortcut.enabled.load(Ordering::Acquire) {
         return false;
     }
@@ -145,6 +145,10 @@ fn should_register(state: &AppState) -> bool {
     };
     hs.voice_input_mode == VoiceInputMode::PushToTalk
         && matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
+}
+
+fn should_register(state: &AppState) -> bool {
+    should_handle_shortcut_event(state)
 }
 
 pub fn refresh_registration(app: &AppHandle, state: &AppState) {

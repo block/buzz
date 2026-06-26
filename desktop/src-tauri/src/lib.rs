@@ -431,19 +431,9 @@ pub fn run() {
                         None => return,
                     };
 
-                    // Only act if a huddle is active and mode is PTT.
-                    let (is_ptt_mode, is_active) = match state.huddle_state.lock() {
-                        Ok(hs) => (
-                            hs.voice_input_mode == huddle::VoiceInputMode::PushToTalk,
-                            matches!(
-                                hs.phase,
-                                huddle::HuddlePhase::Connected | huddle::HuddlePhase::Active
-                            ),
-                        ),
-                        Err(_) => return,
-                    };
-
-                    if !is_ptt_mode || !is_active {
+                    // This is a defensive runtime gate: if unregistering fails after the user
+                    // disables the shortcut, the OS may still deliver events to this handler.
+                    if !ptt_shortcut::should_handle_shortcut_event(&state) {
                         return;
                     }
 
