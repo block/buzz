@@ -498,7 +498,13 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className={cn(topChromeInset.headerBase, topChromeInset.divider)}>
+      <div
+        className={cn(
+          topChromeInset.headerBase,
+          topChromeInset.divider,
+          "-mb-[3.25rem]",
+        )}
+      >
         <div className="flex min-h-[3.25rem] items-center justify-between gap-3 px-5 py-2">
           <Button
             className="h-9 gap-1.5 text-muted-foreground"
@@ -529,7 +535,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
         </div>
       </div>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-[4.25rem]">
         <div className="w-full space-y-5">
           <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
             <div className="flex min-w-0 items-start gap-3">

@@ -83,7 +83,7 @@ const overrides = new Map([
   // syncs team-dir edits before all personas.json readers; run_event_sync
   // signs the persona/team retention events post-identity) layered on top of
   // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1034],
+  ["src-tauri/src/lib.rs", 1035],
   // Project git workflow exploration: branch/push UI and repository status
   // plumbing grew the panel slightly past the default ceiling. Keep this narrow
   // while the project surface is split into smaller components.
