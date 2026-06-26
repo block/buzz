@@ -10,9 +10,10 @@ import {
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import type { TimelineItemsResult } from "@/features/messages/lib/timelineItems";
+import { buildTimelineItems } from "@/features/messages/lib/timelineItems";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
@@ -117,10 +118,6 @@ type ChannelIntro = {
  *  message list. Must be module-level so its identity never changes. */
 const EMPTY_MESSAGES: TimelineMessage[] = [];
 
-/** Stable empty id->index map for the convergence adapter before the first
- *  item stream arrives. Module-level so its identity never changes. */
-const EMPTY_INDEX_MAP: Map<string, number> = new Map();
-
 type DirectMessageIntroParticipant = {
   avatarUrl: string | null;
   displayName: string;
@@ -215,33 +212,17 @@ const MessageTimelineBase = React.forwardRef<
     return pinToBottomByIndexRef.current();
   }, []);
 
-  // The virtualizer instance and the flattened item stream are owned by the
-  // child TimelineMessageList (which mounts the VirtualizedList) and reported
-  // up here so the scroll manager can resolve scroll targets by index. The
-  // virtualizer reaches us via a ref (its identity is stable across renders,
-  // but it arrives after first paint); the item stream + id->index map arrive
-  // as state so a rebuild re-runs the scroll manager's index-model paths.
+  // The virtualizer instance is owned by the child TimelineMessageList (which
+  // mounts the VirtualizedList) and reported up here via a ref so the scroll
+  // manager can drive index-model scroll paths. The virtualizer arrives via
+  // VirtualizedList's onVirtualizer layout effect (child layout effects fire
+  // before parent layout effects), so getVirtualizer() is live by the time
+  // useAnchoredScroll's mount pin runs.
   const virtualizerRef = React.useRef<ListVirtualizer | null>(null);
   const handleVirtualizer = React.useCallback((instance: ListVirtualizer) => {
     virtualizerRef.current = instance;
   }, []);
   const getVirtualizer = React.useCallback(() => virtualizerRef.current, []);
-  const [timelineItems, setTimelineItems] =
-    React.useState<TimelineItemsResult | null>(null);
-  const handleItems = React.useCallback((result: TimelineItemsResult) => {
-    setTimelineItems(result);
-  }, []);
-  const virtualizerOption = React.useMemo(
-    () =>
-      timelineItems
-        ? {
-            getVirtualizer,
-            indexByMessageId: timelineItems.indexByMessageId,
-            itemCount: timelineItems.items.length,
-          }
-        : null,
-    [getVirtualizer, timelineItems],
-  );
 
   // Gate the heavy timeline render (each row runs a synchronous
   // react-markdown parse) behind React concurrency. `useDeferredValue` lets the
@@ -266,6 +247,32 @@ const MessageTimelineBase = React.forwardRef<
     EMPTY_TIMELINE_SNAPSHOT,
   );
   const deferredMessages = deferredSnapshot.messages;
+  // The flattened item stream mirrors what TimelineMessageList renders: use the
+  // hoisted mainEntries when the deferred snapshot is current (same identity as
+  // the live messages), fall back to building entries from deferredMessages when
+  // the deferred value is stale. This keeps the scroll manager's index map in
+  // sync with what's actually painted without a state-update round-trip.
+  const deferredEntries = React.useMemo(
+    () =>
+      (deferredMessages === messages ? mainEntries : undefined) ??
+      buildMainTimelineEntries(deferredMessages),
+    [mainEntries, deferredMessages, messages],
+  );
+  const timelineItems = React.useMemo(
+    () => buildTimelineItems(deferredEntries, firstUnreadMessageId),
+    [deferredEntries, firstUnreadMessageId],
+  );
+  const virtualizerOption = React.useMemo(
+    () =>
+      timelineItems.items.length > 0
+        ? {
+            getVirtualizer,
+            indexByMessageId: timelineItems.indexByMessageId,
+            itemCount: timelineItems.items.length,
+          }
+        : null,
+    [getVirtualizer, timelineItems],
+  );
   const isDeferredSnapshotStale = isDeferredTimelineSnapshotStale({
     deferredSnapshot,
     liveSnapshot,
@@ -348,7 +355,7 @@ const MessageTimelineBase = React.forwardRef<
   // path is the whole story and a missing row simply isn't reachable.
   const { scrollToMessage: convergeToMessage, cancel: cancelConvergence } =
     useConvergentScrollToMessage(getVirtualizer, {
-      indexByMessageId: timelineItems?.indexByMessageId ?? EMPTY_INDEX_MAP,
+      indexByMessageId: timelineItems.indexByMessageId,
       align: "center",
       onConverged: (messageId) => {
         scrollToMessage(messageId, { highlight: true });
@@ -378,11 +385,12 @@ const MessageTimelineBase = React.forwardRef<
   }, [convergeToMessage, virtualizerOption]);
   // Drive the mount bottom-pin through the virtualizer when one is present.
   // Assigned during render (not an effect) because `useAnchoredScroll`'s
-  // mount pin runs in a layout effect on the SAME first commit — a passive
-  // effect would assign too late and the hook would fall back to the raw pin
-  // on the very mount the index pin exists to fix. The virtualizer instance
-  // arrives via the child's `onVirtualizer` (child refs resolve before this
-  // parent's layout effects), so `getVirtualizer()` is live by pin time.
+  // mount pin runs in a layout effect on the same commit — a passive effect
+  // would assign too late. `virtualizerOption` is derived from `timelineItems`
+  // via useMemo (no state update, no extra render), so it is non-null from the
+  // first deferred commit that carries real messages. `getVirtualizer()` is
+  // live by pin time because VirtualizedList publishes the instance in a
+  // layout effect, and child layout effects fire before parent layout effects.
   pinToBottomByIndexRef.current = virtualizerOption
     ? () => {
         const virtualizer = getVirtualizer();
@@ -717,7 +725,6 @@ const MessageTimelineBase = React.forwardRef<
                     unfollowThreadById={unfollowThreadById}
                     scrollContainerRef={scrollContainerRef}
                     headerOverlayRef={activeDayHeaderRef}
-                    onItems={handleItems}
                     onVirtualizer={handleVirtualizer}
                   />
                 </div>

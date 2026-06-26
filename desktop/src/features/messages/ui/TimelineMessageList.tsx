@@ -6,7 +6,6 @@ import {
   getTimelineItemKey,
   resolveActiveDayTimestamp,
   type TimelineItem,
-  type TimelineItemsResult,
 } from "@/features/messages/lib/timelineItems";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -82,9 +81,6 @@ type TimelineMessageListProps = {
   /** Non-scrolling overlay container the floating active-day header portals
    *  into — sits OUTSIDE the scroll container so the header cannot drift. */
   headerOverlayRef: React.RefObject<HTMLElement | null>;
-  /** Receives the flattened item stream + index map so the scroll manager can
-   *  resolve scroll targets by id. Called whenever the stream is rebuilt. */
-  onItems?: (result: TimelineItemsResult) => void;
   /** Receives the virtualizer instance for index-model scroll paths. */
   onVirtualizer?: (virtualizer: ListVirtualizer) => void;
 };
@@ -119,7 +115,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   unfollowThreadById,
   scrollContainerRef,
   headerOverlayRef,
-  onItems,
   onVirtualizer,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
@@ -181,10 +176,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     () => buildTimelineItems(entries, firstUnreadMessageId),
     [entries, firstUnreadMessageId],
   );
-
-  React.useLayoutEffect(() => {
-    onItems?.(itemsResult);
-  }, [itemsResult, onItems]);
 
   const renderItem = React.useCallback(
     (item: TimelineItem) => {
