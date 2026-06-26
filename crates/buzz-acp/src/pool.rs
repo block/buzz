@@ -292,6 +292,10 @@ pub enum SteerError {
     /// unknown after prompt completion — the main loop must treat this as
     /// "release the withheld event so normal dispatch handles it" with no
     /// claims that the agent did or did not incorporate it.
+    ///
+    /// Returned synchronously by `send_steer` when no task is in flight
+    /// for the channel. Never sent through the ack channel — the ack
+    /// watcher is only spawned on `send_steer` success.
     PromptCompleted,
 }
 

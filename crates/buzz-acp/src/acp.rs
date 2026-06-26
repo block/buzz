@@ -1248,7 +1248,12 @@ impl AcpClient {
                 // the run has cleared. Other agents don't emit this field;
                 // for them `active_run_id` stays `None` and steer callers
                 // will fall back to cancel+merge.
-                let meta = update.get("_meta").and_then(|m| m.get("goose"));
+                //
+                // Per the ACP `SessionNotification` schema, `_meta` is a
+                // sibling of `update` and `sessionId` at the params level —
+                // not nested inside `update`. Both goose and buzz-agent emit
+                // it at `params._meta.goose.activeRunId`.
+                let meta = msg["params"].get("_meta").and_then(|m| m.get("goose"));
                 if let Some(goose_meta) = meta {
                     match goose_meta.get("activeRunId") {
                         Some(serde_json::Value::String(run_id)) => {
@@ -2468,6 +2473,10 @@ mod tests {
     /// Build a `session/update` JSON-RPC notification carrying a
     /// `session_info_update` with the given `_meta.goose.activeRunId` value.
     /// Pass `None` to omit the `activeRunId` field entirely.
+    ///
+    /// `_meta` is a sibling of `update` at the params level (per the ACP
+    /// `SessionNotification` schema), matching what both goose and buzz-agent
+    /// emit on the wire.
     fn session_info_update_msg(active_run_id: Option<serde_json::Value>) -> serde_json::Value {
         let mut goose = serde_json::Map::new();
         if let Some(v) = active_run_id {
@@ -2479,10 +2488,11 @@ mod tests {
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
+                "sessionId": "test-session",
                 "update": {
                     "sessionUpdate": "session_info_update",
-                    "_meta": serde_json::Value::Object(meta),
-                }
+                },
+                "_meta": serde_json::Value::Object(meta),
             }
         })
     }

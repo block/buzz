@@ -570,6 +570,7 @@ impl EventQueue {
         self.retry_counts.remove(&channel_id);
         self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
+        self.withheld_native_steer.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -1951,7 +1952,7 @@ mod tests {
                 "reply".into(),
             ]],
         );
-        let steering_id = steering.id.to_hex();
+        let _steering_id = steering.id.to_hex();
 
         let batch = FlushBatch {
             channel_id: ch,
@@ -1970,10 +1971,13 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Reply instruction points at the steering message's own event id.
+        // Reply instruction points at the thread root of the steering message
+        // (thread_b), not the steering event's own id — this matches the
+        // human-aware reply anchoring from PR #1281: for human-facing turns in
+        // a thread, the anchor is always the thread root.
         assert!(
-            prompt.contains(&format!("--reply-to {steering_id}")),
-            "reply instruction should target the steering message: {prompt}"
+            prompt.contains(&format!("--reply-to {thread_b}")),
+            "reply instruction should target the steering thread root: {prompt}"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {thread_a}")),
@@ -3897,6 +3901,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");

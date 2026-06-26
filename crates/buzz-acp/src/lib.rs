@@ -2078,13 +2078,21 @@ async fn tokio_main() -> Result<()> {
                 //     path. Drop the withheld event so normal dispatch
                 //     never redelivers it.
                 //
-                //   Err(_) where the read loop had NOT yet established
-                //   pending_steer (write never landed — Transport /
-                //   ExpectedRunIdMissing / AgentError before pending):
+                //   Err(_) where the write never landed (Transport /
+                //   ExpectedRunIdMissing):
                 //     Delivery state of the underlying message is "never
                 //     attempted on the wire". Release withheld back to the
                 //     queue front AND issue the cancel+merge fallback so
                 //     the message still reaches the agent.
+                //
+                //   Err(AgentError)
+                //     The write landed and the agent returned a JSON-RPC
+                //     error. The agent's turn is still running (or just
+                //     completed). Release withheld for normal dispatch;
+                //     do NOT fire the fallback signal — the agent already
+                //     saw the steer attempt. If the turn is still running,
+                //     normal dispatch re-delivers when it completes. If
+                //     the turn already ended, there is nothing to cancel.
                 //
                 //   PromptCompletedNeutral
                 //     The read loop wrote the steer (or was preparing to)
@@ -2097,13 +2105,11 @@ async fn tokio_main() -> Result<()> {
                 //     redelivery via the released queue entry).
                 //
                 //   Err(PromptCompleted)
-                //     Defensive case: the read loop does not currently
-                //     send this variant — `pool::send_steer` returns it
-                //     synchronously (handled by `try_native_steer`'s Err
-                //     branch falling through to cancel+merge). If a
-                //     future read-loop change ever routes this through
-                //     the ack, treat it like PromptCompletedNeutral:
-                //     release, no fallback.
+                //     `SteerError::PromptCompleted` is returned synchronously
+                //     by `pool::send_steer` when no task is in flight (handled
+                //     in `try_native_steer`'s Err branch, which falls through
+                //     to cancel+merge). It is never routed through the ack
+                //     channel, so this variant never appears in `SteerAckEvent`.
                 //
                 //   Watcher Err (oneshot dropped)
                 //     Should not happen — the read loop drains
@@ -2112,9 +2118,16 @@ async fn tokio_main() -> Result<()> {
                 //     the withheld event in `withheld_native_steer`.
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
                     Ok(pool::SteerAck::Success) => (false, true, false),
-                    Ok(pool::SteerAck::Err(pool::SteerError::PromptCompleted)) => {
+                    // AgentError: write landed, agent rejected it at the
+                    // application level. Release for normal dispatch; no
+                    // fallback signal (the turn is still running or just
+                    // ended — either way there is nothing to cancel).
+                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError(_))) => {
                         (true, false, false)
                     }
+                    // Transport / ExpectedRunIdMissing: write never landed.
+                    // Release and fire the cancel+merge fallback so the
+                    // message still reaches the agent.
                     Ok(pool::SteerAck::Err(_)) => (true, false, true),
                     Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
                     Err(_recv_err) => (true, false, false),
