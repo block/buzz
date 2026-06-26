@@ -124,10 +124,24 @@ export function applyRemoteContextTimestamp(args: {
 }
 
 /**
+ * Result of a `trimContextsToBudget` call.
+ */
+export interface TrimResult {
+  /** Number of entries removed from `contexts`. */
+  evicted: number;
+  /** True when the serialized blob fits within `maxBytes` after trimming. */
+  fitsAfterTrim: boolean;
+}
+
+/**
  * Trim a contexts map to fit within `maxBytes` when serialized as the JSON
  * blob `{v:1, client_id, contexts}`. Evicts oldest `msg:` entries first
  * (lowest timestamp), then oldest `thread:` entries. Channel keys are never
- * evicted. Returns the number of entries removed.
+ * evicted. Mutates `contexts` in place.
+ *
+ * Returns `{ evicted, fitsAfterTrim }`. `fitsAfterTrim` is false when the
+ * remaining blob (channel keys only) still exceeds `maxBytes` — the caller
+ * must not publish in that case.
  *
  * Exported for unit testing; callers should prefer `currentContexts()`.
  */
@@ -135,13 +149,14 @@ export function trimContextsToBudget(
   contexts: Record<string, number>,
   clientId: string,
   maxBytes: number,
-): number {
+): TrimResult {
   const encoder = new TextEncoder();
   const blobFor = (c: Record<string, number>) =>
     JSON.stringify({ v: 1, client_id: clientId, contexts: c });
 
-  if (encoder.encode(blobFor(contexts)).length <= maxBytes) {
-    return 0;
+  let currentBytes = encoder.encode(blobFor(contexts)).length;
+  if (currentBytes <= maxBytes) {
+    return { evicted: 0, fitsAfterTrim: true };
   }
 
   const msgEntries: [string, number][] = [];
@@ -157,13 +172,26 @@ export function trimContextsToBudget(
   msgEntries.sort((a, b) => a[1] - b[1]);
   threadEntries.sort((a, b) => a[1] - b[1]);
 
-  let evicted = 0;
-  for (const [key] of [...msgEntries, ...threadEntries]) {
-    if (encoder.encode(blobFor(contexts)).length <= maxBytes) break;
-    delete contexts[key];
-    evicted++;
+  // O(n) pass: subtract each entry's byte contribution from currentBytes and
+  // collect entries to evict. The per-entry estimate is `,"key":timestamp`
+  // (key.length + 3 bytes for `"`, `"`, `:` plus 1 comma) + timestamp digits.
+  // This is an approximation — the final encode below is the authoritative check.
+  const toEvict: string[] = [];
+  for (const [key, ts] of [...msgEntries, ...threadEntries]) {
+    if (currentBytes <= maxBytes) break;
+    // Contribution: `,"key":timestamp` — comma + quoted key + colon + value
+    currentBytes -= key.length + 3 + String(ts).length + 1;
+    toEvict.push(key);
   }
-  return evicted;
+
+  for (const key of toEvict) {
+    delete contexts[key];
+  }
+
+  // Final authoritative check — handles JSON comma-accounting edge cases
+  // (e.g. last-entry comma disappears) that the per-entry estimate ignores.
+  const fitsAfterTrim = encoder.encode(blobFor(contexts)).length <= maxBytes;
+  return { evicted: toEvict.length, fitsAfterTrim };
 }
 
 export class ReadStateManager {
@@ -207,7 +235,8 @@ export class ReadStateManager {
     if (this.destroyed) return;
     await this.startLiveSubscription();
     if (this.destroyed) return;
-    if (!this.isIdenticalToLastPublished(this.currentContexts())) {
+    const initContexts = this.currentContexts();
+    if (initContexts !== null && !this.isIdenticalToLastPublished(initContexts)) {
       this.schedulePublish();
     }
 
@@ -543,8 +572,8 @@ export class ReadStateManager {
     // Build blob from contexts this client is allowed to publish.
     const contexts = this.currentContexts();
 
-    // Suppress no-op publishes
-    if (this.isIdenticalToLastPublished(contexts)) return;
+    // Suppress no-op publishes; also skip if the blob cannot fit within budget.
+    if (contexts === null || this.isIdenticalToLastPublished(contexts)) return;
 
     const blob: ReadStateBlob = {
       v: 1,
@@ -630,7 +659,7 @@ export class ReadStateManager {
     return true;
   }
 
-  private currentContexts(): Record<string, number> {
+  private currentContexts(): Record<string, number> | null {
     const contexts: Record<string, number> = {};
     for (const [ctx, ts] of this.effectiveState) {
       if (!this.publishableContextIds.has(ctx)) {
@@ -643,7 +672,7 @@ export class ReadStateManager {
     // the wrong metric — the relay rejects on byte size, not entry count. Evict
     // oldest msg: entries first (lowest timestamp), then thread: entries, until
     // the JSON fits. Channel keys are never evicted.
-    const evicted = trimContextsToBudget(
+    const { evicted, fitsAfterTrim } = trimContextsToBudget(
       contexts,
       this.clientId,
       READ_STATE_MAX_PLAINTEXT_BYTES,
@@ -652,6 +681,12 @@ export class ReadStateManager {
       console.warn(
         `[ReadStateManager] currentContexts trimmed ${evicted} entries to fit byte budget`,
       );
+    }
+    if (!fitsAfterTrim) {
+      console.error(
+        "[ReadStateManager] currentContexts: blob exceeds byte budget even after full eviction — skipping publish",
+      );
+      return null;
     }
 
     return contexts;
