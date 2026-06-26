@@ -73,10 +73,10 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('general'), findsOneWidget);
-    expect(find.text('design-forum'), findsOneWidget);
+    expect(find.text('design-forum'), findsNothing);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('CHANNELS'), findsOneWidget);
-    expect(find.text('FORUMS'), findsOneWidget);
+    expect(find.text('FORUMS'), findsNothing);
     expect(find.text('DMS'), findsOneWidget);
     expect(find.text('\u{1F331}'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);

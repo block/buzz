@@ -34,7 +34,7 @@ import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
 
-enum _QuickAction { createChannel, createForum, newDm }
+enum _QuickAction { createChannel, newDm }
 
 /// Height of the [_ConnectionBanner]: vertical padding (Grid.quarter + 2) × 2
 /// plus the ~16px row content (12px spinner / labelSmall text).
@@ -153,16 +153,11 @@ class ChannelsPage extends HookConsumerWidget {
 
       switch (action) {
         case _QuickAction.createChannel:
-        case _QuickAction.createForum:
           final created = await showModalBottomSheet<Channel>(
             context: context,
             isScrollControlled: true,
             showDragHandle: true,
-            builder: (_) => _CreateChannelSheet(
-              channelType: action == _QuickAction.createForum
-                  ? 'forum'
-                  : 'stream',
-            ),
+            builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
           );
           if (created != null && context.mounted) {
             await openChannel(created);
@@ -347,9 +342,6 @@ class _SliverChannelsList extends HookConsumerWidget {
     final streamChannels = visibleChannels
         .where((channel) => channel.isStream)
         .toList();
-    final forumChannels = visibleChannels
-        .where((channel) => channel.isForum)
-        .toList();
     final dmChannels = sortDmChannelsByDisplayLabel(
       visibleChannels.where((channel) => channel.isDm),
       currentPubkey: currentPubkey,
@@ -357,7 +349,6 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     final starredExpanded = useState(true);
     final channelsExpanded = useState(true);
-    final forumsExpanded = useState(true);
     final dmsExpanded = useState(true);
     final initialSeedComplete = useState(false);
     final seededPubkey = useRef<String?>(null);
@@ -563,19 +554,6 @@ class _SliverChannelsList extends HookConsumerWidget {
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
-              onSelectChannel: onSelectChannel,
-            ),
-            _ChannelSection(
-              title: 'Forums',
-              icon: LucideIcons.messageSquareText,
-              expanded: forumsExpanded.value,
-              onToggle: () => forumsExpanded.value = !forumsExpanded.value,
-              channels: forumChannels,
-              unreadChannelIds: unreadChannelIds,
-              unreadChannelCounts: unreadChannelCounts,
-              mutedChannelIds: mutedChannelIds,
-              currentPubkey: currentPubkey,
-              emptyLabel: 'No forums yet',
               onSelectChannel: onSelectChannel,
             ),
             _ChannelSection(
@@ -1416,12 +1394,6 @@ class _QuickActionsSheet extends StatelessWidget {
               subtitle: const Text('Start a new stream channel'),
               onTap: () =>
                   Navigator.of(context).pop(_QuickAction.createChannel),
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.messageSquareText),
-              title: const Text('Create forum'),
-              subtitle: const Text('Set up a threaded discussion space'),
-              onTap: () => Navigator.of(context).pop(_QuickAction.createForum),
             ),
             ListTile(
               leading: const Icon(LucideIcons.messagesSquare),
