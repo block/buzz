@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::{app_state::AppState, managed_agents::resolve_command};
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
     pub short_hash: String,
@@ -24,12 +24,23 @@ pub struct ProjectRepoFileInfo {
     pub size: Option<u64>,
     pub preview_content: Option<String>,
     pub last_changed_at: Option<i64>,
+    pub latest_commit: Option<ProjectRepoCommitInfo>,
+}
+
+#[derive(Serialize)]
+pub struct ProjectRepoContributorInfo {
+    pub name: String,
+    pub email: String,
+    pub commit_count: usize,
+    pub last_commit_at: i64,
 }
 
 #[derive(Serialize)]
 pub struct ProjectRepoSnapshotInfo {
     pub latest_commit: Option<ProjectRepoCommitInfo>,
+    pub commits: Vec<ProjectRepoCommitInfo>,
     pub files: Vec<ProjectRepoFileInfo>,
+    pub contributors: Vec<ProjectRepoContributorInfo>,
 }
 
 struct GitAuthConfig {
@@ -162,18 +173,77 @@ fn read_preview_content(
     String::from_utf8(bytes).ok()
 }
 
-fn parse_last_changed_at(output: &str) -> std::collections::HashMap<String, i64> {
-    let mut current_timestamp = None;
-    let mut result = std::collections::HashMap::new();
+fn parse_commits(output: &str) -> Vec<ProjectRepoCommitInfo> {
+    output
+        .lines()
+        .filter_map(parse_latest_commit)
+        .take(50)
+        .collect()
+}
+
+fn parse_contributors(output: &str) -> Vec<ProjectRepoContributorInfo> {
+    let mut contributors: std::collections::HashMap<String, ProjectRepoContributorInfo> =
+        std::collections::HashMap::new();
 
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        if let Ok(timestamp) = line.parse::<i64>() {
-            current_timestamp = Some(timestamp);
+        let mut parts = line.split('\0');
+        let name = parts.next().unwrap_or_default().trim().to_string();
+        let email = parts.next().unwrap_or_default().trim().to_string();
+        let timestamp = parts
+            .next()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or_default();
+        if name.is_empty() && email.is_empty() {
             continue;
         }
 
-        if let Some(timestamp) = current_timestamp {
-            result.entry(line.to_string()).or_insert(timestamp);
+        let key = if email.is_empty() {
+            name.to_lowercase()
+        } else {
+            email.to_lowercase()
+        };
+        contributors
+            .entry(key)
+            .and_modify(|contributor| {
+                contributor.commit_count += 1;
+                contributor.last_commit_at = contributor.last_commit_at.max(timestamp);
+            })
+            .or_insert(ProjectRepoContributorInfo {
+                name,
+                email,
+                commit_count: 1,
+                last_commit_at: timestamp,
+            });
+    }
+
+    let mut contributors = contributors.into_values().collect::<Vec<_>>();
+    contributors.sort_by(|left, right| {
+        right
+            .commit_count
+            .cmp(&left.commit_count)
+            .then_with(|| right.last_commit_at.cmp(&left.last_commit_at))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    contributors.truncate(50);
+    contributors
+}
+
+fn parse_latest_commit_by_path(
+    output: &str,
+) -> std::collections::HashMap<String, ProjectRepoCommitInfo> {
+    let mut current_commit = None;
+    let mut result = std::collections::HashMap::new();
+
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if line.contains('\0') {
+            current_commit = parse_latest_commit(line);
+            continue;
+        }
+
+        if let Some(commit) = &current_commit {
+            result
+                .entry(line.to_string())
+                .or_insert_with(|| commit.clone());
         }
     }
 
@@ -183,7 +253,7 @@ fn parse_last_changed_at(output: &str) -> std::collections::HashMap<String, i64>
 fn parse_ls_tree(
     repo_dir: &std::path::Path,
     output: &str,
-    last_changed_by_path: &std::collections::HashMap<String, i64>,
+    latest_commit_by_path: &std::collections::HashMap<String, ProjectRepoCommitInfo>,
 ) -> Vec<ProjectRepoFileInfo> {
     output
         .lines()
@@ -204,7 +274,10 @@ fn parse_ls_tree(
                 kind,
                 size,
                 preview_content,
-                last_changed_at: last_changed_by_path.get(path).copied(),
+                last_changed_at: latest_commit_by_path
+                    .get(path)
+                    .map(|commit| commit.timestamp),
+                latest_commit: latest_commit_by_path.get(path).cloned(),
             })
         })
         .take(250)
@@ -219,11 +292,36 @@ fn snapshot_from_repo(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> Proje
     )
     .ok()
     .and_then(|output| parse_latest_commit(&output));
-    let files = if latest_commit.is_some() {
-        let last_changed_by_path = run_git(
+    let (commits, contributors) = if latest_commit.is_some() {
+        let commits = run_git(
             &[
                 "log",
-                "--format=%ct",
+                "--max-count=50",
+                "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s",
+                "HEAD",
+            ],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| parse_commits(&output))
+        .unwrap_or_default();
+        let contributors = run_git(
+            &["log", "--format=%an%x00%ae%x00%at", "HEAD"],
+            Some(repo_dir),
+            auth,
+        )
+        .map(|output| parse_contributors(&output))
+        .unwrap_or_default();
+        (commits, contributors)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let files = if latest_commit.is_some() {
+        let latest_commit_by_path = run_git(
+            &[
+                "log",
+                "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s",
                 "--name-only",
                 "--diff-filter=ACMRT",
                 "--",
@@ -231,11 +329,11 @@ fn snapshot_from_repo(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> Proje
             Some(repo_dir),
             auth,
         )
-        .map(|output| parse_last_changed_at(&output))
+        .map(|output| parse_latest_commit_by_path(&output))
         .unwrap_or_default();
 
         run_git(&["ls-tree", "-r", "--long", "HEAD"], Some(repo_dir), auth)
-            .map(|output| parse_ls_tree(repo_dir, &output, &last_changed_by_path))
+            .map(|output| parse_ls_tree(repo_dir, &output, &latest_commit_by_path))
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -243,7 +341,9 @@ fn snapshot_from_repo(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> Proje
 
     ProjectRepoSnapshotInfo {
         latest_commit,
+        commits,
         files,
+        contributors,
     }
 }
 
@@ -279,7 +379,7 @@ pub async fn get_project_repo_snapshot(
             .to_str()
             .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
 
-        let mut clone_args = vec!["clone", "--depth=1", "--filter=blob:none"];
+        let mut clone_args = vec!["clone", "--filter=blob:none"];
         if let Some(ref branch) = branch {
             clone_args.push("--branch");
             clone_args.push(branch.as_str());
@@ -294,13 +394,7 @@ pub async fn get_project_repo_snapshot(
             // Retry without the branch selector so we can still render a clean
             // "no commits/files yet" state instead of an error card.
             run_git(
-                &[
-                    "clone",
-                    "--depth=1",
-                    "--filter=blob:none",
-                    clone_url.as_str(),
-                    repo_path,
-                ],
+                &["clone", "--filter=blob:none", clone_url.as_str(), repo_path],
                 None,
                 &auth,
             )?;

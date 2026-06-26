@@ -1,9 +1,26 @@
 import {
   ArrowLeft,
   BookOpen,
+  Braces,
   ChevronRight,
+  CodeXml,
+  Database,
+  FileArchive,
+  FileAudio,
+  FileCode2,
+  FileCog,
   FileDiff,
+  FileImage,
+  FileJson,
+  FileLock2,
+  FileSpreadsheet,
+  FileText,
+  FileType,
+  FileVideo,
   FolderGit2,
+  Package,
+  Settings,
+  Terminal,
 } from "lucide-react";
 import * as React from "react";
 
@@ -11,14 +28,42 @@ import type {
   ProjectRepoFile,
   ProjectRepoSnapshot,
 } from "@/features/projects/hooks";
+import { useUserSearchQuery } from "@/features/profile/hooks";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { UserSearchResult } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+function relativeCommitTime(createdAt: number) {
+  const elapsedSeconds = Math.max(
+    1,
+    Math.floor(Date.now() / 1_000 - createdAt),
+  );
+  const units = [
+    { label: "year", seconds: 365 * 24 * 60 * 60 },
+    { label: "month", seconds: 30 * 24 * 60 * 60 },
+    { label: "week", seconds: 7 * 24 * 60 * 60 },
+    { label: "day", seconds: 24 * 60 * 60 },
+    { label: "hour", seconds: 60 * 60 },
+    { label: "minute", seconds: 60 },
+    { label: "second", seconds: 1 },
+  ];
+
+  for (const unit of units) {
+    const value = Math.floor(elapsedSeconds / unit.seconds);
+    if (value >= 1) {
+      return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
+    }
+  }
+
+  return "just now";
+}
+
+function pluralize(count: number, singular: string) {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`;
 }
 
 function formatLastChangedAt(timestamp: number | null) {
@@ -36,6 +81,100 @@ function formatFileSize(size: number | null) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function normalizeAuthorLookupValue(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+type CommitAuthorProfile = {
+  avatarUrl: string | null;
+  displayName: string | null;
+  isAgent?: boolean;
+  nip05Handle?: string | null;
+  ownerPubkey?: string | null;
+};
+
+function profileMatchesCommitAuthor(
+  commit: ProjectRepoFile["latestCommit"],
+  profile: CommitAuthorProfile,
+  pubkey?: string,
+) {
+  if (!commit) return false;
+
+  const authorName = normalizeAuthorLookupValue(commit.authorName);
+  const authorEmail = normalizeAuthorLookupValue(commit.authorEmail);
+  if (!authorName && !authorEmail) return false;
+
+  const candidates = [
+    pubkey,
+    profile.displayName,
+    profile.nip05Handle,
+    profile.ownerPubkey,
+  ].map(normalizeAuthorLookupValue);
+
+  return candidates.includes(authorName) || candidates.includes(authorEmail);
+}
+
+function profileForCommitAuthor(
+  commit: ProjectRepoFile["latestCommit"],
+  profiles: UserProfileLookup | undefined,
+) {
+  if (!commit || !profiles) return null;
+
+  for (const [pubkey, profile] of Object.entries(profiles)) {
+    if (profileMatchesCommitAuthor(commit, profile, pubkey)) {
+      return profile;
+    }
+  }
+
+  return null;
+}
+
+function searchedProfileForCommitAuthor(
+  commit: ProjectRepoFile["latestCommit"],
+  users: UserSearchResult[] | undefined,
+) {
+  if (!commit || !users?.length) return null;
+
+  return (
+    users.find((user) =>
+      profileMatchesCommitAuthor(commit, user, user.pubkey),
+    ) ?? users[0]
+  );
+}
+
+function commitAuthorLabel(
+  commit: ProjectRepoFile["latestCommit"],
+  profile?: CommitAuthorProfile | null,
+) {
+  if (!commit) return "";
+
+  return (
+    profile?.displayName?.trim() ||
+    profile?.nip05Handle?.trim() ||
+    commit.authorName
+  );
+}
+
+function RepositoryCommitCell({
+  commit,
+  profiles,
+}: {
+  commit: ProjectRepoFile["latestCommit"];
+  profiles?: UserProfileLookup;
+}) {
+  if (!commit) return <span className="text-muted-foreground">—</span>;
+
+  return (
+    <p className="truncate text-sm text-foreground">
+      {commit.subject}
+      <span className="text-muted-foreground">
+        {" "}
+        · {commitAuthorLabel(commit, profileForCommitAuthor(commit, profiles))}
+      </span>
+    </p>
+  );
 }
 
 function baseName(path: string) {
@@ -84,12 +223,240 @@ function languageForPath(path: string) {
   return extension ? FILE_LANGUAGE_BY_EXTENSION[extension] : undefined;
 }
 
+type FileIconVisual = {
+  Icon: React.ComponentType<{ className?: string }>;
+  className: string;
+  containerClassName: string;
+};
+
+const CODE_EXTENSIONS = new Set([
+  "c",
+  "cc",
+  "cpp",
+  "cs",
+  "dart",
+  "go",
+  "java",
+  "js",
+  "jsx",
+  "kt",
+  "kts",
+  "mjs",
+  "mts",
+  "py",
+  "rb",
+  "rs",
+  "swift",
+  "ts",
+  "tsx",
+  "zig",
+]);
+const IMAGE_EXTENSIONS = new Set([
+  "gif",
+  "heic",
+  "jpeg",
+  "jpg",
+  "png",
+  "svg",
+  "webp",
+]);
+const ARCHIVE_EXTENSIONS = new Set([
+  "7z",
+  "bz2",
+  "gz",
+  "rar",
+  "tar",
+  "tgz",
+  "zip",
+]);
+const AUDIO_EXTENSIONS = new Set(["aac", "flac", "m4a", "mp3", "ogg", "wav"]);
+const VIDEO_EXTENSIONS = new Set(["avi", "m4v", "mov", "mp4", "webm"]);
+const SPREADSHEET_EXTENSIONS = new Set(["csv", "ods", "tsv", "xls", "xlsx"]);
+const TEXT_EXTENSIONS = new Set(["md", "mdx", "rst", "txt"]);
+
+function extensionForPath(path: string) {
+  const name = baseName(path).toLowerCase();
+  if (!name.includes(".")) return "";
+  return name.split(".").pop() ?? "";
+}
+
+function fileIconVisual(entry: RepositoryFileEntry): FileIconVisual {
+  if (entry.type === "directory") {
+    return {
+      Icon: FolderGit2,
+      className: "fill-sky-500/25 text-sky-500",
+      containerClassName: "bg-sky-500/15",
+    };
+  }
+
+  const name = entry.name.toLowerCase();
+  const extension = extensionForPath(entry.name);
+
+  if (
+    name === "dockerfile" ||
+    name === "containerfile" ||
+    name === "package.json"
+  ) {
+    return {
+      Icon: Package,
+      className: "fill-orange-500/20 text-orange-500",
+      containerClassName: "bg-orange-500/15",
+    };
+  }
+
+  if (name.includes("lock") || extension === "pem" || extension === "key") {
+    return {
+      Icon: FileLock2,
+      className: "fill-amber-500/20 text-amber-500",
+      containerClassName: "bg-amber-500/15",
+    };
+  }
+
+  if (extension === "json") {
+    return {
+      Icon: FileJson,
+      className: "fill-yellow-500/20 text-yellow-500",
+      containerClassName: "bg-yellow-500/15",
+    };
+  }
+
+  if (
+    ["yaml", "yml", "toml", "ini", "conf", "config", "env"].includes(extension)
+  ) {
+    return {
+      Icon: Settings,
+      className: "fill-zinc-500/20 text-zinc-500",
+      containerClassName: "bg-zinc-500/15",
+    };
+  }
+
+  if (["html", "xml"].includes(extension)) {
+    return {
+      Icon: CodeXml,
+      className: "fill-rose-500/20 text-rose-500",
+      containerClassName: "bg-rose-500/15",
+    };
+  }
+
+  if (extension === "css") {
+    return {
+      Icon: Braces,
+      className: "fill-violet-500/20 text-violet-500",
+      containerClassName: "bg-violet-500/15",
+    };
+  }
+
+  if (CODE_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileCode2,
+      className: "fill-blue-500/20 text-blue-500",
+      containerClassName: "bg-blue-500/15",
+    };
+  }
+
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileImage,
+      className: "fill-pink-500/20 text-pink-500",
+      containerClassName: "bg-pink-500/15",
+    };
+  }
+
+  if (ARCHIVE_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileArchive,
+      className: "fill-orange-500/20 text-orange-500",
+      containerClassName: "bg-orange-500/15",
+    };
+  }
+
+  if (AUDIO_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileAudio,
+      className: "fill-purple-500/20 text-purple-500",
+      containerClassName: "bg-purple-500/15",
+    };
+  }
+
+  if (VIDEO_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileVideo,
+      className: "fill-red-500/20 text-red-500",
+      containerClassName: "bg-red-500/15",
+    };
+  }
+
+  if (SPREADSHEET_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileSpreadsheet,
+      className: "fill-emerald-500/20 text-emerald-500",
+      containerClassName: "bg-emerald-500/15",
+    };
+  }
+
+  if (extension === "sql" || extension === "db" || extension === "sqlite") {
+    return {
+      Icon: Database,
+      className: "fill-cyan-500/20 text-cyan-500",
+      containerClassName: "bg-cyan-500/15",
+    };
+  }
+
+  if (["bash", "fish", "sh", "zsh"].includes(extension)) {
+    return {
+      Icon: Terminal,
+      className: "fill-lime-500/20 text-lime-500",
+      containerClassName: "bg-lime-500/15",
+    };
+  }
+
+  if (TEXT_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileText,
+      className: "fill-slate-500/20 text-slate-500",
+      containerClassName: "bg-slate-500/15",
+    };
+  }
+
+  if (extension === "pdf") {
+    return {
+      Icon: FileType,
+      className: "fill-red-500/20 text-red-500",
+      containerClassName: "bg-red-500/15",
+    };
+  }
+
+  return {
+    Icon: FileCog,
+    className: "fill-muted-foreground/20 text-muted-foreground",
+    containerClassName: "bg-muted/70",
+  };
+}
+
+function RepositoryEntryIcon({ entry }: { entry: RepositoryFileEntry }) {
+  const visual = fileIconVisual(entry);
+  const Icon = visual.Icon;
+
+  return (
+    <span
+      className={cn(
+        "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+        visual.containerClassName,
+      )}
+    >
+      <Icon className={cn("h-4 w-4", visual.className)} />
+    </span>
+  );
+}
+
 type RepositoryFileEntry = {
   file?: ProjectRepoFile;
   fileCount?: number;
   lastChangedAt: number | null;
+  latestCommit: ProjectRepoFile["latestCommit"];
   name: string;
   path: string;
+  size: number | null;
   type: "directory" | "file";
 };
 
@@ -115,16 +482,18 @@ function repositoryEntries(
       const existing = directories.get(path);
       if (existing) {
         existing.fileCount = (existing.fileCount ?? 0) + 1;
-        existing.lastChangedAt = Math.max(
-          existing.lastChangedAt ?? 0,
-          file.lastChangedAt ?? 0,
-        );
+        if ((file.lastChangedAt ?? 0) > (existing.lastChangedAt ?? 0)) {
+          existing.lastChangedAt = file.lastChangedAt;
+          existing.latestCommit = file.latestCommit;
+        }
       } else {
         directories.set(path, {
           fileCount: 1,
           lastChangedAt: file.lastChangedAt,
+          latestCommit: file.latestCommit,
           name,
           path,
+          size: null,
           type: "directory",
         });
       }
@@ -134,8 +503,10 @@ function repositoryEntries(
     entries.push({
       file,
       lastChangedAt: file.lastChangedAt,
+      latestCommit: file.latestCommit,
       name,
       path: file.path,
+      size: file.size,
       type: "file",
     });
   }
@@ -144,6 +515,29 @@ function repositoryEntries(
     if (left.type !== right.type) return left.type === "directory" ? -1 : 1;
     return left.name.localeCompare(right.name);
   });
+}
+
+function openRepositoryEntry(
+  entry: RepositoryFileEntry,
+  setCurrentPath: (path: string) => void,
+  setSelectedFile: (file: ProjectRepoFile) => void,
+) {
+  if (entry.type === "directory") {
+    setCurrentPath(entry.path);
+    return;
+  }
+
+  if (entry.file) setSelectedFile(entry.file);
+}
+
+function handleRepositoryEntryKeyDown(
+  event: React.KeyboardEvent<HTMLTableRowElement>,
+  onOpen: () => void,
+) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+
+  event.preventDefault();
+  onOpen();
 }
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
@@ -286,11 +680,15 @@ export function RepositoryFilesPanel({
   snapshot,
   isLoading,
   error,
+  profiles,
+  fallbackAuthorPubkey,
 }: {
   files: ProjectRepoFile[];
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
+  profiles?: UserProfileLookup;
+  fallbackAuthorPubkey?: string;
 }) {
   const [currentPath, setCurrentPath] = React.useState("");
   const [selectedFile, setSelectedFile] =
@@ -299,7 +697,37 @@ export function RepositoryFilesPanel({
     () => repositoryEntries(files, currentPath),
     [currentPath, files],
   );
+  const visibleEntries = entries.slice(0, 200);
   const latestCommit = snapshot?.latestCommit ?? null;
+  const knownLatestCommitProfile = React.useMemo(
+    () => profileForCommitAuthor(latestCommit, profiles),
+    [latestCommit, profiles],
+  );
+  const fallbackLatestCommitProfile = fallbackAuthorPubkey
+    ? (profiles?.[normalizePubkey(fallbackAuthorPubkey)] ?? null)
+    : null;
+  const authorSearchQuery = useUserSearchQuery(
+    latestCommit?.authorEmail || latestCommit?.authorName || "",
+    {
+      enabled:
+        Boolean(latestCommit) &&
+        !knownLatestCommitProfile?.avatarUrl &&
+        !fallbackLatestCommitProfile?.avatarUrl,
+      limit: 3,
+    },
+  );
+  const searchedLatestCommitProfile = React.useMemo(
+    () => searchedProfileForCommitAuthor(latestCommit, authorSearchQuery.data),
+    [authorSearchQuery.data, latestCommit],
+  );
+  const latestCommitProfile =
+    knownLatestCommitProfile ??
+    searchedLatestCommitProfile ??
+    fallbackLatestCommitProfile;
+  const latestCommitAuthorLabel = commitAuthorLabel(
+    latestCommit,
+    latestCommitProfile,
+  );
   const pathSegments = currentPath ? currentPath.split("/") : [];
 
   const filesKey = React.useMemo(
@@ -348,29 +776,6 @@ export function RepositoryFilesPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
-      <div className="flex flex-col gap-2 border-border/50 border-b bg-muted/20 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium text-foreground">
-            {latestCommit?.subject ?? "Repository files"}
-          </p>
-          {latestCommit ? (
-            <p className="truncate text-xs text-muted-foreground">
-              {latestCommit.authorName} committed{" "}
-              {compactDate(latestCommit.timestamp)}
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {files.length} tracked files
-            </p>
-          )}
-        </div>
-        {latestCommit ? (
-          <code className="w-fit shrink-0 rounded-md bg-background/60 px-2 py-1 text-xs text-muted-foreground">
-            {latestCommit.shortHash}
-          </code>
-        ) : null}
-      </div>
-
       <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3">
         <BreadcrumbButton onClick={() => setCurrentPath("")}>
           Files
@@ -388,71 +793,157 @@ export function RepositoryFilesPanel({
         })}
       </div>
 
-      <div className="hidden grid-cols-[minmax(0,1fr)_9rem_5rem] gap-3 border-border/50 border-b bg-muted/10 px-4 py-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground sm:grid">
-        <span>Name</span>
-        <span>Last changed</span>
-        <span className="text-right">Size</span>
-      </div>
-
-      <div className="divide-y divide-border/50">
-        {currentPath ? (
-          <button
-            className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-muted/30 sm:grid-cols-[minmax(0,1fr)_9rem_5rem]"
-            onClick={() => {
-              const parent = currentPath.split("/").slice(0, -1).join("/");
-              setCurrentPath(parent);
-            }}
-            type="button"
-          >
-            <div className="flex min-w-0 items-center gap-2">
-              <FolderGit2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="truncate font-medium text-muted-foreground">
-                ..
-              </span>
-            </div>
-            <span className="hidden shrink-0 text-xs text-muted-foreground sm:block" />
-            <span className="shrink-0 text-xs text-muted-foreground">
-              Parent
-            </span>
-          </button>
-        ) : null}
-        {entries.slice(0, 200).map((entry) => {
-          const Icon = entry.type === "directory" ? FolderGit2 : FileDiff;
-          const meta =
-            entry.type === "directory"
-              ? `${entry.fileCount ?? 0} files`
-              : formatFileSize(entry.file?.size ?? null);
-          const lastChanged = formatLastChangedAt(entry.lastChangedAt);
-
-          return (
-            <button
-              className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors hover:bg-muted/30 sm:grid-cols-[minmax(0,1fr)_9rem_5rem]"
-              key={`${entry.type}:${entry.path}`}
-              onClick={() => {
-                if (entry.type === "directory") {
-                  setCurrentPath(entry.path);
-                  return;
+      <div className="overflow-x-auto">
+        <table className="w-full caption-bottom text-sm">
+          <thead>
+            <tr className="border-border/50 border-b bg-muted/20">
+              <th className="px-4 py-3 text-left font-normal" colSpan={3}>
+                {latestCommit ? (
+                  <div className="flex min-w-0 items-center justify-between gap-3 text-sm">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <UserAvatar
+                        accent={latestCommitProfile?.isAgent === true}
+                        avatarUrl={latestCommitProfile?.avatarUrl ?? null}
+                        displayName={latestCommitAuthorLabel}
+                        size="sm"
+                      />
+                      <p className="min-w-0 flex-1 truncate text-foreground">
+                        <span className="font-semibold">
+                          {latestCommitAuthorLabel}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {" "}
+                          committed
+                        </span>
+                        <span className="font-medium">
+                          {" "}
+                          {latestCommit.subject}
+                        </span>
+                        <code
+                          className="mx-1.5 rounded-md bg-background/60 px-1.5 py-0.5 text-2xs text-muted-foreground"
+                          title={latestCommit.hash}
+                        >
+                          {latestCommit.shortHash}
+                        </code>
+                        <span className="text-muted-foreground">
+                          · {pluralize(files.length, "file")}
+                        </span>
+                      </p>
+                    </div>
+                    <time
+                      className="shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground"
+                      dateTime={new Date(
+                        latestCommit.timestamp * 1_000,
+                      ).toISOString()}
+                    >
+                      {relativeCommitTime(latestCommit.timestamp)}
+                    </time>
+                  </div>
+                ) : (
+                  <p className="truncate text-sm font-medium text-foreground">
+                    Repository files · {files.length} tracked files
+                  </p>
+                )}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {currentPath ? (
+              <tr
+                aria-label="Go to parent folder"
+                className="cursor-pointer border-border/50 border-b transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden"
+                onClick={() => {
+                  const parent = currentPath.split("/").slice(0, -1).join("/");
+                  setCurrentPath(parent);
+                }}
+                onKeyDown={(event) =>
+                  handleRepositoryEntryKeyDown(event, () => {
+                    const parent = currentPath
+                      .split("/")
+                      .slice(0, -1)
+                      .join("/");
+                    setCurrentPath(parent);
+                  })
                 }
-                if (entry.file) setSelectedFile(entry.file);
-              }}
-              type="button"
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-                <span className="truncate font-medium text-foreground">
-                  {entry.name}
-                </span>
-              </div>
-              <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">
-                {lastChanged}
-              </span>
-              <span className="shrink-0 text-right text-xs text-muted-foreground">
-                {meta}
-              </span>
-            </button>
-          );
-        })}
+                tabIndex={0}
+              >
+                <td className="min-w-52 p-3 align-middle">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/15">
+                      <FolderGit2 className="h-4 w-4 fill-sky-500/25 text-sky-500" />
+                    </span>
+                    <span className="truncate font-medium text-muted-foreground">
+                      ..
+                    </span>
+                  </div>
+                </td>
+                <td className="p-3 align-middle text-muted-foreground">
+                  Parent folder
+                </td>
+                <td className="w-36 p-3 text-right align-middle text-muted-foreground">
+                  —
+                </td>
+              </tr>
+            ) : null}
+            {visibleEntries.map((entry, index) => {
+              const latestCommit = entry.latestCommit;
+              const rowIsLast = index === visibleEntries.length - 1;
+              const openEntry = () =>
+                openRepositoryEntry(entry, setCurrentPath, setSelectedFile);
+
+              return (
+                <tr
+                  aria-label={`Open ${entry.type} ${entry.name}`}
+                  className={cn(
+                    "cursor-pointer transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden",
+                    !rowIsLast && "border-border/50 border-b",
+                  )}
+                  key={`${entry.type}:${entry.path}`}
+                  onClick={openEntry}
+                  onKeyDown={(event) =>
+                    handleRepositoryEntryKeyDown(event, openEntry)
+                  }
+                  tabIndex={0}
+                >
+                  <td className="min-w-52 p-3 align-middle">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <RepositoryEntryIcon entry={entry} />
+                      <span className="truncate font-medium text-foreground">
+                        {entry.name}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="max-w-96 p-3 align-middle">
+                    <RepositoryCommitCell
+                      commit={latestCommit}
+                      profiles={profiles}
+                    />
+                  </td>
+                  <td className="w-36 whitespace-nowrap p-3 text-right align-middle text-muted-foreground">
+                    {latestCommit ? (
+                      <time
+                        dateTime={new Date(
+                          latestCommit.timestamp * 1_000,
+                        ).toISOString()}
+                      >
+                        {relativeCommitTime(latestCommit.timestamp)}
+                      </time>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
+      {entries.length > 200 ? (
+        <p className="border-border/50 border-t px-4 py-3 text-2xs text-muted-foreground">
+          Showing the first 200 entries in this folder. Open a folder to narrow
+          the list.
+        </p>
+      ) : null}
     </div>
   );
 }

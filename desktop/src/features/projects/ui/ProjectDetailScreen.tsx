@@ -1,8 +1,8 @@
 import {
   ArrowLeft,
+  BookOpen,
   Bot,
   Check,
-  CheckCircle2,
   CircleDot,
   Copy,
   ExternalLink,
@@ -10,7 +10,6 @@ import {
   FolderGit2,
   GitBranch,
   GitFork,
-  ListTodo,
   MessageSquare,
   Users,
 } from "lucide-react";
@@ -19,15 +18,16 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   type Project,
+  type ProjectRepoContributor,
   type ProjectRepoSnapshot,
-  useProjectIssuesQuery,
   useProjectQuery,
   useProjectRepoSnapshotQuery,
-  useRepoStateQuery,
 } from "@/features/projects/hooks";
-import type { ProjectIssue } from "@/features/projects/projectIssues.mjs";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { resolveUserLabel } from "@/features/profile/lib/identity";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -53,7 +53,7 @@ function CloneUrlRow({ url }: { url: string }) {
   }, [url]);
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-border/50 bg-card/60 px-3 py-2">
+    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border/50 bg-background/45 px-3 py-2">
       <GitFork className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       <code className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
         {url}
@@ -74,36 +74,41 @@ function CloneUrlRow({ url }: { url: string }) {
   );
 }
 
-function ProjectStatCard({
-  icon: Icon,
-  label,
-  value,
+function RepositorySourceCard({
+  branch,
+  cloneUrls,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string | number;
+  branch: string;
+  cloneUrls: string[];
 }) {
+  if (cloneUrls.length === 0 && !branch) return null;
+
   return (
-    <Card className="flex items-center gap-3 border-border/50 bg-card/60 p-3 shadow-none">
-      <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-      <div className="min-w-0">
-        <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-          {label}
-        </p>
-        <p className="truncate text-sm font-semibold text-foreground">
-          {value}
-        </p>
+    <Card className="space-y-3 border-border/50 bg-card/60 p-4 shadow-none">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,0.35fr)_minmax(0,1fr)] lg:items-start">
+        <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border/50 bg-background/45 px-3 py-2">
+          <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <div className="min-w-0">
+            <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
+              Branch
+            </p>
+            <p className="truncate font-mono text-sm font-semibold text-foreground">
+              {branch || "—"}
+            </p>
+          </div>
+        </div>
+        <div className="min-w-0 space-y-1.5">
+          {cloneUrls.length > 0 ? (
+            cloneUrls.map((url) => <CloneUrlRow key={url} url={url} />)
+          ) : (
+            <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-2 text-sm text-muted-foreground">
+              No clone URL published yet.
+            </div>
+          )}
+        </div>
       </div>
     </Card>
   );
-}
-
-function formatCreatedDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  });
 }
 
 function compactDate(createdAt: number) {
@@ -113,21 +118,164 @@ function compactDate(createdAt: number) {
   });
 }
 
-function projectPeople(project: Project, issues: ProjectIssue[]) {
+function projectPeople(project: Project) {
   return [
     ...new Set(
-      [
-        project.owner,
-        ...project.contributors,
-        ...issues.flatMap((issue) => [issue.author, ...issue.recipients]),
-      ]
+      [project.owner, ...project.contributors]
         .filter(Boolean)
         .map(normalizePubkey),
     ),
   ];
 }
 
-function LatestCommitPanel({
+function contributorKey(contributor: ProjectRepoContributor) {
+  return (contributor.email || contributor.name).trim().toLowerCase();
+}
+
+function profileMatchesContributor(
+  contributor: ProjectRepoContributor,
+  profile: UserProfileLookup[string] | undefined,
+  pubkey?: string,
+) {
+  if (!profile) return false;
+  const name = contributor.name.trim().toLowerCase();
+  const email = contributor.email.trim().toLowerCase();
+  const candidates = [
+    pubkey,
+    profile.displayName,
+    profile.nip05Handle,
+    profile.ownerPubkey,
+  ].map((value) => value?.trim().toLowerCase() ?? "");
+  return candidates.includes(name) || candidates.includes(email);
+}
+
+function contributorMatchesProfiles(
+  contributor: ProjectRepoContributor,
+  profiles: UserProfileLookup | undefined,
+) {
+  if (!profiles) return false;
+  return Object.entries(profiles).some(([pubkey, profile]) =>
+    profileMatchesContributor(contributor, profile, pubkey),
+  );
+}
+
+function contributorForProfile(
+  pubkey: string,
+  profiles: UserProfileLookup | undefined,
+  repoContributors: ProjectRepoContributor[],
+) {
+  const profile = profiles?.[normalizePubkey(pubkey)];
+  return repoContributors.find((contributor) =>
+    profileMatchesContributor(contributor, profile, pubkey),
+  );
+}
+
+function ContributorsPanel({
+  peoplePubkeys,
+  project,
+  profiles,
+  repoContributors,
+}: {
+  peoplePubkeys: string[];
+  project: Project;
+  profiles?: UserProfileLookup;
+  repoContributors: ProjectRepoContributor[];
+}) {
+  const rows = [
+    ...peoplePubkeys.map((pubkey) => {
+      const normalizedPubkey = normalizePubkey(pubkey);
+      const profile = profiles?.[normalizedPubkey];
+      const isOwner = normalizedPubkey === normalizePubkey(project.owner);
+      const contributor = contributorForProfile(
+        pubkey,
+        profiles,
+        repoContributors,
+      );
+      const label = resolveUserLabel({ pubkey, profiles });
+      return {
+        avatarUrl: profile?.avatarUrl ?? null,
+        commitCount: contributor?.commitCount ?? null,
+        id: `profile:${normalizedPubkey}`,
+        isAgent: profile?.isAgent === true,
+        label,
+        lastCommitAt: contributor?.lastCommitAt ?? null,
+        role: isOwner
+          ? "Project owner"
+          : profile?.isAgent
+            ? "Agent"
+            : "Contributor",
+      };
+    }),
+    ...repoContributors
+      .filter(
+        (contributor) => !contributorMatchesProfiles(contributor, profiles),
+      )
+      .map((contributor) => ({
+        avatarUrl: null,
+        commitCount: contributor.commitCount,
+        id: `git:${contributorKey(contributor)}`,
+        isAgent: false,
+        label: contributor.name || contributor.email,
+        lastCommitAt: contributor.lastCommitAt,
+        role: contributor.email || "Git contributor",
+      })),
+  ];
+
+  if (rows.length === 0) return null;
+
+  return (
+    <section className="space-y-2">
+      <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <Users className="h-4 w-4" />
+        Contributors ({rows.length})
+      </h3>
+      <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+        <table className="w-full caption-bottom text-sm">
+          <tbody>
+            {rows.map((row, index) => (
+              <tr
+                className={cn(
+                  "transition-colors hover:bg-muted/35",
+                  index !== rows.length - 1 && "border-border/50 border-b",
+                )}
+                key={row.id}
+              >
+                <td className="min-w-52 p-3 align-middle">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <UserAvatar
+                      accent={row.isAgent}
+                      avatarUrl={row.avatarUrl}
+                      displayName={row.label}
+                      size="xs"
+                    />
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-foreground">
+                        {row.label}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {row.role}
+                      </p>
+                    </div>
+                  </div>
+                </td>
+                <td className="hidden p-3 align-middle text-muted-foreground sm:table-cell">
+                  {row.commitCount === null
+                    ? "No git commits"
+                    : `${row.commitCount} git commit${row.commitCount === 1 ? "" : "s"}`}
+                </td>
+                <td className="w-36 whitespace-nowrap p-3 text-right align-middle text-muted-foreground">
+                  {row.lastCommitAt ? compactDate(row.lastCommitAt) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ActivityPanel({
   snapshot,
   isLoading,
   error,
@@ -136,13 +284,15 @@ function LatestCommitPanel({
   isLoading: boolean;
   error: unknown;
 }) {
-  const latestCommit = snapshot?.latestCommit ?? null;
+  const commits = snapshot?.commits ?? [];
 
   if (isLoading) {
-    return <p className="p-4 text-sm text-muted-foreground">Loading commit…</p>;
+    return (
+      <p className="p-4 text-sm text-muted-foreground">Loading activity…</p>
+    );
   }
 
-  if (!latestCommit) {
+  if (commits.length === 0) {
     return (
       <p className="p-4 text-sm text-muted-foreground">
         {error
@@ -153,150 +303,27 @@ function LatestCommitPanel({
   }
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="rounded-lg bg-muted/70 p-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0 space-y-1">
-            <p className="line-clamp-2 text-sm font-medium text-foreground">
-              {latestCommit.subject}
+    <div className="divide-y divide-border/50">
+      {commits.map((commit) => (
+        <article
+          className="flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/30"
+          key={commit.hash}
+        >
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
+            {(commit.authorName || commit.authorEmail || "?").slice(0, 1)}
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="truncate text-sm font-medium text-foreground">
+              {commit.subject}
             </p>
             <p className="truncate text-xs text-muted-foreground">
-              {latestCommit.authorName} · {compactDate(latestCommit.timestamp)}
+              {commit.authorName || commit.authorEmail || "Unknown author"} ·{" "}
+              {compactDate(commit.timestamp)}
             </p>
           </div>
           <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-            {latestCommit.shortHash}
+            {commit.shortHash}
           </code>
-        </div>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-2">
-        <ProjectStatCard
-          icon={CircleDot}
-          label="Commit"
-          value={latestCommit.shortHash}
-        />
-        <ProjectStatCard
-          icon={Users}
-          label="Author"
-          value={latestCommit.authorName}
-        />
-      </div>
-    </div>
-  );
-}
-
-function BranchesPanel({
-  project,
-  repoState,
-  isLoading,
-}: {
-  project: Project;
-  repoState: ReturnType<typeof useRepoStateQuery>["data"];
-  isLoading: boolean;
-}) {
-  if (isLoading) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">Loading branches…</p>
-    );
-  }
-
-  if (!repoState) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">
-        No branch refs have been published yet.
-      </p>
-    );
-  }
-
-  return (
-    <div className="space-y-3 p-4">
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-        <ProjectStatCard
-          icon={GitBranch}
-          label="Default"
-          value={project.defaultBranch}
-        />
-        <ProjectStatCard
-          icon={CircleDot}
-          label="Branches"
-          value={repoState.branches.length}
-        />
-        <ProjectStatCard
-          icon={CheckCircle2}
-          label="Tags"
-          value={repoState.tags.length}
-        />
-      </div>
-      <div className="space-y-1">
-        {repoState.branches.slice(0, 12).map((branch) => (
-          <div
-            className="flex items-center justify-between gap-3 rounded-md bg-muted/30 px-3 py-1.5 text-sm"
-            key={branch.name}
-          >
-            <span className="min-w-0 truncate font-mono">{branch.name}</span>
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">
-              {branch.commit.slice(0, 8)}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function IssuesPanel({
-  issues,
-  isLoading,
-}: {
-  issues: ProjectIssue[];
-  isLoading: boolean;
-}) {
-  if (isLoading) {
-    return <p className="p-4 text-sm text-muted-foreground">Loading issues…</p>;
-  }
-
-  if (issues.length === 0) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">
-        No issues yet. Git issues for this project will appear here with their
-        workflow status.
-      </p>
-    );
-  }
-
-  return (
-    <div className="space-y-2 p-4">
-      {issues.slice(0, 10).map((issue) => (
-        <article
-          className="space-y-2 rounded-lg bg-muted/70 p-3"
-          key={issue.id}
-        >
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-foreground">
-                {issue.title}
-              </p>
-              {issue.content ? (
-                <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
-                  {issue.content}
-                </p>
-              ) : null}
-            </div>
-            <span className="shrink-0 rounded-full bg-background/55 px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-              {issue.status}
-            </span>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-2xs text-muted-foreground">
-            <span>Updated {compactDate(issue.updatedAt)}</span>
-            {issue.labels.map((label) => (
-              <span
-                className="rounded-md bg-background/60 px-1.5 py-0.5"
-                key={label}
-              >
-                {label}
-              </span>
-            ))}
-          </div>
         </article>
       ))}
     </div>
@@ -308,80 +335,84 @@ function WorkspaceTabs({
   snapshot,
   snapshotError,
   snapshotLoading,
-  repoState,
-  repoStateLoading,
-  issues,
-  issuesLoading,
+  profiles,
+  peoplePubkeys,
+  repoContributors,
 }: {
   project: Project;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
   snapshotLoading: boolean;
-  repoState: ReturnType<typeof useRepoStateQuery>["data"];
-  repoStateLoading: boolean;
-  issues: ProjectIssue[];
-  issuesLoading: boolean;
+  profiles?: UserProfileLookup;
+  peoplePubkeys: string[];
+  repoContributors: ProjectRepoContributor[];
 }) {
   const files = snapshot?.files ?? [];
   const readmeFile = React.useMemo(() => findReadmeFile(files), [files]);
+  const readmeTabLabel = readmeFile?.path.split("/").pop() ?? "README";
+  const [selectedTab, setSelectedTab] = React.useState("activity");
 
   return (
-    <Tabs className="space-y-3" defaultValue="files">
+    <Tabs
+      className="space-y-3"
+      onValueChange={setSelectedTab}
+      value={selectedTab}
+    >
       <TabsList className="h-8 w-fit justify-start">
-        <TabsTrigger className="h-7 gap-1 px-2" value="files">
-          <FolderGit2 className="h-3.5 w-3.5" />
-          Files
-        </TabsTrigger>
         <TabsTrigger className="h-7 gap-1 px-2" value="activity">
           <CircleDot className="h-3.5 w-3.5" />
           Activity
         </TabsTrigger>
-        <TabsTrigger className="h-7 gap-1 px-2" value="issues">
-          <ListTodo className="h-3.5 w-3.5" />
-          Issues
+        <TabsTrigger className="h-7 gap-1 px-2" value="files">
+          <FolderGit2 className="h-3.5 w-3.5" />
+          Files
         </TabsTrigger>
-        <TabsTrigger className="h-7 gap-1 px-2" value="branches">
-          <GitBranch className="h-3.5 w-3.5" />
-          Branches
+        {readmeFile ? (
+          <TabsTrigger className="h-7 gap-1 px-2" value="readme">
+            <BookOpen className="h-3.5 w-3.5" />
+            {readmeTabLabel}
+          </TabsTrigger>
+        ) : null}
+        <TabsTrigger className="h-7 gap-1 px-2" value="contributors">
+          <Users className="h-3.5 w-3.5" />
+          Contributors
         </TabsTrigger>
       </TabsList>
-
-      <TabsContent className="m-0 space-y-4" value="files">
-        <RepositoryFilesPanel
-          error={snapshotError}
-          files={files}
-          isLoading={snapshotLoading}
-          snapshot={snapshot}
-        />
-        <ReadmePanel file={readmeFile} />
-      </TabsContent>
 
       <TabsContent
         className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
         value="activity"
       >
-        <LatestCommitPanel
+        <ActivityPanel
           error={snapshotError}
           isLoading={snapshotLoading}
           snapshot={snapshot}
         />
       </TabsContent>
 
-      <TabsContent
-        className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
-        value="issues"
-      >
-        <IssuesPanel isLoading={issuesLoading} issues={issues} />
+      <TabsContent className="m-0" value="files">
+        <RepositoryFilesPanel
+          error={snapshotError}
+          fallbackAuthorPubkey={project.owner}
+          files={files}
+          isLoading={snapshotLoading}
+          profiles={profiles}
+          snapshot={snapshot}
+        />
       </TabsContent>
 
-      <TabsContent
-        className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
-        value="branches"
-      >
-        <BranchesPanel
-          isLoading={repoStateLoading}
+      {readmeFile ? (
+        <TabsContent className="m-0" value="readme">
+          <ReadmePanel file={readmeFile} />
+        </TabsContent>
+      ) : null}
+
+      <TabsContent className="m-0" value="contributors">
+        <ContributorsPanel
+          peoplePubkeys={peoplePubkeys}
+          profiles={profiles}
           project={project}
-          repoState={repoState}
+          repoContributors={repoContributors}
         />
       </TabsContent>
     </Tabs>
@@ -396,14 +427,12 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const { goChannel, goProjects } = useAppNavigation();
   const projectQuery = useProjectQuery(projectId);
   const project = projectQuery.data;
-  const repoStateQuery = useRepoStateQuery(project);
-  const repoSnapshotQuery = useProjectRepoSnapshotQuery(project);
-  const issuesQuery = useProjectIssuesQuery(project);
-  const issues = issuesQuery.data ?? [];
+  const activeBranch = project?.defaultBranch ?? null;
+  const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
 
   const peoplePubkeys = React.useMemo(
-    () => (project ? projectPeople(project, issues) : []),
-    [issues, project],
+    () => (project ? projectPeople(project) : []),
+    [project],
   );
   const profilesQuery = useUsersBatchQuery(peoplePubkeys, {
     enabled: peoplePubkeys.length > 0,
@@ -465,18 +494,14 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
 
   const ownerProfile = profiles?.[normalizePubkey(project.owner)];
   const ownerLabel = resolveUserLabel({ pubkey: project.owner, profiles });
+  const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div
-        className={cn(
-          "flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4",
-          topChromeInset.padding,
-        )}
-      >
-        <div className="mb-4">
+      <div className={cn(topChromeInset.headerBase, topChromeInset.divider)}>
+        <div className="flex min-h-[3.25rem] items-center justify-between gap-3 px-5 py-2">
           <Button
-            className="gap-1.5 text-muted-foreground"
+            className="h-9 gap-1.5 text-muted-foreground"
             onClick={() => {
               void goProjects();
             }}
@@ -486,92 +511,52 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             <ArrowLeft className="h-4 w-4" />
             Back to Projects
           </Button>
+          {project.projectChannelId ? (
+            <Button
+              className="h-9 shrink-0 gap-1.5"
+              onClick={() => {
+                if (project.projectChannelId) {
+                  void goChannel(project.projectChannelId);
+                }
+              }}
+              size="sm"
+              variant="outline"
+            >
+              <MessageSquare className="h-4 w-4" />
+              Open Discussion
+            </Button>
+          ) : null}
         </div>
+      </div>
 
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
         <div className="w-full space-y-5">
           <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div className="flex min-w-0 items-start gap-3">
-                <UserAvatar
-                  accent={ownerProfile?.isAgent === true}
-                  avatarUrl={ownerProfile?.avatarUrl ?? null}
-                  className="shrink-0"
-                  displayName={ownerLabel}
-                  size="md"
-                />
-                <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2">
-                    <h2 className="truncate text-lg font-semibold">
-                      {project.name}
-                    </h2>
-                    <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-                      {project.status}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Work by {ownerLabel} · Created{" "}
-                    {formatCreatedDate(project.createdAt)}
+            <div className="flex min-w-0 items-start gap-3">
+              <UserAvatar
+                accent={ownerProfile?.isAgent === true}
+                avatarUrl={ownerProfile?.avatarUrl ?? null}
+                className="shrink-0"
+                displayName={ownerLabel}
+                size="md"
+              />
+              <div className="min-w-0 flex-1 space-y-1">
+                <h2 className="truncate text-lg font-semibold">
+                  {project.name}
+                </h2>
+                {project.description ? (
+                  <p className="text-sm text-muted-foreground">
+                    {project.description}
                   </p>
-                </div>
+                ) : null}
               </div>
-              {project.projectChannelId ? (
-                <Button
-                  className="shrink-0 gap-1.5"
-                  onClick={() => {
-                    if (project.projectChannelId) {
-                      void goChannel(project.projectChannelId);
-                    }
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  <MessageSquare className="h-4 w-4" />
-                  Open Discussion
-                </Button>
-              ) : null}
             </div>
-            {project.description ? (
-              <p className="text-sm text-muted-foreground">
-                {project.description}
-              </p>
-            ) : null}
 
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-4">
-              <ProjectStatCard
-                icon={GitBranch}
-                label="Branch"
-                value={project.defaultBranch}
-              />
-              <ProjectStatCard
-                icon={ListTodo}
-                label="Issues"
-                value={issues.length}
-              />
-              <ProjectStatCard
-                icon={Users}
-                label="Involved"
-                value={peoplePubkeys.length}
-              />
-              <ProjectStatCard
-                icon={MessageSquare}
-                label="Discussion"
-                value={project.projectChannelId ? "Linked" : "Not linked"}
-              />
-            </div>
+            <RepositorySourceCard
+              branch={activeBranch ?? project.defaultBranch}
+              cloneUrls={project.cloneUrls}
+            />
           </section>
-
-          {project.cloneUrls.length > 0 ? (
-            <section className="space-y-2">
-              <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Clone
-              </h3>
-              <div className="space-y-1.5">
-                {project.cloneUrls.map((url) => (
-                  <CloneUrlRow key={url} url={url} />
-                ))}
-              </div>
-            </section>
-          ) : null}
 
           {project.webUrl && isSafeUrl(project.webUrl) ? (
             <section className="space-y-2">
@@ -591,53 +576,15 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
           ) : null}
 
           <WorkspaceTabs
-            issues={issues}
-            issuesLoading={issuesQuery.isLoading}
+            key={project.id}
+            peoplePubkeys={peoplePubkeys}
+            profiles={profiles}
             project={project}
-            repoState={repoStateQuery.data}
-            repoStateLoading={repoStateQuery.isLoading}
+            repoContributors={repoContributors}
             snapshot={repoSnapshotQuery.data}
             snapshotError={repoSnapshotQuery.error}
             snapshotLoading={repoSnapshotQuery.isLoading}
           />
-
-          {peoplePubkeys.length > 0 ? (
-            <section className="space-y-2">
-              <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                <Users className="h-4 w-4" />
-                Involved ({peoplePubkeys.length})
-              </h3>
-              <div className="grid gap-1.5 sm:grid-cols-2">
-                {peoplePubkeys.map((pubkey) => {
-                  const profile = profiles?.[normalizePubkey(pubkey)];
-                  const label = resolveUserLabel({ pubkey, profiles });
-                  const isOwner =
-                    normalizePubkey(pubkey) === normalizePubkey(project.owner);
-                  return (
-                    <div
-                      className="flex min-w-0 items-center gap-2 rounded-lg border border-border/40 bg-card/50 px-3 py-2"
-                      key={pubkey}
-                    >
-                      <UserAvatar
-                        accent={profile?.isAgent === true || isOwner}
-                        avatarUrl={profile?.avatarUrl ?? null}
-                        displayName={label}
-                        size="xs"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm text-foreground">
-                          {label}
-                        </p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {isOwner ? "Project owner" : "Contributor"}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          ) : null}
 
           <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">

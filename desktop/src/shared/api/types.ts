@@ -173,11 +173,21 @@ export type ProjectRepoFile = {
   size: number | null;
   previewContent: string | null;
   lastChangedAt: number | null;
+  latestCommit: ProjectRepoCommit | null;
+};
+
+export type ProjectRepoContributor = {
+  name: string;
+  email: string;
+  commitCount: number;
+  lastCommitAt: number;
 };
 
 export type ProjectRepoSnapshot = {
   latestCommit: ProjectRepoCommit | null;
+  commits: ProjectRepoCommit[];
   files: ProjectRepoFile[];
+  contributors: ProjectRepoContributor[];
 };
 
 export type RelayEvent = {

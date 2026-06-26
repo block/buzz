@@ -368,8 +368,8 @@ function ProjectsToolbar({
   ];
 
   return (
-    <div className="mb-4 flex flex-col gap-3 border-b border-border/50 pb-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="flex flex-col gap-3 px-5 py-2" data-tauri-drag-region>
+      <div className="flex min-h-9 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="text-lg font-semibold text-foreground">Projects</h2>
@@ -840,64 +840,71 @@ export function ProjectsView() {
   }
 
   return (
-    <div
-      className={cn(
-        "flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4",
-        topChromeInset.padding,
-      )}
-    >
-      <ProjectsToolbar
-        filter={filter}
-        onFilterChange={handleFilterChange}
-        onSortChange={handleSortChange}
-        onViewModeChange={handleViewModeChange}
-        projectCount={visibleProjects.length}
-        sort={sort}
-        totalProjectCount={projects.length}
-        viewMode={viewMode}
-      />
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <div className={cn(topChromeInset.headerBase, topChromeInset.divider)}>
+        <ProjectsToolbar
+          filter={filter}
+          onFilterChange={handleFilterChange}
+          onSortChange={handleSortChange}
+          onViewModeChange={handleViewModeChange}
+          projectCount={visibleProjects.length}
+          sort={sort}
+          totalProjectCount={projects.length}
+          viewMode={viewMode}
+        />
+      </div>
 
-      {visibleProjects.length === 0 ? (
-        <EmptyFilteredState />
-      ) : viewMode === "grid" ? (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {visibleProjects.map((project) => {
-            const summary = activitySummariesQuery.data?.[project.repoAddress];
-            return (
-              <ProjectGridCard
-                canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
-                deleteDisabled={deleteProjectMutation.isPending}
-                key={project.id}
-                onDelete={handleDeleteProject}
-                onOpen={handleOpenProject}
-                people={projectPeople(project, summary)}
-                profiles={profiles}
-                project={project}
-                summary={summary}
-              />
-            );
-          })}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {visibleProjects.map((project) => {
-            const summary = activitySummariesQuery.data?.[project.repoAddress];
-            return (
-              <ProjectListRow
-                canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
-                deleteDisabled={deleteProjectMutation.isPending}
-                key={project.id}
-                onDelete={handleDeleteProject}
-                onOpen={handleOpenProject}
-                people={projectPeople(project, summary)}
-                profiles={profiles}
-                project={project}
-                summary={summary}
-              />
-            );
-          })}
-        </div>
-      )}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
+        {visibleProjects.length === 0 ? (
+          <EmptyFilteredState />
+        ) : viewMode === "grid" ? (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {visibleProjects.map((project) => {
+              const summary =
+                activitySummariesQuery.data?.[project.repoAddress];
+              return (
+                <ProjectGridCard
+                  canDelete={isProjectOwnedByCurrentUser(
+                    project,
+                    currentPubkey,
+                  )}
+                  deleteDisabled={deleteProjectMutation.isPending}
+                  key={project.id}
+                  onDelete={handleDeleteProject}
+                  onOpen={handleOpenProject}
+                  people={projectPeople(project, summary)}
+                  profiles={profiles}
+                  project={project}
+                  summary={summary}
+                />
+              );
+            })}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {visibleProjects.map((project) => {
+              const summary =
+                activitySummariesQuery.data?.[project.repoAddress];
+              return (
+                <ProjectListRow
+                  canDelete={isProjectOwnedByCurrentUser(
+                    project,
+                    currentPubkey,
+                  )}
+                  deleteDisabled={deleteProjectMutation.isPending}
+                  key={project.id}
+                  onDelete={handleDeleteProject}
+                  onOpen={handleOpenProject}
+                  people={projectPeople(project, summary)}
+                  profiles={profiles}
+                  project={project}
+                  summary={summary}
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

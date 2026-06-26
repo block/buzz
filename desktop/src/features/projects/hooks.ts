@@ -18,6 +18,7 @@ import {
   KIND_REPO_STATE,
 } from "@/shared/constants/kinds";
 import type {
+  ProjectRepoContributor,
   ProjectRepoFile,
   ProjectRepoSnapshot,
   RelayEvent,
@@ -59,7 +60,7 @@ export type ProjectActivitySummary = {
   participantPubkeys: string[];
 };
 
-export type { ProjectRepoFile, ProjectRepoSnapshot };
+export type { ProjectRepoContributor, ProjectRepoFile, ProjectRepoSnapshot };
 
 function getTag(event: RelayEvent, name: string): string | undefined {
   return event.tags.find((t) => t[0] === name)?.[1];
@@ -254,13 +255,14 @@ async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
 
 async function fetchProjectRepoSnapshot(
   project: Project,
+  branchName?: string | null,
 ): Promise<ProjectRepoSnapshot | null> {
   const cloneUrl = project.cloneUrls[0];
   if (!cloneUrl) return null;
 
   return getProjectRepoSnapshot({
     cloneUrl,
-    defaultBranch: project.defaultBranch,
+    defaultBranch: branchName ?? project.defaultBranch,
   });
 }
 
@@ -341,13 +343,21 @@ export function useRepoStateQuery(project: Project | null | undefined) {
 
 export function useProjectRepoSnapshotQuery(
   project: Project | null | undefined,
+  branchName?: string | null,
 ) {
+  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+
   return useQuery({
     enabled: Boolean(project?.cloneUrls[0]),
-    queryKey: ["project", project?.id ?? "none", "repo-snapshot"],
+    queryKey: [
+      "project",
+      project?.id ?? "none",
+      "repo-snapshot",
+      selectedBranch ?? "default",
+    ],
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
-      return fetchProjectRepoSnapshot(project);
+      return fetchProjectRepoSnapshot(project, selectedBranch);
     },
     staleTime: 30_000,
     retry: 1,

@@ -82,7 +82,11 @@ const overrides = new Map([
   // syncs team-dir edits before all personas.json readers; run_event_sync
   // signs the persona/team retention events post-identity) layered on top of
   // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1026],
+  ["src-tauri/src/lib.rs", 1027],
+  // Project git workflow exploration: branch/push UI and repository status
+  // plumbing grew the panel slightly past the default ceiling. Keep this narrow
+  // while the project surface is split into smaller components.
+  ["src/features/projects/ui/ProjectRepositoryPanel.tsx", 1004],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
