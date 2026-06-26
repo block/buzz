@@ -57,7 +57,7 @@ function ComposerAgentConversationLinkView({ extension, node }: NodeViewProps) {
   return (
     <NodeViewWrapper
       as="span"
-      className="my-1 flex min-w-0 max-w-xl cursor-default overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top text-left"
+      className="my-1 flex min-w-52 max-w-full cursor-default overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top text-left sm:max-w-xl"
       data-agent-conversation-link=""
       data-href={href}
       title={href}
@@ -191,7 +191,7 @@ export const AgentConversationLinkNode =
           "span",
           {
             class:
-              "my-1 flex min-w-0 max-w-xl overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top",
+              "my-1 flex min-w-52 max-w-full overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top sm:max-w-xl",
           },
           [
             "span",

@@ -1380,7 +1380,7 @@ function AgentConversationLinkCard({
   if (!interactive) {
     return (
       <span
-        className="my-1 flex min-w-0 max-w-xl overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top"
+        className="my-1 flex min-w-52 max-w-full overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top sm:max-w-xl"
         data-agent-conversation-link=""
         title={href}
       >
@@ -1394,7 +1394,7 @@ function AgentConversationLinkCard({
   return (
     <button
       aria-label={`Open task: ${title}`}
-      className="group/task-link my-1 flex min-w-0 max-w-xl cursor-pointer overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      className="group/task-link my-1 flex min-w-52 max-w-full cursor-pointer overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background sm:max-w-xl"
       data-agent-conversation-link=""
       onClick={(event) => {
         event.preventDefault();
