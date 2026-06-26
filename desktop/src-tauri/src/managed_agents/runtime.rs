@@ -1654,7 +1654,7 @@ pub fn spawn_agent_child(
         .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
     command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
     command.env("BUZZ_ACP_AGENTS", record.parallelism.to_string());
-    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "owner-interrupt");
+    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
