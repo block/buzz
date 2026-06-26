@@ -366,12 +366,7 @@ export function PersonaDialog({
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
   const llmProviderFieldVisible = runtime.trim().length > 0;
-  const modelFieldVisible =
-    llmProviderFieldVisible &&
-    (isCustomProviderEditing ||
-      provider.trim().length > 0 ||
-      model.trim().length > 0 ||
-      isCustomModelEditing);
+  const modelFieldVisible = llmProviderFieldVisible;
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
