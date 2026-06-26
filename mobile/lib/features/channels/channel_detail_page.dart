@@ -23,6 +23,8 @@ import 'channels_provider.dart';
 import 'compose_bar.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
+import 'dm_channel_labels.dart';
+import 'ephemeral_channel_display.dart';
 import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
@@ -159,11 +161,23 @@ class ChannelDetailPage extends HookConsumerWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          resolvedChannel.displayLabel(
-                            currentPubkey: currentPubkey,
-                          ),
-                          overflow: TextOverflow.ellipsis,
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Flexible(
+                              child: Text(
+                                resolveDmChannelDisplayLabel(
+                                  resolvedChannel,
+                                  currentPubkey: currentPubkey,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            if (resolvedChannel.isEphemeral) ...[
+                              const SizedBox(width: Grid.quarter),
+                              _HeaderEphemeralBadge(channel: resolvedChannel),
+                            ],
+                          ],
                         ),
                         if (resolvedChannel.isStream)
                           Text(
@@ -977,6 +991,28 @@ class _ReadOnlyNotice extends StatelessWidget {
   }
 }
 
+class _HeaderEphemeralBadge extends StatelessWidget {
+  final Channel channel;
+
+  const _HeaderEphemeralBadge({required this.channel});
+
+  @override
+  Widget build(BuildContext context) {
+    final display = ephemeralChannelDisplay(channel);
+    if (display == null) return const SizedBox.shrink();
+
+    return Tooltip(
+      message: display.tooltipLabel,
+      child: Icon(
+        LucideIcons.clockFading,
+        key: const Key('chat-ephemeral-badge'),
+        size: 16,
+        color: context.colors.onSurfaceVariant,
+      ),
+    );
+  }
+}
+
 class _DetailConnectionBanner extends StatelessWidget {
   final SessionStatus status;
 
@@ -1233,11 +1269,25 @@ class _DmAppBarTitle extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                channel.displayLabel(currentPubkey: currentPubkey),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.textTheme.titleSmall,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      resolveDmChannelDisplayLabel(
+                        channel,
+                        currentPubkey: currentPubkey,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.textTheme.titleSmall,
+                    ),
+                  ),
+                  if (channel.isEphemeral) ...[
+                    const SizedBox(width: Grid.quarter),
+                    _HeaderEphemeralBadge(channel: channel),
+                  ],
+                ],
               ),
               Text(
                 presenceLabel,
