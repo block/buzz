@@ -817,12 +817,12 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   `Inv_AdmissionFence` violated by a 3-state trace
   (`Init → AdmitMember(commB, alice) → ReadHostAuxRows(hostA)`). M10–M13 confirm the
   open-AUTH/create/feed/aux fences are load-bearing, not decorative — the same
-  "every new conjunct earns a confirmed red" contract as M1–M9. (The `.tla` header's
-  M12/M13 helper comment points the substitution at the row-set helper
-  `VisibleHostFeedRows_GlobalAdmission`; the substitution that actually trips
-  `Inv_AdmissionFence` is the action's admission *guard*, since the invariant
-  quantifies over the recorded `feedReads`/`auxReads` witnesses, not the returned
-  row set.) The host-fence and new-surface
+  "every new conjunct earns a confirmed red" contract as M1–M9. (To reproduce M12/M13,
+  the substitution that trips `Inv_AdmissionFence` is the action's admission *guard*
+  (`IsAdmitted(c, a)` → `GloballyAdmitted(a)` in `ReadHostFeedRows`/`ReadHostAuxRows`),
+  not the row-set helper alone, since the invariant quantifies over the recorded
+  `feedReads`/`auxReads` witnesses rather than the returned row set — the `.tla`
+  helper comments call this out.) The host-fence and new-surface
   figures above are counterexample **trace lengths** (the error-trace state count),
   which unlike TLC's run-dependent "depth of complete graph search" total are
   reproducible from the printed error trace. The
