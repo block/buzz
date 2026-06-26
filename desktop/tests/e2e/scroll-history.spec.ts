@@ -1432,14 +1432,27 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
       );
     });
 
+  // Poll for real progress instead of a fixed sleep: a slow CI shard's fetch
+  // round-trip outlasts a hard delay and reads as a false stall.
+  const waitForOlderHistoryProgress = async (previousDeepest: number) => {
+    try {
+      await expect
+        .poll(async () => (await oldestRenderedIndex()) ?? previousDeepest, {
+          timeout: 10_000,
+        })
+        .toBeLessThan(previousDeepest);
+    } catch {
+      // No advancement within the window: treat as a stall, not a failure.
+    }
+    return oldestRenderedIndex();
+  };
+
   await timeline.hover();
   let deepest = Number.POSITIVE_INFINITY;
   let stallStreak = 0;
   for (let attempt = 0; attempt < 200 && deepest > 0; attempt += 1) {
     await page.mouse.wheel(0, -4000);
-    await page.waitForTimeout(80);
-
-    const current = await oldestRenderedIndex();
+    const current = await waitForOlderHistoryProgress(deepest);
     if ((current ?? Number.POSITIVE_INFINITY) > 50) {
       expect(await isIntroHeaderInViewport()).toBe(false);
     }
@@ -1448,11 +1461,10 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
       deepest = current;
       stallStreak = 0;
     } else {
+      // Oldest row did not advance within the settle window: bail once it
+      // clearly stalls, after a couple of retries.
       stallStreak += 1;
-      // Already at the top of the rendered window and not advancing: give the
-      // in-flight fetch a beat to prepend, then bail if it never progresses.
-      await page.waitForTimeout(200);
-      if (stallStreak > 25) break;
+      if (stallStreak > 3) break;
     }
   }
 
