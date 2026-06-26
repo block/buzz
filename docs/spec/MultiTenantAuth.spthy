@@ -337,6 +337,30 @@ rule Probe_Host_Token_Mismatch:
     ]->
   [ ]
 
+
+// Open-community AUTH auto-registration. A community with no NIP-43 member
+// pubkey allowlist admits any authenticated npub, but still only into the
+// community resolved from the connection host. This is a separate admission
+// source from NIP-43 member-list signing: NIP-43 admissions emit
+// `MemberAdmitted`; open AUTH emits `OpenCommunityAutoRegistered`. Both mint the
+// same downstream `!Admitted(pk, comm)` fact, so later read/write checks stay
+// literal admission checks rather than read-path carve-outs.
+rule Mark_Open_Community:
+  [ !Community(comm) ]
+  --[
+      OpenCommunityEnabled(comm)
+    ]->
+  [ !OpenCommunity(comm) ]
+
+rule Authenticate_To_Open_Community:
+  [ !ClientPublic(pk), !HostCommunity(host, comm), !OpenCommunity(comm) ]
+  --[
+      OpenCommunityAutoRegistered(pk, comm, host),
+      HostBoundFor(host, comm),
+      OpenRegistrationResolved(pk, comm, host, comm)
+    ]->
+  [ !Admitted(pk, comm) ]
+
 // ============================================================================
 // Per-community signing keys
 // ============================================================================
@@ -567,6 +591,14 @@ lemma host_token_mismatch_not_authorized:
       HostTokenMismatchAttempt(tok, client, minted_comm, host_comm, host) @ i
     ==> not (Ex #j. ChannelLessAuthorized(tok, client, minted_comm, host) @ j)"
 
+// Open-community auto-registration is host-confined: the registered community is
+// exactly the community bound to the connection host. There is no client-supplied
+// community selector in the rule.
+lemma open_auth_registration_confined_to_host_community:
+  "All pk registered_comm host host_comm #i.
+      OpenRegistrationResolved(pk, registered_comm, host, host_comm) @ i
+    ==> registered_comm = host_comm"
+
 // S2: every minted token has exactly one stamped community, and every requested
 // channel recorded for that mint resolved to that stamp.
 lemma minted_token_channels_match_stamp:
@@ -708,5 +740,9 @@ lemma executable_host_token_mismatch_attempt:
 lemma executable_member_admitted:
   exists-trace
   "Ex pk comm #i. MemberAdmitted(pk, comm) @ i"
+
+lemma executable_open_auth_registration:
+  exists-trace
+  "Ex pk comm host #i. OpenCommunityAutoRegistered(pk, comm, host) @ i"
 
 end
