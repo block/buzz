@@ -10,6 +10,7 @@ import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart' show channelDetailsProvider;
+import 'channel_mutes/channel_mutes_provider.dart';
 import 'read_state/read_state_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -258,7 +259,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
               ),
             );
             for (final event in events) {
-              if (shouldNotifyForEvent(event, myPk)) {
+              if (shouldNotifyForEvent(
+                event,
+                myPk,
+                mutedChannelIds: _mutedChannelIds(),
+                channelId: channel.id,
+              )) {
                 return MapEntry(channel.id, event.createdAt);
               }
             }
@@ -434,6 +440,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     if (myPk == null) return;
 
     final session = ref.read(relaySessionProvider.notifier);
+    final mutedChannelIds = _mutedChannelIds();
     final ReadStateState readState;
     try {
       readState = ref.read(readStateProvider);
@@ -447,7 +454,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       if (!channel.isMember || channel.isArchived) continue;
       final readAt = readState.effectiveTimestamp(channel.id);
       futures.add(
-        _catchUpUnreadEventsForChannel(session, channel, myPk, readAt),
+        _catchUpUnreadEventsForChannel(
+          session,
+          channel,
+          myPk,
+          readAt,
+          mutedChannelIds,
+        ),
       );
     }
 
@@ -464,6 +477,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     Channel channel,
     String myPk,
     int? readAt,
+    Set<String> mutedChannelIds,
   ) async {
     try {
       final events = await session.fetchHistory(
@@ -491,6 +505,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           myPk,
           participatedRootIds: _participatedRootIds,
           authoredRootIds: _authoredRootIds,
+          mutedChannelIds: mutedChannelIds,
+          channelId: channel.id,
         )) {
           continue;
         }
@@ -508,6 +524,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     if (channelId == null) return;
 
     final myPk = ref.read(myPubkeyProvider);
+    final mutedChannelIds = _mutedChannelIds();
 
     state = state.whenData((channels) {
       final idx = channels.indexWhere((c) => c.id == channelId);
@@ -528,6 +545,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             myPk,
             participatedRootIds: _participatedRootIds,
             authoredRootIds: _authoredRootIds,
+            mutedChannelIds: mutedChannelIds,
+            channelId: channel.id,
           )) {
         _recordUnreadEvent(channel, event, myPk);
         final eventTime = DateTime.fromMillisecondsSinceEpoch(
@@ -543,6 +562,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       return updated;
     });
   }
+
+  Set<String> _mutedChannelIds() => {
+    for (final entry in ref.read(channelMutesProvider).store.channels.entries)
+      if (entry.value.muted) entry.key,
+  };
 
   void _loadThreadInterestStores(String pubkey) {
     final normalizedPubkey = pubkey.toLowerCase();

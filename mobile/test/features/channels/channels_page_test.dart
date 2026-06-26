@@ -6,6 +6,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -155,7 +156,7 @@ void main() {
     expect(find.text('Retry'), findsOneWidget);
   });
 
-  testWidgets('renders and clears unread indicator', (tester) async {
+  testWidgets('renders and clears unread dot indicator', (tester) async {
     final channels = [
       Channel(
         id: '1',
@@ -185,7 +186,81 @@ void main() {
     await tester.pumpWidget(
       buildTestable(
         overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(channels)),
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              channels,
+              observedEventsByChannel: {
+                '1': [_observed(id: 'msg-1', createdAt: 20)],
+              },
+            ),
+          ),
+          readStateProvider.overrideWith(() => readState),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('channel-unread-dot-1')), findsOneWidget);
+
+    readState.markContextRead('1', 20);
+    await tester.pump();
+
+    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
+  });
+
+  testWidgets('renders numeric unread count for counted events', (
+    tester,
+  ) async {
+    final channels = [
+      Channel(
+        id: '1',
+        name: 'general',
+        channelType: 'stream',
+        visibility: 'open',
+        description: 'General discussion',
+        createdBy: 'abc',
+        createdAt: DateTime(2025),
+        memberCount: 10,
+        lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+          30 * 1000,
+          isUtc: true,
+        ),
+        isMember: true,
+      ),
+    ];
+    final readState = _FakeReadStateNotifier(
+      const ReadStateState(
+        isReady: true,
+        pubkey: 'pk',
+        contexts: {'1': 10},
+        version: 0,
+      ),
+    );
+
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier(
+              channels,
+              observedEventsByChannel: {
+                '1': [
+                  _observed(
+                    id: 'reply-1',
+                    createdAt: 20,
+                    rootId: 'root',
+                    isThreadedReply: true,
+                  ),
+                  _observed(
+                    id: 'reply-2',
+                    createdAt: 30,
+                    rootId: 'root',
+                    isThreadedReply: true,
+                  ),
+                ],
+              },
+            ),
+          ),
           readStateProvider.overrideWith(() => readState),
         ],
       ),
@@ -193,11 +268,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('channel-unread-1')), findsOneWidget);
-
-    readState.markContextRead('1', 20);
-    await tester.pump();
-
-    expect(find.byKey(const Key('channel-unread-1')), findsNothing);
+    expect(find.text('2'), findsOneWidget);
+    expect(find.byKey(const Key('channel-unread-dot-1')), findsNothing);
   });
 
   testWidgets('seeds first loaded channels as read', (tester) async {
@@ -294,10 +366,31 @@ void main() {
 
 class _FakeNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
-  _FakeNotifier(this._channels);
+  final Map<String, Map<String, ObservedUnreadEvent>> _observedEventsByChannel;
+
+  _FakeNotifier(
+    this._channels, {
+    Map<String, List<ObservedUnreadEvent>> observedEventsByChannel = const {},
+  }) : _observedEventsByChannel = {
+         for (final entry in observedEventsByChannel.entries)
+           entry.key: {for (final event in entry.value) event.id: event},
+       };
 
   @override
   Future<List<Channel>> build() async => _channels;
+
+  @override
+  Map<String, int> get latestObservedByChannel => {
+    for (final entry in _observedEventsByChannel.entries)
+      if (entry.value.isNotEmpty)
+        entry.key: entry.value.values
+            .map((event) => event.createdAt)
+            .reduce((left, right) => left > right ? left : right),
+  };
+
+  @override
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel => _observedEventsByChannel;
 }
 
 class _ErrorNotifier extends ChannelsNotifier {
@@ -348,3 +441,18 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     state = state.copyWithContext(contextId, unixTimestamp);
   }
 }
+
+ObservedUnreadEvent _observed({
+  required String id,
+  required int createdAt,
+  String? rootId,
+  bool highPriority = false,
+  bool isThreadedReply = false,
+}) => makeObservedUnreadEvent(
+  id: id,
+  createdAt: createdAt,
+  rootId: rootId,
+  highPriority: highPriority,
+  channelType: 'stream',
+  isThreadedReply: isThreadedReply,
+);
