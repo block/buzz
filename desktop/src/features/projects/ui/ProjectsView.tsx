@@ -875,56 +875,58 @@ export function ProjectsView() {
         />
       </div>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)+1rem)]">
-        {visibleProjects.length === 0 ? (
-          <EmptyFilteredState />
-        ) : viewMode === "grid" ? (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {visibleProjects.map((project) => {
-              const summary =
-                activitySummariesQuery.data?.[project.repoAddress];
-              return (
-                <ProjectGridCard
-                  canDelete={isProjectOwnedByCurrentUser(
-                    project,
-                    currentPubkey,
-                  )}
-                  deleteDisabled={deleteProjectMutation.isPending}
-                  key={project.id}
-                  onDelete={handleDeleteProject}
-                  onOpen={handleOpenProject}
-                  people={projectPeople(project, summary)}
-                  profiles={profiles}
-                  project={project}
-                  summary={summary}
-                />
-              );
-            })}
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {visibleProjects.map((project) => {
-              const summary =
-                activitySummariesQuery.data?.[project.repoAddress];
-              return (
-                <ProjectListRow
-                  canDelete={isProjectOwnedByCurrentUser(
-                    project,
-                    currentPubkey,
-                  )}
-                  deleteDisabled={deleteProjectMutation.isPending}
-                  key={project.id}
-                  onDelete={handleDeleteProject}
-                  onOpen={handleOpenProject}
-                  people={projectPeople(project, summary)}
-                  profiles={profiles}
-                  project={project}
-                  summary={summary}
-                />
-              );
-            })}
-          </div>
-        )}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
+        <div className="pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
+          {visibleProjects.length === 0 ? (
+            <EmptyFilteredState />
+          ) : viewMode === "grid" ? (
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {visibleProjects.map((project) => {
+                const summary =
+                  activitySummariesQuery.data?.[project.repoAddress];
+                return (
+                  <ProjectGridCard
+                    canDelete={isProjectOwnedByCurrentUser(
+                      project,
+                      currentPubkey,
+                    )}
+                    deleteDisabled={deleteProjectMutation.isPending}
+                    key={project.id}
+                    onDelete={handleDeleteProject}
+                    onOpen={handleOpenProject}
+                    people={projectPeople(project, summary)}
+                    profiles={profiles}
+                    project={project}
+                    summary={summary}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {visibleProjects.map((project) => {
+                const summary =
+                  activitySummariesQuery.data?.[project.repoAddress];
+                return (
+                  <ProjectListRow
+                    canDelete={isProjectOwnedByCurrentUser(
+                      project,
+                      currentPubkey,
+                    )}
+                    deleteDisabled={deleteProjectMutation.isPending}
+                    key={project.id}
+                    onDelete={handleDeleteProject}
+                    onOpen={handleOpenProject}
+                    people={projectPeople(project, summary)}
+                    profiles={profiles}
+                    project={project}
+                    summary={summary}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
