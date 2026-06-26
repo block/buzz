@@ -122,12 +122,17 @@ export function usePersonaActions() {
   );
 
   React.useEffect(() => {
-    if (sharedCatalogPersonaIds.length === 0) {
+    if (!personasQuery.isSuccess || sharedCatalogPersonaIds.length === 0) {
       return;
     }
 
     const personaIds = new Set(personas.map((persona) => persona.id));
     const next = sharedCatalogPersonaIds.filter((id) => personaIds.has(id));
+    if (next.length === 0) {
+      // Keep stored ids when this workspace has not loaded matching custom personas.
+      return;
+    }
+
     if (next.length !== sharedCatalogPersonaIds.length) {
       setSharedCatalogPersonaIds(next);
       writeSharedCatalogPersonaIds(next);
@@ -282,7 +287,10 @@ export function usePersonaActions() {
     setPersonaToShare(persona);
   }
 
-  function setPersonaCatalogVisibility(persona: AgentPersona, visible: boolean) {
+  function setPersonaCatalogVisibility(
+    persona: AgentPersona,
+    visible: boolean,
+  ) {
     if (persona.isBuiltIn) {
       return;
     }

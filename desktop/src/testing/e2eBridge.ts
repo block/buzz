@@ -1116,8 +1116,7 @@ function resetMockManagedAgents(config?: E2eConfig) {
 const BUILT_IN_PERSONA_AVATAR_URLS = {
   angelica:
     "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcT1MGeCxaWcvoonCISYyuhWfjngmSE8cyJhfQ&s",
-  bart:
-    "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcShI3uwQ-mSgRdv5WYBibPyo2I3X7ybsYmrVQ&s",
+  bart: "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcShI3uwQ-mSgRdv5WYBibPyo2I3X7ybsYmrVQ&s",
   chucky:
     "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ_cxY4ocdqIGx5JVRuZjlCvyhlhEWV5MXWDw&s",
   marge:
