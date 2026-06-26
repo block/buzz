@@ -280,7 +280,8 @@ test("persona model options follow the selected LLM provider", async ({
   const model = page.locator("#persona-model");
   await expect(provider).toContainText("Goose (default)");
   await expect(llmProvider).toBeVisible();
-  await expect(model).toHaveCount(0);
+  await expect(model).toBeVisible();
+  await expect(model).toContainText("Auto (default)");
 
   await llmProvider.click();
   await page
@@ -321,5 +322,14 @@ test("persona model options follow the selected LLM provider", async ({
     .last()
     .getByRole("menuitemradio", { name: "Auto (default)", exact: true })
     .click();
-  await expect(model).toHaveCount(0);
+  await expect(model).toBeVisible();
+  await expect(model).toContainText("Claude Sonnet 4.6");
+
+  await model.click();
+  await expect(
+    page.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+  ).toBeVisible();
 });
