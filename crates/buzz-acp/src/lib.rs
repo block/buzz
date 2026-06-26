@@ -885,7 +885,7 @@ struct RespawnResult {
     result: Result<(AcpClient, u32, bool)>,
 }
 
-/// Outcome of a goose-native steer attempt, forwarded from a per-attempt
+/// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
 /// watcher task (which awaits the `SteerRequest.ack_tx` oneshot) back to
 /// the main loop's `select!`. The main loop drives queue side-effects from
 /// this — it cannot await the oneshot itself without blocking the relay
@@ -1364,7 +1364,7 @@ async fn tokio_main() -> Result<()> {
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-    // Channel for goose-native steer ack watchers to forward outcomes back
+    // Channel for non-cancelling steer ack watchers to forward outcomes back
     // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
     // short-lived task that awaits the `SteerRequest.ack_tx` oneshot and
     // forwards a `SteerAckEvent`. Unbounded because:
@@ -1839,7 +1839,7 @@ async fn tokio_main() -> Result<()> {
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
                             let event_id_hex = buzz_event.event.id.to_hex();
-                            // Clone for the goose-native steer fork, which
+                            // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
                             // clone is unconditional because we don't know
                             // yet whether the mode gate will demand a steer
@@ -1871,8 +1871,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel —
-                            // OR take the goose-native non-cancelling steer
-                            // fork for `Steer` signals against goose agents.
+                            // OR take the non-cancelling (ACP steer) fork for Steer signals.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
                                 // Author eligibility (owner ∪ allowlist ∪ siblings)
                                 // is already enforced by the inbound author gate
@@ -2155,7 +2154,7 @@ async fn tokio_main() -> Result<()> {
                     release_withheld,
                     drop_withheld,
                     signal_fallback,
-                    "goose-native steer ack received"
+                    "non-cancelling steer ack received"
                 );
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
@@ -2360,7 +2359,7 @@ fn signal_in_flight_task(
     false
 }
 
-/// Attempt the goose-native non-cancelling steer for a freshly-queued event.
+/// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
 /// - `event` has already been pushed into `EventQueue::queues[channel_id]`
@@ -2460,7 +2459,7 @@ fn try_native_steer(
             tracing::info!(
                 channel = %channel_id,
                 error = ?e,
-                "goose-native steer not accepted — falling back to cancel+merge"
+                "non-cancelling steer not accepted — falling back to cancel+merge"
             );
             false
         }
@@ -3372,7 +3371,7 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
-    
+
             },
         );
 
@@ -3896,7 +3895,7 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
-    
+
             },
         );
 
