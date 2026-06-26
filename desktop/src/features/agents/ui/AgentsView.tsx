@@ -138,6 +138,7 @@ export function AgentsView() {
               onCreatePersona={personas.openCreate}
               onChooseCatalog={personas.openCatalog}
               onDuplicatePersona={personas.openDuplicate}
+              onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");

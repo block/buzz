@@ -1,4 +1,4 @@
-import { CopyPlus, Ellipsis, Share2, Trash2 } from "lucide-react";
+import { CopyPlus, Ellipsis, Pencil, Share2, Trash2 } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
 import {
@@ -14,6 +14,7 @@ export function PersonaActionsMenu({
   isPending,
   persona,
   onDuplicate,
+  onEdit,
   onShare,
   onDeactivate,
   onDelete,
@@ -22,11 +23,13 @@ export function PersonaActionsMenu({
   isPending: boolean;
   persona: AgentPersona;
   onDuplicate: (persona: AgentPersona) => void;
+  onEdit: (persona: AgentPersona) => void;
   onShare: (persona: AgentPersona) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
   const disabled = isActionPending || isPending;
+  const canEdit = !persona.isBuiltIn && !persona.sourceTeam;
 
   return (
     <DropdownMenu modal={false}>
@@ -47,6 +50,12 @@ export function PersonaActionsMenu({
           <Share2 className="h-4 w-4" />
           Share
         </DropdownMenuItem>
+        {canEdit ? (
+          <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
+            <Pencil className="h-4 w-4" />
+            Edit
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem
           disabled={disabled}
           onClick={() => onDuplicate(persona)}

@@ -359,6 +359,7 @@ test("custom personas can be shared into the agent catalog", async ({
   await page.getByLabel("Open actions for Analyst").click();
   await expect(page.getByRole("menuitem")).toHaveText([
     "Share",
+    "Edit",
     "Duplicate",
     "Remove from My Agents",
   ]);
