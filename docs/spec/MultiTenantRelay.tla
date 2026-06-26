@@ -463,9 +463,11 @@ VisibleHostFeedRows(community, actor) ==
         /\ (m.channel = NoChannel \/ m.channel \in ScopedAccessible(community, actor))}
 
 \* Intentionally-bad host feed helper for mutation M12: answers from the host
-\* community but treats admission as relay-global. Substitute this into
-\* ReadHostFeedRows; after AdmitMember(commB, actor), a HostA feed read is recorded
-\* for commA and Inv_AdmissionFence fails.
+\* community but treats admission as relay-global. To reproduce the red mutation,
+\* change ReadHostFeedRows' admission guard from IsAdmitted(c, a) to
+\* GloballyAdmitted(a) and optionally use this row helper; after an actor is
+\* admitted only in B, a HostA feed read is recorded for commA and
+\* Inv_AdmissionFence fails.
 VisibleHostFeedRows_GlobalAdmission(community, actor) ==
     {m \in messages :
         /\ m.community = community
@@ -480,9 +482,11 @@ VisibleHostAuxRows(community, actor, id) ==
         /\ (m.channel = NoChannel \/ m.channel \in ScopedAccessible(community, actor))}
 
 \* Intentionally-bad host aux helper for mutation M13: answers from the host
-\* community but treats admission as relay-global. Substitute this into
-\* ReadHostAuxRows; after AdmitMember(commB, actor), a HostA aux read is recorded
-\* for commA and Inv_AdmissionFence fails.
+\* community but treats admission as relay-global. To reproduce the red mutation,
+\* change ReadHostAuxRows' admission guard from IsAdmitted(c, a) to
+\* GloballyAdmitted(a) and optionally use this row helper; after an actor is
+\* admitted only in B, a HostA aux read is recorded for commA and
+\* Inv_AdmissionFence fails.
 VisibleHostAuxRows_GlobalAdmission(community, actor, id) ==
     {m \in messages :
         /\ m.id = id
