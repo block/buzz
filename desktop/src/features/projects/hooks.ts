@@ -26,6 +26,10 @@ import type {
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
+import type { ProjectPullRequest } from "./projectPullRequests.mjs";
+import { projectPullRequestEventsToPullRequests } from "./projectPullRequests.mjs";
+
+export type { ProjectPullRequest };
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
@@ -55,6 +59,7 @@ export type RepoState = {
 export type ProjectActivitySummary = {
   repoAddress: string;
   issueCount: number;
+  prCount: number;
   activityCount: number;
   updatedAt: number;
   participantPubkeys: string[];
@@ -253,6 +258,28 @@ async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
   return projectIssueEventsToIssues(issueEvents, statusEvents);
 }
 
+async function fetchProjectPullRequests(
+  project: Project,
+): Promise<ProjectPullRequest[]> {
+  const [pullRequestEvents, updateEvents] = await Promise.all([
+    relayClient.fetchEvents({
+      kinds: [KIND_GIT_PULL_REQUEST],
+      "#a": [project.repoAddress],
+      limit: 200,
+    }),
+    relayClient.fetchEvents({
+      kinds: [KIND_GIT_PR_UPDATE],
+      "#a": [project.repoAddress],
+      limit: 500,
+    }),
+  ]);
+
+  return projectPullRequestEventsToPullRequests(
+    pullRequestEvents,
+    updateEvents,
+  );
+}
+
 async function fetchProjectRepoSnapshot(
   project: Project,
   branchName?: string | null,
@@ -371,6 +398,20 @@ export function useProjectIssuesQuery(project: Project | null | undefined) {
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
       return fetchProjectIssues(project);
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectPullRequestsQuery(
+  project: Project | null | undefined,
+) {
+  return useQuery({
+    enabled: Boolean(project),
+    queryKey: ["project", project?.id ?? "none", "pull-requests"],
+    queryFn: () => {
+      if (!project) throw new Error("No project selected.");
+      return fetchProjectPullRequests(project);
     },
     staleTime: 30_000,
   });

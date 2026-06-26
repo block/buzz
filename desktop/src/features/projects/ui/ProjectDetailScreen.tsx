@@ -11,6 +11,7 @@ import {
   FolderGit2,
   GitBranch,
   GitFork,
+  GitPullRequest,
   MessageSquare,
   Users,
 } from "lucide-react";
@@ -19,9 +20,11 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   type Project,
+  type ProjectPullRequest,
   type ProjectRepoContributor,
   type ProjectRepoSnapshot,
   useProjectQuery,
+  useProjectPullRequestsQuery,
   useProjectRepoSnapshotQuery,
   useRepoStateQuery,
 } from "@/features/projects/hooks";
@@ -160,6 +163,10 @@ function compactDate(createdAt: number) {
     month: "short",
     day: "numeric",
   });
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function projectPeople(project: Project) {
@@ -374,8 +381,76 @@ function ActivityPanel({
   );
 }
 
+function PullRequestsPanel({
+  error,
+  isLoading,
+  pullRequests,
+}: {
+  error: unknown;
+  isLoading: boolean;
+  pullRequests: ProjectPullRequest[];
+}) {
+  if (isLoading) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        Loading pull requests…
+      </p>
+    );
+  }
+
+  if (pullRequests.length === 0) {
+    return (
+      <p className="p-4 text-sm text-muted-foreground">
+        {error
+          ? "Could not load pull requests for this repository."
+          : "No pull requests yet."}
+      </p>
+    );
+  }
+
+  return (
+    <div className="divide-y divide-border/50">
+      {pullRequests.map((pullRequest) => (
+        <article
+          className="flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/30"
+          key={pullRequest.id}
+        >
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <GitPullRequest className="h-4 w-4" />
+          </div>
+          <div className="min-w-0 flex-1 space-y-1">
+            <p className="truncate text-sm font-medium text-foreground">
+              {pullRequest.title}
+            </p>
+            <p className="truncate text-xs text-muted-foreground">
+              {pullRequest.branchName ? `${pullRequest.branchName} · ` : ""}
+              {pullRequest.updateCount > 0
+                ? `${pluralize(pullRequest.updateCount, "update")} · `
+                : ""}
+              {compactDate(pullRequest.updatedAt)}
+            </p>
+            {pullRequest.content ? (
+              <p className="line-clamp-2 text-sm text-muted-foreground">
+                {pullRequest.content}
+              </p>
+            ) : null}
+          </div>
+          {pullRequest.commit ? (
+            <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
+              {pullRequest.commit.slice(0, 7)}
+            </code>
+          ) : null}
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function WorkspaceTabs({
   project,
+  pullRequests,
+  pullRequestsError,
+  pullRequestsLoading,
   snapshot,
   snapshotError,
   snapshotLoading,
@@ -384,6 +459,9 @@ function WorkspaceTabs({
   repoContributors,
 }: {
   project: Project;
+  pullRequests: ProjectPullRequest[];
+  pullRequestsError: unknown;
+  pullRequestsLoading: boolean;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
   snapshotLoading: boolean;
@@ -424,6 +502,10 @@ function WorkspaceTabs({
           <CircleDot className="h-3.5 w-3.5" />
           Activity
         </TabsTrigger>
+        <TabsTrigger className="h-7 gap-1 px-2" value="prs">
+          <GitPullRequest className="h-3.5 w-3.5" />
+          PRs
+        </TabsTrigger>
         <TabsTrigger className="h-7 gap-1 px-2" value="files">
           <FolderGit2 className="h-3.5 w-3.5" />
           Files
@@ -442,6 +524,17 @@ function WorkspaceTabs({
           error={snapshotError}
           isLoading={snapshotLoading}
           snapshot={snapshot}
+        />
+      </TabsContent>
+
+      <TabsContent
+        className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
+        value="prs"
+      >
+        <PullRequestsPanel
+          error={pullRequestsError}
+          isLoading={pullRequestsLoading}
+          pullRequests={pullRequests}
         />
       </TabsContent>
 
@@ -502,6 +595,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const activeBranch =
     selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
+  const pullRequestsQuery = useProjectPullRequestsQuery(project);
 
   React.useEffect(() => {
     if (!project) {
@@ -679,6 +773,9 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             peoplePubkeys={peoplePubkeys}
             profiles={profiles}
             project={project}
+            pullRequests={pullRequestsQuery.data ?? []}
+            pullRequestsError={pullRequestsQuery.error}
+            pullRequestsLoading={pullRequestsQuery.isLoading}
             repoContributors={repoContributors}
             snapshot={repoSnapshotQuery.data}
             snapshotError={repoSnapshotQuery.error}

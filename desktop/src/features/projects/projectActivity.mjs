@@ -17,6 +17,7 @@ function ensureSummary(summaryByRepoAddress, repoAddress) {
   const summary = {
     repoAddress,
     issueCount: 0,
+    prCount: 0,
     activityCount: 0,
     updatedAt: 0,
     participantPubkeys: [],
@@ -51,6 +52,9 @@ export function summarizeProjectActivityEvents(events, projects) {
 
     if (event.kind === 1621) {
       summary.issueCount += 1;
+    }
+    if (event.kind === 1618) {
+      summary.prCount += 1;
     }
 
     const author = normalizePubkey(event.pubkey);

@@ -3,6 +3,7 @@ import {
   CalendarDays,
   FolderGit2,
   GitFork,
+  GitPullRequest,
   LayoutGrid,
   List,
   MessageSquare,
@@ -57,7 +58,13 @@ import {
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectsViewMode = "grid" | "list";
-type ProjectsFilter = "all" | "mine" | "repositories" | "agents" | "users";
+type ProjectsFilter =
+  | "all"
+  | "mine"
+  | "repositories"
+  | "prs"
+  | "agents"
+  | "users";
 type ProjectsSort = "updated" | "created" | "name";
 
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
@@ -89,6 +96,7 @@ function readStoredFilter(): ProjectsFilter {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
     return value === "mine" ||
       value === "repositories" ||
+      value === "prs" ||
       value === "agents" ||
       value === "users"
       ? value
@@ -203,10 +211,12 @@ function getActivityLabel(summary: ProjectActivitySummary | undefined) {
     return "No activity yet";
   }
 
-  return `${pluralize(summary.issueCount, "issue")} · ${pluralize(
-    summary.activityCount,
-    "event",
-  )}`;
+  const parts = [pluralize(summary.issueCount, "issue")];
+  if (summary.prCount > 0) {
+    parts.push(pluralize(summary.prCount, "PR"));
+  }
+  parts.push(pluralize(summary.activityCount, "event"));
+  return parts.join(" · ");
 }
 
 function getProjectUpdatedAt(
@@ -409,6 +419,7 @@ function ProjectsToolbar({
     { label: "All", value: "all" },
     { label: "Mine", value: "mine" },
     { label: "Repositories", value: "repositories" },
+    { label: "PRs", value: "prs" },
     { label: "Agents", value: "agents" },
     { label: "Users", value: "users" },
   ];
@@ -446,6 +457,9 @@ function ProjectsToolbar({
               ) : null}
               {option.value === "repositories" ? (
                 <FolderGit2 className="h-3.5 w-3.5" />
+              ) : null}
+              {option.value === "prs" ? (
+                <GitPullRequest className="h-3.5 w-3.5" />
               ) : null}
               {option.value === "users" ? (
                 <Users className="h-3.5 w-3.5" />
@@ -809,6 +823,7 @@ export function ProjectsView() {
         const summary = activitySummariesQuery.data?.[project.repoAddress];
         const people = projectPeople(project, summary);
         if (filter === "mine") return isProjectMine(project, currentPubkey);
+        if (filter === "prs") return (summary?.prCount ?? 0) > 0;
         if (filter === "agents") {
           return projectHasAgent(project, people, profiles);
         }
