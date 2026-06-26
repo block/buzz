@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use clap::Parser;
+use clap::ValueEnum;
 use nostr::Keys;
 use thiserror::Error;
 use url::Url;
@@ -73,7 +74,7 @@ pub enum MultipleEventHandling {
 /// - `allowlist`  — owner + explicit pubkey list (`--respond-to-allowlist`).
 /// - `anyone`     — all events forwarded (no author filtering).
 /// - `nobody`     — all events dropped (proactive/heartbeat-only mode).
-#[derive(Debug, Clone, Default, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum RespondTo {
     #[default]
     OwnerOnly,
@@ -393,6 +394,14 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
 
+    /// Comma-separated list of allowed `--respond-to` modes.
+    /// When set, the harness rejects startup if `--respond-to` is not in this list.
+    /// Modes: owner-only, allowlist, anyone, nobody.
+    /// Default: empty (all modes allowed — no restriction).
+    /// Example: `BUZZ_ACP_ALLOWED_RESPOND_TO=owner-only,allowlist`
+    #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
+    pub allowed_respond_to: Option<Vec<String>>,
+
     /// Path to a persona pack directory. Used with --persona-name to configure
     /// the agent from a .persona.md pack instead of CLI flags.
     #[arg(long, env = "BUZZ_ACP_PERSONA_PACK")]
@@ -460,6 +469,8 @@ pub struct Config {
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
+    /// Allowed `respond_to` modes. Empty = all modes allowed.
+    pub allowed_respond_to: HashSet<RespondTo>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
@@ -808,6 +819,31 @@ impl Config {
             HashSet::new()
         };
 
+        // Validate respond_to against the allowed set.
+        let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
+            let mut set = HashSet::new();
+            for s in &raw {
+                let mode = RespondTo::from_str(s.trim(), true).map_err(|_| {
+                    ConfigError::ConfigFile(format!(
+                        "invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO: '{s}' \
+                         (valid values: owner-only, allowlist, anyone, nobody)"
+                    ))
+                })?;
+                set.insert(mode);
+            }
+            if !set.is_empty() && !set.contains(&args.respond_to) {
+                return Err(ConfigError::ConfigFile(format!(
+                    "respond_to '{}' is not permitted on this deployment \
+                     (BUZZ_ACP_ALLOWED_RESPOND_TO={})",
+                    args.respond_to,
+                    raw.join(",")
+                )));
+            }
+            set
+        } else {
+            HashSet::new()
+        };
+
         //
         // Precedence: CLI/env args > persona values > built-in defaults.
         // Persona fills in what's missing. Explicit flags always win.
@@ -899,6 +935,7 @@ impl Config {
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
+            allowed_respond_to,
             persona_env_vars,
             relay_observer: args.relay_observer,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
@@ -917,8 +954,19 @@ impl Config {
             }
             other => format!("respond_to={other}"),
         };
+        let allowed_respond_to_detail = if self.allowed_respond_to.is_empty() {
+            String::new()
+        } else {
+            let mut modes: Vec<String> = self
+                .allowed_respond_to
+                .iter()
+                .map(|m| m.to_string())
+                .collect();
+            modes.sort();
+            format!(" allowed_respond_to=[{}]", modes.join(","))
+        };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -940,6 +988,7 @@ impl Config {
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
             respond_to_detail,
+            allowed_respond_to_detail,
         )
     }
 }
@@ -1225,6 +1274,7 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
 mod tests {
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
+    use clap::ValueEnum;
 
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
@@ -1259,6 +1309,7 @@ mod tests {
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            allowed_respond_to: HashSet::new(),
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
@@ -2305,6 +2356,106 @@ channels = "ALL"
         assert!(
             idle_valid < max_turn_valid,
             "default idle (900) must be less than default max_turn (3600)"
+        );
+    }
+
+    // --- BUZZ_ACP_ALLOWED_RESPOND_TO gate ---
+
+    fn parse_allowed_respond_to(
+        raw: &[&str],
+    ) -> Result<HashSet<RespondTo>, ConfigError> {
+        let mut set = HashSet::new();
+        for s in raw {
+            let mode = RespondTo::from_str(s.trim(), true).map_err(|_| {
+                ConfigError::ConfigFile(format!(
+                    "invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO: '{s}' \
+                     (valid values: owner-only, allowlist, anyone, nobody)"
+                ))
+            })?;
+            set.insert(mode);
+        }
+        Ok(set)
+    }
+
+    fn check_allowed_respond_to(
+        allowed_raw: &[&str],
+        respond_to: RespondTo,
+    ) -> Result<(), ConfigError> {
+        let set = parse_allowed_respond_to(allowed_raw)?;
+        if !set.is_empty() && !set.contains(&respond_to) {
+            return Err(ConfigError::ConfigFile(format!(
+                "respond_to '{}' is not permitted on this deployment \
+                 (BUZZ_ACP_ALLOWED_RESPOND_TO={})",
+                respond_to,
+                allowed_raw.join(",")
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn allowed_respond_to_rejects_disallowed_mode() {
+        let result =
+            check_allowed_respond_to(&["owner-only", "allowlist"], RespondTo::Anyone);
+        assert!(
+            result.is_err(),
+            "anyone should be rejected when not in allowed set"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not permitted"),
+            "error should mention 'not permitted': {msg}"
+        );
+    }
+
+    #[test]
+    fn allowed_respond_to_accepts_allowed_mode() {
+        let result =
+            check_allowed_respond_to(&["owner-only", "allowlist"], RespondTo::OwnerOnly);
+        assert!(result.is_ok(), "owner-only should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn allowed_respond_to_empty_allows_all() {
+        // No restriction — anyone is accepted.
+        let result = check_allowed_respond_to(&[], RespondTo::Anyone);
+        assert!(
+            result.is_ok(),
+            "empty allowed set should permit any mode: {result:?}"
+        );
+    }
+
+    #[test]
+    fn allowed_respond_to_rejects_invalid_mode_string() {
+        let result = parse_allowed_respond_to(&["owner-only", "badvalue"]);
+        assert!(result.is_err(), "invalid mode string should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO"),
+            "error should name the env var: {msg}"
+        );
+        assert!(msg.contains("badvalue"), "error should name the bad value: {msg}");
+    }
+
+    #[test]
+    fn allowed_respond_to_summary_shows_restriction_when_set() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        config.allowed_respond_to =
+            HashSet::from([RespondTo::OwnerOnly, RespondTo::Allowlist]);
+        let s = config.summary();
+        assert!(
+            s.contains("allowed_respond_to="),
+            "summary should include allowed_respond_to when set: {s}"
+        );
+    }
+
+    #[test]
+    fn allowed_respond_to_summary_omitted_when_empty() {
+        let config = test_config(SubscribeMode::Mentions);
+        let s = config.summary();
+        assert!(
+            !s.contains("allowed_respond_to="),
+            "summary should not include allowed_respond_to when empty: {s}"
         );
     }
 }

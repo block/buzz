@@ -527,6 +527,21 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
+    // Check if this policy is allowed by the deployment.
+    if let Ok(allowed_raw) = std::env::var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES") {
+        let allowed: Vec<&str> = allowed_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !allowed.is_empty() && !allowed.contains(&policy) {
+            return Err(CliError::Usage(format!(
+                "channel_add_policy '{policy}' is not permitted on this deployment \
+                 (BUZZ_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
+            )));
+        }
+    }
+
     let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
     use nostr::{EventBuilder, Kind};
     let builder = EventBuilder::new(
@@ -649,6 +664,7 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 #[cfg(test)]
 mod tests {
     use super::{name_matches, validate_ttl_seconds, ChannelSummary};
+    use crate::CliError;
     use serde_json::json;
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
@@ -755,5 +771,56 @@ mod tests {
     #[test]
     fn validate_ttl_rejects_overflow() {
         assert!(validate_ttl_seconds(i32::MAX as i64 + 1).is_err());
+    }
+
+    // --- BUZZ_ALLOWED_CHANNEL_ADD_POLICIES gate ---
+
+    fn check_allowed_channel_add_policy(
+        allowed_raw: &str,
+        policy: &str,
+    ) -> Result<(), CliError> {
+        let allowed: Vec<&str> = allowed_raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !allowed.is_empty() && !allowed.contains(&policy) {
+            return Err(CliError::Usage(format!(
+                "channel_add_policy '{policy}' is not permitted on this deployment \
+                 (BUZZ_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
+            )));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_add_policy_rejects_disallowed_policy() {
+        let result = check_allowed_channel_add_policy("owner_only,nobody", "anyone");
+        assert!(result.is_err(), "anyone should be rejected when not in allowed set");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not permitted"),
+            "error should mention 'not permitted': {msg}"
+        );
+        assert!(
+            msg.contains("anyone"),
+            "error should name the disallowed policy: {msg}"
+        );
+    }
+
+    #[test]
+    fn set_add_policy_accepts_allowed_policy() {
+        let result = check_allowed_channel_add_policy("owner_only,nobody", "owner_only");
+        assert!(result.is_ok(), "owner_only should be accepted: {result:?}");
+    }
+
+    #[test]
+    fn set_add_policy_no_restriction_allows_all() {
+        // Empty allowed list means no restriction.
+        let result = check_allowed_channel_add_policy("", "anyone");
+        assert!(
+            result.is_ok(),
+            "empty allowed list should permit any policy: {result:?}"
+        );
     }
 }
