@@ -2,6 +2,7 @@ import {
   Bot,
   CalendarDays,
   FolderGit2,
+  GitFork,
   LayoutGrid,
   List,
   MessageSquare,
@@ -56,7 +57,7 @@ import {
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectsViewMode = "grid" | "list";
-type ProjectsFilter = "all" | "mine" | "agents" | "users";
+type ProjectsFilter = "all" | "mine" | "repositories" | "agents" | "users";
 type ProjectsSort = "updated" | "created" | "name";
 
 const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
@@ -86,7 +87,10 @@ function writeStoredViewMode(viewMode: ProjectsViewMode) {
 function readStoredFilter(): ProjectsFilter {
   try {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
-    return value === "mine" || value === "agents" || value === "users"
+    return value === "mine" ||
+      value === "repositories" ||
+      value === "agents" ||
+      value === "users"
       ? value
       : "all";
   } catch {
@@ -147,6 +151,51 @@ function projectPeople(
 
 function getDiscussionLabel(project: Project) {
   return project.projectChannelId ? "Discussion linked" : "No discussion";
+}
+
+function normalizeRepositoryUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    const normalizedPath = parsed.pathname
+      .replace(/\/+$/, "")
+      .replace(/\.git$/i, "")
+      .toLowerCase();
+    return `${parsed.hostname.toLowerCase()}${normalizedPath}`;
+  } catch {
+    return url
+      .trim()
+      .replace(/\/+$/, "")
+      .replace(/\.git$/i, "")
+      .toLowerCase();
+  }
+}
+
+function getClonePathLabel(project: Project) {
+  const cloneUrl = project.cloneUrls[0];
+  if (!cloneUrl) return "Clone path pending";
+
+  try {
+    const parsed = new URL(cloneUrl);
+    return `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return cloneUrl;
+  }
+}
+
+function repositoryIdentityKey(project: Project) {
+  const cloneUrl = project.cloneUrls[0];
+  if (cloneUrl) return normalizeRepositoryUrl(cloneUrl);
+  return (project.name || project.dtag).trim().toLowerCase();
+}
+
+function uniqueRepositories(projects: Project[]) {
+  const seen = new Set<string>();
+  return projects.filter((project) => {
+    const key = repositoryIdentityKey(project);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function getActivityLabel(summary: ProjectActivitySummary | undefined) {
@@ -359,6 +408,7 @@ function ProjectsToolbar({
   const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
     { label: "All", value: "all" },
     { label: "Mine", value: "mine" },
+    { label: "Repositories", value: "repositories" },
     { label: "Agents", value: "agents" },
     { label: "Users", value: "users" },
   ];
@@ -393,6 +443,9 @@ function ProjectsToolbar({
             >
               {option.value === "agents" ? (
                 <Bot className="h-3.5 w-3.5" />
+              ) : null}
+              {option.value === "repositories" ? (
+                <FolderGit2 className="h-3.5 w-3.5" />
               ) : null}
               {option.value === "users" ? (
                 <Users className="h-3.5 w-3.5" />
@@ -576,6 +629,13 @@ function ProjectGridCard({
           {project.description || "A shared space for internal git work."}
         </p>
 
+        <div className="flex min-w-0 items-center gap-1.5 rounded-lg bg-muted/45 px-2.5 py-1.5 text-xs text-muted-foreground/80">
+          <GitFork className="h-3.5 w-3.5 shrink-0" />
+          <span className="truncate font-mono">
+            {getClonePathLabel(project)}
+          </span>
+        </div>
+
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <MetadataItem icon={Users}>
             {pluralize(people.length, "person", "people")}
@@ -641,6 +701,12 @@ function ProjectListRow({
           <p className="line-clamp-1 text-sm text-muted-foreground">
             {project.description || "A shared space for internal git work."}
           </p>
+          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/75">
+            <GitFork className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate font-mono">
+              {getClonePathLabel(project)}
+            </span>
+          </div>
         </div>
 
         <div className="min-w-0 space-y-1">
@@ -738,7 +804,7 @@ export function ProjectsView() {
   }, []);
 
   const visibleProjects = React.useMemo(() => {
-    return projects
+    const sortedProjects = projects
       .filter((project) => {
         const summary = activitySummariesQuery.data?.[project.repoAddress];
         const people = projectPeople(project, summary);
@@ -763,6 +829,10 @@ export function ProjectsView() {
           getProjectUpdatedAt(left, leftSummary)
         );
       });
+
+    return filter === "repositories"
+      ? uniqueRepositories(sortedProjects)
+      : sortedProjects;
   }, [
     activitySummariesQuery.data,
     currentPubkey,

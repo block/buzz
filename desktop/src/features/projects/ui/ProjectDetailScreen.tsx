@@ -68,7 +68,7 @@ function CloneUrlRow({ url }: { url: string }) {
   }, [url]);
 
   return (
-    <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border/50 bg-background/45 px-3 py-2">
+    <div className="flex min-w-0 items-center gap-2">
       <GitFork className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       <code className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
         {url}
@@ -101,55 +101,51 @@ function RepositorySourceCard({
   onBranchChange: (branch: string) => void;
 }) {
   if (cloneUrls.length === 0 && !branch) return null;
-  const canSelectBranch = branchOptions.length > 1;
+  const selectableBranches =
+    branchOptions.length > 0 ? branchOptions : [branch];
 
   return (
-    <Card className="space-y-3 border-border/50 bg-card/60 p-4 shadow-none">
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,0.35fr)_minmax(0,1fr)] lg:items-start">
-        <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border/50 bg-background/45 px-3 py-2">
-          <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <div className="min-w-0">
-            <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-              Branch
-            </p>
-            {canSelectBranch ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    className="-ml-2 h-7 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <span className="truncate">{branch || "—"}</span>
-                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="min-w-56">
-                  <DropdownMenuRadioGroup
-                    onValueChange={onBranchChange}
-                    value={branch}
-                  >
-                    {branchOptions.map((option) => (
-                      <DropdownMenuRadioItem key={option} value={option}>
-                        <span className="truncate font-mono">{option}</span>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : (
-              <p className="truncate font-mono text-sm font-semibold text-foreground">
-                {branch || "—"}
-              </p>
-            )}
-          </div>
+    <Card className="border-border/50 bg-card/60 p-4 shadow-none">
+      <div className="flex min-w-0 flex-col">
+        <div className="flex min-w-0 items-center gap-2">
+          <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
+          {branch ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  className="h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  <span className="truncate">{branch || "—"}</span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-56">
+                <DropdownMenuRadioGroup
+                  onValueChange={onBranchChange}
+                  value={branch}
+                >
+                  {selectableBranches.map((option) => (
+                    <DropdownMenuRadioItem key={option} value={option}>
+                      <span className="truncate font-mono">{option}</span>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <span className="truncate font-mono text-sm font-semibold text-foreground">
+              {branch || "—"}
+            </span>
+          )}
         </div>
-        <div className="min-w-0 space-y-1.5">
+        <div className="min-w-0 flex-1">
           {cloneUrls.length > 0 ? (
             cloneUrls.map((url) => <CloneUrlRow key={url} url={url} />)
           ) : (
-            <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-2 text-sm text-muted-foreground">
+            <div className="text-sm text-muted-foreground">
               No clone URL published yet.
             </div>
           )}
@@ -397,8 +393,15 @@ function WorkspaceTabs({
 }) {
   const files = snapshot?.files ?? [];
   const readmeFile = React.useMemo(() => findReadmeFile(files), [files]);
-  const readmeTabLabel = readmeFile?.path.split("/").pop() ?? "README";
-  const [selectedTab, setSelectedTab] = React.useState("activity");
+  const [selectedTab, setSelectedTab] = React.useState("readme");
+
+  React.useEffect(() => {
+    setSelectedTab((currentTab) =>
+      currentTab === "readme" && !readmeFile && !snapshotLoading
+        ? "activity"
+        : currentTab,
+    );
+  }, [readmeFile, snapshotLoading]);
 
   return (
     <Tabs
@@ -407,6 +410,16 @@ function WorkspaceTabs({
       value={selectedTab}
     >
       <TabsList className="h-8 w-fit justify-start">
+        {readmeFile ? (
+          <TabsTrigger
+            aria-label="README"
+            className="h-7 px-2"
+            title="README"
+            value="readme"
+          >
+            <BookOpen className="h-3.5 w-3.5" />
+          </TabsTrigger>
+        ) : null}
         <TabsTrigger className="h-7 gap-1 px-2" value="activity">
           <CircleDot className="h-3.5 w-3.5" />
           Activity
@@ -415,12 +428,6 @@ function WorkspaceTabs({
           <FolderGit2 className="h-3.5 w-3.5" />
           Files
         </TabsTrigger>
-        {readmeFile ? (
-          <TabsTrigger className="h-7 gap-1 px-2" value="readme">
-            <BookOpen className="h-3.5 w-3.5" />
-            {readmeTabLabel}
-          </TabsTrigger>
-        ) : null}
         <TabsTrigger className="h-7 gap-1 px-2" value="contributors">
           <Users className="h-3.5 w-3.5" />
           Contributors
@@ -620,7 +627,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
-        <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
+        <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
           <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
             <div className="flex min-w-0 items-start gap-3">
               <UserAvatar
