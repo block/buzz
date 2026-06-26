@@ -248,8 +248,7 @@ export function useLoadOlderOnScroll({
                 const target = resolveTarget({
                   instance: grew ? instance : null,
                   abandonedToBottom,
-                  lastIndex:
-                    (after?.liveMessageCount ?? previousCount) - 1,
+                  lastIndex: (after?.liveMessageCount ?? previousCount) - 1,
                   newIndex,
                   anchorTop,
                 });
