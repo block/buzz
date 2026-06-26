@@ -64,9 +64,7 @@ fn name_matches_known_binary(name: &str) -> bool {
 /// a managed agent wrapper (e.g. `node` running an npm shim for `codex-acp`).
 /// Callers must additionally verify `BUZZ_MANAGED_AGENT` ownership.
 fn name_matches_interpreter(name: &str) -> bool {
-    KNOWN_SCRIPT_INTERPRETERS
-        .iter()
-        .any(|&interp| name == interp)
+    KNOWN_SCRIPT_INTERPRETERS.contains(&name)
 }
 
 #[cfg(unix)]
