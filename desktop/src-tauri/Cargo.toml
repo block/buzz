@@ -17,8 +17,9 @@ name = "buzz_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = ["system-keyring"]
+default = ["system-keyring", "global-shortcut"]
 mesh-llm = ["dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime"]
+global-shortcut = ["dep:tauri-plugin-global-shortcut"]
 # OS keyring backing for desktop secret storage (nsec private keys). When
 # disabled, secrets fall back to 0o600 files. On by default for real builds.
 system-keyring = ["dep:keyring"]
@@ -88,7 +89,7 @@ sha2 = "0.11"
 tar = "0.4"
 bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
-tauri-plugin-global-shortcut = "2"
+tauri-plugin-global-shortcut = { version = "2", optional = true }
 tauri-plugin-notification = "2.3.3"
 uuid = { version = "1", features = ["v4"] }
 png = "0.18"

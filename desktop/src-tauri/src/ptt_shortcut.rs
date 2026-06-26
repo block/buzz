@@ -4,9 +4,11 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+#[cfg(feature = "global-shortcut")]
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
 use crate::app_state::AppState;
+#[cfg(any(feature = "global-shortcut", test))]
 use crate::huddle::{HuddlePhase, VoiceInputMode};
 
 const SETTINGS_FILE_NAME: &str = "ptt-shortcut.json";
@@ -50,6 +52,7 @@ impl Default for PttShortcutRuntimeState {
     }
 }
 
+#[cfg(feature = "global-shortcut")]
 fn ptt_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL), Code::Space)
 }
@@ -136,6 +139,7 @@ fn set_ptt_inactive(app: &AppHandle, state: &AppState) {
     let _ = app.emit("ptt-state", false);
 }
 
+#[cfg(any(feature = "global-shortcut", test))]
 pub(crate) fn should_handle_shortcut_event(state: &AppState) -> bool {
     if !state.ptt_shortcut.enabled.load(Ordering::Acquire) {
         return false;
@@ -147,10 +151,12 @@ pub(crate) fn should_handle_shortcut_event(state: &AppState) -> bool {
         && matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
 }
 
+#[cfg(any(feature = "global-shortcut", test))]
 fn should_register(state: &AppState) -> bool {
     should_handle_shortcut_event(state)
 }
 
+#[cfg(feature = "global-shortcut")]
 pub fn refresh_registration(app: &AppHandle, state: &AppState) {
     let should_be_registered = should_register(state);
     let is_registered = state.ptt_shortcut.registered.load(Ordering::Acquire);
@@ -219,6 +225,16 @@ pub fn refresh_registration(app: &AppHandle, state: &AppState) {
                 eprintln!("buzz-desktop: {message}");
             }
         }
+    }
+}
+
+#[cfg(not(feature = "global-shortcut"))]
+pub fn refresh_registration(app: &AppHandle, state: &AppState) {
+    if state.ptt_shortcut.registered.swap(false, Ordering::AcqRel) {
+        set_ptt_inactive(app, state);
+    }
+    if let Ok(mut error) = state.ptt_shortcut.error.lock() {
+        *error = None;
     }
 }
 

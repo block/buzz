@@ -843,7 +843,7 @@ jobs:
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
       - name: Test (Tauri crate)
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET --no-default-features --features system-keyring
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
