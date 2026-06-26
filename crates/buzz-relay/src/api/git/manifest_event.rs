@@ -20,8 +20,6 @@ use std::collections::BTreeMap;
 
 use nostr::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind};
 
-// ── Inputs ───────────────────────────────────────────────────────────────────
-
 /// Subset of `Manifest` needed to emit a kind:30618 event.
 ///
 /// Deliberately a borrowed slice of fields (not the whole `Manifest`) so this
@@ -53,8 +51,6 @@ pub enum BuildError {
     #[error("nostr event signing failed: {0}")]
     Sign(String),
 }
-
-// ── Build helper ─────────────────────────────────────────────────────────────
 
 /// Build & sign a kind:30618 event from the manifest's ref state.
 ///
@@ -117,8 +113,6 @@ pub fn build_ref_state_event(
     Ok(event)
 }
 
-// ── Validators (private) ─────────────────────────────────────────────────────
-
 /// NIP-34 kind:30618 only emits refs under heads/ and tags/.
 fn is_emittable_ref(name: &str) -> bool {
     if !(name.starts_with("refs/heads/") || name.starts_with("refs/tags/")) {
@@ -135,8 +129,6 @@ fn is_emittable_ref(name: &str) -> bool {
 fn is_valid_oid(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -182,8 +174,6 @@ mod tests {
         tags_with_kind(ev, kind).into_iter().next()
     }
 
-    // ── Empty repo (creation event) ──────────────────────────────────────────
-
     #[test]
     fn empty_repo_emits_d_head_p_only() {
         let owner = owner_hex();
@@ -213,8 +203,6 @@ mod tests {
         assert!(tags_with_kind(&ev, "refs/heads/main").is_empty());
     }
 
-    // ── HEAD wrapping (the gotcha) ───────────────────────────────────────────
-
     #[test]
     fn head_tag_always_wraps_with_ref_prefix() {
         // Even if a caller is sloppy and passes head with the prefix already...
@@ -230,8 +218,6 @@ mod tests {
         let ev = build_ref_state_event(&inputs, &relay_keys()).unwrap();
         assert_eq!(first_tag(&ev, "HEAD").unwrap()[1], "ref: refs/heads/dev");
     }
-
-    // ── Branch + tag refs ────────────────────────────────────────────────────
 
     #[test]
     fn emits_branches_and_tags() {
@@ -264,8 +250,6 @@ mod tests {
             "3333333333333333333333333333333333333333",
         );
     }
-
-    // ── Non-heads/tags refs are filtered ─────────────────────────────────────
 
     #[test]
     fn skips_non_heads_or_tags_refs() {
@@ -302,8 +286,6 @@ mod tests {
         assert!(first_tag(&ev, "refs/stash").is_none());
         assert!(first_tag(&ev, "refs/pull/1/head").is_none());
     }
-
-    // ── OID validation: SHA-1 and SHA-256 ────────────────────────────────────
 
     #[test]
     fn accepts_sha1_and_sha256_oids() {
@@ -351,8 +333,6 @@ mod tests {
         assert!(first_tag(&ev, "refs/heads/ok").is_some());
     }
 
-    // ── Ref name validation ──────────────────────────────────────────────────
-
     #[test]
     fn rejects_malformed_ref_names() {
         let refs = refs_with(&[
@@ -385,8 +365,6 @@ mod tests {
         assert_eq!(tags_with_kind(&ev, "refs/heads//double").len(), 0);
     }
 
-    // ── Actor pubkey errors ──────────────────────────────────────────────────
-
     #[test]
     fn rejects_invalid_actor_pubkey() {
         let refs = refs_with(&[]);
@@ -399,8 +377,6 @@ mod tests {
         let err = build_ref_state_event(&inputs, &relay_keys()).unwrap_err();
         assert!(matches!(err, BuildError::InvalidActor(_)));
     }
-
-    // ── d-tag matches kind:30617 identifier (NOT <repo>.git) ─────────────────
 
     #[test]
     fn d_tag_is_repo_id_not_repo_dot_git() {

@@ -388,7 +388,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
           audioTrack,
           initialTransmitting,
         );
-        // Apply current gain level to the new audio graph.
         worklet.setGain(micGainRef.current);
 
         if (tokenRef.current !== myToken) {
@@ -425,13 +424,11 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       setHuddleError(null);
       setIsStarting(true);
       try {
-        // Step 1: Call Rust to create ephemeral channel
         const joinInfo = await invoke<HuddleJoinInfo>("start_huddle", {
           parentChannelId,
           memberPubkeys,
         });
         rustActiveRef.current = true;
-        // Step 2–4: Get mic, setup AudioWorklet, confirm active
         try {
           await connectAndSetupMedia(joinInfo, myToken);
         } catch (e) {
@@ -472,14 +469,12 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       setIsStarting(true);
 
       try {
-        // Step 1: Call Rust join_huddle
         const joinInfo = await invoke<HuddleJoinInfo>("join_huddle", {
           parentChannelId,
           ephemeralChannelId,
         });
         rustActiveRef.current = true;
 
-        // Step 2–4: Get mic, setup AudioWorklet, confirm active
         try {
           await connectAndSetupMedia(joinInfo, myToken);
         } catch (e) {

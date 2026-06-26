@@ -30,8 +30,6 @@ use crate::kind_translator::KindTranslator;
 use crate::shadow_keys::ShadowKeyManager;
 use crate::ProxyError;
 
-// ─── Translator ──────────────────────────────────────────────────────────────
-
 /// Translates events and filters between Buzz internal format and NIP-28
 /// standard format.
 ///
@@ -88,8 +86,6 @@ impl Translator {
         }
     }
 }
-
-// ─── Outbound translation (Buzz → NIP-28 client) ───────────────────────────
 
 impl Translator {
     fn cache_event_mapping(&self, internal_event_id: &str, external_event_id: &str) {
@@ -394,8 +390,6 @@ impl Translator {
     }
 }
 
-// ─── Inbound translation (NIP-28 client → Buzz) ────────────────────────────
-
 impl Translator {
     /// Translate a NIP-28 event from an external client into Buzz format.
     ///
@@ -662,8 +656,6 @@ impl Translator {
     }
 }
 
-// ─── Filter translation ───────────────────────────────────────────────────────
-
 impl Translator {
     /// Translate a NIP-28 REQ filter to Buzz format.
     ///
@@ -745,8 +737,6 @@ impl Translator {
     }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 /// Extract plain text from V2 rich content JSON.
 ///
 /// V2 content is a JSON object with a `"text"` field. Falls back to the raw
@@ -758,15 +748,11 @@ fn extract_plain_text(content: &str) -> String {
         .unwrap_or_else(|| content.to_string())
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::channel_map::{ChannelDto, ChannelMap};
     use buzz_core::kind::KIND_STREAM_MESSAGE;
-
-    // ── Test fixtures ────────────────────────────────────────────────────────
 
     const TEST_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
     const TEST_SALT: &[u8] = b"test-salt-for-translate-tests";
@@ -815,8 +801,6 @@ mod tests {
         vec![]
     }
 
-    // ── Test 1: Outbound — kind:9 + #h → kind:42 + #e ───────────────────
-
     #[tokio::test]
     async fn outbound_translates_stream_message() {
         let (translator, kind40_event_id) = make_translator();
@@ -864,8 +848,6 @@ mod tests {
             .verify()
             .expect("translated event signature must be valid");
     }
-
-    // ── Test 2: Inbound — kind:42 + #e → kind:9 + #h ───────────────────
 
     #[test]
     fn inbound_translates_channel_message() {
@@ -917,8 +899,6 @@ mod tests {
             .expect("translated event signature must be valid");
     }
 
-    // ── Test 3: Outbound — channel not in allowed_channels → PermissionDenied
-
     #[tokio::test]
     async fn outbound_rejects_channel_not_in_scope() {
         let (translator, _) = make_translator();
@@ -941,8 +921,6 @@ mod tests {
         );
     }
 
-    // ── Test 4: Inbound — channel not in allowed_channels → PermissionDenied
-
     #[test]
     fn inbound_rejects_channel_not_in_scope() {
         let (translator, kind40_event_id) = make_translator();
@@ -963,8 +941,6 @@ mod tests {
             result
         );
     }
-
-    // ── Test 5: V2 content extraction ────────────────────────────────────────
 
     #[tokio::test]
     async fn v2_content_plain_text_extracted() {
@@ -998,8 +974,6 @@ mod tests {
         assert_eq!(content, "not json at all");
     }
 
-    // ── Test 6: Filter translation — kind:42 → kind:9 ───────────────────
-
     #[test]
     fn filter_inbound_translates_kind() {
         let (translator, _) = make_translator();
@@ -1023,8 +997,6 @@ mod tests {
         let has_h_filter = translated.generic_tags.contains_key(&h_tag);
         assert!(has_h_filter, "filter must have #h tag constraints injected");
     }
-
-    // ── Test 6b: Filter — #e channel ref translates to #h UUID (FIX A) ─────
 
     #[test]
     fn filter_inbound_translates_e_tag_to_h() {
@@ -1068,8 +1040,6 @@ mod tests {
         );
     }
 
-    // ── Test 6c: Filter — #e with unknown event ID falls back to allowed_channels
-
     #[test]
     fn filter_inbound_e_tag_unknown_event_id_denies_all() {
         let (translator, _) = make_translator();
@@ -1109,8 +1079,6 @@ mod tests {
             "unknown #e must NOT fall back to allowed channels"
         );
     }
-
-    // ── Test 7: Inbound — reply #e tags are preserved (FIX 1) ───────────────
 
     #[test]
     fn inbound_preserves_reply_e_tags() {
@@ -1165,8 +1133,6 @@ mod tests {
             .expect("translated event signature must be valid");
     }
 
-    // ── Test 8: Outbound — non-channel #h tags are preserved (FIX 2) ────────
-
     #[tokio::test]
     async fn outbound_preserves_non_channel_h_tags() {
         let (translator, kind40_event_id) = make_translator();
@@ -1217,8 +1183,6 @@ mod tests {
             .expect("translated event signature must be valid");
     }
 
-    // ── Test 9: Filter — empty allowed_channels injects deny-all (FIX 3) ────
-
     #[test]
     fn empty_allowed_channels_denies_all() {
         let (translator, _) = make_translator();
@@ -1240,8 +1204,6 @@ mod tests {
             h_values
         );
     }
-
-    // ── Test 10: Inbound — kind:41 (edit) → kind:40003 ─────────────────────
 
     #[test]
     fn inbound_translates_edit_message() {
@@ -1284,8 +1246,6 @@ mod tests {
             .expect("translated edit signature must be valid");
     }
 
-    // ── Test 11: Inbound — rejects unknown kinds ─────────────────────────────
-
     #[test]
     fn inbound_rejects_unknown_kind() {
         let (translator, kind40_event_id) = make_translator();
@@ -1301,8 +1261,6 @@ mod tests {
             translator.translate_inbound(&event, &external_keys.public_key().to_hex(), &allowed());
         assert!(result.is_err(), "kind:9999 must be rejected inbound");
     }
-
-    // ── Test 12: Outbound — kind:40003 (edit) → kind:41 (FIX 4) ─────────────
 
     #[tokio::test]
     async fn outbound_translates_edit_message() {
@@ -1389,8 +1347,6 @@ mod tests {
             "the surviving #h tag must be the authorized channel UUID"
         );
     }
-
-    // ── Test 15: Outbound — unknown kinds are dropped (not leaked) ───────
 
     #[tokio::test]
     async fn outbound_drops_unknown_kinds() {

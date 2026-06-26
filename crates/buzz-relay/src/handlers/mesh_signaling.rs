@@ -430,7 +430,6 @@ mod tests {
         assert_eq!(r2.peer_endpoint_id, None);
     }
 
-    // ── Trust gate: membership_admits_mesh ──────────────────────────────────
     // This is the single pure predicate behind the requester, target, AND
     // reporter gates. v1 admits only direct relay members (or open relays);
     // NIP-OA-delegated (ViaOwner) and Denied are excluded, symmetrically.
@@ -675,7 +674,6 @@ mod tests {
         assert!(target_rx.try_recv().is_err(), "target receives no event");
     }
 
-    // ── HTTP door (handle_mesh_event_http) ──────────────────────────────────
     // Regression coverage for the post-#879 transport: the desktop's Rust
     // coordinator publishes 24620/24621 via POST /events, which used to fall
     // into ingest_event's allowlist and 400 with "unknown event kind".

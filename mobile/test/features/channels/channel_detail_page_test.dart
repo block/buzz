@@ -18,10 +18,6 @@ import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
-// ---------------------------------------------------------------------------
-// Test fixtures
-// ---------------------------------------------------------------------------
-
 const _channelId = 'test-channel';
 
 final _testChannel = Channel(
@@ -106,10 +102,6 @@ NostrEvent _edit({
   sig: '',
 );
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 Widget _buildTestable({
   required List<NostrEvent> messages,
   List<TypingEntry> typing = const [],
@@ -180,10 +172,6 @@ Finder findRichText(String text) {
     return false;
   }, description: 'RichText containing "$text"');
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 void main() {
   group('ChannelDetailPage', () {
@@ -1151,10 +1139,6 @@ void main() {
     });
   });
 }
-
-// ---------------------------------------------------------------------------
-// Fake providers
-// ---------------------------------------------------------------------------
 
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;

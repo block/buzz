@@ -30,8 +30,6 @@ use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zeroize::Zeroizing;
 
-// ── CLI definition ────────────────────────────────────────────────────────────
-
 #[derive(Parser)]
 #[command(
     name = "buzz-pair",
@@ -72,8 +70,6 @@ enum Cmd {
     TestVectors,
 }
 
-// ── Error type ────────────────────────────────────────────────────────────────
-
 #[derive(Debug, thiserror::Error)]
 enum CliError {
     #[error("pairing error: {0}")]
@@ -98,8 +94,6 @@ enum CliError {
     Other(String),
 }
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -116,8 +110,6 @@ async fn run(cmd: Cmd) -> Result<(), CliError> {
         Cmd::TestVectors => cmd_test_vectors(),
     }
 }
-
-// ── source subcommand ─────────────────────────────────────────────────────────
 
 async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliError> {
     // Resolve the payload to transfer.
@@ -207,8 +199,6 @@ async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliEr
     println!("Transfer complete! ✓");
     Ok(())
 }
-
-// ── target subcommand ─────────────────────────────────────────────────────────
 
 async fn cmd_target(relay_override: Option<String>, show_secret: bool) -> Result<(), CliError> {
     // Read QR URI from stdin.
@@ -342,8 +332,6 @@ async fn cmd_target(relay_override: Option<String>, show_secret: bool) -> Result
     Ok(())
 }
 
-// ── test-vectors subcommand ───────────────────────────────────────────────────
-
 fn cmd_test_vectors() -> Result<(), CliError> {
     // Fixed test keys from the NIP-AB spec.
     let session_secret: [u8; 32] =
@@ -409,8 +397,6 @@ fn cmd_test_vectors() -> Result<(), CliError> {
     Ok(())
 }
 
-// ── Abort-aware event helpers ─────────────────────────────────────────────────
-
 /// Check whether `event` is an abort from the peer. If so, transition the
 /// session and return an error the caller can propagate. Otherwise return
 /// `Ok(())` so the caller can proceed with its own handler.
@@ -422,8 +408,6 @@ fn check_for_abort(session: &mut PairingSession, event: &Event) -> Result<(), Cl
         Err(_) => Ok(()), // not an abort — caller should try its own handler
     }
 }
-
-// ── NIP-42 auth helper ────────────────────────────────────────────────────────
 
 /// Handle NIP-42 authentication if the relay requires it.
 ///
@@ -501,8 +485,6 @@ fn parse_auth_challenge(text: &str) -> Option<String> {
     }
     None
 }
-
-// ── WebSocket helpers ─────────────────────────────────────────────────────────
 
 /// Publish a Nostr event to the relay.
 async fn publish_event<S>(write: &mut S, event: &Event) -> Result<(), CliError>
@@ -592,8 +574,6 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<Event> {
     serde_json::from_value(arr[2].clone()).ok()
 }
 
-// ── Payload helpers ───────────────────────────────────────────────────────────
-
 /// Resolve the payload to send.
 ///
 /// If `nsec` is provided, parse it as bech32 and return the raw nsec string.
@@ -617,8 +597,6 @@ fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadTy
     }
 }
 
-// ── I/O helpers ───────────────────────────────────────────────────────────────
-
 /// Read a single line from stdin (trims trailing newline).
 fn read_line() -> Result<String, CliError> {
     let stdin = io::stdin();
@@ -635,8 +613,6 @@ fn read_yes_no() -> Result<bool, CliError> {
     let line = read_line()?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes" | "YES"))
 }
-
-// ── Crypto helpers ────────────────────────────────────────────────────────────
 
 /// Decode a 64-char hex string into a `[u8; 32]`.
 fn hex_to_32(s: &str) -> Result<[u8; 32], CliError> {

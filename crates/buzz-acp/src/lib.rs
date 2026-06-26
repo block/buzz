@@ -38,8 +38,6 @@ use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-// ── Subcommand dispatch ───────────────────────────────────────────────────────
-
 /// Check if argv[1] matches a subcommand name, before any clap parsing.
 ///
 /// This avoids clap rejecting harness flags (like `--private-key`) that aren't
@@ -54,8 +52,6 @@ fn is_subcommand(name: &str) -> bool {
 
 /// Timeout for the `buzz-acp models` subcommand (spawn + init + session/new).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
-
-// ── Presence helper ───────────────────────────────────────────────────────────
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -80,8 +76,6 @@ async fn publish_presence(
     publisher.publish_event(event).await?;
     Ok(())
 }
-
-// ── Owner resolution ──────────────────────────────────────────────────────────
 
 /// Resolve the agent's owner pubkey at startup.
 ///
@@ -110,8 +104,6 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
     // Fall back to --agent-owner config.
     config.agent_owner.clone()
 }
-
-// ── Owner cache ───────────────────────────────────────────────────────────────
 
 /// Cache for the agent's owner pubkey.
 ///
@@ -948,7 +940,6 @@ impl Drop for RespawnGuard {
     }
 }
 
-// ── Finding #16: propagate_legacy_env_vars before tokio runtime ───────────────
 //
 // Sync env-var propagation must run before the tokio runtime starts so that
 // any child processes inherit the correct environment. This must happen in the
@@ -966,7 +957,6 @@ async fn tokio_main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
-    // ── Subcommand dispatch — before Config::from_cli() or any harness setup ──
     if is_subcommand("models") {
         // Strip the "models" token so clap doesn't reject it as a positional.
         // Keeps argv[0] (binary name) and passes everything after "models".
@@ -1007,7 +997,6 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    // ── Step 1: Spawn N ACP agent subprocesses and initialize ─────────────────
     //
     // Finding #10: one agent failing to start must not kill the whole pool.
     // We attempt each spawn under a 60-second timeout; failures are logged and
@@ -1084,7 +1073,6 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("agent_pool_ready agents={}", live_count);
     let mut pool = AgentPool::from_slots(agent_slots);
 
-    // ── Step 2: Connect to Buzz relay ──────────────────────────────────────
     //
     // Finding #22: capture a startup watermark BEFORE connecting to the relay.
     // This timestamp is used for membership notification replay (via
@@ -1120,14 +1108,12 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
-    // ── Step 2b: Subscribe to membership notifications ────────────────────────
     relay
         .subscribe_membership_notifications()
         .await
         .map_err(|e| anyhow::anyhow!("membership notification subscribe error: {e}"))?;
     tracing::info!("subscribed to membership notifications");
 
-    // ── Step 2c: Set initial presence ─────────────────────────────────────────
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
     if config.presence_enabled {
@@ -1137,7 +1123,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Step 2d: Resolve agent owner ────────────────────────────────────────
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
     if let Some(ref owner) = startup_owner {
@@ -1201,7 +1186,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Step 3: Discover channels and build subscription rules ────────────────
     let channel_info_map = relay
         .discover_channels()
         .await
@@ -1247,7 +1231,6 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    // ── Step 4: Subscribe to channels ────────────────────────────────────────
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
@@ -1260,7 +1243,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Step 5: Build shared prompt context ──────────────────────────────────
     let dedup_mode = config.dedup_mode;
     let mut queue = EventQueue::new(dedup_mode);
 
@@ -1304,7 +1286,6 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    // ── Step 6: Heartbeat timer ───────────────────────────────────────────────
     let mut heartbeat = if config.heartbeat_interval_secs > 0 {
         let interval = Duration::from_secs(config.heartbeat_interval_secs);
         Some(tokio::time::interval_at(
@@ -1316,7 +1297,6 @@ async fn tokio_main() -> Result<()> {
     };
     let mut heartbeat_in_flight = false;
 
-    // ── Step 6b: Presence heartbeat timer (refreshes 90s TTL every 60s) ───────
     let mut presence_heartbeat = if config.presence_enabled {
         let interval = Duration::from_secs(60);
         Some(tokio::time::interval_at(
@@ -1327,7 +1307,6 @@ async fn tokio_main() -> Result<()> {
         None
     };
 
-    // ── Step 6c: Typing refresh timer (re-publishes kind:20002 every 3s) ──────
     let mut typing_refresh = if config.typing_enabled {
         let interval = Duration::from_secs(3);
         Some(tokio::time::interval_at(
@@ -1340,7 +1319,6 @@ async fn tokio_main() -> Result<()> {
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    // ── Step 6d: Maintenance (slot refill + queue compaction) ────────────────
     // Runs at the TOP of every loop iteration via Instant check — cannot be
     // starved by the biased select. Slot refill spawns background tasks so
     // spawn_and_init never blocks the main loop.
@@ -1353,7 +1331,6 @@ async fn tokio_main() -> Result<()> {
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-    // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
 
     let tx = shutdown_tx.clone();
@@ -1405,7 +1382,6 @@ async fn tokio_main() -> Result<()> {
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
 
-    // ── Finding #14: Per-slot crash history for circuit breaker ───────────────
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
     // CIRCUIT_BREAKER_WINDOW on each respawn attempt. The Vec is indexed by
@@ -1419,7 +1395,6 @@ async fn tokio_main() -> Result<()> {
         })
         .collect();
 
-    // ── Step 8: Main orchestration loop ──────────────────────────────────────
     //
     // Branches 1 & 2 both need to borrow `pool`, but they access different
     // fields (result_rx vs join_set). We use `rx_and_join_set()` to split the
@@ -1430,7 +1405,6 @@ async fn tokio_main() -> Result<()> {
     }
 
     loop {
-        // ── Maintenance (runs at loop top — cannot be starved by biased select) ──
         if last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
@@ -1470,7 +1444,6 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
-        // ── Collect completed background respawns (non-blocking) ─────────────
         let mut respawn_collected = false;
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
@@ -1552,7 +1525,6 @@ async fn tokio_main() -> Result<()> {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
-                            // ── Membership notification handling ──────────────
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
                                 || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
                             {
@@ -1659,14 +1631,12 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 continue;
                             }
-                            // ── End membership notification handling ──────────
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
 
-                            // ── Shutdown command handling ─────────────────────
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
                             let is_shutdown = is_owner_control_command(
                                 &buzz_event.event,
@@ -1691,9 +1661,7 @@ async fn tokio_main() -> Result<()> {
                                 // Don't drop it — it's a regular message that happens to
                                 // contain "!shutdown" from a non-owner.
                             }
-                            // ── End shutdown command handling ──────────────────
 
-                            // ── Cancel command handling ──────────────────────
                             // Mirrors !shutdown: kind:9, content "!cancel", from
                             // owner, mentions THIS agent. Must be BEFORE
                             // queue.push() — the event content is moved by push.
@@ -1726,9 +1694,7 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 // Not from owner — fall through to normal prompt handling.
                             }
-                            // ── End cancel command handling ───────────────────
 
-                            // ── Rotate command handling ─────────────────────
                             // Mirrors !shutdown / !cancel: kind:9, content
                             // "!rotate", from owner, mentions THIS agent.
                             //
@@ -1773,9 +1739,7 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 // Not from owner — fall through to normal prompt handling.
                             }
-                            // ── End rotate command handling ──────────────────
 
-                            // ── Inbound author gate ──────────────────────────
                             // Coarse security policy: drop events from disallowed
                             // authors before they reach subscription rules or the
                             // agent. Must be AFTER !shutdown (owner can always
@@ -1807,7 +1771,6 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             }
-                            // ── End inbound author gate ──────────────────────
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
                             let prompt_tag = match matched {
@@ -1838,7 +1801,6 @@ async fn tokio_main() -> Result<()> {
                                     pool::reaction_add(&rc, &event_id_hex, "👀").await;
                                 });
                             }
-                            // ── Multiple-event-handling mode gate ─────────────
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
@@ -1860,7 +1822,6 @@ async fn tokio_main() -> Result<()> {
                                     );
                                 }
                             }
-                            // ── End mode gate ────────────────────────────────
                             for (channel_id, thread_tags) in
                                 dispatch_pending(&mut pool, &mut queue, &ctx)
                             {
@@ -2016,7 +1977,6 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // ── Shutdown sequence ─────────────────────────────────────────────────────
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
@@ -2117,15 +2077,11 @@ async fn tokio_main() -> Result<()> {
     Ok(())
 }
 
-// ── Loop control ──────────────────────────────────────────────────────────────
-
 #[derive(PartialEq)]
 enum LoopAction {
     Continue,
     Exit,
 }
-
-// ── Owner control commands ───────────────────────────────────────────────────
 
 fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     event.tags.iter().any(|t| {
@@ -2144,8 +2100,6 @@ fn is_owner_control_command(
         && event.content.trim() == command
         && event_mentions_agent(event, agent_pubkey_hex)
 }
-
-// ── signal_in_flight_task ─────────────────────────────────────────────────────
 
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
@@ -2168,8 +2122,6 @@ fn signal_in_flight_task(
     }
     false
 }
-
-// ── dispatch_pending ──────────────────────────────────────────────────────────
 
 /// Flush queued work to available agents.
 fn dispatch_pending(
@@ -2245,8 +2197,6 @@ fn dispatch_pending(
     );
     dispatched_channels
 }
-
-// ── handle_prompt_result ──────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
@@ -2442,8 +2392,6 @@ fn handle_prompt_result(
     LoopAction::Continue
 }
 
-// ── recover_panicked_agent ────────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn recover_panicked_agent(
     pool: &mut AgentPool,
@@ -2540,8 +2488,6 @@ fn recover_panicked_agent(
     });
 }
 
-// ── drain_ready_join_results ──────────────────────────────────────────────────
-
 #[allow(clippy::too_many_arguments)]
 fn drain_ready_join_results(
     pool: &mut AgentPool,
@@ -2578,8 +2524,6 @@ fn drain_ready_join_results(
     }
     LoopAction::Continue
 }
-
-// ── dispatch_heartbeat ────────────────────────────────────────────────────────
 
 fn dispatch_heartbeat(
     pool: &mut AgentPool,
@@ -2623,8 +2567,6 @@ fn dispatch_heartbeat(
     tracing::info!(agent = agent_index, "heartbeat_fired");
 }
 
-// ── default_heartbeat_prompt ──────────────────────────────────────────────────
-
 fn default_heartbeat_prompt() -> String {
     let now = chrono::Utc::now().to_rfc3339();
     format!(
@@ -2643,8 +2585,6 @@ fn default_heartbeat_prompt() -> String {
          Do not invent work — only act on items surfaced by the feed commands."
     )
 }
-
-// ── respawn_agent_into ────────────────────────────────────────────────────────
 
 /// Spawn a background respawn task for a crashed agent slot.
 ///
@@ -2703,8 +2643,6 @@ fn spawn_respawn_task(
     true
 }
 
-// ── spawn_and_init ────────────────────────────────────────────────────────────
-
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
 /// Takes owned args so it can run in a background `tokio::spawn` task without
@@ -2743,10 +2681,6 @@ async fn spawn_and_init(
         }
     }
 }
-
-// ── build_mcp_servers ─────────────────────────────────────────────────────────
-
-// ── run_models ─────────────────────────────────────────────────────────────────
 
 /// `buzz-acp models` — spawn an agent, query its available models, exit.
 ///
@@ -2931,8 +2865,6 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         },
     }]
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod heartbeat_base_prompt_tests {

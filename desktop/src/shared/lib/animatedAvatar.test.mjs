@@ -10,8 +10,6 @@ import {
 const POSTER = "https://relay.example.com/media/aa.png";
 const GIF = "https://relay.example.com/media/bb.gif";
 
-// ── round trip ───────────────────────────────────────────────────────────────
-
 test("build + parse round-trips poster and gif URLs", () => {
   const url = buildAnimatedAvatarUrl(POSTER, GIF);
   const parsed = parseAnimatedAvatarUrl(url);
@@ -26,8 +24,6 @@ test("build encodes the gif URL so the fragment has no reserved chars", () => {
   assert.ok(!fragment.includes("&"), "fragment should not contain raw &");
   assert.equal(parseAnimatedAvatarUrl(url)?.animationUrl, gif);
 });
-
-// ── parse rejects non-animated URLs ──────────────────────────────────────────
 
 test("parse returns null for plain image URLs", () => {
   assert.equal(parseAnimatedAvatarUrl(POSTER), null);
@@ -73,8 +69,6 @@ test("parse returns null when poster part is not an http(s) URL", () => {
 test("parse returns null on malformed percent-encoding", () => {
   assert.equal(parseAnimatedAvatarUrl(`${POSTER}#buzz-anim=%E0%A4%A`), null);
 });
-
-// -- snapshot URL -------------------------------------------------------------
 
 test("getAvatarSnapshotUrl strips animated avatars to their poster URL", () => {
   assert.equal(

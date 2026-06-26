@@ -257,7 +257,6 @@ class _EmojiPickerSheetState extends ConsumerState<EmojiPickerSheet> {
           ),
           Divider(height: 1, color: colors.outlineVariant),
           const SizedBox(height: Grid.xxs),
-          // Emoji grid.
           Expanded(
             child: isCustomCategory
                 ? _CustomEmojiGrid(

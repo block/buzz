@@ -25,6 +25,7 @@ import {
   getImportErrorLabel,
   IMPORT_ERROR_VISIBILITY_MS,
 } from "./personaDialogImportState";
+import { canSubmitPersonaDialog } from "./personaDialogState";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -519,11 +520,7 @@ export function PersonaDialog({
                 Cancel
               </Button>
               <Button
-                disabled={
-                  displayName.trim().length === 0 ||
-                  systemPrompt.trim().length === 0 ||
-                  isPending
-                }
+                disabled={!canSubmitPersonaDialog({ displayName, isPending })}
                 onClick={() => void handleSubmit()}
                 size="sm"
                 type="button"

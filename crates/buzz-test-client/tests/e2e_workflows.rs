@@ -23,8 +23,6 @@ use std::time::Duration;
 use nostr::Keys;
 use reqwest::Client;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 /// WebSocket relay URL (e.g. `ws://localhost:3001`).
 fn relay_ws_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3001".to_string())
@@ -84,8 +82,6 @@ steps:
     )
 }
 
-// ── Shared HTTP helpers ───────────────────────────────────────────────────────
-
 /// POST to create a workflow in a channel. Returns the parsed JSON response body.
 async fn create_workflow(
     client: &Client,
@@ -126,8 +122,6 @@ async fn delete_workflow(client: &Client, base: &str, pubkey_hex: &str, workflow
         .as_u16()
 }
 
-// ── Test 1: List workflows (empty) ────────────────────────────────────────────
-
 /// GET /api/channels/:id/workflows returns 200 OK with a valid JSON array.
 /// The channel may have workflows from other tests, but the response must be
 /// a well-formed array where every element has at least `id` and `name`.
@@ -163,8 +157,6 @@ async fn test_list_workflows_empty_channel() {
         assert!(wf.get("name").is_some(), "workflow missing 'name' field");
     }
 }
-
-// ── Test 2: Create + list workflow ────────────────────────────────────────────
 
 /// POST /api/channels/:id/workflows creates a workflow, and it appears in the
 /// subsequent GET list. Cleans up after itself by deleting the created workflow.
@@ -216,8 +208,6 @@ async fn test_create_and_list_workflow() {
     let status = delete_workflow(&client, &base, pubkey_hex, workflow_id).await;
     assert_eq!(status, 204, "cleanup DELETE should return 204");
 }
-
-// ── Test 3: Trigger workflow + check run ──────────────────────────────────────
 
 /// Create a webhook-triggered workflow, POST to its trigger endpoint, then
 /// verify a run record appears in GET /api/workflows/:id/runs.
@@ -308,8 +298,6 @@ async fn test_trigger_workflow_and_check_run() {
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }
 
-// ── Test 5: Event-driven workflow execution ───────────────────────────────────
-
 /// Send a kind:9 message to a channel that has a `message_posted` workflow.
 /// Verify that the workflow engine creates a run record.
 ///
@@ -325,7 +313,6 @@ async fn test_event_driven_workflow_execution() {
     let pubkey_hex: &str = SEEDED_PUBKEY;
     let base = relay_http_url();
 
-    // ── Step 1: Create a message_posted workflow in the general channel ───────
     let workflow_yaml = r#"name: event-driven-e2e-test
 description: E2E test for message_posted trigger
 trigger:
@@ -342,7 +329,6 @@ steps:
         .expect("created workflow must have 'id'")
         .to_string();
 
-    // ── Step 2: Connect via WebSocket and send a kind:9 message ───────────
     // Use fresh keys for the sender (channel is open, no auth required to post).
     let sender_keys = Keys::generate();
     let mut ws_client = BuzzTestClient::connect(&relay_ws_url(), &sender_keys)
@@ -360,10 +346,8 @@ steps:
         .await
         .expect("send event failed");
 
-    // ── Step 3: Wait for the workflow engine to process the event ─────────────
     tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // ── Step 4: Check that a run was created ──────────────────────────────────
     let runs_url = format!("{base}/api/workflows/{workflow_id}/runs");
     let runs_resp = client
         .get(&runs_url)
@@ -398,8 +382,6 @@ steps:
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }
 
-// ── Test 6: Event-driven workflow with filter ─────────────────────────────────
-
 /// Verify that a `message_posted` workflow with a filter expression only fires
 /// when the filter matches.
 ///
@@ -420,7 +402,6 @@ async fn test_event_driven_workflow_with_filter() {
     let pubkey_hex: &str = SEEDED_PUBKEY;
     let base = relay_http_url();
 
-    // ── Step 1: Create a filtered message_posted workflow ─────────────────────
     let workflow_yaml = r#"name: filtered-event-e2e-test
 description: E2E test for message_posted trigger with filter
 trigger:
@@ -443,7 +424,6 @@ steps:
         .await
         .expect("ws connect failed");
 
-    // ── Step 2: Send a message that does NOT match the filter ─────────────────
     let h_tag = Tag::parse(["h", CHANNEL_GENERAL]).expect("tag parse failed");
     let non_matching =
         nostr::EventBuilder::new(Kind::Custom(9), "this is a routine update, nothing urgent")
@@ -474,7 +454,6 @@ steps:
         runs_after_non_match.len()
     );
 
-    // ── Step 3: Send a message that DOES match the filter ─────────────────────
     let matching = nostr::EventBuilder::new(Kind::Custom(9), "P1 alert: database is down")
         .tags([h_tag])
         .sign_with_keys(&sender_keys)
@@ -513,8 +492,6 @@ steps:
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }
 
-// ── Test 4: Workflow CRUD (update + delete) ───────────────────────────────────
-
 /// Full CRUD lifecycle:
 ///   1. Create a workflow
 ///   2. GET it by ID — verify fields
@@ -529,7 +506,6 @@ async fn test_workflow_update_and_delete() {
     let pubkey_hex: &str = SEEDED_PUBKEY;
     let base = relay_http_url();
 
-    // ── Step 1: Create ────────────────────────────────────────────────────────
     let yaml_v1 = webhook_workflow_yaml("e2e-crud-original");
     let created = create_workflow(&client, &base, pubkey_hex, CHANNEL_GENERAL, &yaml_v1).await;
     let workflow_id = created["id"]
@@ -537,7 +513,6 @@ async fn test_workflow_update_and_delete() {
         .expect("workflow must have 'id'")
         .to_string();
 
-    // ── Step 2: GET by ID ─────────────────────────────────────────────────────
     let get_url = format!("{base}/api/workflows/{workflow_id}");
     let get_resp = client
         .get(&get_url)
@@ -558,7 +533,6 @@ async fn test_workflow_update_and_delete() {
         "fetched workflow id must match"
     );
 
-    // ── Step 3: PUT to update ─────────────────────────────────────────────────
     let yaml_v2 = webhook_workflow_yaml("e2e-crud-updated");
     let put_url = format!("{base}/api/workflows/{workflow_id}");
     let put_resp = client
@@ -581,7 +555,6 @@ async fn test_workflow_update_and_delete() {
         "PUT must return the same workflow id"
     );
 
-    // ── Step 4: GET again — verify update persisted ───────────────────────────
     let get_resp2 = client
         .get(&get_url)
         .header("X-Pubkey", pubkey_hex)
@@ -596,11 +569,9 @@ async fn test_workflow_update_and_delete() {
         "re-fetched workflow must have updated name"
     );
 
-    // ── Step 5: DELETE ────────────────────────────────────────────────────────
     let del_status = delete_workflow(&client, &base, pubkey_hex, &workflow_id).await;
     assert_eq!(del_status, 204, "DELETE must return 204 No Content");
 
-    // ── Step 6: GET after delete — expect 404 ────────────────────────────────
     let get_after_del = client
         .get(&get_url)
         .header("X-Pubkey", pubkey_hex)
@@ -613,8 +584,6 @@ async fn test_workflow_update_and_delete() {
         "GET after DELETE must return 404"
     );
 }
-
-// ── Test 7: Approval gate (WF-08 stub) ────────────────────────────────────────
 
 /// Create a workflow with a `request_approval` step, trigger it, and verify
 /// the run fails with the "approval gates not yet implemented" message.
@@ -629,7 +598,6 @@ async fn test_approval_gate_stub_fails_gracefully() {
     let pubkey_hex: &str = SEEDED_PUBKEY;
     let base = relay_http_url();
 
-    // ── Step 1: Create a workflow with a request_approval step ────────────────
     let workflow_yaml = format!(
         r#"name: approval-test
 description: Test approval gate
@@ -659,7 +627,6 @@ steps:
         .expect("created workflow must have 'id'")
         .to_string();
 
-    // ── Step 2: Trigger the workflow ──────────────────────────────────────────
     let trigger_url = format!("{base}/api/workflows/{workflow_id}/trigger");
     let trigger_resp = client
         .post(&trigger_url)
@@ -683,7 +650,6 @@ steps:
         .expect("trigger response must include 'run_id'")
         .to_string();
 
-    // ── Step 3: Poll until the run reaches a terminal status ──────────────────
     let runs_url = format!("{base}/api/workflows/{workflow_id}/runs");
     let mut final_run: Option<serde_json::Value> = None;
     for _ in 0..10 {
@@ -705,7 +671,6 @@ steps:
         }
     }
 
-    // ── Step 4: Assert the run failed with the expected stub error ────────────
     let run = final_run.expect("run must reach a terminal status within 1 second");
 
     assert_eq!(
@@ -720,7 +685,6 @@ steps:
         "run error must contain 'approval gates not yet implemented', got: {error_msg:?}"
     );
 
-    // ── Step 5: Clean up ──────────────────────────────────────────────────────
     let del_status = delete_workflow(&client, &base, pubkey_hex, &workflow_id).await;
     assert_eq!(del_status, 204, "cleanup DELETE should return 204");
 }

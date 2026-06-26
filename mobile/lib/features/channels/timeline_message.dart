@@ -5,10 +5,6 @@ import 'package:flutter/foundation.dart';
 import '../../shared/relay/relay.dart';
 import '../custom_emoji/custom_emoji.dart';
 
-// ---------------------------------------------------------------------------
-// System event types (kind 40099)
-// ---------------------------------------------------------------------------
-
 enum SystemEventType {
   memberJoined,
   memberLeft,
@@ -101,10 +97,6 @@ class SystemEvent {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Reaction — aggregated emoji reaction on a message
-// ---------------------------------------------------------------------------
-
 @immutable
 class TimelineReaction {
   final String emoji;
@@ -125,10 +117,6 @@ class TimelineReaction {
     this.currentUserReactionId,
   });
 }
-
-// ---------------------------------------------------------------------------
-// TimelineMessage — a processed, display-ready message
-// ---------------------------------------------------------------------------
 
 @immutable
 class TimelineMessage {
@@ -169,10 +157,6 @@ class TimelineMessage {
   });
 }
 
-// ---------------------------------------------------------------------------
-// ThreadSummary — inline thread indicator on the main timeline
-// ---------------------------------------------------------------------------
-
 @immutable
 class ThreadSummary {
   final String threadHeadId;
@@ -196,10 +180,6 @@ class MainTimelineEntry {
 
   const MainTimelineEntry({required this.message, this.summary});
 }
-
-// ---------------------------------------------------------------------------
-// formatTimeline — converts raw NostrEvents into display-ready messages
-// ---------------------------------------------------------------------------
 
 /// Process a chronologically-sorted list of [NostrEvent]s into a list of
 /// [TimelineMessage]s, applying deletions, edits, reactions, and system event
@@ -421,10 +401,6 @@ ThreadSummary? _buildSummary(
     participantPubkeys: participants.reversed.toList(),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 class _Edit {
   final String content;

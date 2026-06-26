@@ -3,8 +3,6 @@ import test from "node:test";
 
 import { hasMentionForEvent, shouldNotifyForEvent } from "./shouldNotify.ts";
 
-// ── Fixtures ──────────────────────────────────────────────────────────────────
-
 const PUBKEY = "a".repeat(64);
 const OTHER_PUBKEY = "b".repeat(64);
 const CHANNEL_ID =
@@ -33,8 +31,6 @@ const pTag = (pubkey) => ["p", pubkey];
 const broadcastTag = () => ["broadcast", "1"];
 const hTag = (channelId) => ["h", channelId];
 
-// ── hasMentionForEvent ────────────────────────────────────────────────────────
-
 test("hasMentionForEvent: p-tag matching currentPubkey returns true", () => {
   const event = makeEvent([pTag(PUBKEY)]);
   assert.equal(hasMentionForEvent(event, PUBKEY), true);
@@ -59,8 +55,6 @@ test("hasMentionForEvent: empty currentPubkey returns false", () => {
   const event = makeEvent([pTag(PUBKEY)]);
   assert.equal(hasMentionForEvent(event, ""), false);
 });
-
-// ── shouldNotifyForEvent: channel muting ─────────────────────────────────────
 
 test("top-level message in muted channel is suppressed", () => {
   const event = makeEvent([hTag(CHANNEL_ID)]);

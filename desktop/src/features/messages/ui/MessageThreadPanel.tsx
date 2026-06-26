@@ -23,7 +23,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
-  PANEL_BASE_CLASS,
+  PANEL_ENTER_BASE_CLASS,
   PANEL_OVERLAY_CLASS,
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
@@ -207,7 +207,7 @@ function ThreadComposerSkeleton() {
         </div>
         <div
           className={cn(
-            "-mt-1 h-7 bg-background pb-1 pt-0",
+            "h-7 bg-background pb-1 pt-0",
             THREAD_PANEL_COMPOSER_GUTTER_CLASS,
           )}
         />
@@ -304,7 +304,7 @@ export function MessageThreadPanelSkeleton({
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
         className={cn(
-          PANEL_BASE_CLASS,
+          PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
         )}
@@ -902,7 +902,7 @@ export function MessageThreadPanel({
           />
           <div
             className={cn(
-              "-mt-1 h-7 bg-background pb-1 pt-0",
+              "h-7 bg-background pb-1 pt-0",
               THREAD_PANEL_COMPOSER_GUTTER_CLASS,
             )}
           >
@@ -913,7 +913,7 @@ export function MessageThreadPanel({
               {threadTypingPubkeys.length > 0 ? (
                 <TypingIndicatorRow
                   channel={channel}
-                  className="min-w-0 flex-1 px-0 py-0"
+                  className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
                   currentPubkey={currentPubkey}
                   profiles={profiles}
                   typingPubkeys={threadTypingPubkeys}
@@ -974,7 +974,7 @@ export function MessageThreadPanel({
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
         className={cn(
-          PANEL_BASE_CLASS,
+          PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
         )}

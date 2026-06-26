@@ -2,8 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SHOTS = "test-results/relay-reconnect-screenshots";
-
 async function settle(page: import("@playwright/test").Page) {
   // Tolerate cancelled animations (skeleton → live swap rejects `.finished`
   // with AbortError) AND indefinitely-running ones (the degraded-state pulse
@@ -49,7 +47,7 @@ async function scrollSidebarToBottom(page: import("@playwright/test").Page) {
     });
 }
 
-test.describe("relay reconnect affordance screenshots", () => {
+test.describe("relay reconnect affordance", () => {
   test("01 — sidebar has no reconnect prompt when healthy", async ({
     page,
   }) => {
@@ -67,9 +65,6 @@ test.describe("relay reconnect affordance screenshots", () => {
     // Frame the left sidebar directly — the relay-unreachable block lives there,
     // and a full-window shot makes its presence/absence illegible against the
     // unrelated top connection banner.
-    await page.getByTestId("app-sidebar").screenshot({
-      path: `${SHOTS}/01-sidebar-healthy.png`,
-    });
   });
 
   test("02 — sidebar reconnect prompt shown when degraded, channels visible", async ({
@@ -89,9 +84,5 @@ test.describe("relay reconnect affordance screenshots", () => {
     // Scroll the block clear of the occluding footer (symmetric with 01).
     await scrollSidebarToBottom(page);
     await settle(page);
-
-    await page.getByTestId("app-sidebar").screenshot({
-      path: `${SHOTS}/02-sidebar-degraded.png`,
-    });
   });
 });

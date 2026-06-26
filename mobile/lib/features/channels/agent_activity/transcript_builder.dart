@@ -2,10 +2,6 @@ import 'dart:convert';
 
 import 'observer_models.dart';
 
-// ---------------------------------------------------------------------------
-// Buzz tool catalogs
-// ---------------------------------------------------------------------------
-
 const _buzzReadTools = <String>{
   'get_messages',
   'get_channel_history',
@@ -77,10 +73,6 @@ final _buzzToolTitleAliases = <(RegExp, String)>[
   (RegExp(r'\bremoving reaction\b'), 'remove_reaction'),
 ];
 
-// ---------------------------------------------------------------------------
-// Utility helpers (port of agentSessionUtils.ts)
-// ---------------------------------------------------------------------------
-
 Map<String, dynamic> _asRecord(dynamic value) {
   if (value is Map<String, dynamic>) return value;
   if (value is Map) return value.cast<String, dynamic>();
@@ -105,10 +97,6 @@ String _titleCase(String value) {
       .trim()
       .replaceAllMapped(RegExp(r'\b\w'), (m) => m[0]!.toUpperCase());
 }
-
-// ---------------------------------------------------------------------------
-// Tool name helpers (port of agentSessionToolCatalog.ts)
-// ---------------------------------------------------------------------------
 
 String _normalizeToolNameText(String value) {
   return value
@@ -183,10 +171,6 @@ ToolStatus _normalizeToolStatus(String status) {
   }
   return ToolStatus.executing;
 }
-
-// ---------------------------------------------------------------------------
-// Transcript helpers (port of agentSessionTranscriptHelpers.ts)
-// ---------------------------------------------------------------------------
 
 String _extractContentText(dynamic value) {
   if (value is String) return value;
@@ -413,10 +397,6 @@ String _safeJsonEncode(dynamic value) {
     return value.toString();
   }
 }
-
-// ---------------------------------------------------------------------------
-// buildTranscript (port of agentSessionTranscript.ts)
-// ---------------------------------------------------------------------------
 
 List<TranscriptItem> buildTranscript(List<ObserverFrame> events) {
   final items = <TranscriptItem>[];

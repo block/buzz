@@ -15,16 +15,12 @@
 use crate::channel::MemberRole;
 use std::fmt;
 
-// ── Limits (DoS prevention for untrusted kind:30617 input) ───────────────────
-
 /// Maximum number of `buzz-protect` tags per repo.
 pub const MAX_PROTECTION_RULES: usize = 50;
 /// Maximum character length of a ref pattern.
 pub const MAX_PATTERN_LENGTH: usize = 256;
 /// Maximum number of wildcard segments per pattern.
 pub const MAX_WILDCARDS_PER_PATTERN: usize = 3;
-
-// ── Ref Pattern ──────────────────────────────────────────────────────────────
 
 /// A validated ref pattern for matching git refs.
 ///
@@ -195,8 +191,6 @@ impl fmt::Display for RefPattern {
     }
 }
 
-// ── Update Classification ────────────────────────────────────────────────────
-
 /// The type of ref update in a push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateKind {
@@ -241,8 +235,6 @@ pub struct RefUpdate {
     /// New OID (hex, 40 chars). Zero OID for deletes.
     pub new_oid: String,
 }
-
-// ── Protection Rules ─────────────────────────────────────────────────────────
 
 /// A single protection rule parsed from a `buzz-protect` tag on kind:30617.
 ///
@@ -407,8 +399,6 @@ pub fn parse_protection_tags(tags: &[Vec<String>]) -> Result<ParsedProtection, R
     })
 }
 
-// ── Built-in Defaults ────────────────────────────────────────────────────────
-
 /// Built-in default minimum role for an operation when no `buzz-protect` tag matches.
 pub fn default_min_role(ref_name: &str, kind: UpdateKind) -> MemberRole {
     let is_branch = ref_name.starts_with("refs/heads/");
@@ -436,8 +426,6 @@ pub fn default_min_role(ref_name: &str, kind: UpdateKind) -> MemberRole {
         UpdateKind::Delete => MemberRole::Admin,
     }
 }
-
-// ── Effective Rules (union of all matching patterns) ─────────────────────────
 
 /// The effective constraints for a ref after unioning all matching rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,8 +486,6 @@ impl EffectiveRules {
         }
     }
 }
-
-// ── Policy Denial ────────────────────────────────────────────────────────────
 
 /// A single denial reason from the policy engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -612,13 +598,9 @@ pub fn evaluate_push(
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── RefPattern tests ─────────────────────────────────────────────────
 
     #[test]
     fn pattern_parse_valid() {
@@ -697,8 +679,6 @@ mod tests {
         assert!(!p.matches("refs/heads"));
     }
 
-    // ── UpdateKind tests ─────────────────────────────────────────────────
-
     #[test]
     fn classify_create() {
         let zero = "0000000000000000000000000000000000000000";
@@ -732,8 +712,6 @@ mod tests {
             UpdateKind::NonFastForward
         );
     }
-
-    // ── Protection rule parsing ──────────────────────────────────────────
 
     #[test]
     fn parse_protection_tag_basic() {
@@ -791,8 +769,6 @@ mod tests {
         ));
     }
 
-    // ── Effective rules (union semantics) ────────────────────────────────
-
     #[test]
     fn effective_rules_union_strictest_role() {
         let rules = vec![
@@ -811,8 +787,6 @@ mod tests {
         let eff = EffectiveRules::for_ref("refs/heads/develop", &rules);
         assert!(!eff.has_explicit_match);
     }
-
-    // ── Policy evaluation ────────────────────────────────────────────────
 
     #[test]
     fn evaluate_owner_passes_push_role() {

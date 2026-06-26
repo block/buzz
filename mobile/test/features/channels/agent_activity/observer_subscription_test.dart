@@ -291,10 +291,6 @@ void main() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
 class _RecordingRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> filters = [];
   final List<void Function(NostrEvent)> _listeners = [];

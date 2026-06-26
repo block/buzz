@@ -5,8 +5,6 @@ import { installMockBridge } from "../helpers/bridge";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
 const STAR_STORAGE_KEY = `buzz-channel-stars.v1:${MOCK_PUBKEY}`;
-const SHOTS = "test-results/channel-star";
-
 function seedStarState(
   page: import("@playwright/test").Page,
   channelId: string,
@@ -27,7 +25,7 @@ function seedStarState(
   );
 }
 
-test.describe("channel starring screenshots", () => {
+test.describe("channel starring", () => {
   test("01 — context menu shows Star channel", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
@@ -45,11 +43,6 @@ test.describe("channel starring screenshots", () => {
           .map((a) => a.finished) ?? [],
       ),
     );
-
-    await page.screenshot({
-      path: `${SHOTS}/01-context-menu-star.png`,
-      clip: { x: 0, y: 0, width: 450, height: 720 },
-    });
   });
 
   test("02 — starred channel appears in Starred section", async ({ page }) => {
@@ -63,11 +56,6 @@ test.describe("channel starring screenshots", () => {
     const starredList = page.getByTestId("starred-list");
     await expect(starredList).toBeVisible();
     await expect(starredList.getByTestId("channel-engineering")).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/02-starred-section.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
-    });
   });
 
   test("03 — context menu shows Unstar channel when starred", async ({
@@ -94,11 +82,6 @@ test.describe("channel starring screenshots", () => {
           .map((a) => a.finished) ?? [],
       ),
     );
-
-    await page.screenshot({
-      path: `${SHOTS}/03-context-menu-unstar.png`,
-      clip: { x: 0, y: 0, width: 450, height: 720 },
-    });
   });
 
   test("04 — starred channel is removed from the Channels group", async ({

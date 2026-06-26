@@ -22,10 +22,6 @@ import type {
   WorkflowFormState,
 } from "./workflowFormTypes";
 
-// ---------------------------------------------------------------------------
-// Trigger config fields
-// ---------------------------------------------------------------------------
-
 function TriggerConfigFields({
   trigger,
   onUpdate,
@@ -121,10 +117,6 @@ function TriggerConfigFields({
       return null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
 
 type WorkflowFormBuilderProps = {
   disabled?: boolean;

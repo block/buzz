@@ -78,7 +78,6 @@ class AgentActivitySheet extends HookConsumerWidget {
             MediaQuery.viewPaddingOf(context).bottom + Grid.sm;
         return Column(
           children: [
-            // Header
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
               child: Column(

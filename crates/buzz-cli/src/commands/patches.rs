@@ -5,10 +5,6 @@ use crate::validate::{
 };
 use buzz_sdk::{GitAppliedPatchRef, GitPatchMeta, GitRepoCoord, GitStatus, GitStatusMeta};
 
-// ---------------------------------------------------------------------------
-// Send patch — publish kind:1617
-// ---------------------------------------------------------------------------
-
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_send_patch(
     client: &BuzzClient,
@@ -74,10 +70,6 @@ fn parse_committer(spec: &str) -> Result<(String, String, String, String), CliEr
     }
 }
 
-// ---------------------------------------------------------------------------
-// Get patch — query kind:1617 by event id
-// ---------------------------------------------------------------------------
-
 pub async fn cmd_get_patch(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
     let filter = serde_json::json!({
@@ -88,10 +80,6 @@ pub async fn cmd_get_patch(client: &BuzzClient, event: &str) -> Result<(), CliEr
     println!("{resp}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// List patches — query kind:1617 by repo coordinate, with optional filters
-// ---------------------------------------------------------------------------
 
 pub async fn cmd_list_patches(
     client: &BuzzClient,
@@ -121,10 +109,6 @@ pub async fn cmd_list_patches(
     println!("{resp}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Status — publish kind:1630/1631/1632/1633 against a patch root
-// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_patch_status(
@@ -218,10 +202,6 @@ pub(crate) fn parse_status(s: &str) -> Result<GitStatus, CliError> {
         ))),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
 
 pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::PatchesCmd;

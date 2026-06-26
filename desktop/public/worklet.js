@@ -22,7 +22,6 @@ class SttTapProcessor extends AudioWorkletProcessor {
     this.offset = 0;
     this.transmitting = true; // default: open (VAD mode). PTT mode sets false on init.
 
-    // Listen for PTT state changes from main thread.
     // Direction: main→worklet (receives). The worklet→main direction uses
     // this.port.postMessage for PCM data — these don't conflict.
     this.port.onmessage = (e) => {
@@ -43,20 +42,17 @@ class SttTapProcessor extends AudioWorkletProcessor {
       return true;
     }
 
-    // Accumulate samples
     const remaining = this.buffer.length - this.offset;
     const toCopy = Math.min(input.length, remaining);
     this.buffer.set(input.subarray(0, toCopy), this.offset);
     this.offset += toCopy;
 
-    // Flush when buffer is full
     if (this.offset >= this.buffer.length) {
       // Transfer ownership for zero-copy
       this.port.postMessage(this.buffer, [this.buffer.buffer]);
       this.buffer = new Float32Array(960);
       this.offset = 0;
 
-      // Handle leftover samples
       if (toCopy < input.length) {
         const leftover = input.subarray(toCopy);
         this.buffer.set(leftover);

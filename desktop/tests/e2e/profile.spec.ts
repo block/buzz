@@ -687,6 +687,60 @@ test("renders agent memories seeded through the Playwright mock bridge", async (
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
+test("owned agent absent from relay/managed lists still renders agent framing", async ({
+  page,
+}) => {
+  // Regression: bot-detection used to rely solely on the relay-agents registry
+  // + the local managed-agents list. An owned agent deployed elsewhere can miss
+  // BOTH lists, so the panel rendered it as a human (wrong archive framing).
+  // The fix ORs in the kind:0 NIP-OA agent flag (same signal the archive gate
+  // trusts), surfaced via the users-batch summary's `isAgent`.
+  const ednaPubkey =
+    "16aaadcf39011edbd887e4abefe5837170621db277e234f3f6c220d38ba75ecf";
+  await installMockBridge(page, {
+    // Seeded as an agent (kind:0 NIP-OA owner) but NOT as a managed agent and
+    // NOT in the relay-agents registry — exactly the bug scenario.
+    searchProfiles: [
+      { pubkey: ednaPubkey, displayName: "Edna", isAgent: true },
+    ],
+  });
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.evaluate(
+    ({ pubkey }) => {
+      const emit = (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            pubkey: string;
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) {
+        throw new Error("Mock message emitter is unavailable.");
+      }
+      emit({ channelName: "general", content: "Edna check-in", pubkey });
+    },
+    { pubkey: ednaPubkey },
+  );
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Edna check-in" });
+  await expect(messageRow).toBeVisible();
+  await messageRow.locator("button").first().click();
+
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  // The bot indicator only renders when isBot resolves true — the assertion
+  // that the OA-owner signal now drives agent framing.
+  await expect(page.getByTestId("profile-bot-indicator")).toBeVisible();
+});
+
 test("renders settings in the app shell with a back button", async ({
   page,
 }) => {

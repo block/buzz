@@ -295,7 +295,6 @@ class AppTheme {
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       ),
 
-      // Divider
       dividerTheme: DividerThemeData(
         color: scheme.outline,
         thickness: 1,

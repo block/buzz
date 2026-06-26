@@ -1,9 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Records (stored on disk + returned to frontend)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelTemplateRecord {
     pub id: String,
@@ -73,10 +69,6 @@ fn default_channel_type() -> String {
 fn default_visibility() -> String {
     "open".to_string()
 }
-
-// ---------------------------------------------------------------------------
-// Request types (received from frontend)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

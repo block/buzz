@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 
 /// Unit tests for [unreadBadgeProvider].
@@ -23,10 +24,6 @@ void main() {
   const t10 = 10; // older
   const t20 = 20; // newer — any channel with lastMessageAt == t20 has a message
   const t30 = 30; // even newer — used for high-priority events
-
-  // ---------------------------------------------------------------------------
-  // Channel factory helper
-  // ---------------------------------------------------------------------------
 
   Channel makeChannel({
     required String id,
@@ -55,20 +52,19 @@ void main() {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Container builder
-  // ---------------------------------------------------------------------------
-
   ProviderContainer buildContainer({
     required List<Channel> channels,
     Map<String, int> readContexts = const {},
     Set<String> locallyForcedChannelIds = const {},
     bool readStateReady = true,
     Map<String, int> highPriorityMap = const {},
+    Map<String, List<ObservedUnreadEvent>>? observedEventsByChannel,
   }) {
     final notifier = _StubbedChannelsNotifier(
       channels: channels,
-      highPriorityMap: highPriorityMap,
+      observedEventsByChannel:
+          observedEventsByChannel ??
+          _defaultObservedEvents(channels, highPriorityMap),
     );
 
     return ProviderContainer(
@@ -88,10 +84,6 @@ void main() {
       ],
     );
   }
-
-  // ---------------------------------------------------------------------------
-  // Tests
-  // ---------------------------------------------------------------------------
 
   test('all channels read returns (0, 0)', () async {
     final container = buildContainer(
@@ -278,6 +270,66 @@ void main() {
     },
   );
 
+  test('thread marker clears only replies in that thread context', () async {
+    const channelId = 'ch-a';
+    final container = buildContainer(
+      channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
+      readContexts: {'thread:root-1': t30},
+      observedEventsByChannel: {
+        channelId: [
+          _observed(
+            id: 'reply-1',
+            createdAt: t20,
+            rootId: 'root-1',
+            isThreadedReply: true,
+          ),
+          _observed(
+            id: 'reply-2',
+            createdAt: t20,
+            rootId: 'root-2',
+            isThreadedReply: true,
+          ),
+        ],
+      },
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final badge = container.read(unreadBadgeProvider);
+    expect(badge.highPriorityCount, 0);
+    expect(badge.generalUnreadCount, 1);
+  });
+
+  test('message marker clears only that observed message', () async {
+    const channelId = 'ch-a';
+    final container = buildContainer(
+      channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
+      readContexts: {'msg:reply-1': t30},
+      observedEventsByChannel: {
+        channelId: [
+          _observed(
+            id: 'reply-1',
+            createdAt: t20,
+            rootId: 'root-1',
+            isThreadedReply: true,
+          ),
+          _observed(
+            id: 'reply-2',
+            createdAt: t20,
+            rootId: 'root-1',
+            isThreadedReply: true,
+          ),
+        ],
+      },
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    final badge = container.read(unreadBadgeProvider);
+    expect(badge.highPriorityCount, 0);
+    expect(badge.generalUnreadCount, 1);
+  });
+
   test('channelsProvider in loading state returns (0, 0)', () {
     // The provider returns const UnreadBadgeState() while channels are loading.
     // We intentionally do NOT await the future here — the channels notifier
@@ -314,7 +366,12 @@ void main() {
       final container = buildContainer(
         channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
         readContexts: {channelId: t20},
-        highPriorityMap: {channelId: t10}, // mention is older than read marker
+        observedEventsByChannel: {
+          channelId: [
+            _observed(id: 'mention', createdAt: t10, highPriority: true),
+            _observed(id: 'general', createdAt: t30),
+          ],
+        },
       );
       addTearDown(container.dispose);
 
@@ -326,30 +383,77 @@ void main() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Test doubles
-// ---------------------------------------------------------------------------
+ObservedUnreadEvent _observed({
+  required String id,
+  required int createdAt,
+  String? rootId,
+  bool highPriority = false,
+  bool isThreadedReply = false,
+  String channelType = 'stream',
+}) => makeObservedUnreadEvent(
+  id: id,
+  createdAt: createdAt,
+  rootId: rootId,
+  highPriority: highPriority,
+  channelType: channelType,
+  isThreadedReply: isThreadedReply,
+);
+
+Map<String, List<ObservedUnreadEvent>> _defaultObservedEvents(
+  List<Channel> channels,
+  Map<String, int> highPriorityMap,
+) {
+  return {
+    for (final channel in channels)
+      if (channel.lastMessageAt != null)
+        channel.id: [
+          _observed(
+            id: '${channel.id}-latest',
+            createdAt: channel.lastMessageAt!.millisecondsSinceEpoch ~/ 1000,
+            highPriority:
+                channel.isDm || highPriorityMap.containsKey(channel.id),
+            channelType: channel.channelType,
+          ),
+        ],
+  };
+}
 
 /// A [ChannelsNotifier] that immediately resolves to a canned [channels] list
-/// and exposes a pre-seeded [latestHighPriorityByChannel] map.
+/// and exposes pre-seeded observed unread events.
 ///
 /// Extends [ChannelsNotifier] so [ref.read(channelsProvider.notifier)] returns
-/// an instance whose [latestHighPriorityByChannel] getter works correctly.
+/// an instance whose observed-event getters work correctly.
 class _StubbedChannelsNotifier extends ChannelsNotifier {
   _StubbedChannelsNotifier({
     required List<Channel> channels,
-    Map<String, int> highPriorityMap = const {},
+    Map<String, List<ObservedUnreadEvent>> observedEventsByChannel = const {},
   }) : _channels = channels,
-       _highPriorityMap = Map<String, int>.unmodifiable(highPriorityMap);
+       _observedEventsByChannel =
+           Map<String, Map<String, ObservedUnreadEvent>>.unmodifiable({
+             for (final entry in observedEventsByChannel.entries)
+               entry.key: Map<String, ObservedUnreadEvent>.unmodifiable({
+                 for (final event in entry.value) event.id: event,
+               }),
+           });
 
   final List<Channel> _channels;
-  final Map<String, int> _highPriorityMap;
+  final Map<String, Map<String, ObservedUnreadEvent>> _observedEventsByChannel;
 
   @override
   Future<List<Channel>> build() async => _channels;
 
   @override
-  Map<String, int> get latestHighPriorityByChannel => _highPriorityMap;
+  Map<String, int> get latestObservedByChannel => {
+    for (final entry in _observedEventsByChannel.entries)
+      if (entry.value.isNotEmpty)
+        entry.key: entry.value.values
+            .map((event) => event.createdAt)
+            .reduce((left, right) => left > right ? left : right),
+  };
+
+  @override
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel => _observedEventsByChannel;
 }
 
 /// A [ChannelsNotifier] that stays in the loading state indefinitely.
@@ -358,7 +462,11 @@ class _LoadingChannelsNotifier extends ChannelsNotifier {
   Future<List<Channel>> build() => Completer<List<Channel>>().future;
 
   @override
-  Map<String, int> get latestHighPriorityByChannel => const {};
+  Map<String, int> get latestObservedByChannel => const {};
+
+  @override
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel => const {};
 }
 
 /// A [ReadStateNotifier] that returns a fixed [ReadStateState].

@@ -375,7 +375,6 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
 
-// ── NIP-34: Git repository events ────────────────────────────────────────────
 /// NIP-34: Repository announcement (parameterized replaceable, d-tag = repo-id).
 pub const KIND_GIT_REPO_ANNOUNCEMENT: u32 = 30617;
 /// NIP-34: Repository state — current branch/tag refs (parameterized replaceable, d-tag = repo-id).

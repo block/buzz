@@ -37,6 +37,7 @@ import {
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import {
   usePresenceSession,
@@ -139,6 +140,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
   );
   usePersonaSync(identityQuery.data?.pubkey);
+  useAgentsDataRefresh();
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
@@ -154,9 +156,12 @@ export function AppShell() {
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
   const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data ?? [];
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
+    channels,
   );
   const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
@@ -165,9 +170,7 @@ export function AppShell() {
     identityQuery.data?.pubkey,
     refetchHomeFeedFromLiveSignal,
   );
-  const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
-  const channels = channelsQuery.data ?? [];
   const channelsErrorMessage =
     channelsQuery.error instanceof Error
       ? channelsQuery.error.message
@@ -798,7 +801,7 @@ export function AppShell() {
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
                             style={chromeCssVarDefaults}
                           >
-                            <div className="relative z-10 ml-px mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-tl-xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
+                            <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
                               <ConnectionBanner
                                 errorMessage={channelsErrorMessage}
                               />

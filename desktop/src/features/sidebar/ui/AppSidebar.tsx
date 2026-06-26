@@ -28,6 +28,7 @@ import {
   CreateSectionDialog,
   DeleteSectionAlertDialog,
   RenameSectionDialog,
+  useLeaveChannelDialog,
 } from "@/features/sidebar/ui/ChannelSectionDialogs";
 import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
@@ -78,10 +79,6 @@ type CollapsibleSidebarGroup =
   | "channels"
   | "forums"
   | "directMessages";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 type CreateChannelKind = "stream" | "forum";
 
@@ -174,10 +171,6 @@ type AppSidebarProps = {
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
 };
-
-// ---------------------------------------------------------------------------
-// AppSidebar
-// ---------------------------------------------------------------------------
 
 export function AppSidebar({
   activeWorkspace,
@@ -388,6 +381,8 @@ export function AppSidebar({
     React.useState<ChannelSection | null>(null);
   const [deleteSectionTarget, setDeleteSectionTarget] =
     React.useState<ChannelSection | null>(null);
+  const { requestLeaveChannel, dialog: leaveChannelDialog } =
+    useLeaveChannelDialog();
 
   const sectionIds = React.useMemo(
     () => channelSections.map((s) => s.id),
@@ -682,6 +677,7 @@ export function AppSidebar({
                   starredChannelIds={starredChannelIds}
                   onStarChannel={onStarChannel}
                   onUnstarChannel={onUnstarChannel}
+                  onLeaveChannel={requestLeaveChannel}
                 />
               ) : null}
               <SidebarDndContext
@@ -735,6 +731,7 @@ export function AppSidebar({
                     starredChannelIds={starredChannelIds}
                     onStarChannel={onStarChannel}
                     onUnstarChannel={onUnstarChannel}
+                    onLeaveChannel={requestLeaveChannel}
                   />
                 ))}
                 <ChannelGroupSection
@@ -768,6 +765,7 @@ export function AppSidebar({
                   starredChannelIds={starredChannelIds}
                   onStarChannel={onStarChannel}
                   onUnstarChannel={onUnstarChannel}
+                  onLeaveChannel={requestLeaveChannel}
                 />
               </SidebarDndContext>
               <FeatureGate feature="forum">
@@ -981,6 +979,7 @@ export function AppSidebar({
           setDeleteSectionTarget(null);
         }}
       />
+      {leaveChannelDialog}
       <SidebarRail />
     </Sidebar>
   );

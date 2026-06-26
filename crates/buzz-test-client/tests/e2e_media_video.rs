@@ -15,8 +15,6 @@ use reqwest::{Client, StatusCode};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-// ── URL helpers ───────────────────────────────────────────────────────────────
-
 fn relay_http_url() -> String {
     std::env::var("RELAY_HTTP_URL").unwrap_or_else(|_| "http://localhost:3000".to_string())
 }
@@ -27,8 +25,6 @@ fn http_client() -> Client {
         .build()
         .expect("failed to build HTTP client")
 }
-
-// ── Blossom auth helpers ──────────────────────────────────────────────────────
 
 fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
     let now = Timestamp::now().as_secs();
@@ -50,8 +46,6 @@ fn blossom_auth_header(event: &nostr::Event) -> String {
         URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
     )
 }
-
-// ── Minimal MP4 builder ───────────────────────────────────────────────────────
 
 /// Build a minimal but structurally valid fast-start MP4 (H.264, 1s, 320×240).
 ///
@@ -240,8 +234,6 @@ fn build_test_mp4() -> Vec<u8> {
 
     [ftyp, moov, mdat].concat()
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Upload a valid MP4 video via Blossom, verify the BlobDescriptor includes
 /// video-specific fields (duration, dim) and the blob is retrievable.
@@ -433,8 +425,6 @@ async fn test_video_upload_no_auth_returns_401() {
         "upload without auth should return 401"
     );
 }
-
-// ── Poster frame + imeta integration tests ───────────────────────────────────
 
 fn relay_ws_url() -> String {
     relay_http_url()

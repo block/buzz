@@ -2,11 +2,43 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canSubmitPersonaDialog,
   createPersonaDialogState,
   duplicatePersonaDialogState,
   editPersonaDialogState,
   importPersonaDialogState,
 } from "./personaDialogState.ts";
+
+test("canSubmitPersonaDialog requires a display name but not a system prompt", () => {
+  // Empty system prompt is allowed: core memory is auto-injected, so the
+  // persona prompt is optional. Only the display name gates submission.
+  assert.equal(
+    canSubmitPersonaDialog({ displayName: "Coder", isPending: false }),
+    true,
+  );
+  assert.equal(
+    canSubmitPersonaDialog({ displayName: "  Coder  ", isPending: false }),
+    true,
+  );
+});
+
+test("canSubmitPersonaDialog blocks an empty or whitespace display name", () => {
+  assert.equal(
+    canSubmitPersonaDialog({ displayName: "", isPending: false }),
+    false,
+  );
+  assert.equal(
+    canSubmitPersonaDialog({ displayName: "   ", isPending: false }),
+    false,
+  );
+});
+
+test("canSubmitPersonaDialog blocks while a save is pending", () => {
+  assert.equal(
+    canSubmitPersonaDialog({ displayName: "Coder", isPending: true }),
+    false,
+  );
+});
 
 test("createPersonaDialogState returns a fresh empty draft", () => {
   const first = createPersonaDialogState();
@@ -151,8 +183,6 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
     provider: undefined,
   });
 });
-
-// ── Provider round-trip tests ─────────────────────────────────────────────────
 
 test("editPersonaDialogState preserves provider=databricks", () => {
   const state = editPersonaDialogState({

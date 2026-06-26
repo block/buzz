@@ -19,7 +19,6 @@ const EMOJI_DEBOUNCE_MS = 120;
 const MIN_QUERY_LENGTH = 2;
 const MAX_RESULTS = 8;
 
-// Initialize emoji-mart search index once
 init({ data });
 
 /**
@@ -60,7 +59,6 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
   const latestValueRef = React.useRef<string>("");
   const latestCursorRef = React.useRef<number>(0);
 
-  // Clean up pending timeout on unmount
   React.useEffect(() => {
     return () => {
       if (debounceTimerRef.current !== null) {
@@ -69,7 +67,6 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
     };
   }, []);
 
-  // Search emoji-mart when query changes
   React.useEffect(() => {
     if (emojiQuery === null) {
       setSuggestions([]);

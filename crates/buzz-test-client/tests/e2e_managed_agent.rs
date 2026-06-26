@@ -91,8 +91,6 @@ fn agent_d_tag() -> String {
     uuid::Uuid::new_v4().simple().to_string().repeat(2)
 }
 
-// ── Publish and query back ───────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore]
 async fn test_managed_agent_publish_and_query() {
@@ -135,8 +133,6 @@ async fn test_managed_agent_publish_and_query() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── Round-trip fidelity (relay returns only what was published) ──────────────
 
 /// The relay round-trips published content byte-for-byte: a projection-shaped
 /// body goes out, and the relay returns exactly those fields and nothing more.
@@ -225,8 +221,6 @@ async fn test_managed_agent_round_trips_only_projected_fields() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── NIP-33 replacement semantics ─────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore]
 async fn test_managed_agent_nip33_replacement_newer_wins() {
@@ -271,8 +265,6 @@ async fn test_managed_agent_nip33_replacement_newer_wins() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── NIP-09 coordinate deletion (tombstone) ───────────────────────────────────
 
 /// The a-tag tombstone is the only state-destroying op in the managed-agent
 /// flow. Publish an agent, confirm it is live, publish the a-tag-only tombstone

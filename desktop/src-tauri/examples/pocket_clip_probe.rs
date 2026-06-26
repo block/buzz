@@ -82,7 +82,6 @@ fn main() {
         ..Default::default()
     };
 
-    // Warmup.
     let _ = engine.generate_with_config("warmup.", &gen(), None::<fn(&[f32], f32) -> bool>);
 
     println!(

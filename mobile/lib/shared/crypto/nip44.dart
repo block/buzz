@@ -27,10 +27,8 @@ String nip44Encrypt(Uint8List conversationKey, String plaintext) {
     throw ArgumentError('Plaintext must be 1-65535 bytes');
   }
 
-  // Pad plaintext.
   final padded = _pad(Uint8List.fromList(plaintextBytes));
 
-  // Generate 32-byte nonce.
   final nonce = secureRandomBytes(32);
 
   // Derive message keys: chacha_key(32) + chacha_nonce(12) + hmac_key(32) = 76
@@ -39,7 +37,6 @@ String nip44Encrypt(Uint8List conversationKey, String plaintext) {
   final chachaNonce = Uint8List.sublistView(messageKeys, 32, 44);
   final hmacKey = Uint8List.sublistView(messageKeys, 44, 76);
 
-  // Encrypt with ChaCha20.
   final ciphertext = _chacha20(chachaKey, chachaNonce, padded);
 
   // HMAC-SHA256 over nonce || ciphertext.
@@ -67,7 +64,6 @@ String nip44Decrypt(Uint8List conversationKey, String payloadBase64) {
     throw FormatException('NIP-44 payload too short: ${payload.length}');
   }
 
-  // Check version byte.
   if (payload[0] != 0x02) {
     throw FormatException('NIP-44 unsupported version: ${payload[0]}');
   }
@@ -76,7 +72,6 @@ String nip44Decrypt(Uint8List conversationKey, String payloadBase64) {
   final ciphertext = Uint8List.sublistView(payload, 33, payload.length - 32);
   final receivedMac = Uint8List.sublistView(payload, payload.length - 32);
 
-  // Derive message keys.
   final messageKeys = hkdfExpand(conversationKey, nonce, 76);
   final chachaKey = Uint8List.sublistView(messageKeys, 0, 32);
   final chachaNonce = Uint8List.sublistView(messageKeys, 32, 44);
@@ -88,10 +83,8 @@ String nip44Decrypt(Uint8List conversationKey, String payloadBase64) {
     throw FormatException('NIP-44 HMAC verification failed');
   }
 
-  // Decrypt with ChaCha20.
   final padded = _chacha20(chachaKey, chachaNonce, ciphertext);
 
-  // Unpad.
   return _unpad(padded);
 }
 

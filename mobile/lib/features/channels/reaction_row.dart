@@ -24,10 +24,6 @@ void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Reaction pills row (shared between channel + thread detail pages)
-// ---------------------------------------------------------------------------
-
 class ReactionRow extends StatelessWidget {
   final List<TimelineReaction> reactions;
   final void Function(String emoji) onToggle;
@@ -112,10 +108,6 @@ class _ReactionEmoji extends StatelessWidget {
     return CustomEmojiImage(shortcode: shortcode, url: emojiUrl, size: size);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Reaction detail bottom sheet
-// ---------------------------------------------------------------------------
 
 void showReactionDetailSheet({
   required BuildContext context,
@@ -313,10 +305,6 @@ class _ReactorAvatar extends HookWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Emoji shortcode mapping (common subset)
-// ---------------------------------------------------------------------------
 
 String _emojiToShortcode(String emoji) {
   const map = <String, String>{

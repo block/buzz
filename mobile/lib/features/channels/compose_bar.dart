@@ -503,10 +503,6 @@ class ComposeBar extends HookConsumerWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Typing indicator broadcast
-// ---------------------------------------------------------------------------
-
 const _typingThrottleMs = 3000;
 
 /// Walk backward from [cursor] looking for [trigger] (e.g. `@` or `#`) at a
@@ -632,10 +628,6 @@ void _sendTypingIndicator(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Mention suggestions
-// ---------------------------------------------------------------------------
-
 List<ChannelMember> _filterMembers(
   List<ChannelMember> members,
   String? query,
@@ -747,10 +739,6 @@ class _MentionSuggestions extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Channel suggestions
-// ---------------------------------------------------------------------------
-
 @visibleForTesting
 List<Channel> filterChannels(List<Channel> channels, String? query) {
   if (query == null) return const [];
@@ -825,10 +813,6 @@ class _ChannelSuggestions extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Formatting toolbar
-// ---------------------------------------------------------------------------
-
 class _FormattingToolbar extends StatelessWidget {
   final void Function(String prefix, [String? suffix]) onFormat;
 
@@ -897,10 +881,6 @@ class _FormatButton extends StatelessWidget {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Compose action buttons
-// ---------------------------------------------------------------------------
 
 class _ComposeAction extends StatelessWidget {
   final IconData icon;

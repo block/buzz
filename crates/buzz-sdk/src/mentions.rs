@@ -390,8 +390,6 @@ pub fn extract_nostr_uris(content: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    // ── extract_at_names ────────────────────────────────────────────────
-
     #[test]
     fn extract_at_names_matches_basic() {
         assert_eq!(extract_at_names("hello @alice"), vec!["alice"]);
@@ -427,8 +425,6 @@ mod tests {
         assert!(extract_at_names("hello @ world").is_empty());
         assert!(extract_at_names("hello @").is_empty());
     }
-
-    // ── extract_at_mentions_with_known ──────────────────────────────────
 
     #[test]
     fn known_multiword_name_matches_fully() {
@@ -546,8 +542,6 @@ mod tests {
         assert_eq!(result, vec!["alice"]);
     }
 
-    // ── match_names_to_profiles ─────────────────────────────────────────
-
     fn profile<'a>(pk: &'a str, json: &'a str) -> MentionProfile<'a> {
         MentionProfile {
             pubkey: pk,
@@ -619,8 +613,6 @@ mod tests {
         assert!(match_names_to_profiles(&[], &profiles).is_empty());
     }
 
-    // ── merge_mentions ──────────────────────────────────────────────────
-
     #[test]
     fn merge_appends_new_and_skips_dupes() {
         let mut m = vec!["a".to_string()];
@@ -644,8 +636,6 @@ mod tests {
         assert!(!m.contains(&"extra".to_string()));
     }
 
-    // ── normalize_mention_pubkeys ───────────────────────────────────────
-
     #[test]
     fn normalize_lowercases_and_dedups() {
         let pks = vec!["ABC".to_string(), "abc".to_string(), "DEF".to_string()];
@@ -668,8 +658,6 @@ mod tests {
     fn normalize_empty_input() {
         assert!(normalize_mention_pubkeys(&[], Some("anything")).is_empty());
     }
-
-    // ── strip_code_regions ──────────────────────────────────────────────
 
     #[test]
     fn strip_code_regions_removes_fenced_block() {
@@ -710,8 +698,6 @@ mod tests {
         let stripped = strip_code_regions(input);
         assert!(stripped.contains("world"));
     }
-
-    // ── extract_nostr_uris ──────────────────────────────────────────────
 
     const TEST_NPUB1: &str = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
     const TEST_HEX1: &str = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";

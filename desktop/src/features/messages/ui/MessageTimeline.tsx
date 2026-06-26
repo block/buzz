@@ -50,6 +50,7 @@ type MessageTimelineProps = {
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
   isFetchingOlder?: boolean;
+  layoutShiftKey?: string | number | null;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
@@ -148,6 +149,7 @@ const MessageTimelineBase = React.forwardRef<
     hasComposerOverlay = true,
     hasOlderMessages = true,
     isFetchingOlder = false,
+    layoutShiftKey = null,
     followThreadById,
     isFollowingThreadById,
     isMessageUnreadById,
@@ -242,6 +244,7 @@ const MessageTimelineBase = React.forwardRef<
     hasOlderMessages,
     isFetchingOlder,
     isLoading: showTimelineSkeleton,
+    layoutShiftKey,
     messages: deferredMessages,
     onTargetReached,
     scrollContainerRef,
