@@ -79,11 +79,6 @@ const overrides = new Map([
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1449],
-  // persona-events rebase: boot-time event-sync wiring (run_boot_migrations
-  // syncs team-dir edits before all personas.json readers; run_event_sync
-  // signs the persona/team retention events post-identity) layered on top of
-  // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1034],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
