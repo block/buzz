@@ -1350,44 +1350,64 @@ function AgentConversationLinkCard({
   onOpenAgentConversationLink,
 }: AgentConversationLinkCardProps) {
   const title = marker?.title?.trim() || "Task";
-
-  return (
-    <span
-      className="my-1 flex min-w-0 max-w-xl overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top"
-      data-agent-conversation-link=""
-      title={href}
-    >
-      <span className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2">
+  const content = (
+    <>
+      <span
+        aria-hidden
+        className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-background p-2.5 text-muted-foreground shadow-xs ring-1 ring-border/60"
+      >
+        <ClipboardPlus className="size-5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-foreground">
+          Task
+        </span>
+        <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+          {title}
+        </span>
+      </span>
+      {interactive ? (
         <span
           aria-hidden
-          className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-background p-2.5 text-muted-foreground shadow-xs ring-1 ring-border/60"
+          className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground shadow-xs transition-colors group-hover/task-link:bg-accent group-hover/task-link:text-accent-foreground"
         >
-          <ClipboardPlus className="size-5" />
+          Open
         </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-foreground">
-            Task
-          </span>
-          <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-            {title}
-          </span>
+      ) : null}
+    </>
+  );
+
+  if (!interactive) {
+    return (
+      <span
+        className="my-1 flex min-w-0 max-w-xl overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top"
+        data-agent-conversation-link=""
+        title={href}
+      >
+        <span className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2">
+          {content}
         </span>
-        {interactive ? (
-          <button
-            aria-label={`Open task: ${title}`}
-            className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground shadow-xs transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onOpenAgentConversationLink(link);
-            }}
-            type="button"
-          >
-            Open
-          </button>
-        ) : null}
       </span>
-    </span>
+    );
+  }
+
+  return (
+    <button
+      aria-label={`Open task: ${title}`}
+      className="group/task-link my-1 flex min-w-0 max-w-xl cursor-pointer overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top text-left transition-colors hover:bg-muted/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      data-agent-conversation-link=""
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenAgentConversationLink(link);
+      }}
+      title={href}
+      type="button"
+    >
+      <span className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2">
+        {content}
+      </span>
+    </button>
   );
 }
 
@@ -2370,14 +2390,6 @@ function MarkdownInner({
       void goChannel(link.channelId, {
         messageId: link.messageId,
         threadRootId: link.threadRootId,
-      });
-    },
-    [goChannel],
-  );
-  const onOpenAgentConversationLink = React.useCallback(
-    (link: ParsedAgentConversationLink) => {
-      void goChannel(link.channelId, {
-        taskReplyId: link.agentReplyId,
       });
     },
     [goChannel],

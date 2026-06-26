@@ -105,7 +105,7 @@ function ChannelTaskRow({
         </div>
         <div className="flex shrink-0 items-center gap-2 opacity-0 transition-opacity group-hover/task:opacity-100 group-focus-within/task:opacity-100">
           <Button
-            className="h-8 rounded-lg px-3 text-xs font-medium"
+            className="h-8 rounded-lg bg-transparent px-3 text-xs font-medium text-foreground shadow-none hover:bg-secondary hover:text-secondary-foreground"
             data-testid="channel-task-go-to-thread"
             disabled={!onGoToTaskMessage || !message || !threadMessage}
             onClick={() => {
@@ -115,7 +115,7 @@ function ChannelTaskRow({
             }}
             title="Go to source message in channel"
             type="button"
-            variant="secondary"
+            variant="ghost"
           >
             Go to message
           </Button>
