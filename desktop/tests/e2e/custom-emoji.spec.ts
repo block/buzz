@@ -119,15 +119,16 @@ test("native emoji-only messages leave space below the author metadata", async (
   await expect(emojiBody).toContainText(nativeEmoji);
   await expect(emojiBody).toBeVisible();
 
-  const authorBox = await author.boundingBox();
-  const emojiBodyBox = await emojiBody.boundingBox();
-  if (!authorBox || !emojiBodyBox) {
-    throw new Error("Expected author and emoji body boxes to be measurable.");
-  }
-
-  expect(
-    emojiBodyBox.y - (authorBox.y + authorBox.height),
-  ).toBeGreaterThanOrEqual(4);
+  await expect
+    .poll(async () => {
+      const authorBox = await author.boundingBox();
+      const emojiBodyBox = await emojiBody.boundingBox();
+      if (!authorBox || !emojiBodyBox) {
+        return Number.NEGATIVE_INFINITY;
+      }
+      return emojiBodyBox.y - (authorBox.y + authorBox.height);
+    })
+    .toBeGreaterThanOrEqual(4);
 });
 
 // Regression guard for custom-emoji REACTIONS.
