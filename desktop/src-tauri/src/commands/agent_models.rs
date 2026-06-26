@@ -41,8 +41,13 @@ pub async fn get_agent_models(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)).0 {
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
             save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
         }
 
         let record = records
@@ -691,7 +696,11 @@ pub async fn update_managed_agent(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        let (_, exited_pubkeys) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
+        }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
 

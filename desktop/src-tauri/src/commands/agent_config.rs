@@ -157,8 +157,13 @@ pub async fn get_agent_config_surface(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)).0 {
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
             save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
         }
         records
             .into_iter()
