@@ -217,7 +217,7 @@ test("importPersonaDialogState preserves imported name pools", () => {
   assert.deepEqual(state.initialValues.namePool, ["Birch", "Compass"]);
 });
 
-test("importPersonaDialogState preserves Goose app-avatar refs from persona markdown", () => {
+test("importPersonaDialogState filters unresolved Goose app-avatar refs", () => {
   const state = importPersonaDialogState({
     displayName: "Goosey",
     avatarDataUrl: null,
@@ -230,7 +230,7 @@ test("importPersonaDialogState preserves Goose app-avatar refs from persona mark
     sourceFile: "goosey.persona.md",
   });
 
-  assert.equal(state.initialValues.avatarUrl, "app-avatar:gloopies-19");
+  assert.equal(state.initialValues.avatarUrl, "");
 });
 
 test("importPersonaDialogState preserves URL-like avatar refs", () => {

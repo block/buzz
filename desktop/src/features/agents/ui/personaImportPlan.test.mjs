@@ -87,15 +87,27 @@ test("buildPersonaImportPlan detects avatar change", () => {
   assert.equal(plan.fields[0]?.field, "avatarUrl");
 });
 
-test("buildPersonaImportPlan detects avatar ref changes", () => {
+test("buildPersonaImportPlan detects hosted avatar ref changes", () => {
   const plan = buildPersonaImportPlan({
     persona: createPersona({ avatarUrl: null }),
-    preview: createPreview({ avatarRef: "app-avatar:gloopies-19" }),
+    preview: createPreview({ avatarRef: "https://new.example/avatar.png" }),
   });
 
   assert.equal(plan.fields.length, 1);
   assert.equal(plan.fields[0]?.field, "avatarUrl");
-  assert.equal(plan.fields[0]?.importedValue, "app-avatar:gloopies-19");
+  assert.equal(plan.fields[0]?.importedValue, "https://new.example/avatar.png");
+});
+
+test("buildPersonaImportPlan ignores unresolved app-avatar refs", () => {
+  const plan = buildPersonaImportPlan({
+    persona: createPersona({ avatarUrl: "https://old.example/avatar.png" }),
+    preview: createPreview({ avatarRef: "app-avatar:gloopies-19" }),
+  });
+
+  assert.equal(
+    plan.fields.some((field) => field.field === "avatarUrl"),
+    false,
+  );
 });
 
 test("buildPersonaImportPlan ignores raw relative avatar refs", () => {

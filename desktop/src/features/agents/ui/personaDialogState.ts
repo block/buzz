@@ -36,7 +36,6 @@ function isSafeImportedAvatarRef(
 ): ref is string {
   const trimmed = ref?.trim();
   if (!trimmed) return false;
-  if (trimmed.startsWith("app-avatar:")) return true;
 
   try {
     const parsed = new URL(trimmed);
