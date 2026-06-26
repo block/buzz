@@ -1080,6 +1080,9 @@ pub async fn run_prompt_task(
             Some(ci) => Some(PromptChannelInfo {
                 name: ci.name.clone(),
                 channel_type: ci.channel_type.clone(),
+                description: ci.description.clone(),
+                topic: ci.topic.clone(),
+                purpose: ci.purpose.clone(),
             }),
             None => fetch_channel_info(b.channel_id, &ctx.rest_client).await,
         };
@@ -1500,12 +1503,18 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
                 let ev = events.first()?;
                 let tags = ev.get("tags")?.as_array()?;
                 let mut name = None;
+                let mut description = None;
+                let mut topic = None;
+                let mut purpose = None;
                 let mut is_hidden = false;
                 let mut is_private = false;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
                         match arr.first().and_then(|v| v.as_str()) {
                             Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                            Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
+                            Some("topic") => topic = arr.get(1).and_then(|v| v.as_str()),
+                            Some("purpose") => purpose = arr.get(1).and_then(|v| v.as_str()),
                             Some("hidden") => is_hidden = true,
                             Some("private") => is_private = true,
                             _ => {}
@@ -1522,6 +1531,9 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
                 Some(PromptChannelInfo {
                     name: name.unwrap_or("unknown").to_string(),
                     channel_type,
+                    description: description.map(str::to_string),
+                    topic: topic.map(str::to_string),
+                    purpose: purpose.map(str::to_string),
                 })
             }
             Ok(Err(e)) => {

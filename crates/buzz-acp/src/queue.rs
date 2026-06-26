@@ -725,10 +725,62 @@ pub struct ContextMessage {
 }
 
 /// Channel metadata for prompt formatting.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PromptChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description (`about` tag on the NIP-29 metadata event).
+    pub description: Option<String>,
+    /// Channel topic (`topic` tag on the NIP-29 metadata event).
+    pub topic: Option<String>,
+    /// Channel purpose (`purpose` tag on the NIP-29 metadata event).
+    pub purpose: Option<String>,
+}
+
+/// Per-field character budget for inlining channel metadata into `[Context]`.
+///
+/// Fields under this length are inlined verbatim; longer fields are replaced
+/// with a placeholder pointing the agent at `buzz channels get` so the prompt
+/// stays compact.
+const CHANNEL_FIELD_INLINE_BUDGET: usize = 200;
+
+/// Render one optional channel metadata field as a `[Context]` line.
+///
+/// Returns `None` when the field is absent or empty. Short values inline
+/// verbatim; values over [`CHANNEL_FIELD_INLINE_BUDGET`] collapse to a
+/// placeholder so the agent knows to fetch the full text on demand.
+fn format_channel_field(label: &str, value: Option<&str>) -> Option<String> {
+    let value = value.map(str::trim).filter(|v| !v.is_empty())?;
+    if value.chars().count() <= CHANNEL_FIELD_INLINE_BUDGET {
+        Some(format!("{label}: {value}"))
+    } else {
+        Some(format!(
+            "{label}: (long — run `buzz channels get --channel <UUID>` to read)"
+        ))
+    }
+}
+
+/// Render the channel metadata lines (description/topic/purpose) for `[Context]`.
+///
+/// Returns an empty string when no fields are present, so callers can append
+/// it unconditionally.
+fn format_channel_metadata(channel_info: Option<&PromptChannelInfo>) -> String {
+    let Some(ci) = channel_info else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for line in [
+        format_channel_field("Description", ci.description.as_deref()),
+        format_channel_field("Topic", ci.topic.as_deref()),
+        format_channel_field("Purpose", ci.purpose.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
 }
 
 /// Minimal profile fields needed to label users in ACP prompts.
@@ -967,8 +1019,15 @@ fn format_context_hints(
     has_conversation_context: bool,
     reply_anchor: Option<&str>,
 ) -> String {
+    // Channel name + any inlined metadata (description/topic/purpose). The
+    // metadata lines are folded into `channel_display` so they render directly
+    // under the `Channel:` line in every scope branch below.
     let channel_display = match channel_info {
-        Some(ci) => format!("{} (#{channel_id})", ci.name),
+        Some(ci) => format!(
+            "{} (#{channel_id}){}",
+            ci.name,
+            format_channel_metadata(channel_info)
+        ),
         None => channel_id.to_string(),
     };
 
@@ -2285,6 +2344,108 @@ mod tests {
     }
 
     #[test]
+    fn test_format_channel_field_inlines_short_value() {
+        assert_eq!(
+            format_channel_field("Topic", Some("ship the thing")).as_deref(),
+            Some("Topic: ship the thing")
+        );
+    }
+
+    #[test]
+    fn test_format_channel_field_skips_empty_and_whitespace() {
+        assert_eq!(format_channel_field("Topic", None), None);
+        assert_eq!(format_channel_field("Topic", Some("")), None);
+        assert_eq!(format_channel_field("Topic", Some("   ")), None);
+    }
+
+    #[test]
+    fn test_format_channel_field_trims_inlined_value() {
+        assert_eq!(
+            format_channel_field("Purpose", Some("  hello  ")).as_deref(),
+            Some("Purpose: hello")
+        );
+    }
+
+    #[test]
+    fn test_format_channel_field_placeholder_when_over_budget() {
+        let long = "x".repeat(CHANNEL_FIELD_INLINE_BUDGET + 1);
+        let rendered = format_channel_field("Description", Some(&long)).unwrap();
+        assert!(rendered.starts_with("Description: (long —"));
+        assert!(rendered.contains("buzz channels get"));
+        // The long value itself must not leak into the prompt.
+        assert!(!rendered.contains(&long));
+    }
+
+    #[test]
+    fn test_format_channel_field_inlines_at_exact_budget() {
+        let exact = "y".repeat(CHANNEL_FIELD_INLINE_BUDGET);
+        let rendered = format_channel_field("Topic", Some(&exact)).unwrap();
+        assert_eq!(rendered, format!("Topic: {exact}"));
+    }
+
+    #[test]
+    fn test_format_channel_metadata_renders_all_present_fields() {
+        let ci = PromptChannelInfo {
+            name: "eng".into(),
+            channel_type: "stream".into(),
+            description: Some("the eng channel".into()),
+            topic: Some("Q3 roadmap".into()),
+            purpose: Some("coordinate eng work".into()),
+        };
+        let out = format_channel_metadata(Some(&ci));
+        assert_eq!(
+            out,
+            "\nDescription: the eng channel\nTopic: Q3 roadmap\nPurpose: coordinate eng work"
+        );
+    }
+
+    #[test]
+    fn test_format_channel_metadata_empty_when_none_present() {
+        let ci = PromptChannelInfo {
+            name: "eng".into(),
+            channel_type: "stream".into(),
+            ..Default::default()
+        };
+        assert_eq!(format_channel_metadata(Some(&ci)), "");
+        assert_eq!(format_channel_metadata(None), "");
+    }
+
+    #[test]
+    fn test_format_prompt_channel_scope_inlines_metadata() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+        let ci = PromptChannelInfo {
+            name: "engineering".into(),
+            channel_type: "stream".into(),
+            description: Some("where eng happens".into()),
+            topic: Some("Q3 roadmap".into()),
+            purpose: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(prompt.contains("engineering (#"));
+        assert!(prompt.contains("\nDescription: where eng happens"));
+        assert!(prompt.contains("\nTopic: Q3 roadmap"));
+        // Absent field produces no line.
+        assert!(!prompt.contains("Purpose:"));
+    }
+
+    #[test]
     fn test_format_prompt_with_channel_info() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
@@ -2300,6 +2461,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "engineering".into(),
             channel_type: "stream".into(),
+            ..Default::default()
         };
 
         let prompt = format_prompt(
@@ -2330,6 +2492,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            ..Default::default()
         };
 
         let prompt = format_prompt(
@@ -2437,6 +2600,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            ..Default::default()
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
@@ -2691,6 +2855,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            ..Default::default()
         };
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
@@ -2747,6 +2912,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            ..Default::default()
         };
 
         // No context fetched — hints only.
@@ -3179,6 +3345,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            ..Default::default()
         };
 
         let prompt = format_prompt(
@@ -3240,6 +3407,7 @@ mod tests {
         let ci = PromptChannelInfo {
             name: "DM".into(),
             channel_type: "dm".into(),
+            ..Default::default()
         };
 
         let prompt = format_prompt(

@@ -79,6 +79,12 @@ use crate::config::ChannelFilter;
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description (`about` tag on the NIP-29 metadata event).
+    pub description: Option<String>,
+    /// Channel topic (`topic` tag on the NIP-29 metadata event).
+    pub topic: Option<String>,
+    /// Channel purpose (`purpose` tag on the NIP-29 metadata event).
+    pub purpose: Option<String>,
 }
 
 /// Build the discovered-channel subscribe set from the membership UUIDs and the
@@ -95,7 +101,7 @@ fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut meta_map: HashMap<Uuid, ChannelInfo> = HashMap::new();
     let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
@@ -105,6 +111,9 @@ fn merge_discovered_channels(
             };
             let mut d_val = None;
             let mut name = None;
+            let mut description = None;
+            let mut topic = None;
+            let mut purpose = None;
             let mut is_hidden = false;
             let mut is_private = false;
             let mut is_archived = false;
@@ -113,6 +122,9 @@ fn merge_discovered_channels(
                     match arr.first().and_then(|v| v.as_str()) {
                         Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
+                        Some("topic") => topic = arr.get(1).and_then(|v| v.as_str()),
+                        Some("purpose") => purpose = arr.get(1).and_then(|v| v.as_str()),
                         Some("hidden") => is_hidden = true,
                         Some("private") => is_private = true,
                         Some("archived") => {
@@ -137,7 +149,16 @@ fn merge_discovered_channels(
                     } else {
                         "stream".to_string()
                     };
-                    meta_map.insert(uuid, (ch_name, ch_type));
+                    meta_map.insert(
+                        uuid,
+                        ChannelInfo {
+                            name: ch_name,
+                            channel_type: ch_type,
+                            description: description.map(str::to_string),
+                            topic: topic.map(str::to_string),
+                            purpose: purpose.map(str::to_string),
+                        },
+                    );
                 }
             }
         }
@@ -148,10 +169,14 @@ fn merge_discovered_channels(
         if archived.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
-            .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+        let info = meta_map.remove(&uuid).unwrap_or_else(|| ChannelInfo {
+            name: "unknown".to_string(),
+            channel_type: "stream".to_string(),
+            description: None,
+            topic: None,
+            purpose: None,
+        });
+        map.insert(uuid, info);
     }
     map
 }
