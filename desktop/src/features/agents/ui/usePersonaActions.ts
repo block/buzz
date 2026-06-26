@@ -137,7 +137,7 @@ export function usePersonaActions() {
       setSharedCatalogPersonaIds(next);
       writeSharedCatalogPersonaIds(next);
     }
-  }, [personas, sharedCatalogPersonaIds]);
+  }, [personas, personasQuery.isSuccess, sharedCatalogPersonaIds]);
 
   const personaImportActions = usePersonaImportActions(personas, {
     clearPersonaFeedback: () => clearFeedback("library"),
