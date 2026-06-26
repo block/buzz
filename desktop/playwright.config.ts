@@ -36,6 +36,7 @@ export default defineConfig({
         "**/file-attachment.spec.ts",
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",
+        "**/screenshot-tooltip-pointer-events.spec.ts",
         "**/mentions.spec.ts",
         "**/relay-reconnect.spec.ts",
         "**/relay-reconnect-affordance.spec.ts",
