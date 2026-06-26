@@ -134,12 +134,21 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     agentName,
   );
-  const inlineLog = page
-    .getByTestId("agents-library-personas")
-    .getByTestId("managed-agent-log-content");
 
-  await expect(inlineLog).toContainText("parallelism=3");
-  await expect(inlineLog).toContainText("system prompt override configured");
+  // Logs now live in the profile sidebar (PR #1274), not an inline panel.
+  // Open the new agent's card to reveal the profile panel, then read the
+  // harness log from the diagnostics view.
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-diagnostics-ingress").click();
+
+  const log = page.getByTestId("managed-agent-log-content");
+  await expect(log).toContainText("parallelism=3");
+  await expect(log).toContainText("system prompt override configured");
 });
 
 test("opens a mocked channel from the inbox feed", async ({ page }) => {

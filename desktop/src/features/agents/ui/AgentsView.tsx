@@ -75,13 +75,6 @@ export function AgentsView() {
               }
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
-              logContent={agents.managedAgentLogQuery.data?.content ?? null}
-              logError={
-                agents.managedAgentLogQuery.error instanceof Error
-                  ? agents.managedAgentLogQuery.error
-                  : null
-              }
-              logLoading={agents.managedAgentLogQuery.isLoading}
               personaLabelsById={personas.personaLabelsById}
               presenceLoaded={agents.managedPresenceQuery.isSuccess}
               presenceLookup={agents.managedPresenceQuery.data ?? {}}
@@ -100,8 +93,6 @@ export function AgentsView() {
               onOpenPersonaProfile={(persona) => {
                 openPersonaProfilePanel?.(persona);
               }}
-              onSelectLogAgent={agents.setLogAgentPubkey}
-              selectedLogAgentPubkey={agents.logAgentPubkey}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
               personas={personas.libraryPersonas}

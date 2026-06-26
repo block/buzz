@@ -5,6 +5,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { AgentPersona } from "@/shared/api/types";
 import { Card } from "@/shared/ui/card";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
 
 type TeamIdentityCardProps = {
@@ -17,7 +18,6 @@ type TeamIdentityCardProps = {
   personas: AgentPersona[];
   sourceDir?: string | null;
   symlinkTarget?: string | null;
-  teamId: string;
   teamName: string;
   version?: string | null;
 };
@@ -178,7 +178,7 @@ function TeamAvatarItem({
 
 function getTeamFooterModelLabel(personas: AgentPersona[]) {
   const modelLabels = personas
-    .map((persona) => formatFooterModelLabel(persona.model))
+    .map((persona) => formatAgentModelLabel(persona.model))
     .filter((model): model is string => Boolean(model));
 
   if (modelLabels.length === 0) return "Auto";
@@ -190,9 +190,4 @@ function getTeamFooterModelLabel(personas: AgentPersona[]) {
   return uniqueModels.size === 1
     ? (uniqueModels.values().next().value ?? "Auto")
     : "Mixed models";
-}
-
-function formatFooterModelLabel(model: string | null | undefined) {
-  const trimmed = model?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : "Auto";
 }

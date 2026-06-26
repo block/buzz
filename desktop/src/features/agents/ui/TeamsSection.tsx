@@ -212,7 +212,6 @@ export function TeamsSection({
                 personas={resolution.resolvedPersonas}
                 sourceDir={team.sourceDir}
                 symlinkTarget={team.symlinkTarget}
-                teamId={team.id}
                 teamName={team.name}
                 version={team.version}
               >

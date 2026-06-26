@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
@@ -32,7 +33,6 @@ import {
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { CreateIdentityCard } from "./CreateIdentityCard";
-import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
@@ -44,9 +44,6 @@ type UnifiedAgentsSectionProps = {
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
-  logContent: string | null;
-  logError: Error | null;
-  logLoading: boolean;
   personaLabelsById: Record<string, string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
@@ -55,8 +52,6 @@ type UnifiedAgentsSectionProps = {
   onCreateAgent: () => void;
   onOpenAgentProfile: (pubkey: string) => void;
   onOpenPersonaProfile: (persona: AgentPersona) => void;
-  onSelectLogAgent: (pubkey: string | null) => void;
-  selectedLogAgentPubkey: string | null;
   canChooseCatalog: boolean;
   personas: AgentPersona[];
   personasError: Error | null;
@@ -80,12 +75,8 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     agentsError,
     isActionPending,
     isAgentsLoading,
-    logContent,
-    logError,
-    logLoading,
     presenceLoaded,
     presenceLookup,
-    selectedLogAgentPubkey,
     onBulkRemoveStopped,
     onBulkStopRunning,
     onCreateAgent,
@@ -125,14 +116,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     }
     return additional;
   }, [groups]);
-  const selectedLogAgent = React.useMemo(
-    () =>
-      selectedLogAgentPubkey
-        ? (agents.find((agent) => agent.pubkey === selectedLogAgentPubkey) ??
-          null)
-        : null,
-    [agents, selectedLogAgentPubkey],
-  );
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   const {
     fileInputRef,
@@ -244,19 +227,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
             />
-          ) : null}
-          {selectedLogAgent ? (
-            <div
-              className={AGENT_CARD_COLUMN_CLASS}
-              data-testid="managed-agent-log-row"
-            >
-              <ManagedAgentLogPanel
-                error={logError}
-                isLoading={logLoading}
-                logContent={logContent}
-                selectedAgent={selectedLogAgent}
-              />
-            </div>
           ) : null}
         </div>
       ) : null}
@@ -411,11 +381,6 @@ function AgentCardStatus({
       status={agent.status}
     />
   );
-}
-
-function formatAgentModelLabel(model: string | null | undefined) {
-  const trimmed = model?.trim();
-  return trimmed && trimmed.length > 0 ? trimmed : "Auto";
 }
 
 function firstAvatarUrl(
