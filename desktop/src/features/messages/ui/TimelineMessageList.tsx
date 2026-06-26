@@ -182,7 +182,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     [entries, firstUnreadMessageId],
   );
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     onItems?.(itemsResult);
   }, [itemsResult, onItems]);
 

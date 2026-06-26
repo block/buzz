@@ -354,6 +354,7 @@ const MessageTimelineBase = React.forwardRef<
         scrollToMessage(messageId, { highlight: true });
         onTargetReached?.(messageId);
       },
+      onAbandoned: (messageId) => onTargetReached?.(messageId),
     });
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
