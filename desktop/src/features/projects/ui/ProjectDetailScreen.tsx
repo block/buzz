@@ -551,7 +551,13 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
         </div>
       </div>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)+1rem)]">
+      <div
+        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4"
+        style={{
+          paddingTop:
+            "calc(var(--buzz-channel-content-top-padding, 5.75rem) + 1rem)",
+        }}
+      >
         <div className="w-full space-y-5">
           <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
             <div className="flex min-w-0 items-start gap-3">
