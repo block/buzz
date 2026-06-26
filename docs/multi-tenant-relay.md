@@ -114,6 +114,20 @@ Two operation classes act on the store:
   control-plane state) under `ctx.community_id`, after an authorization decision
   over current control-plane state.
 
+A community is either **allowlisted** or **open**. An allowlisted community admits
+actors only via a signed NIP-43 member list (§Authorization, S7); an **open**
+community (one with no member-pubkey allowlist) auto-registers any authenticated
+npub on AUTH — but the registration is stamped to the **host-resolved** community,
+never a client-claimed one, so "open" widens *who* may join, never *which*
+community they join. Two further control-plane writes are first-class: **channel
+creation** stamps a fresh channel atomically from `HostCommunity[host]` (the client
+supplies no community id, and the stamp is immutable thereafter), and **no-`#h`
+reads** — the kinds-only feed read and the `#e`-only aux read (reactions, edits,
+deletes, thread metadata) — resolve their community from the connection's host and
+are gated on host-community admission like every other channel-less operation.
+These surfaces are modeled, not asserted: see §Isolation (I5) and
+§Authorization (S5/S8).
+
 **The resolved `community_id` is the sole tenant authority.** The `h` tag on a
 wire event is a *routing hint* a client asserts; it is never the commit point of
 tenancy. This is the **confused-deputy** hazard (Hardy 1988): the relay holds
@@ -468,10 +482,23 @@ load-bearing *backstop*.
   quantifies over every membership *and* every recorded channel-less read,
   requiring same-community admission on both — the channel-less branch additionally
   binding `HostCommunity[host] = community`, so the host axis is fenced here too.
-  The fence is about **current** capability: it is mutation-tested non-vacuous by
-  M9 (re-keying the gate to any-community admission), which goes red on both a
-  membership trace and a channel-less-read trace, proving an admit-into-A then
-  act-in-B escape is caught rather than invisible. (See C3 for the explicit
+  The same gate covers the **open-community** and **no-`#h`-read** surfaces: an
+  open community auto-registers an authenticated npub into the host-resolved
+  community (`AuthenticateOpenCommunity` recording an `authRegistration`), and the
+  kinds-only **feed read** (`ReadHostFeedRows`) and `#e`-only **aux read**
+  (`ReadHostAuxRows`) each record a witness only when the actor is `IsAdmitted` to
+  the host community — `Inv_AdmissionFence` quantifies over those witness sets too,
+  so an actor admitted only in B can neither open-register into A nor read A's
+  no-`#h` feed/aux. **Channel creation** (`CreateChannel`) stamps a fresh channel
+  from `HostCommunity[host]` and `Inv_ChannelCommunityImmutable` proves that stamp
+  is never re-labeled — creation is an in-relay analog of S2's
+  resolve-then-immutable discipline. The fence is about **current**
+  capability: it is mutation-tested non-vacuous by
+  M9 (re-keying the membership/read gate to any-community admission), which goes red
+  on both a membership trace and a channel-less-read trace, and by M10–M13 (the
+  open-AUTH, channel-create, feed-read, and aux-read stamp/gate mutations), each
+  confirmed red — proving an admit-into-A then act-in-B escape is caught rather than
+  invisible on every one of these surfaces. (See C3 for the explicit
   historical-write carve-out.)
 
 ### Authorization soundness (mechanized in Tamarin, Dolev-Yao adversary)
@@ -530,13 +557,27 @@ load-bearing *backstop*.
   `MemberAdmitted(pk, comm)` ⇔ `admittedMembers`/`IsAdmitted(c, a)` — one property,
   two worlds (Tamarin proves the admission *event* per-community unforgeable, TLA+
   proves the resulting capability in-relay scoped).
+- **S8 (Open-community AUTH confinement).** When a community carries no NIP-43
+  member-pubkey allowlist it is **open**: any authenticated npub auto-registers on
+  AUTH. The registration is still confined to the **host-resolved** community —
+  `Authenticate_To_Open_Community` stamps the registration from the connection's
+  host binding, never a client-supplied selector, so "open" relaxes the *gate* on
+  membership without relaxing the *boundary* it lands in. Mechanized as
+  `open_auth_registration_confined_to_host_community` (a host-bound npub registers
+  only into its host's community), with the exists-trace witness
+  `executable_open_auth_registration` proving a legitimate open registration is
+  producible so the confinement lemma is non-vacuous. This is S5/S6's host-binding
+  discipline applied to the admission *event*: the same confused-deputy fence that
+  stops a B-stamped token authorizing over an A-host stops a B-host AUTH
+  registering into A. Its in-relay counterpart is I5's open-community branch
+  (`AuthenticateOpenCommunity`, mutation M10).
 
 Each Tamarin lemma is paired with an exists-trace sanity lemma (the honest
 protocol can run), the Tamarin analog of the mutation test.
 
-**Verification status.** S1–S7 are **machine-verified green** on
-Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 30 lemmas in
-~18s with zero `analyzed` failures. S1/S2: `token_confinement`,
+**Verification status.** S1–S8 are **machine-verified green** on
+Tamarin 1.12.0 / Maude 3.5.1 — the full selected run verifies all 32 lemmas in
+~12s with zero `analyzed` failures. S1/S2: `token_confinement`,
 `cross_community_use_attempts_are_not_authorized`, the two
 `minted_*_channels_match_stamp` lemmas, `token_stamp_matches_mint`,
 `cross_community_mint_yields_no_token_for_that_request`, and the
@@ -574,6 +615,11 @@ true over an unreachable premise. The S7 mutation `MUTATION_Admit_Ignore_Communi
 signed — the admission-side confused deputy, the dual of S6's
 `MUTATION_Use_Token_Ignore_Host`) is confirmed red: it falsifies
 `nip43_admission_confined_to_signing_community` in 1.57s with a 7-step trace.
+S8 (open-community AUTH confinement): `open_auth_registration_confined_to_host_community`
+(2 steps), paired with the exists-trace witness `executable_open_auth_registration`
+(5 steps) proving a legitimate open-community registration is producible, so the
+confinement lemma is non-vacuous; its in-relay counterpart is the M10 open-AUTH
+stamp mutation, confirmed red in TLA+ (a 2-state `Inv_AdmissionFence` violation).
 
 The S5 confinement lemma was deliberately framed to keep its mutation
 *cheaply* refutable. An earlier framing joined two action facts
@@ -694,23 +740,35 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   On the core finite harness (2 communities × 4 channels, 2 message ids, 1 actor,
   1 worker, 2 audit values, bounded observation set, symmetry over the permutable
   model-value sets) TLC **completes exhaustively**: *Model checking completed. No
-  error has been found.* — 265,122,788 states generated, 9,232,992 distinct, 0 left
-  on queue, depth 17 (16 workers, ~1m23). The distinct-state count grew from the
+  error has been found.* — 472,530,528 states generated, 16,226,016 distinct, 0 left
+  on queue, depth 13 (8 workers, ~5m). The distinct-state count grew from the
   pre-host-binding baseline (4,350,464 → 5,091,328 with channel-less host binding →
   5,621,760 with channel-bearing host/channel agreement → 9,232,992 with the
   `admittedMembers` allowlist, `channelLessReads` capability rows, and the
-  `AdmitMember`/`RevokeMember` actions) precisely because the
+  `AdmitMember`/`RevokeMember` actions → 16,226,016 with the open-community AUTH
+  auto-registration, server-stamped channel creation, and the no-`#h` host
+  feed/aux read paths) precisely because the
   channel-less write path, the fail-closed unmapped-host path, the
   channel-bearing host/channel-agreement (and its fail-closed disagreement) path,
-  and now the admit/revoke/gated-membership/gated-read paths
+  the admit/revoke/gated-membership/gated-read paths, and now the
+  open-AUTH/channel-create/feed-read/aux-read paths
   are genuinely reachable — new behavior, not dead code. Threading the host through
-  the duplicate/no-op path adds reachable fail-closed transitions (138.7M generated,
-  up from 136.3M) without new distinct states: only the agreeing host can produce a
+  the duplicate/no-op path adds reachable fail-closed transitions without new
+  distinct states: only the agreeing host can produce a
   recorded duplicate, so the host on that path is fully determined; layering the
-  admission gate on top is the +91% generated / +64% distinct growth to the figures
-  above (admit-then-act, revoke-then-act-fails, and gated reads/joins multiply the
-  reachable space). Non-vacuity is
-  shown by seven mutations, each
+  admission gate, then the open-AUTH/channel-create/feed/aux surfaces on top, is the
+  growth to the figures above (admit-then-act, revoke-then-act-fails, gated
+  reads/joins, open-community auto-registration, server-stamped creation, and the
+  two host-fenced no-`#h` read shapes multiply the reachable space). That each new
+  surface is reachable rather than dead is pinned by four intentionally-false
+  reachability probes (`Probe_OpenAuthRegistration_Unreachable`,
+  `Probe_CreatedChannel_Unreachable`, `Probe_HostFeedRead_Unreachable`,
+  `Probe_HostAuxRead_Unreachable`): each asserts the corresponding witness set stays
+  empty, so each must go red if its action fires — and all four do (open AUTH and
+  channel-create at 2 states; host feed and host aux at 3 states, via open AUTH then
+  read). A vacuously-passing new conjunct over an unfireable action is therefore
+  ruled out, not assumed. Non-vacuity of the
+  invariants themselves is shown by thirteen mutations (M1–M13), each
   confirmed to produce a counterexample: substituting the unscoped direct-by-id
   lookup (`UnscopedDirectIdRows`, the `get_accessible_channel_ids` landmine) →
   `Safety` violated at depth 4; widening the sanitized-error label to all
@@ -739,7 +797,32 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   (`Init → WriteInsert → AdmitMember(commB, alice) →
   ReadMessageRows(commA, NoChannel, hostA)`). The two M9 variants prove both the
   `AddMembership` gate and the channel-less-read gate are independently
-  load-bearing, not just one. The two host-fence
+  load-bearing, not just one. The four newest surfaces — open-community AUTH
+  auto-registration, server-stamped channel creation, and the two no-`#h` host
+  read shapes (kinds-only feed, `#e`-only aux) — are each held by their own
+  confirmed-red mutation: the **M10** open-AUTH stamp mutation (the relay stamping
+  an open-community auto-registration into a default/claimed community instead of
+  `HostCommunity[host]`) → `Inv_AdmissionFence` violated by a 2-state trace
+  (`Init → AuthenticateOpenCommunity(hostB stamps commA)`), catching an
+  `authRegistration` whose host maps elsewhere; the **M11** channel-create stamp
+  mutation (a fresh channel stamped into a default/claimed community rather than
+  the host's) → `Inv_HostBindingFence`/`Inv_ChannelCommunityImmutable` violated by a
+  2-state trace (`Init → CreateChannel(hostB stamps commA)`); the **M12** feed
+  global-admission mutation (re-keying the `ReadHostFeedRows` admission guard from
+  same-community `IsAdmitted(c, a)` to relay-global `GloballyAdmitted(a)`) →
+  `Inv_AdmissionFence` violated by a 3-state trace
+  (`Init → AdmitMember(commB, alice) → ReadHostFeedRows(hostA)`), so an actor
+  admitted only in B cannot read A's no-`#h` feed; and the **M13** aux
+  global-admission mutation (the same guard re-key on `ReadHostAuxRows`) →
+  `Inv_AdmissionFence` violated by a 3-state trace
+  (`Init → AdmitMember(commB, alice) → ReadHostAuxRows(hostA)`). M10–M13 confirm the
+  open-AUTH/create/feed/aux fences are load-bearing, not decorative — the same
+  "every new conjunct earns a confirmed red" contract as M1–M9. (The `.tla` header's
+  M12/M13 helper comment points the substitution at the row-set helper
+  `VisibleHostFeedRows_GlobalAdmission`; the substitution that actually trips
+  `Inv_AdmissionFence` is the action's admission *guard*, since the invariant
+  quantifies over the recorded `feedReads`/`auxReads` witnesses, not the returned
+  row set.) The host-fence and new-surface
   figures above are counterexample **trace lengths** (the error-trace state count),
   which unlike TLC's run-dependent "depth of complete graph search" total are
   reproducible from the printed error trace. The
@@ -748,18 +831,25 @@ as label-flow non-interference is, to our knowledge, new for a Nostr relay.
   actors, and ids explodes the space; symmetry + bounded observations keep the
   core isolation surface exhaustively checkable.
 - **`docs/spec/MultiTenantAuth.spthy`** — the Tamarin authorization model. Run:
-  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 30 lemmas (S1–S7)
-  verify green (Tamarin 1.12.0 / Maude 3.5.1, ~18 s) — each safety lemma paired with
+  `tamarin-prover --prove docs/spec/MultiTenantAuth.spthy`. All 32 lemmas (S1–S8)
+  verify green (Tamarin 1.12.0 / Maude 3.5.1, ~12 s) — each safety lemma paired with
   a verified exists-trace sanity lemma, and the documented mutations
   (`MUTATION_Use_Token_Claimed_Community` for S1, the S3 bad-accept and S4
   splice-as-append mutations, `MUTATION_Use_Token_ChannelLess_Ignore_Host`
   for S5's host fence, `MUTATION_Use_Token_Ignore_Host` for S6's channel-bearing
   host/channel-agreement fence, and `MUTATION_Admit_Ignore_Community` for S7's
-  NIP-43 admission confinement) confirmed red. See §Authorization soundness for the
+  NIP-43 admission confinement) confirmed red. The 32 lemmas include the
+  open-community AUTH pair added with the host-scoped-open-auth surfaces:
+  `open_auth_registration_confined_to_host_community` (2 steps) proves an
+  open-community auto-registration commits to the host-resolved community and never
+  a client-claimed one, and its exists-trace witness
+  `executable_open_auth_registration` (5 steps) proves a legitimate open-community
+  registration is producible, so the confinement lemma is non-vacuous. See
+  §Authorization soundness for the
   full lemma list, the S5/S6 single-witness framing, and the corrected
   `other_community_key_compromise_does_not_authorize` vacuity fix.
 
-  **Machine-check hygiene.** S1–S7 lemmas close by two distinct shapes.
+  **Machine-check hygiene.** S1–S8 lemmas close by two distinct shapes.
   **Rule-shape closure** means the lemma's conclusion follows by unification on a
   single rule's action multiset: `token_confinement`,
   `audit_append_advances_same_community_head`,
