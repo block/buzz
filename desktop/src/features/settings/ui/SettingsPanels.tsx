@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef } from "react";
 import {
+  AppWindow,
   BellRing,
   Bot,
   Check,
@@ -38,6 +39,7 @@ import { Switch } from "@/shared/ui/switch";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
+import { GeneralSettingsCard } from "./GeneralSettingsCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
@@ -55,6 +57,7 @@ export type SettingsSection =
   | "channel-templates"
   | "compute"
   | "appearance"
+  | "general"
   | "shortcuts"
   | "relay-members"
   | "custom-emoji"
@@ -72,6 +75,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "channel-templates",
   "compute",
   "appearance",
+  "general",
   "shortcuts",
   "relay-members",
   "custom-emoji",
@@ -147,6 +151,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "compute",
     label: "Compute",
     icon: Cpu,
+  },
+  {
+    value: "general",
+    label: "General",
+    icon: AppWindow,
   },
   {
     value: "shortcuts",
@@ -380,6 +389,8 @@ export function renderSettingsSection(
       return <MeshComputeSettingsCard />;
     case "appearance":
       return <ThemeSettingsCard />;
+    case "general":
+      return <GeneralSettingsCard />;
     case "shortcuts":
       return <KeyboardShortcutsCard />;
     case "relay-members":

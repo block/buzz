@@ -83,7 +83,11 @@ const overrides = new Map([
   // syncs team-dir edits before all personas.json readers; run_event_sync
   // signs the persona/team retention events post-identity) layered on top of
   // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1034],
+  // close-to-tray: the tray module is split out into tray.rs; only the module
+  // registration, the `set_close_to_tray` command handler entry, the
+  // `on_window_event` builder hook, and the macOS dock-reopen / genuine-quit
+  // RunEvent arms remain here. Load-bearing feature wiring, queued to split.
+  ["src-tauri/src/lib.rs", 1054],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -97,7 +101,10 @@ const overrides = new Map([
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
   // 893 lines, not generic debt growth. Approved override; still queued to split.
-  ["src-tauri/src/app_state.rs", 1012],
+  // close-to-tray: adds the `close_to_tray` / `quitting` AppState flags (the
+  // window-close handler reads them) plus their initializers. Load-bearing
+  // feature state, queued to split with the list.
+  ["src-tauri/src/app_state.rs", 1024],
 ]);
 
 await runFileSizeCheck({

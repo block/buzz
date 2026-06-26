@@ -14,6 +14,10 @@ import { router } from "@/app/router";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
+import {
+  applyCloseToTray,
+  getCloseToTrayPref,
+} from "@/features/settings/lib/closeToTray";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import type { Workspace } from "@/features/workspaces/types";
@@ -206,6 +210,13 @@ export function App() {
 
   useLayoutEffect(() => {
     void getCurrentWindow().show();
+  }, []);
+
+  // Push the persisted close-to-tray preference to the backend on launch so the
+  // window-close handler knows whether to hide-to-tray before the user ever
+  // opens Settings.
+  useEffect(() => {
+    void applyCloseToTray(getCloseToTrayPref());
   }, []);
 
   const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
