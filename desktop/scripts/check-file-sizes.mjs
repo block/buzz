@@ -68,8 +68,8 @@ const overrides = new Map([
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
   // types.rs adds the persona/instance harness fields. Load-bearing, not
-  // generic debt.
-  ["src-tauri/src/managed_agents/discovery.rs", 1043],
+  // generic debt. Amp ACP provider entry (+22 lines) added in follow-up.
+  ["src-tauri/src/managed_agents/discovery.rs", 1065],
   ["src-tauri/src/managed_agents/types.rs", 1037],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
