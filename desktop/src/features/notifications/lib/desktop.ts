@@ -1,11 +1,16 @@
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { UserAttentionType, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   onAction,
   requestPermission,
 } from "@tauri-apps/plugin-notification";
-import { isMacPlatform } from "@/shared/lib/platform";
+import { isLinuxPlatform, isMacPlatform } from "@/shared/lib/platform";
+
+// Backend event emitted when the user clicks a native (Linux) notification.
+// See src-tauri/src/commands/notifications.rs.
+const NATIVE_NOTIFICATION_ACTIVATED_EVENT = "native-notification-activated";
 
 export type DesktopNotificationPermissionState =
   | NotificationPermission
@@ -172,6 +177,7 @@ export async function listenForDesktopNotificationActions(
   );
 
   let pluginListener: { unregister: () => Promise<void> } | null = null;
+  let nativeUnlisten: (() => void) | null = null;
 
   if (isTauri()) {
     try {
@@ -188,6 +194,24 @@ export async function listenForDesktopNotificationActions(
     } catch {
       pluginListener = null;
     }
+
+    // Clicks on Linux notifications come back via a backend event rather than
+    // the plugin's onAction (whose connection is torn down before it can fire).
+    try {
+      nativeUnlisten = await listen<unknown>(
+        NATIVE_NOTIFICATION_ACTIVATED_EVENT,
+        (event) => {
+          const target = parseNotificationTarget(event.payload);
+          if (!target) {
+            return;
+          }
+
+          dispatchDesktopNotificationTarget(target);
+        },
+      );
+    } catch {
+      nativeUnlisten = null;
+    }
   }
 
   return () => {
@@ -196,6 +220,7 @@ export async function listenForDesktopNotificationActions(
       handleNotificationAction,
     );
     void pluginListener?.unregister();
+    nativeUnlisten?.();
   };
 }
 
@@ -266,6 +291,23 @@ export async function sendDesktopNotification(
 ): Promise<boolean> {
   if ((await getDesktopNotificationPermissionState()) !== "granted") {
     return false;
+  }
+
+  // On Linux the bundled notification plugin posts via a D-Bus connection that
+  // it drops immediately; GNOME 46+ then dismisses the notification before it
+  // is seen. Route through a backend command that keeps the connection alive.
+  // See src-tauri/src/commands/notifications.rs.
+  if (isTauri() && isLinuxPlatform()) {
+    try {
+      await invoke("show_native_notification", {
+        title: payload.title,
+        body: payload.body,
+        target: payload.target ?? null,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   const notification = new window.Notification(payload.title, {

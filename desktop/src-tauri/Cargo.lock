@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.3.33"
+version = "0.3.34"
 dependencies = [
  "anyhow",
  "atomic-write-file",
@@ -871,6 +871,7 @@ dependencies = [
  "mesh-llm-sdk",
  "neteq",
  "nostr",
+ "notify-rust",
  "objc2-app-kit",
  "opus",
  "png 0.18.1",

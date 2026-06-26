@@ -62,6 +62,7 @@ import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,
   PANEL_BASE_CLASS,
+  PANEL_ENTER_MOTION_CLASS,
   PANEL_OVERLAY_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
 import { ChannelCanvas } from "./ChannelCanvas";
@@ -81,6 +82,7 @@ import { ChannelManagementModerationActions } from "./ChannelManagementModeratio
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
+  animateSplitEnter?: boolean;
   currentPubkey?: string;
   layout?: "overlay" | "split";
   onDeleted?: () => void;
@@ -91,6 +93,7 @@ type ChannelManagementSheetProps = {
 const DEFAULT_EPHEMERAL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export function ChannelManagementSheet({
+  animateSplitEnter = false,
   channel,
   currentPubkey,
   layout = "overlay",
@@ -315,6 +318,7 @@ export function ChannelManagementSheet({
           className={cn(
             PANEL_BASE_CLASS,
             "h-full w-full cursor-default overflow-hidden border-l-0 p-0",
+            animateSplitEnter && PANEL_ENTER_MOTION_CLASS,
             isDark
               ? "bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/75"
               : "bg-background",
@@ -361,7 +365,8 @@ export function ChannelManagementSheet({
             className={cn(
               PANEL_BASE_CLASS,
               PANEL_OVERLAY_CLASS,
-              "w-[380px] cursor-default overflow-hidden p-0 transition ease-in-out data-[state=closed]:duration-300 data-[state=open]:duration-500 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right",
+              PANEL_ENTER_MOTION_CLASS,
+              "w-[380px] cursor-default overflow-hidden p-0 data-[state=closed]:animate-out data-[state=closed]:slide-out-to-right data-[state=closed]:duration-200",
               isDark
                 ? "bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/75"
                 : "bg-background",

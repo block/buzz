@@ -8,6 +8,22 @@ const readStateDTagPrefix = 'read-state:';
 const readStateFetchLimit = 500;
 const readStateHorizonSeconds = 7 * 24 * 60 * 60;
 const _maxContexts = 10000;
+const msgContextPrefix = 'msg:';
+const threadContextPrefix = 'thread:';
+
+String msgContextKey(String messageId) => '$msgContextPrefix$messageId';
+String threadContextKey(String rootId) => '$threadContextPrefix$rootId';
+
+int? maxReadAt(Iterable<int?> markers) {
+  int? latest;
+  for (final marker in markers) {
+    if (marker == null) continue;
+    if (latest == null || marker > latest) {
+      latest = marker;
+    }
+  }
+  return latest;
+}
 
 typedef ReadStateDecrypt = String Function(String ciphertext);
 

@@ -1,3 +1,4 @@
+import * as React from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -21,6 +22,10 @@ type AppTopChromeProps = {
 
 const TOP_CHROME_ICON_BUTTON_CLASS =
   "h-7 w-7 rounded-[4px] text-sidebar-foreground/65 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground [&_svg]:size-4";
+
+function preventTopChromeWheel(event: WheelEvent) {
+  event.preventDefault();
+}
 
 function TopChromeSidebarTrigger() {
   const sidebar = useOptionalSidebar();
@@ -50,6 +55,7 @@ export function AppTopChrome({
   onGoBack,
   onGoForward,
 }: AppTopChromeProps) {
+  const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
   // On macOS the traffic-light buttons overlay the chrome (see
   // `trafficLightPosition` in `tauri.conf.json`), so the nav row clears their
@@ -60,14 +66,29 @@ export function AppTopChrome({
   const navRowAlignmentClass =
     isMacPlatform() && !isFullscreen ? "translate-y-[3px]" : null;
 
+  React.useEffect(() => {
+    const topChrome = topChromeRef.current;
+    if (!topChrome) {
+      return;
+    }
+
+    const options = { capture: true, passive: false };
+    topChrome.addEventListener("wheel", preventTopChromeWheel, options);
+    return () => {
+      topChrome.removeEventListener("wheel", preventTopChromeWheel, options);
+    };
+  }, []);
+
   return (
     <div
+      ref={topChromeRef}
       className={cn(
         "relative z-45 flex shrink-0 cursor-default select-none items-center bg-sidebar pr-3 text-sidebar-foreground",
         topChromeBackdrop.height,
         navRowPaddingClass,
       )}
       data-tauri-drag-region
+      data-testid="app-top-chrome"
     >
       <div className={cn("flex items-center gap-0.5", navRowAlignmentClass)}>
         <TopChromeSidebarTrigger />

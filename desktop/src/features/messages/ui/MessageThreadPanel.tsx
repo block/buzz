@@ -23,7 +23,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
-  PANEL_BASE_CLASS,
+  PANEL_ENTER_BASE_CLASS,
   PANEL_OVERLAY_CLASS,
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
@@ -207,7 +207,7 @@ function ThreadComposerSkeleton() {
         </div>
         <div
           className={cn(
-            "-mt-1 h-7 bg-background pb-1 pt-0",
+            "h-7 bg-background pb-1 pt-0",
             THREAD_PANEL_COMPOSER_GUTTER_CLASS,
           )}
         />
@@ -304,7 +304,7 @@ export function MessageThreadPanelSkeleton({
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
         className={cn(
-          PANEL_BASE_CLASS,
+          PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
         )}
@@ -378,10 +378,6 @@ export function MessageThreadPanel({
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
-  // Threads don't paginate older history, so this sentinel is never observed
-  // (the hook's older-history effect bails without a `fetchOlder`). It exists
-  // only to satisfy the hook's required ref contract.
-  const threadTopSentinelRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
   const [hoveredCollapseBranchId, setHoveredCollapseBranchId] = React.useState<
     string | null
@@ -602,7 +598,6 @@ export function MessageThreadPanel({
       messages: threadMessages,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
-      sentinelRef: threadTopSentinelRef,
       targetMessageId: scrollTargetId,
     });
 
@@ -622,7 +617,6 @@ export function MessageThreadPanel({
       ref={threadBodyRef}
     >
       <div ref={threadContentRef}>
-        <div ref={threadTopSentinelRef} aria-hidden className="h-px" />
         <div
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
           data-testid="message-thread-head"
@@ -736,7 +730,7 @@ export function MessageThreadPanel({
                   return (
                     <div
                       className={cn(
-                        "flex flex-col gap-0",
+                        "content-visibility-auto flex flex-col gap-0",
                         entry.summary &&
                           "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}
@@ -902,7 +896,7 @@ export function MessageThreadPanel({
           />
           <div
             className={cn(
-              "-mt-1 h-7 bg-background pb-1 pt-0",
+              "h-7 bg-background pb-1 pt-0",
               THREAD_PANEL_COMPOSER_GUTTER_CLASS,
             )}
           >
@@ -913,7 +907,7 @@ export function MessageThreadPanel({
               {threadTypingPubkeys.length > 0 ? (
                 <TypingIndicatorRow
                   channel={channel}
-                  className="min-w-0 flex-1 px-0 py-0"
+                  className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
                   currentPubkey={currentPubkey}
                   profiles={profiles}
                   typingPubkeys={threadTypingPubkeys}
@@ -974,7 +968,7 @@ export function MessageThreadPanel({
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
         className={cn(
-          PANEL_BASE_CLASS,
+          PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
         )}

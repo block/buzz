@@ -1,20 +1,6 @@
 import * as React from "react";
 
-import {
-  AlertTriangle,
-  ChevronDown,
-  ChevronRight,
-  Clipboard,
-  Ellipsis,
-  FileText,
-  Pencil,
-  Play,
-  Power,
-  Square,
-  Trash2,
-  UserPlus,
-} from "lucide-react";
-import { toast } from "sonner";
+import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -29,24 +15,15 @@ import type {
   PresenceStatus,
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
-import { EditAgentDialog } from "./EditAgentDialog";
+import { Button } from "@/shared/ui/button";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
-import { ModelPicker } from "./ModelPicker";
 import { truncatePubkey } from "./agentUi";
 
 export function ManagedAgentRow({
   agent,
   channelIdToName,
   channelNames,
-  isActionPending,
   isLogSelected,
   logContent,
   logError,
@@ -54,17 +31,12 @@ export function ManagedAgentRow({
   personaLabelsById,
   presenceLoaded,
   presenceLookup,
-  onAddToChannel,
-  onDelete,
+  onOpenProfile,
   onSelectLogAgent,
-  onStart,
-  onStop,
-  onToggleStartOnAppLaunch,
 }: {
   agent: ManagedAgent;
   channelIdToName: Record<string, string>;
   channelNames: { id: string; name: string }[];
-  isActionPending: boolean;
   isLogSelected: boolean;
   logContent: string | null;
   logError: Error | null;
@@ -72,14 +44,9 @@ export function ManagedAgentRow({
   personaLabelsById: Record<string, string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
-  onAddToChannel: (agent: ManagedAgent) => void;
-  onDelete: (pubkey: string) => void;
+  onOpenProfile: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
-  onStart: (pubkey: string) => void;
-  onStop: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
 }) {
-  const isActive = agent.status === "running" || agent.status === "deployed";
   const isLocal = agent.backend.type === "local";
   const runtimeSource =
     agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
@@ -181,18 +148,14 @@ export function ManagedAgentRow({
         )}
 
         <div className="flex shrink-0 items-start gap-2 lg:pt-0.5">
-          <ModelPicker agent={agent} />
-          <AgentActionsMenu
-            agent={agent}
-            isActionPending={isActionPending}
-            isActive={isActive}
-            onAddToChannel={onAddToChannel}
-            onDelete={onDelete}
-            onOpenLogs={(pubkey) => onSelectLogAgent(pubkey)}
-            onStart={onStart}
-            onStop={onStop}
-            onToggleStartOnAppLaunch={onToggleStartOnAppLaunch}
-          />
+          <Button
+            onClick={() => onOpenProfile(agent.pubkey)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            Manage
+          </Button>
         </div>
       </div>
 
@@ -411,151 +374,6 @@ function RuntimeBlock({
         </div>
       ) : null}
     </div>
-  );
-}
-
-function AgentActionsMenu({
-  agent,
-  isActionPending,
-  isActive,
-  onAddToChannel,
-  onDelete,
-  onOpenLogs,
-  onStart,
-  onStop,
-  onToggleStartOnAppLaunch,
-}: {
-  agent: ManagedAgent;
-  isActionPending: boolean;
-  isActive: boolean;
-  onAddToChannel: (agent: ManagedAgent) => void;
-  onDelete: (pubkey: string) => void;
-  onOpenLogs: (pubkey: string) => void;
-  onStart: (pubkey: string) => void;
-  onStop: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
-}) {
-  const [editOpen, setEditOpen] = React.useState(false);
-
-  return (
-    <>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-label={`Agent actions for ${agent.name}`}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            data-testid={`managed-agent-actions-${agent.pubkey}`}
-            type="button"
-          >
-            <Ellipsis className="h-4 w-4" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          onCloseAutoFocus={(event) => event.preventDefault()}
-        >
-          {agent.backend.type === "provider" ? (
-            <>
-              <DropdownMenuItem
-                disabled={isActionPending}
-                onClick={() => onStart(agent.pubkey)}
-              >
-                <Play className="h-4 w-4" />
-                {isActive ? "Redeploy" : "Deploy"}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={isActionPending}
-                onClick={() => onStop(agent.pubkey)}
-              >
-                <Square className="h-4 w-4" />
-                Shutdown
-              </DropdownMenuItem>
-            </>
-          ) : isActive ? (
-            <DropdownMenuItem
-              disabled={isActionPending}
-              onClick={() => onStop(agent.pubkey)}
-            >
-              <Square className="h-4 w-4" />
-              Stop
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuItem
-              disabled={isActionPending}
-              onClick={() => onStart(agent.pubkey)}
-            >
-              <Play className="h-4 w-4" />
-              Spawn
-            </DropdownMenuItem>
-          )}
-
-          {agent.backend.type !== "provider" ? (
-            <DropdownMenuItem onClick={() => setEditOpen(true)}>
-              <Pencil className="h-4 w-4" />
-              Edit
-            </DropdownMenuItem>
-          ) : null}
-
-          <DropdownMenuItem
-            disabled={isActionPending}
-            onClick={() => onAddToChannel(agent)}
-          >
-            <UserPlus className="h-4 w-4" />
-            Add to channel
-          </DropdownMenuItem>
-
-          <DropdownMenuItem
-            onClick={async () => {
-              await navigator.clipboard.writeText(agent.pubkey);
-              toast.success("Copied pubkey to clipboard");
-            }}
-          >
-            <Clipboard className="h-4 w-4" />
-            Copy pubkey
-          </DropdownMenuItem>
-
-          {agent.backend.type === "local" ? (
-            <DropdownMenuItem onClick={() => onOpenLogs(agent.pubkey)}>
-              <FileText className="h-4 w-4" />
-              View logs
-            </DropdownMenuItem>
-          ) : null}
-
-          {agent.backend.type === "local" ? (
-            <DropdownMenuItem
-              disabled={isActionPending}
-              onClick={() =>
-                onToggleStartOnAppLaunch(agent.pubkey, !agent.startOnAppLaunch)
-              }
-            >
-              <Power className="h-4 w-4" />
-              {agent.startOnAppLaunch
-                ? "Disable auto-start"
-                : "Enable auto-start"}
-            </DropdownMenuItem>
-          ) : null}
-
-          <DropdownMenuSeparator />
-
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            disabled={isActionPending}
-            onClick={() => onDelete(agent.pubkey)}
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      {editOpen ? (
-        <EditAgentDialog
-          agent={agent}
-          onOpenChange={setEditOpen}
-          open={editOpen}
-        />
-      ) : null}
-    </>
   );
 }
 

@@ -2,18 +2,10 @@ import * as React from "react";
 import {
   ChevronDown,
   ChevronRight,
-  Clipboard,
   Ellipsis,
-  FileText,
   OctagonX,
-  Pencil,
-  Play,
-  Power,
-  Square,
   Trash2,
-  UserPlus,
 } from "lucide-react";
-import { toast } from "sonner";
 
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -40,7 +32,6 @@ import {
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { CreateIdentityCard } from "./CreateIdentityCard";
-import { EditAgentDialog } from "./EditAgentDialog";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
@@ -59,16 +50,12 @@ type UnifiedAgentsSectionProps = {
   personaLabelsById: Record<string, string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
-  onAddToChannel: (agent: ManagedAgent) => void;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
   onCreateAgent: () => void;
-  onDeleteAgent: (pubkey: string) => void;
-  onOpenAgentProfile?: (pubkey: string) => void;
+  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenPersonaProfile: (persona: AgentPersona) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
-  onStartAgent: (pubkey: string) => void;
-  onStopAgent: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
   selectedLogAgentPubkey: string | null;
   canChooseCatalog: boolean;
   personas: AgentPersona[];
@@ -79,11 +66,6 @@ type UnifiedAgentsSectionProps = {
   isPersonasPending: boolean;
   onCreatePersona: () => void;
   onChooseCatalog: () => void;
-  onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
-  onExportPersona: (persona: AgentPersona) => void;
-  onDeactivatePersona: (persona: AgentPersona) => void;
-  onDeletePersona: (persona: AgentPersona) => void;
   onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
 };
 
@@ -104,16 +86,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     presenceLoaded,
     presenceLookup,
     selectedLogAgentPubkey,
-    onAddToChannel,
     onBulkRemoveStopped,
     onBulkStopRunning,
     onCreateAgent,
-    onDeleteAgent,
     onOpenAgentProfile,
-    onSelectLogAgent,
-    onStartAgent,
-    onStopAgent,
-    onToggleStartOnAppLaunch,
+    onOpenPersonaProfile,
     canChooseCatalog,
     personas,
     personasError,
@@ -123,11 +100,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isPersonasPending,
     onCreatePersona,
     onChooseCatalog,
-    onDuplicatePersona,
-    onEditPersona,
-    onExportPersona,
-    onDeactivatePersona,
-    onDeletePersona,
     onImportPersonaFile,
   } = props;
 
@@ -182,24 +154,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   useFeedbackToasts(actionNoticeMessage, actionErrorMessage);
   useFeedbackToasts(personaFeedbackNoticeMessage, personaFeedbackErrorMessage);
   const isLoading = isAgentsLoading || isPersonasLoading;
-  const agentMenuProps = {
-    isActionPending,
-    onAddToChannel,
-    onDelete: onDeleteAgent,
-    onOpenLogs: onSelectLogAgent,
-    onStart: onStartAgent,
-    onStop: onStopAgent,
-    onToggleStartOnAppLaunch,
-  } as const;
-  const personaMenuProps = {
-    isActionPending,
-    isPersonasPending,
-    onDeactivatePersona,
-    onDeletePersona,
-    onDuplicatePersona,
-    onEditPersona,
-    onExportPersona,
-  } as const;
 
   return (
     <section
@@ -236,13 +190,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               return (
                 <AgentPersonaCard
                   agent={profileAgent}
-                  agentMenuProps={agentMenuProps}
                   key={group.persona.id}
                   persona={group.persona}
-                  personaMenuProps={personaMenuProps}
                   presenceLoaded={presenceLoaded}
                   presenceLookup={presenceLookup}
                   onOpenAgentProfile={onOpenAgentProfile}
+                  onOpenPersonaProfile={onOpenPersonaProfile}
                 />
               );
             })}
@@ -259,7 +212,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
           {additionalPersonaAgents.length > 0 ? (
             <CollapsibleAgentGroup
               agents={additionalPersonaAgents}
-              agentMenuProps={agentMenuProps}
               collapsed={collapsed}
               groupKey="__additional_persona_agents__"
               label="Additional agent instances"
@@ -272,7 +224,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
           {unknown.length > 0 ? (
             <CollapsibleAgentGroup
               agents={unknown}
-              agentMenuProps={agentMenuProps}
               collapsed={collapsed}
               groupKey="__unknown__"
               label="Unknown Persona"
@@ -285,7 +236,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
           {ungrouped.length > 0 ? (
             <CollapsibleAgentGroup
               agents={ungrouped}
-              agentMenuProps={agentMenuProps}
               collapsed={collapsed}
               groupKey="__ungrouped__"
               label="Custom Agents"
@@ -349,42 +299,20 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   );
 }
 
-type AgentMenuProps = {
-  isActionPending: boolean;
-  onAddToChannel: (agent: ManagedAgent) => void;
-  onDelete: (pubkey: string) => void;
-  onOpenLogs: (pubkey: string) => void;
-  onStart: (pubkey: string) => void;
-  onStop: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
-};
-
-type PersonaMenuProps = {
-  isActionPending: boolean;
-  isPersonasPending: boolean;
-  onDeactivatePersona: (persona: AgentPersona) => void;
-  onDeletePersona: (persona: AgentPersona) => void;
-  onDuplicatePersona: (persona: AgentPersona) => void;
-  onEditPersona: (persona: AgentPersona) => void;
-  onExportPersona: (persona: AgentPersona) => void;
-};
-
 function AgentPersonaCard({
   agent,
-  agentMenuProps,
   persona,
-  personaMenuProps,
   presenceLoaded,
   presenceLookup,
   onOpenAgentProfile,
+  onOpenPersonaProfile,
 }: {
   agent: ManagedAgent | undefined;
-  agentMenuProps: AgentMenuProps;
   persona: AgentPersona;
-  personaMenuProps: PersonaMenuProps;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
-  onOpenAgentProfile?: (pubkey: string) => void;
+  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenPersonaProfile: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
   const modelLabel = formatAgentModelLabel(agent?.model ?? persona.model);
@@ -398,14 +326,6 @@ function AgentPersonaCard({
 
   return (
     <AgentIdentityCard
-      actions={
-        <AgentPersonaActionsMenu
-          agent={agent}
-          agentMenuProps={agentMenuProps}
-          persona={persona}
-          personaMenuProps={personaMenuProps}
-        />
-      }
       ariaLabel={`${title} agent profile`}
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
@@ -414,13 +334,11 @@ function AgentPersonaCard({
       modelControl={agent ? <ModelPicker agent={agent} /> : undefined}
       modelLabel={modelLabel}
       onClick={() => {
-        if (agent && onOpenAgentProfile) {
+        if (agent) {
           onOpenAgentProfile(agent.pubkey);
           return;
         }
-        if (!persona.isBuiltIn) {
-          personaMenuProps.onEditPersona(persona);
-        }
+        onOpenPersonaProfile(persona);
       }}
       status={
         agent ? (
@@ -437,16 +355,14 @@ function AgentPersonaCard({
 
 function StandaloneAgentCard({
   agent,
-  agentMenuProps,
   presenceLoaded,
   presenceLookup,
   onOpenAgentProfile,
 }: {
   agent: ManagedAgent;
-  agentMenuProps: AgentMenuProps;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
-  onOpenAgentProfile?: (pubkey: string) => void;
+  onOpenAgentProfile: (pubkey: string) => void;
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
@@ -454,7 +370,6 @@ function StandaloneAgentCard({
 
   return (
     <AgentIdentityCard
-      actions={<AgentActionsMenu agent={agent} {...agentMenuProps} />}
       ariaLabel={`${title} agent profile`}
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
@@ -463,11 +378,7 @@ function StandaloneAgentCard({
       modelControl={<ModelPicker agent={agent} />}
       modelLabel={formatAgentModelLabel(agent.model)}
       onClick={() => {
-        if (onOpenAgentProfile) {
-          onOpenAgentProfile(agent.pubkey);
-        } else if (agent.backend.type === "local") {
-          agentMenuProps.onOpenLogs(agent.pubkey);
-        }
+        onOpenAgentProfile(agent.pubkey);
       }}
       status={
         <AgentCardStatus
@@ -499,272 +410,6 @@ function AgentCardStatus({
       presenceStatus={presenceStatus}
       status={agent.status}
     />
-  );
-}
-
-function AgentPersonaActionsMenu({
-  agent,
-  agentMenuProps,
-  persona,
-  personaMenuProps,
-}: {
-  agent: ManagedAgent | undefined;
-  agentMenuProps: AgentMenuProps;
-  persona: AgentPersona;
-  personaMenuProps: PersonaMenuProps;
-}) {
-  const [editOpen, setEditOpen] = React.useState(false);
-  const disabled =
-    personaMenuProps.isActionPending || personaMenuProps.isPersonasPending;
-
-  return (
-    <>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-label={`Open actions for ${persona.displayName}`}
-            className="flex h-7 w-7 items-center justify-center rounded-md bg-background/70 text-muted-foreground transition-colors hover:bg-background hover:text-foreground data-[state=open]:bg-background data-[state=open]:text-foreground"
-            data-testid={
-              agent ? `managed-agent-actions-${agent.pubkey}` : undefined
-            }
-            type="button"
-          >
-            <Ellipsis className="h-4 w-4" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          onCloseAutoFocus={(event) => event.preventDefault()}
-        >
-          {agent ? (
-            <>
-              <AgentActionItems
-                agent={agent}
-                {...agentMenuProps}
-                onEdit={() => setEditOpen(true)}
-              />
-              <DropdownMenuSeparator />
-            </>
-          ) : null}
-          {!persona.isBuiltIn ? (
-            <DropdownMenuItem
-              disabled={disabled}
-              onClick={() => personaMenuProps.onEditPersona(persona)}
-            >
-              <Pencil className="h-4 w-4" />
-              Edit persona
-            </DropdownMenuItem>
-          ) : null}
-          <DropdownMenuItem
-            disabled={disabled}
-            onClick={() => personaMenuProps.onDuplicatePersona(persona)}
-          >
-            <Clipboard className="h-4 w-4" />
-            Duplicate persona
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={disabled}
-            onClick={() => personaMenuProps.onExportPersona(persona)}
-          >
-            <FileText className="h-4 w-4" />
-            Export persona
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {persona.isBuiltIn ? (
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              disabled={disabled}
-              onClick={() => personaMenuProps.onDeactivatePersona(persona)}
-            >
-              <Trash2 className="h-4 w-4" />
-              Remove from My Agents
-            </DropdownMenuItem>
-          ) : persona.sourceTeam ? (
-            <DropdownMenuItem disabled>
-              <Trash2 className="h-4 w-4" />
-              Managed by team
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuItem
-              className="text-destructive focus:text-destructive"
-              disabled={disabled}
-              onClick={() => personaMenuProps.onDeletePersona(persona)}
-            >
-              <Trash2 className="h-4 w-4" />
-              Delete persona
-            </DropdownMenuItem>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      {agent ? (
-        <EditAgentDialog
-          agent={agent}
-          onOpenChange={setEditOpen}
-          open={editOpen}
-        />
-      ) : null}
-    </>
-  );
-}
-
-function AgentActionsMenu({
-  agent,
-  isActionPending,
-  onAddToChannel,
-  onDelete,
-  onOpenLogs,
-  onStart,
-  onStop,
-  onToggleStartOnAppLaunch,
-}: { agent: ManagedAgent } & AgentMenuProps) {
-  const [editOpen, setEditOpen] = React.useState(false);
-
-  return (
-    <>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-label={`Agent actions for ${agent.name}`}
-            className="flex h-7 w-7 items-center justify-center rounded-md bg-background/70 text-muted-foreground transition-colors hover:bg-background hover:text-foreground data-[state=open]:bg-background data-[state=open]:text-foreground"
-            data-testid={`managed-agent-actions-${agent.pubkey}`}
-            type="button"
-          >
-            <Ellipsis className="h-4 w-4" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          onCloseAutoFocus={(event) => event.preventDefault()}
-        >
-          <AgentActionItems
-            agent={agent}
-            isActionPending={isActionPending}
-            onAddToChannel={onAddToChannel}
-            onDelete={onDelete}
-            onOpenLogs={onOpenLogs}
-            onStart={onStart}
-            onStop={onStop}
-            onToggleStartOnAppLaunch={onToggleStartOnAppLaunch}
-            onEdit={() => setEditOpen(true)}
-          />
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <EditAgentDialog
-        agent={agent}
-        onOpenChange={setEditOpen}
-        open={editOpen}
-      />
-    </>
-  );
-}
-
-function AgentActionItems({
-  agent,
-  isActionPending,
-  onAddToChannel,
-  onDelete,
-  onEdit,
-  onOpenLogs,
-  onStart,
-  onStop,
-  onToggleStartOnAppLaunch,
-}: { agent: ManagedAgent; onEdit?: () => void } & AgentMenuProps) {
-  const isActive = isManagedAgentActive(agent);
-
-  return (
-    <>
-      {agent.backend.type === "provider" ? (
-        <>
-          <DropdownMenuItem
-            disabled={isActionPending}
-            onClick={() => onStart(agent.pubkey)}
-          >
-            <Play className="h-4 w-4" />
-            {isActive ? "Redeploy" : "Deploy"}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={isActionPending}
-            onClick={() => onStop(agent.pubkey)}
-          >
-            <Square className="h-4 w-4" />
-            Shutdown
-          </DropdownMenuItem>
-        </>
-      ) : isActive ? (
-        <DropdownMenuItem
-          disabled={isActionPending}
-          onClick={() => onStop(agent.pubkey)}
-        >
-          <Square className="h-4 w-4" />
-          Stop
-        </DropdownMenuItem>
-      ) : (
-        <DropdownMenuItem
-          disabled={isActionPending}
-          onClick={() => onStart(agent.pubkey)}
-        >
-          <Play className="h-4 w-4" />
-          Spawn
-        </DropdownMenuItem>
-      )}
-
-      {agent.backend.type !== "provider" && onEdit ? (
-        <DropdownMenuItem onClick={onEdit}>
-          <Pencil className="h-4 w-4" />
-          Edit agent
-        </DropdownMenuItem>
-      ) : null}
-
-      <DropdownMenuItem
-        disabled={isActionPending}
-        onClick={() => onAddToChannel(agent)}
-      >
-        <UserPlus className="h-4 w-4" />
-        Add to channel
-      </DropdownMenuItem>
-
-      <DropdownMenuItem
-        onClick={async () => {
-          await navigator.clipboard.writeText(agent.pubkey);
-          toast.success("Copied pubkey to clipboard");
-        }}
-      >
-        <Clipboard className="h-4 w-4" />
-        Copy pubkey
-      </DropdownMenuItem>
-
-      {agent.backend.type === "local" ? (
-        <DropdownMenuItem onClick={() => onOpenLogs(agent.pubkey)}>
-          <FileText className="h-4 w-4" />
-          View logs
-        </DropdownMenuItem>
-      ) : null}
-
-      {agent.backend.type === "local" ? (
-        <DropdownMenuItem
-          disabled={isActionPending}
-          onClick={() =>
-            onToggleStartOnAppLaunch(agent.pubkey, !agent.startOnAppLaunch)
-          }
-        >
-          <Power className="h-4 w-4" />
-          {agent.startOnAppLaunch ? "Disable auto-start" : "Enable auto-start"}
-        </DropdownMenuItem>
-      ) : null}
-
-      <DropdownMenuSeparator />
-
-      <DropdownMenuItem
-        className="text-destructive focus:text-destructive"
-        disabled={isActionPending}
-        onClick={() => onDelete(agent.pubkey)}
-      >
-        <Trash2 className="h-4 w-4" />
-        Delete
-      </DropdownMenuItem>
-    </>
   );
 }
 
@@ -934,7 +579,6 @@ function CollapsibleAgentGroup({
   groupKey,
   label,
   agents,
-  agentMenuProps,
   collapsed,
   presenceLoaded,
   presenceLookup,
@@ -944,12 +588,11 @@ function CollapsibleAgentGroup({
   groupKey: string;
   label: string;
   agents: ManagedAgent[];
-  agentMenuProps: AgentMenuProps;
   collapsed: ReadonlySet<string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
   onToggle: (key: string) => void;
-  onOpenAgentProfile?: (pubkey: string) => void;
+  onOpenAgentProfile: (pubkey: string) => void;
 }) {
   const isCollapsed = collapsed.has(groupKey);
   return (
@@ -972,7 +615,6 @@ function CollapsibleAgentGroup({
           {agents.map((agent) => (
             <StandaloneAgentCard
               agent={agent}
-              agentMenuProps={agentMenuProps}
               key={agent.pubkey}
               presenceLoaded={presenceLoaded}
               presenceLookup={presenceLookup}

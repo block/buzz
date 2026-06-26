@@ -10,17 +10,22 @@ import {
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
+import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { buildTimelineItems } from "@/features/messages/lib/timelineItems";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import type { ListVirtualizer } from "@/shared/ui/VirtualizedList";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
+import { useConvergentScrollToMessage } from "./useConvergentScrollToMessage";
+import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
@@ -50,7 +55,6 @@ type MessageTimelineProps = {
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
   isFetchingOlder?: boolean;
-  layoutShiftKey?: string | number | null;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
@@ -149,7 +153,6 @@ const MessageTimelineBase = React.forwardRef<
     hasComposerOverlay = true,
     hasOlderMessages = true,
     isFetchingOlder = false,
-    layoutShiftKey = null,
     followThreadById,
     isFollowingThreadById,
     isMessageUnreadById,
@@ -183,6 +186,43 @@ const MessageTimelineBase = React.forwardRef<
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const contentRef = React.useRef<HTMLDivElement>(null);
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
+  // The floating active-day header portals here — a non-scrolling sibling of
+  // the scroll container — so it pins to a fixed offset and never drifts.
+  const activeDayHeaderRef = React.useRef<HTMLDivElement>(null);
+
+  // The convergence fallback for a windowed-out deep-link target. It's defined
+  // below (it depends on the anchored-scroll result), so `useAnchoredScroll`
+  // reads it through a ref via a stable wrapper — letting the hook stay
+  // virtualizer-agnostic while the consumer owns the convergence machinery.
+  const convergeToTargetRef = React.useRef<(messageId: string) => boolean>(
+    () => false,
+  );
+  const convergeToTarget = React.useCallback((messageId: string) => {
+    return convergeToTargetRef.current(messageId);
+  }, []);
+
+  // The mount bottom-pin driven through the virtualizer. Defined here as a
+  // stable wrapper over a ref (assigned below, once the virtualizer/item count
+  // are known) so `useAnchoredScroll` stays virtualizer-agnostic — same
+  // indirection as `convergeToTarget`. Returns `true` once it issued the
+  // index scroll; `false` (thread panel, no virtualizer) → the hook falls back
+  // to its raw bottom pin.
+  const pinToBottomByIndexRef = React.useRef<() => boolean>(() => false);
+  const pinToBottomByIndex = React.useCallback(() => {
+    return pinToBottomByIndexRef.current();
+  }, []);
+
+  // The virtualizer instance is owned by the child TimelineMessageList (which
+  // mounts the VirtualizedList) and reported up here via a ref so the scroll
+  // manager can drive index-model scroll paths. The virtualizer arrives via
+  // VirtualizedList's onVirtualizer layout effect (child layout effects fire
+  // before parent layout effects), so getVirtualizer() is live by the time
+  // useAnchoredScroll's mount pin runs.
+  const virtualizerRef = React.useRef<ListVirtualizer | null>(null);
+  const handleVirtualizer = React.useCallback((instance: ListVirtualizer) => {
+    virtualizerRef.current = instance;
+  }, []);
+  const getVirtualizer = React.useCallback(() => virtualizerRef.current, []);
 
   // Gate the heavy timeline render (each row runs a synchronous
   // react-markdown parse) behind React concurrency. `useDeferredValue` lets the
@@ -207,6 +247,33 @@ const MessageTimelineBase = React.forwardRef<
     EMPTY_TIMELINE_SNAPSHOT,
   );
   const deferredMessages = deferredSnapshot.messages;
+  // The flattened item stream mirrors what TimelineMessageList renders: use the
+  // hoisted mainEntries when the deferred snapshot is current (same identity as
+  // the live messages), fall back to building entries from deferredMessages when
+  // the deferred value is stale. This keeps the scroll manager's index map in
+  // sync with what's actually painted without a state-update round-trip.
+  const deferredEntries = React.useMemo(
+    () =>
+      (deferredMessages === messages ? mainEntries : undefined) ??
+      buildMainTimelineEntries(deferredMessages),
+    [mainEntries, deferredMessages, messages],
+  );
+  const timelineItems = React.useMemo(
+    () => buildTimelineItems(deferredEntries, firstUnreadMessageId),
+    [deferredEntries, firstUnreadMessageId],
+  );
+  const virtualizerOption = React.useMemo(
+    () =>
+      timelineItems.items.length > 0
+        ? {
+            getVirtualizer,
+            indexByMessageId: timelineItems.indexByMessageId,
+            itemCount: timelineItems.items.length,
+            liveMessageCount: messages.length,
+          }
+        : null,
+    [getVirtualizer, timelineItems, messages.length],
+  );
   const isDeferredSnapshotStale = isDeferredTimelineSnapshotStale({
     deferredSnapshot,
     liveSnapshot,
@@ -234,21 +301,21 @@ const MessageTimelineBase = React.forwardRef<
     isAtBottom,
     newMessageCount,
     onScroll,
+    restoreScrollPosition,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
     scrollToMessage,
+    setLoadOlderRestoreInFlight,
+    getAnchorIsAtBottom,
   } = useAnchoredScroll({
     channelId,
     contentRef,
-    fetchOlder,
-    hasOlderMessages,
-    isFetchingOlder,
+    convergeToTarget,
     isLoading: showTimelineSkeleton,
-    layoutShiftKey,
     messages: deferredMessages,
     onTargetReached,
+    pinToBottomByIndex,
     scrollContainerRef,
-    sentinelRef: topSentinelRef,
     targetMessageId,
   });
 
@@ -279,6 +346,66 @@ const MessageTimelineBase = React.forwardRef<
     [scrollToBottomOnNextUpdate],
   );
 
+  // Role 3 — jump-to-message into windowed-out history. The DOM-based
+  // `scrollToMessage` no-ops when the target row isn't mounted (virtualized
+  // out), so when it fails and the timeline is virtualized we drive the
+  // convergence adapter: it scrolls the virtualizer to the target index,
+  // re-aiming each frame as rows mount and measure, then on settle the row is
+  // in the DOM and `scrollToMessage` centers + highlights it. When there's no
+  // virtualizer (e.g. the thread panel), there's nothing to converge — the DOM
+  // path is the whole story and a missing row simply isn't reachable.
+  const { scrollToMessage: convergeToMessage, cancel: cancelConvergence } =
+    useConvergentScrollToMessage(getVirtualizer, {
+      indexByMessageId: timelineItems.indexByMessageId,
+      align: "center",
+      onConverged: (messageId) => {
+        scrollToMessage(messageId, { highlight: true });
+        onTargetReached?.(messageId);
+      },
+      onAbandoned: (messageId) => onTargetReached?.(messageId),
+    });
+  const jumpToMessage = React.useCallback(
+    (messageId: string, options?: { behavior?: ScrollBehavior }) => {
+      if (scrollToMessage(messageId, { highlight: true, ...options })) {
+        return;
+      }
+      if (virtualizerOption) {
+        convergeToMessage(messageId);
+      }
+    },
+    [convergeToMessage, scrollToMessage, virtualizerOption],
+  );
+  // Feed the windowed-out deep-link fallback back into `useAnchoredScroll`,
+  // which calls it when a target row isn't in the DOM. Gated on the virtualizer
+  // so the thread panel (no virtualizer) never converges. Assigned in an effect
+  // because `useAnchoredScroll` reads it asynchronously from a post-mount effect.
+  React.useEffect(() => {
+    convergeToTargetRef.current = virtualizerOption
+      ? convergeToMessage
+      : () => false;
+  }, [convergeToMessage, virtualizerOption]);
+  // Drive the mount bottom-pin through the virtualizer when one is present.
+  // Assigned during render (not an effect) because `useAnchoredScroll`'s
+  // mount pin runs in a layout effect on the same commit — a passive effect
+  // would assign too late. `virtualizerOption` is derived from `timelineItems`
+  // via useMemo (no state update, no extra render), so it is non-null from the
+  // first deferred commit that carries real messages. `getVirtualizer()` is
+  // live by pin time because VirtualizedList publishes the instance in a
+  // layout effect, and child layout effects fire before parent layout effects.
+  pinToBottomByIndexRef.current = virtualizerOption
+    ? () => {
+        const virtualizer = getVirtualizer();
+        const lastIndex = virtualizerOption.itemCount - 1;
+        if (!virtualizer || lastIndex < 0) return false;
+        virtualizer.scrollToIndex(lastIndex, { align: "end" });
+        return true;
+      }
+    : () => false;
+  // Abandon any in-flight convergence on channel switch so a stale loop can't
+  // hijack the new channel's scroll position.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cancel on channel switch only
+  React.useEffect(() => cancelConvergence, [channelId, cancelConvergence]);
+
   // The unread pill is a transient, per-open affordance: dismiss it once the
   // user acts on it (jumps to the oldest unread) or catches up by reaching the
   // bottom of the timeline. Reset when the channel changes so a freshly opened
@@ -308,13 +435,14 @@ const MessageTimelineBase = React.forwardRef<
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
     if (firstUnreadMessageId) {
-      scrollToMessage(firstUnreadMessageId);
+      jumpToMessage(firstUnreadMessageId);
     }
-  }, [firstUnreadMessageId, scrollToMessage]);
+  }, [firstUnreadMessageId, jumpToMessage]);
 
-  // Scroll to the active search match when it changes. `scrollToMessage`
-  // updates the scroll anchor, so the post-commit restore won't yank the
-  // view back off the match.
+  // Scroll to the active search match when it changes. `jumpToMessage` updates
+  // the scroll anchor (so the post-commit restore won't yank the view back off
+  // the match) and, when virtualized, converges on the target through the index
+  // model — the row may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (showTimelineSkeleton) return;
@@ -326,8 +454,20 @@ const MessageTimelineBase = React.forwardRef<
       return;
     }
     prevSearchActiveRef.current = searchActiveMessageId;
-    scrollToMessage(searchActiveMessageId, { behavior: "smooth" });
-  }, [scrollToMessage, searchActiveMessageId, showTimelineSkeleton]);
+    jumpToMessage(searchActiveMessageId, { behavior: "smooth" });
+  }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
+
+  useLoadOlderOnScroll({
+    fetchOlder,
+    hasOlderMessages,
+    isLoading: showTimelineSkeleton,
+    restoreScrollPosition,
+    setLoadOlderRestoreInFlight,
+    getAnchorIsAtBottom,
+    scrollContainerRef,
+    sentinelRef: topSentinelRef,
+    virtualizer: virtualizerOption,
+  });
 
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
@@ -338,6 +478,18 @@ const MessageTimelineBase = React.forwardRef<
   return (
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {/* Non-scrolling overlay anchored to the outer (non-scrolling) box: the
+            floating active-day header portals in here, so it pins to a fixed
+            offset and cannot drift as older history prepends. Sits below the
+            unread pill / fetch spinner (z-20) in the stack. */}
+        <div
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute inset-x-0 z-[6] flex translate-y-3 justify-center px-4",
+            channelChrome.top,
+          )}
+          ref={activeDayHeaderRef}
+        />
         {showUnreadPill ? (
           <div
             className={cn(
@@ -389,6 +541,13 @@ const MessageTimelineBase = React.forwardRef<
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
+
+            {/* Fixed-height slot: an always-mounted height keeps the virtual
+                spacer's offset stable across the load-older fetch toggle, so
+                `scrollMargin` doesn't shift mid-fetch and yank the restore. The
+                visible fetch spinner lives in the absolute overlay above, which
+                does not occupy inline flow. */}
+            <div aria-hidden className="h-8" />
 
             <div
               className={cn(
@@ -534,6 +693,7 @@ const MessageTimelineBase = React.forwardRef<
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
+                    key={scrollContainerDomKey}
                     agentPubkeys={agentPubkeys}
                     channelId={channelId}
                     channelName={channelName}
@@ -564,6 +724,9 @@ const MessageTimelineBase = React.forwardRef<
                     searchQuery={searchQuery}
                     threadUnreadCounts={threadUnreadCounts}
                     unfollowThreadById={unfollowThreadById}
+                    scrollContainerRef={scrollContainerRef}
+                    headerOverlayRef={activeDayHeaderRef}
+                    onVirtualizer={handleVirtualizer}
                   />
                 </div>
               ) : null}

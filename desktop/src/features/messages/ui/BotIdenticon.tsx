@@ -7,6 +7,7 @@ type BotIdenticonProps = {
   /** Size in pixels (default 20) */
   size?: number;
   className?: string;
+  "data-testid"?: string;
 };
 
 /**
@@ -17,6 +18,7 @@ export const BotIdenticon = React.memo(function BotIdenticon({
   value,
   size = 20,
   className,
+  "data-testid": dataTestid,
 }: BotIdenticonProps) {
   const svgHtml = React.useMemo(() => toSvg(value, size), [value, size]);
 
@@ -24,6 +26,7 @@ export const BotIdenticon = React.memo(function BotIdenticon({
     <div
       aria-hidden
       className={className}
+      data-testid={dataTestid}
       // biome-ignore lint/security/noDangerouslySetInnerHtml: jdenticon produces safe SVG
       dangerouslySetInnerHTML={{ __html: svgHtml }}
       style={{ width: size, height: size, flexShrink: 0 }}

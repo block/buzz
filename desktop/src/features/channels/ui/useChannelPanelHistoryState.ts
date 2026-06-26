@@ -1,6 +1,11 @@
 import * as React from "react";
 
-import type { ProfilePanelView } from "@/features/profile/ui/UserProfilePanel";
+import {
+  profilePanelTabFromSearch,
+  type ProfilePanelTab,
+  profilePanelViewFromSearch,
+  type ProfilePanelView,
+} from "@/features/profile/ui/UserProfilePanelUtils";
 import {
   type HistorySearchSetterOptions,
   useHistorySearchState,
@@ -12,9 +17,10 @@ import {
  * was showing, and reloads restore the panel from the URL.
  *
  * Params: `thread` (open thread head id), `profile` (profile panel pubkey),
- * `profileView` (profile panel sub-view), `agentSession` (agent session
- * panel pubkey), `channelManagement` (presence flag for the channel-management
- * panel — open/closed only, so it carries a sentinel `"1"` rather than an id).
+ * `profileView` (profile panel focused view), `profileTab` (profile summary
+ * tab), `agentSession` (agent session panel pubkey), `channelManagement`
+ * (presence flag for the channel-management panel — open/closed only, so it
+ * carries a sentinel `"1"` rather than an id).
  */
 
 export type PanelSetterOptions = HistorySearchSetterOptions;
@@ -29,16 +35,13 @@ const CHANNEL_SEARCH_KEYS = [
   "channelManagement",
   "messageId",
   "profile",
+  "profileTab",
   "profileView",
   "thread",
   "threadRootId",
 ] as const;
 
 const CHANNEL_MANAGEMENT_OPEN_VALUE = "1";
-
-function asProfilePanelView(value: string | null): ProfilePanelView {
-  return value === "memories" || value === "channels" ? value : "summary";
-}
 
 export function useChannelPanelHistoryState() {
   const { applyPatch, values } = useHistorySearchState(CHANNEL_SEARCH_KEYS);
@@ -52,13 +55,22 @@ export function useChannelPanelHistoryState() {
   // the carried `profileView` would otherwise leak onto the next profile.
   const setProfilePanelPubkey = React.useCallback<PanelValueSetter>(
     (value, options) =>
-      applyPatch({ profile: value, profileView: null }, options),
+      applyPatch(
+        { profile: value, profileTab: null, profileView: null },
+        options,
+      ),
     [applyPatch],
   );
 
   const setProfilePanelView = React.useCallback(
     (value: ProfilePanelView, options?: PanelSetterOptions) =>
       applyPatch({ profileView: value === "summary" ? null : value }, options),
+    [applyPatch],
+  );
+
+  const setProfilePanelTab = React.useCallback(
+    (value: ProfilePanelTab, options?: PanelSetterOptions) =>
+      applyPatch({ profileTab: value === "info" ? null : value }, options),
     [applyPatch],
   );
 
@@ -88,10 +100,12 @@ export function useChannelPanelHistoryState() {
     openAgentSessionPubkey: values.agentSession,
     openThreadHeadId: values.thread,
     profilePanelPubkey: values.profile,
-    profilePanelView: asProfilePanelView(values.profileView),
+    profilePanelTab: profilePanelTabFromSearch(values.profileTab),
+    profilePanelView: profilePanelViewFromSearch(values.profileView),
     setChannelManagementOpen,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
+    setProfilePanelTab,
     setProfilePanelPubkey,
     setProfilePanelView,
   };

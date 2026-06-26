@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -16,6 +17,8 @@ import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
 import 'reaction_row.dart';
+import 'read_state/read_state_format.dart';
+import 'read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
@@ -62,6 +65,22 @@ class ThreadDetailPage extends HookConsumerWidget {
     }
 
     final replies = childrenByParent[threadHead.id] ?? const [];
+    final readState = ref.watch(readStateProvider);
+    final visibleReplyReadKey = replies
+        .map((reply) => '${reply.id}:${reply.createdAt}')
+        .join(',');
+
+    useEffect(() {
+      if (!readState.isReady || replies.isEmpty) return null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        for (final reply in replies) {
+          ref
+              .read(readStateProvider.notifier)
+              .markContextRead(msgContextKey(reply.id), reply.createdAt);
+        }
+      });
+      return null;
+    }, [threadHead.id, readState.isReady, visibleReplyReadKey]);
 
     // Thread-scoped typing indicators (exclude self).
     final allTyping = ref.watch(channelTypingProvider(channelId));

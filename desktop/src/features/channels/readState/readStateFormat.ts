@@ -10,6 +10,12 @@ export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 
 export const MAX_CONTEXTS = 10_000;
 
+// Maximum plaintext byte length for the JSON blob passed to nip44EncryptToSelf.
+// NIP-44 v2 hard-caps plaintext at 65,535 bytes; the relay enforces a 256 KB
+// content limit. 32 KB gives ample headroom for NIP-44 overhead (~1.4×
+// expansion to ~45 KB ciphertext) while keeping the blob well under both caps.
+export const READ_STATE_MAX_PLAINTEXT_BYTES = 32_768;
+
 // Context-key prefix for a per-MESSAGE read marker (LP4 v3). One grow-only
 // marker per reply id; the badge predicate reads effective("msg:<id>") live so
 // reading an ancestor never covers a descendant (Issue 2 by construction).

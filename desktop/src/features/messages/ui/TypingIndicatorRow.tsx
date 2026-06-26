@@ -90,8 +90,8 @@ export function TypingIndicatorRow({
       {labels.length > 0 && (
         <div
           className={cn(
-            "flex w-full items-center gap-2",
-            isActivityVariant && "h-full",
+            "flex min-w-0 w-full items-center",
+            isActivityVariant ? "h-full gap-1.5" : "gap-2",
           )}
         >
           <div className="flex shrink-0 items-center">
@@ -103,7 +103,7 @@ export function TypingIndicatorRow({
                   key={pubkey}
                   className={cn(
                     "relative shrink-0 rounded-lg ring-1 ring-background",
-                    isActivityVariant ? "h-[18px] w-[18px]" : "h-5 w-5",
+                    isActivityVariant ? "h-4 w-4" : "h-5 w-5",
                     index > 0 && "-ml-1.5",
                   )}
                   data-testid="message-typing-avatar"
@@ -113,7 +113,7 @@ export function TypingIndicatorRow({
                     label={label}
                     className={cn(
                       isActivityVariant
-                        ? "h-[18px] w-[18px] text-3xs"
+                        ? "h-4 w-4 text-3xs"
                         : "h-5 w-5 text-3xs",
                     )}
                     iconClassName={
@@ -126,10 +126,10 @@ export function TypingIndicatorRow({
           </div>
           <p
             className={cn(
-              "truncate text-muted-foreground",
+              "min-w-0 translate-y-px truncate text-muted-foreground",
               isActivityVariant
-                ? "text-xs font-semibold leading-none"
-                : "text-sm",
+                ? "text-2xs font-medium leading-3"
+                : "text-xs font-medium leading-4",
             )}
             data-testid="message-typing-indicator-label"
           >

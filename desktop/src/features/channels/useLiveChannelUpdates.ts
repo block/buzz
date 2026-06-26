@@ -15,8 +15,13 @@ import {
   CHANNEL_MESSAGE_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import {
+  createTrailingDebounce,
+  type TrailingDebounce,
+} from "@/shared/lib/trailingDebounce";
 
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
+import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
@@ -66,6 +71,11 @@ export type UseLiveChannelUpdatesOptions = {
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 
+// get_channels is an expensive O(channels) relay fan-out. Incoming traffic for
+// non-active channels arrives in bursts, so coalesce the refetch into a single
+// trailing invalidation instead of one per event.
+const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
+
 // Only "new content" kinds should bump unread state. Shared with the
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
@@ -103,6 +113,22 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
+  const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
+  if (channelsInvalidateRef.current === null) {
+    channelsInvalidateRef.current = createTrailingDebounce(() => {
+      refreshChannelsWhenIdle({
+        isFetching: () =>
+          queryClient.isFetching({ queryKey: channelsQueryKey }),
+        invalidate: () => {
+          void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        },
+        reArm: () => channelsInvalidateRef.current?.trigger(),
+      });
+    }, CHANNELS_INVALIDATE_DEBOUNCE_MS);
+  }
+  const invalidateChannelsDebounced = React.useCallback(() => {
+    channelsInvalidateRef.current?.trigger();
+  }, []);
   const liveChannelIds = React.useMemo(
     () => new Set(channels.map((channel) => channel.id)),
     [channels],
@@ -186,7 +212,7 @@ export function useLiveChannelUpdates(
 
     if (!liveChannelIds.has(channelId)) {
       if (channelId !== activeChannelId) {
-        void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        invalidateChannelsDebounced();
       }
       return;
     }
@@ -470,6 +496,8 @@ export function useLiveChannelUpdates(
 
   React.useEffect(() => {
     return () => {
+      channelsInvalidateRef.current?.cancel();
+
       for (const dispose of liveSubsRef.current.values()) {
         void dispose().catch(() => {});
       }

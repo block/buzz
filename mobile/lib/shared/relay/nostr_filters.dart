@@ -83,6 +83,15 @@ abstract final class NostrFilters {
     },
   );
 
+  /// Latest per-viewer hidden-DM snapshot (kind:30622, `#p` = my pubkey).
+  static NostrFilter hiddenDms(String myPk) => NostrFilter(
+    kinds: [EventKind.dmVisibility],
+    tags: {
+      '#p': [myPk],
+    },
+    limit: 1,
+  );
+
   /// Forum posts (kind:45001) in a channel.
   static NostrFilter forumPosts(
     String channelId, {

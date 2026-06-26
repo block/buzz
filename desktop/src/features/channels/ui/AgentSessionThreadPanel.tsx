@@ -20,7 +20,7 @@ import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   OverlayPanelBackdrop,
-  PANEL_BASE_CLASS,
+  PANEL_ENTER_BASE_CLASS,
   PANEL_OVERLAY_CLASS,
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
@@ -30,7 +30,7 @@ import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
-  channel: Channel;
+  channel: Channel | null;
   canInterruptTurn: boolean;
   isWorking: boolean;
   layout?: "standalone" | "split";
@@ -62,6 +62,10 @@ export function AgentSessionThreadPanel({
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
 
   async function handleInterruptTurn() {
+    if (!channel) {
+      return;
+    }
+
     try {
       await cancelManagedAgentTurn(agent.pubkey, channel.id);
       toast.success(
@@ -155,9 +159,13 @@ export function AgentSessionThreadPanel({
     >
       <ManagedAgentSessionPanel
         agent={agent}
-        channelId={channel.id}
+        channelId={channel?.id ?? null}
         className="border-0 bg-transparent p-0 shadow-none"
-        emptyDescription={`Mention ${agent.name} in the channel to see its work here.`}
+        emptyDescription={
+          channel
+            ? `Mention ${agent.name} in the channel to see its work here.`
+            : `Mention ${agent.name} in any channel to see its work here.`
+        }
         profiles={profiles}
         showHeader={false}
         showRaw={false}
@@ -179,7 +187,7 @@ export function AgentSessionThreadPanel({
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
         className={cn(
-          PANEL_BASE_CLASS,
+          PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
         )}
