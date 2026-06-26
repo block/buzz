@@ -18,6 +18,7 @@
     "test:e2e": "pnpm build && playwright test",
     "test:e2e:smoke": "pnpm build && playwright test --project=smoke",
     "test:e2e:integration": "pnpm build && playwright test --project=integration",
+    "test:e2e:perf": "pnpm build && playwright test --config=playwright.perf.config.ts",
     "test:e2e:report": "playwright show-report",
     "tauri:build": "tauri build"
   },

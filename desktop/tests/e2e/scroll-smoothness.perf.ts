@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { logMeasurement, readBrowserMetrics } from "./perf/metrics";
 
 /**
  * Scroll-smoothness measurement harness.
@@ -37,23 +38,6 @@ type Sample = {
   scrollSpan: number;
   frames: number;
 };
-
-type Metrics = { layoutMs: number; recalcMs: number; layoutCount: number };
-
-async function readMetrics(
-  client: import("@playwright/test").CDPSession,
-): Promise<Metrics> {
-  const { metrics } = (await client.send("Performance.getMetrics")) as {
-    metrics: Array<{ name: string; value: number }>;
-  };
-  const m = (name: string) => metrics.find((x) => x.name === name)?.value ?? 0;
-  return {
-    // CDP reports durations in seconds; convert to ms.
-    layoutMs: m("LayoutDuration") * 1000,
-    recalcMs: m("RecalcStyleDuration") * 1000,
-    layoutCount: m("LayoutCount"),
-  };
-}
 
 test("MEASURE: fast-wheel scroll-up layout cost on a busy un-virtualized timeline", async ({
   page,
@@ -111,7 +95,7 @@ test("MEASURE: fast-wheel scroll-up layout cost on a busy un-virtualized timelin
   });
   await page.waitForTimeout(100);
 
-  const before = await readMetrics(client);
+  const before = await readBrowserMetrics(client);
 
   const sample = await timeline.evaluate(async (element): Promise<Sample> => {
     const el = element as HTMLDivElement;
@@ -154,7 +138,7 @@ test("MEASURE: fast-wheel scroll-up layout cost on a busy un-virtualized timelin
     };
   });
 
-  const after = await readMetrics(client);
+  const after = await readBrowserMetrics(client);
   await client.send("Performance.disable");
 
   const layoutDelta = after.layoutMs - before.layoutMs;
@@ -162,22 +146,16 @@ test("MEASURE: fast-wheel scroll-up layout cost on a busy un-virtualized timelin
   const layoutCountDelta = after.layoutCount - before.layoutCount;
   const perScroll = sample.frames > 0 ? sample.frames : 1;
 
-  /* eslint-disable no-console */
-  console.log("\n=== SCROLL SMOOTHNESS BASELINE (Chromium layout cost) ===");
-  console.log(`rows mounted (live DOM):       ${sample.rowCount}`);
-  console.log(
-    `scroll span covered:           ${Math.round(sample.scrollSpan)}px`,
-  );
-  console.log(`scroll frames driven:          ${sample.frames}`);
-  console.log(`layout time over burst:        ${layoutDelta.toFixed(1)}ms`);
-  console.log(`style-recalc time over burst:  ${recalcDelta.toFixed(1)}ms`);
-  console.log(`forced layouts (count delta):  ${layoutCountDelta}`);
-  console.log(
-    `avg layout+recalc per frame:   ${((layoutDelta + recalcDelta) / perScroll).toFixed(3)}ms`,
-  );
-  console.log("(>~8ms/frame main-thread work is where 120Hz starts to drop)");
-  console.log("=========================================================\n");
-  /* eslint-enable no-console */
+  logMeasurement("SCROLL SMOOTHNESS BASELINE (Chromium layout cost)", {
+    "rows mounted (live DOM)": sample.rowCount,
+    "scroll span covered": `${Math.round(sample.scrollSpan)}px`,
+    "scroll frames driven": sample.frames,
+    "layout time over burst": `${layoutDelta.toFixed(1)}ms`,
+    "style-recalc time over burst": `${recalcDelta.toFixed(1)}ms`,
+    "forced layouts (count delta)": layoutCountDelta,
+    "avg layout+recalc per frame": `${((layoutDelta + recalcDelta) / perScroll).toFixed(3)}ms`,
+    note: ">~8ms/frame main-thread work is where 120Hz starts to drop",
+  });
 
   // Instrument, not a gate — just confirm it exercised the full list.
   expect(sample.rowCount).toBeGreaterThan(100);
@@ -257,7 +235,7 @@ test("MEASURE: prepend re-render cost while scrolled up (the untested event-cost
   const client = await page.context().newCDPSession(page);
   await client.send("Performance.enable");
 
-  const before = await readMetrics(client);
+  const before = await readBrowserMetrics(client);
   const scrollTopBefore = await timeline.evaluate(
     (el) => (el as HTMLDivElement).scrollTop,
   );
@@ -280,7 +258,7 @@ test("MEASURE: prepend re-render cost while scrolled up (the untested event-cost
     return performance.now() - t0;
   }, 10);
 
-  const after = await readMetrics(client);
+  const after = await readBrowserMetrics(client);
   const scrollTopAfter = await timeline.evaluate(
     (el) => (el as HTMLDivElement).scrollTop,
   );
@@ -293,18 +271,14 @@ test("MEASURE: prepend re-render cost while scrolled up (the untested event-cost
   const recalcDelta = after.recalcMs - before.recalcMs;
   const anchorDrift = scrollTopAfter - scrollTopBefore;
 
-  /* eslint-disable no-console */
-  console.log("\n=== PREPEND RE-RENDER COST (10 older rows, scrolled up) ===");
-  console.log(`rows after prepend (live DOM): ${rowCountAfter}`);
-  console.log(`tick wall-time (commit+layout): ${tickMs.toFixed(2)}ms`);
-  console.log(`layout time attributed:         ${layoutDelta.toFixed(1)}ms`);
-  console.log(`style-recalc time attributed:   ${recalcDelta.toFixed(1)}ms`);
-  console.log(
-    `anchor drift (scrollTop delta): ${anchorDrift.toFixed(1)}px  (0 = held)`,
-  );
-  console.log("(tick > ~8ms during active wheel is where 120Hz stalls)");
-  console.log("===========================================================\n");
-  /* eslint-enable no-console */
+  logMeasurement("PREPEND RE-RENDER COST (10 older rows, scrolled up)", {
+    "rows after prepend (live DOM)": rowCountAfter,
+    "tick wall-time (commit+layout)": `${tickMs.toFixed(2)}ms`,
+    "layout time attributed": `${layoutDelta.toFixed(1)}ms`,
+    "style-recalc time attributed": `${recalcDelta.toFixed(1)}ms`,
+    "anchor drift (scrollTop delta)": `${anchorDrift.toFixed(1)}px  (0 = held)`,
+    note: "tick > ~8ms during active wheel is where 120Hz stalls",
+  });
 
   // Instrument, not a gate — just confirm the prepend actually happened.
   expect(rowCountAfter).toBeGreaterThan(50);

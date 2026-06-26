@@ -216,6 +216,10 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Run desktop read-only GUI latency harness against the mock bridge
+desktop-e2e-perf:
+    cd {{desktop_dir}} && pnpm test:e2e:perf
+
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
