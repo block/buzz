@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 test.beforeEach(async ({ page }) => {
@@ -249,6 +250,13 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await page.getByTestId("env-vars-add").click();
   await keys.nth(2).fill("OPENAI_BASE_URL");
   await values.nth(2).fill("https://api.openai.com/v1");
+
+  // Capture a screenshot of the dialog with three env vars filled. Helps
+  // reviewers see the UI at a glance.
+  await waitForAnimations(page);
+  await page
+    .getByRole("dialog")
+    .screenshot({ path: "test-results/persona-env-dialog.png" });
 
   // Remove the first row to verify per-row removal still works.
   await page.getByTestId("env-vars-remove").first().click();
