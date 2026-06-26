@@ -454,7 +454,7 @@ async fn steer_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireS
         wire_tx,
         wire::session_update_with_goose_meta(
             &p.session_id,
-            json!({ "sessionUpdate": "session_info" }),
+            json!({ "sessionUpdate": "session_info_update" }),
             json!({ "queuedSteer": { "messageId": message_id, "runId": run_id } }),
         ),
     )
@@ -502,7 +502,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         &wire_tx,
         wire::session_update_with_goose_meta(
             &sid,
-            json!({ "sessionUpdate": "session_info" }),
+            json!({ "sessionUpdate": "session_info_update" }),
             json!({ "activeRunId": run_id }),
         ),
     )
