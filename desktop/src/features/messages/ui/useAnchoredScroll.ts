@@ -298,6 +298,9 @@ export function useAnchoredScroll({
   // bail); this is the matching cede for the non-React-driven observer writer.
   const loadOlderRestoreInFlightRef = React.useRef(false);
   const highlightTimeoutRef = React.useRef<number | null>(null);
+  // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
+  // on channel switch (the channelId reset effect clears it).
+  const mountPinRafIdRef = React.useRef<number | null>(null);
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
   // appends, we snap to bottom even if they had scrolled up to read history.
@@ -331,6 +334,10 @@ export function useAnchoredScroll({
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
+    }
+    if (mountPinRafIdRef.current !== null) {
+      cancelAnimationFrame(mountPinRafIdRef.current);
+      mountPinRafIdRef.current = null;
     }
   }, [channelId]);
 
@@ -534,12 +541,23 @@ export function useAnchoredScroll({
       // window. Driving the last index through TanStack lands that row at the
       // bottom across its own measurement. Falls back to the raw pin when no
       // virtualizer is present (thread panel) or it declines.
+      // Track a pending rAF so the cleanup can cancel it if the effect
+      // re-runs (channel switch) before the frame fires.
       const pinToBottomOnMount = () => {
-        if (pinToBottomByIndexRef.current?.()) {
-          anchorRef.current = { kind: "at-bottom" };
-          return;
-        }
-        scrollToBottomImperative("auto");
+        // Set the anchor synchronously so settlingRef is correct below.
+        anchorRef.current = { kind: "at-bottom" };
+        // Defer the actual scroll call out of the layout effect. TanStack's
+        // virtualizer calls flushSync(rerender) on scroll events when
+        // useFlushSync=true (the default), which would trigger a synchronous
+        // React re-render inside this layout effect and mutate the DOM before
+        // Playwright (and the browser) finish measuring layout. Deferring to
+        // rAF lets the current paint commit complete first.
+        mountPinRafIdRef.current = requestAnimationFrame(() => {
+          mountPinRafIdRef.current = null;
+          if (!pinToBottomByIndexRef.current?.()) {
+            scrollToBottomImperative("auto");
+          }
+        });
       };
       if (targetMessageId) {
         // A cold deep-link target may not be in the DOM on this first

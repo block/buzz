@@ -160,7 +160,11 @@ export function useLoadOlderOnScroll({
             // one-shot, never an overlapping second target.
             const instance = virt.getVirtualizer();
             const container = scrollContainerRef.current;
-            const previousCount = virt.itemCount;
+            // Read the live count from the virtualizer instance rather than
+            // virt.itemCount: virt.itemCount is derived from deferredMessages
+            // (stale during a fetch), so the growth check would never fire.
+            const previousCount =
+              instance?.options.count ?? virt.itemCount;
 
             void fetchOlder().then(() => {
               // Claim scroll ownership for the whole re-aim window so the
@@ -217,7 +221,8 @@ export function useLoadOlderOnScroll({
               const waitForPrepend = () => {
                 const after = virtualizerRef.current;
                 const grew =
-                  (after?.itemCount ?? previousCount) > previousCount;
+                  (after?.getVirtualizer()?.options.count ?? previousCount) >
+                  previousCount;
                 // Resolve this frame's target offset. Two cases, one mechanism:
                 //   - Abandon: the user jumped to bottom while this loop owned
                 //     scroll. Hold the BOTTOM (last row's end offset), not the
@@ -243,7 +248,9 @@ export function useLoadOlderOnScroll({
                 const target = resolveTarget({
                   instance: grew ? instance : null,
                   abandonedToBottom,
-                  lastIndex: (after?.itemCount ?? previousCount) - 1,
+                  lastIndex:
+                    (after?.getVirtualizer()?.options.count ?? previousCount) -
+                    1,
                   newIndex,
                   anchorTop,
                 });
