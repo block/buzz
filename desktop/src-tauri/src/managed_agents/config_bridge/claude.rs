@@ -41,10 +41,6 @@ pub(super) fn read_config_file() -> Option<RuntimeFileConfig> {
     }
     cfg.extensions = extensions;
 
-    // Buzz-synthesized annotation — not a field from the user's config file.
-    cfg.extra
-        .insert("provider_locked".to_string(), "true".to_string());
-
     Some(cfg)
 }
 
@@ -74,9 +70,6 @@ mod tests {
         cfg.thinking_effort = json_string(&val, "effortLevel");
         let skip = &["model", "effortLevel"];
         cfg.extra = super::super::schema_walker::extract_config_fields(&val, skip);
-        // provider_locked is always added by read_config_file; add here for parity.
-        cfg.extra
-            .insert("provider_locked".to_string(), "true".to_string());
         cfg
     }
 

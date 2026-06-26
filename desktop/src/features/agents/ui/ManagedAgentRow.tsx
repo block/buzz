@@ -178,7 +178,6 @@ export function ManagedAgentRow({
             </p>
             <AgentConfigPanel
               pubkey={agent.pubkey}
-              isRunning={agent.status === "running"}
             />
           </div>
         </div>

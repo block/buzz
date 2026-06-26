@@ -518,7 +518,6 @@ export type ConfigWriteMechanism =
 export type NormalizedField = {
   value: string | null;
   origin: ConfigOrigin;
-  isWritable: boolean;
   writeVia: ConfigWriteMechanism;
   overriddenValue: string | null;
   overriddenOrigin: ConfigOrigin | null;
@@ -538,7 +537,6 @@ export type ConfigField = {
   value: string | null;
   origin: ConfigOrigin;
   schemaType: ConfigFieldType;
-  isWritable: boolean;
   writeVia: ConfigWriteMechanism;
 };
 
@@ -569,29 +567,6 @@ export type RuntimeConfigSurface = {
   normalized: NormalizedConfig;
   advanced: ConfigField[];
   sources: ConfigSourceReport;
-};
-
-export type WriteConfigTarget =
-  | { type: "model" }
-  | { type: "provider" }
-  | { type: "mode" }
-  | { type: "thinkingEffort" }
-  | { type: "maxOutputTokens" }
-  | { type: "contextLimit" }
-  | { type: "systemPrompt" }
-  | { type: "advanced"; key: string };
-
-export type WriteConfigFieldRequest = {
-  pubkey: string;
-  field: WriteConfigTarget;
-  value: string | null;
-};
-
-export type WriteConfigResult = {
-  success: boolean;
-  mechanismUsed: ConfigWriteMechanism;
-  requiresRestart: boolean;
-  error: string | null;
 };
 
 export type UpdateManagedAgentInput = {

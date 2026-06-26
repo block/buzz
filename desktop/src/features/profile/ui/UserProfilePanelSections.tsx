@@ -258,7 +258,6 @@ export function ProfileSummaryView({
                 </div>
                 <AgentConfigPanel
                   pubkey={managedAgent.pubkey}
-                  isRunning={managedAgent.status === "running"}
                 />
               </div>
             ) : null

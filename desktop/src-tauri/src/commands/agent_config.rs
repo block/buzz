@@ -7,10 +7,8 @@ use crate::{
             reader::read_config_surface,
             types::{
                 AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
-                ConfigWriteMechanism, NormalizedField, RuntimeConfigSurface, SessionConfigCache,
-                WriteConfigFieldRequest, WriteConfigResult, WriteConfigTarget,
+                NormalizedField, RuntimeConfigSurface, SessionConfigCache,
             },
-            writer::plan_config_write,
         },
         effective_agent_command, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
@@ -20,13 +18,10 @@ use crate::{
 
 /// Resolve the config surface with persona values applied.
 ///
-/// Both the read path (`get_agent_config_surface`) and the write path
-/// (`write_agent_config_field`) must see the same surface, so this is the
-/// single place persona resolution happens. The pipeline: resolve the linked
-/// persona's prompt/model/provider, inject each into the record only where the
-/// record lacks its own value, let `read_config_surface` tag those injected
-/// fields `BuzzExplicit`, then re-tag exactly the injected fields to
-/// `PersonaDefault`.
+/// The pipeline: resolve the linked persona's prompt/model/provider, inject
+/// each into the record only where the record lacks its own value, let
+/// `read_config_surface` tag those injected fields `BuzzExplicit`, then re-tag
+/// exactly the injected fields to `PersonaDefault`.
 ///
 /// The re-tag is triple-gated — a field is re-tagged only when (a) the record
 /// did not already have it (`!had_*`), (b) the surface produced the field, and
@@ -170,76 +165,6 @@ pub async fn get_agent_config_surface(
         runtime_meta,
         session_cache.as_ref(),
     ))
-}
-
-/// Write a config field value for a managed agent.
-///
-/// Plans the write mechanism based on the current config surface, then
-/// executes: either updating the record (for env var respawn) or returning
-/// the mechanism for the frontend to send via observer control (for ACP writes).
-///
-/// Uses the same persona-resolved surface as `get_agent_config_surface` so
-/// `plan_config_write` sees persona-sourced fields and never returns
-/// "field not available" for a value inherited from the linked persona.
-#[tauri::command]
-pub async fn write_agent_config_field(
-    request: WriteConfigFieldRequest,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<WriteConfigResult, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-
-    let record = records
-        .iter()
-        .find(|r| r.pubkey == request.pubkey)
-        .cloned()
-        .ok_or_else(|| format!("agent {} not found", request.pubkey))?;
-
-    let personas = load_personas(&app).unwrap_or_default();
-    let effective_cmd = effective_agent_command(
-        record.persona_id.as_deref(),
-        &personas,
-        record.agent_command_override.as_deref(),
-    );
-    let runtime_meta = known_acp_runtime(&effective_cmd);
-    let session_cache = state.get_session_cache(&request.pubkey);
-    let surface = resolve_config_surface(record, &personas, runtime_meta, session_cache.as_ref());
-
-    let mut result = plan_config_write(&surface, &request.field);
-
-    if !result.success {
-        return Ok(result);
-    }
-
-    if let ConfigWriteMechanism::RespawnWithEnvVar { ref env_key } = result.mechanism_used {
-        let record = records
-            .iter_mut()
-            .find(|r| r.pubkey == request.pubkey)
-            .ok_or_else(|| format!("agent {} not found", request.pubkey))?;
-
-        match request.value {
-            Some(ref val) if !val.is_empty() => {
-                record.env_vars.insert(env_key.clone(), val.clone());
-            }
-            _ => {
-                record.env_vars.remove(env_key);
-            }
-        }
-
-        if matches!(request.field, WriteConfigTarget::Model) {
-            record.model = request.value.clone();
-        }
-
-        record.updated_at = crate::util::now_iso();
-        save_managed_agents(&app, &records)?;
-        result.requires_restart = true;
-    }
-
-    Ok(result)
 }
 
 /// Store a `session_config_captured` observer event payload into the session cache.
@@ -538,28 +463,6 @@ mod tests {
             goose_native_config: None,
             captured_at: "".to_string(),
         }
-    }
-
-    /// The write path must see a persona-inherited model. Without persona
-    /// resolution `surface.normalized.model` would be `None` and
-    /// `plan_config_write` would return "field not available for this runtime".
-    #[test]
-    fn write_path_sees_persona_sourced_model_field() {
-        let record = agent_record();
-        let personas = vec![persona_with_model("persona-model")];
-
-        let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None);
-
-        let model = surface.normalized.model.as_ref().expect("model resolved");
-        assert_eq!(model.value.as_deref(), Some("persona-model"));
-        assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
-
-        let result = plan_config_write(&surface, &WriteConfigTarget::Model);
-        assert!(result.success, "write plan failed: {:?}", result.error);
-        assert!(matches!(
-            result.mechanism_used,
-            ConfigWriteMechanism::RespawnWithEnvVar { .. }
-        ));
     }
 
     /// A model the user set explicitly in Buzz must never be re-tagged to

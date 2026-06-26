@@ -14,7 +14,6 @@ import type {
 
 type Props = {
   pubkey: string;
-  isRunning: boolean;
 };
 
 // ── Provenance sentence ──────────────────────────────────────────────────────
@@ -147,7 +146,7 @@ function AdvancedRow({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function AgentConfigPanel({ pubkey, isRunning: _isRunning }: Props) {
+export function AgentConfigPanel({ pubkey }: Props) {
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
 
   const { data, isLoading, error } = useAgentConfigSurface(pubkey);

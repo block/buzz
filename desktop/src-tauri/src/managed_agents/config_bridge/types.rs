@@ -57,7 +57,6 @@ pub enum ConfigWriteMechanism {
 pub struct NormalizedField {
     pub value: Option<String>,
     pub origin: ConfigOrigin,
-    pub is_writable: bool,
     pub write_via: ConfigWriteMechanism,
     /// When this field overrides a lower-precedence value, show what it overrode.
     pub overridden_value: Option<String>,
@@ -89,7 +88,6 @@ pub struct ConfigField {
     pub value: Option<String>,
     pub origin: ConfigOrigin,
     pub schema_type: ConfigFieldType,
-    pub is_writable: bool,
     pub write_via: ConfigWriteMechanism,
 }
 
@@ -132,39 +130,6 @@ pub struct RuntimeConfigSurface {
     pub normalized: NormalizedConfig,
     pub advanced: Vec<ConfigField>,
     pub sources: ConfigSourceReport,
-}
-
-/// Request to write a config field value.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteConfigFieldRequest {
-    pub pubkey: String,
-    pub field: WriteConfigTarget,
-    pub value: Option<String>,
-}
-
-/// Which config field to write.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum WriteConfigTarget {
-    Model,
-    Provider,
-    Mode,
-    ThinkingEffort,
-    MaxOutputTokens,
-    ContextLimit,
-    SystemPrompt,
-    Advanced { key: String },
-}
-
-/// Result of a config write operation.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteConfigResult {
-    pub success: bool,
-    pub mechanism_used: ConfigWriteMechanism,
-    pub requires_restart: bool,
-    pub error: Option<String>,
 }
 
 /// Raw config values extracted from a runtime's config file.

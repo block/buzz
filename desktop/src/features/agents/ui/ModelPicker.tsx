@@ -7,10 +7,8 @@ import React from "react";
 import type {
   AgentModelsResponse,
   ManagedAgent,
-  RuntimeConfigSurface,
 } from "@/shared/api/types";
 import {
-  getAgentConfigSurface,
   getAgentModels,
   updateManagedAgent,
 } from "@/shared/api/tauri";
@@ -18,6 +16,7 @@ import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
 import { subscribeControlResults } from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { useAgentConfigSurface } from "@/features/agents/hooks";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -36,13 +35,13 @@ export function ModelPicker({
 }) {
   const [modelsData, setModelsData] =
     React.useState<AgentModelsResponse | null>(null);
-  const [configSurface, setConfigSurface] =
-    React.useState<RuntimeConfigSurface | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
   const [needsRestart, setNeedsRestart] = React.useState(false);
   const [hasRequestedModels, setHasRequestedModels] = React.useState(false);
+
+  const { data: configSurface } = useAgentConfigSurface(agent.pubkey);
 
   const isRunning = agent.status === "running" || agent.status === "deployed";
   const activeTurns = useActiveAgentTurns(agent.pubkey);
@@ -78,21 +77,9 @@ export function ModelPicker({
       }
 
       setHasRequestedModels(true);
-      // Fetch config surface for model provenance data alongside the model list.
-      // The config surface call is best-effort — a failure doesn't block model
-      // selection, it just means we won't show the origin badge.
-      void getAgentConfigSurface(agent.pubkey)
-        .then((surface) => {
-          if (!surface.isPreSpawn) {
-            setConfigSurface(surface);
-          }
-        })
-        .catch(() => {
-          // Intentionally swallowed — provenance badge is informational only.
-        });
       void fetchModels();
     },
-    [agent.pubkey, fetchModels, loading, modelsData],
+    [fetchModels, loading, modelsData],
   );
 
   const currentValue = agent.model ?? modelsData?.agentDefaultModel ?? "";

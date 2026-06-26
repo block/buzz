@@ -92,7 +92,6 @@ pub(crate) fn read_config_surface(
             .map(|v| NormalizedField {
                 value: Some(v.clone()),
                 origin: ConfigOrigin::ConfigFile,
-                is_writable: false,
                 write_via: ConfigWriteMechanism::ReadOnly,
                 overridden_value: None,
                 overridden_origin: None,
@@ -101,7 +100,6 @@ pub(crate) fn read_config_surface(
         context_limit: file_config.context_limit.as_ref().map(|v| NormalizedField {
             value: Some(v.clone()),
             origin: ConfigOrigin::ConfigFile,
-            is_writable: false,
             write_via: ConfigWriteMechanism::ReadOnly,
             overridden_value: None,
             overridden_origin: None,
@@ -115,7 +113,6 @@ pub(crate) fn read_config_surface(
             record_system_prompt.as_ref().map(|v| NormalizedField {
                 value: Some(v.clone()),
                 origin: ConfigOrigin::BuzzExplicit,
-                is_writable: true,
                 write_via: ConfigWriteMechanism::RespawnWithEnvVar {
                     env_key: "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
                 },
@@ -139,7 +136,6 @@ pub(crate) fn read_config_surface(
             value: Some(v.clone()),
             origin: ConfigOrigin::ConfigFile,
             schema_type: ConfigFieldType::String,
-            is_writable: false,
             write_via: ConfigWriteMechanism::ReadOnly,
         })
         .collect();
@@ -172,7 +168,6 @@ pub(crate) fn read_config_surface(
             value: Some(v.clone()),
             origin: ConfigOrigin::BuzzExplicit,
             schema_type: ConfigFieldType::String,
-            is_writable: true,
             write_via: ConfigWriteMechanism::RespawnWithEnvVar { env_key: k.clone() },
         });
     }
@@ -264,7 +259,6 @@ fn build_model_field(
     NormalizedField {
         value,
         origin,
-        is_writable: !matches!(write_via, ConfigWriteMechanism::ReadOnly),
         write_via,
         overridden_value,
         overridden_origin,
@@ -360,7 +354,6 @@ fn build_provider_field(
         return Some(NormalizedField {
             value: Some("Anthropic (locked)".to_string()),
             origin: ConfigOrigin::HarnessConstraint,
-            is_writable: false,
             write_via: ConfigWriteMechanism::ReadOnly,
             overridden_value: None,
             overridden_origin: None,
@@ -368,13 +361,11 @@ fn build_provider_field(
         });
     }
 
-    let (value, origin) = if let Some(ref p) = record_provider {
-        (Some(p.clone()), ConfigOrigin::BuzzExplicit)
-    } else if let Some(ref p) = file_provider {
-        (Some(p.clone()), ConfigOrigin::ConfigFile)
-    } else {
-        return None;
-    };
+    let tiers: &[(Option<&str>, ConfigOrigin)] = &[
+        (record_provider.as_deref(), ConfigOrigin::BuzzExplicit),
+        (file_provider.as_deref(), ConfigOrigin::ConfigFile),
+    ];
+    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
 
     let write_via = if let Some(env_key) = provider_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
@@ -387,18 +378,9 @@ fn build_provider_field(
     Some(NormalizedField {
         value,
         origin,
-        is_writable: !matches!(write_via, ConfigWriteMechanism::ReadOnly),
         write_via,
-        overridden_value: if record_provider.is_some() {
-            file_provider.clone()
-        } else {
-            None
-        },
-        overridden_origin: if record_provider.is_some() && file_provider.is_some() {
-            Some(ConfigOrigin::ConfigFile)
-        } else {
-            None
-        },
+        overridden_value,
+        overridden_origin,
         is_required,
     })
 }
@@ -409,13 +391,11 @@ fn build_mode_field(
     is_pre_spawn: bool,
     session_cache: Option<&SessionConfigCache>,
 ) -> Option<NormalizedField> {
-    let (value, origin) = if let Some(ref m) = acp_mode {
-        (Some(m.clone()), ConfigOrigin::AcpConfigOption)
-    } else if let Some(ref m) = file_mode {
-        (Some(m.clone()), ConfigOrigin::ConfigFile)
-    } else {
-        return None;
-    };
+    let tiers: &[(Option<&str>, ConfigOrigin)] = &[
+        (acp_mode.as_deref(), ConfigOrigin::AcpConfigOption),
+        (file_mode.as_deref(), ConfigOrigin::ConfigFile),
+    ];
+    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
 
     let write_via = if !is_pre_spawn && has_config_option(session_cache, "mode") {
         ConfigWriteMechanism::AcpSetConfigOption {
@@ -428,18 +408,9 @@ fn build_mode_field(
     Some(NormalizedField {
         value,
         origin,
-        is_writable: !matches!(write_via, ConfigWriteMechanism::ReadOnly),
         write_via,
-        overridden_value: if acp_mode.is_some() {
-            file_mode.clone()
-        } else {
-            None
-        },
-        overridden_origin: if acp_mode.is_some() && file_mode.is_some() {
-            Some(ConfigOrigin::ConfigFile)
-        } else {
-            None
-        },
+        overridden_value,
+        overridden_origin,
         is_required: false,
     })
 }
@@ -452,15 +423,12 @@ fn build_thinking_field(
     is_pre_spawn: bool,
     session_cache: Option<&SessionConfigCache>,
 ) -> Option<NormalizedField> {
-    let (value, origin) = if let Some(ref e) = record_effort {
-        (Some(e.clone()), ConfigOrigin::BuzzExplicit)
-    } else if let Some(ref e) = acp_effort {
-        (Some(e.clone()), ConfigOrigin::AcpConfigOption)
-    } else if let Some(ref e) = file_effort {
-        (Some(e.clone()), ConfigOrigin::ConfigFile)
-    } else {
-        return None;
-    };
+    let tiers: &[(Option<&str>, ConfigOrigin)] = &[
+        (record_effort.as_deref(), ConfigOrigin::BuzzExplicit),
+        (acp_effort.as_deref(), ConfigOrigin::AcpConfigOption),
+        (file_effort.as_deref(), ConfigOrigin::ConfigFile),
+    ];
+    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
 
     let write_via = if !is_pre_spawn && has_config_option(session_cache, "effort") {
         ConfigWriteMechanism::AcpSetConfigOption {
@@ -477,24 +445,35 @@ fn build_thinking_field(
     Some(NormalizedField {
         value,
         origin,
-        is_writable: !matches!(write_via, ConfigWriteMechanism::ReadOnly),
         write_via,
-        overridden_value: if record_effort.is_some() {
-            acp_effort.clone().or(file_effort.clone())
-        } else if acp_effort.is_some() {
-            file_effort.clone()
-        } else {
-            None
-        },
-        overridden_origin: if record_effort.is_some() && acp_effort.is_some() {
-            Some(ConfigOrigin::AcpConfigOption)
-        } else if file_effort.is_some() && (record_effort.is_some() || acp_effort.is_some()) {
-            Some(ConfigOrigin::ConfigFile)
-        } else {
-            None
-        },
+        overridden_value,
+        overridden_origin,
         is_required: false,
     })
+}
+
+/// Picks the first `Some` value from `tiers` (highest-precedence first) and
+/// returns `(value, origin, overridden_value, overridden_origin)` where the
+/// overridden pair is the next `Some` tier after the winner. Returns `None`
+/// when no tier has a value.
+fn resolve_with_override(
+    tiers: &[(Option<&str>, ConfigOrigin)],
+) -> Option<(Option<String>, ConfigOrigin, Option<String>, Option<ConfigOrigin>)> {
+    let winner_idx = tiers.iter().position(|(v, _)| v.is_some())?;
+    let (value, origin) = &tiers[winner_idx];
+    let value = value.map(str::to_string);
+    let origin = origin.clone();
+
+    // Overridden = the next Some after the winner.
+    let overridden = tiers[winner_idx + 1..]
+        .iter()
+        .find(|(v, _)| v.is_some());
+    let (overridden_value, overridden_origin) = match overridden {
+        Some((v, o)) => (v.map(str::to_string), Some(o.clone())),
+        None => (None, None),
+    };
+
+    Some((value, origin, overridden_value, overridden_origin))
 }
 
 // ── ACP cache helpers ────────────────────────────────────────────────────────
@@ -650,7 +629,6 @@ mod tests {
         let surface = read_config_surface(&record, Some(runtime), None, None);
         let provider = surface.normalized.provider.unwrap();
         assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
-        assert!(!provider.is_writable);
         assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
     }
 
@@ -970,7 +948,6 @@ mod tests {
             .unwrap();
         assert_eq!(field.value.as_deref(), Some("mem-value"));
         assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
-        assert!(field.is_writable);
         assert!(matches!(
             field.write_via,
             ConfigWriteMechanism::RespawnWithEnvVar { ref env_key } if env_key == "SPROUT_ACP_MEMORY"
