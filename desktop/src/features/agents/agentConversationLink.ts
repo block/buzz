@@ -96,3 +96,28 @@ export function trimAgentConversationLinkMatch(matchText: string) {
   }
   return { value, trailing: matchText.slice(value.length) };
 }
+
+type AgentConversationLinkRenderInput = {
+  href: string;
+  label: string;
+};
+
+export type AgentConversationLinkRenderTarget =
+  | { kind: "card"; link: ParsedAgentConversationLink }
+  | { kind: "label"; link: ParsedAgentConversationLink }
+  | { kind: "none" };
+
+export function resolveAgentConversationLinkRenderTarget({
+  href,
+  label,
+}: AgentConversationLinkRenderInput): AgentConversationLinkRenderTarget {
+  if (!isAgentConversationLink(href)) return { kind: "none" };
+
+  const parsed = parseAgentConversationLink(href);
+  if (!parsed.ok) return { kind: "none" };
+
+  return {
+    kind: label === href ? "card" : "label",
+    link: parsed.value,
+  };
+}

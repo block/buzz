@@ -4,7 +4,14 @@ import ReactMarkdown, {
   type Components,
   defaultUrlTransform,
 } from "react-markdown";
-import { Copy, Download, FileText, ZoomIn, ZoomOut } from "lucide-react";
+import {
+  ClipboardPlus,
+  Copy,
+  Download,
+  FileText,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
 import { useReducedMotion } from "motion/react";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -20,9 +27,11 @@ import {
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import {
   isAgentConversationLink,
   parseAgentConversationLink,
+  resolveAgentConversationLinkRenderTarget,
   type ParsedAgentConversationLink,
 } from "@/features/agents/agentConversationLink";
 import remarkAgentConversationLinks from "@/features/agents/remarkAgentConversationLinks";
@@ -92,6 +101,14 @@ type MessageLinkPillProps = {
   interactive: boolean;
   link: ParsedMessageLink;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
+
+type AgentConversationLinkCardProps = {
+  href: string;
+  interactive: boolean;
+  link: ParsedAgentConversationLink;
+  marker?: AgentConversationMarker;
+  onOpenAgentConversationLink: (link: ParsedAgentConversationLink) => void;
 };
 
 let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
@@ -206,6 +223,7 @@ const VideoReviewMarkdownContext = React.createContext<
 
 type MarkdownRuntime = {
   agentMentionPubkeysByName?: Record<string, string>;
+  agentConversationMarkers?: readonly AgentConversationMarker[];
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
   mentionPubkeysByName?: Record<string, string>;
@@ -277,6 +295,7 @@ function messageLinkUrlTransform(value: string, key: string): string {
 }
 
 type MarkdownProps = {
+  agentConversationMarkers?: readonly AgentConversationMarker[];
   channelNames?: string[];
   className?: string;
   content: string;
@@ -1272,6 +1291,17 @@ function getCodeBlockText(children: React.ReactNode) {
   return getReactNodeText(children).replace(/\n$/, "");
 }
 
+function findAgentConversationMarker(
+  markers: readonly AgentConversationMarker[] | undefined,
+  link: ParsedAgentConversationLink,
+): AgentConversationMarker | undefined {
+  return markers?.find(
+    (marker) =>
+      marker.channelId === link.channelId &&
+      marker.agentReplyId === link.agentReplyId,
+  );
+}
+
 function MessageLinkPill({
   channels,
   href,
@@ -1309,6 +1339,55 @@ function MessageLinkPill({
     >
       {label}
     </button>
+  );
+}
+
+function AgentConversationLinkCard({
+  href,
+  interactive,
+  link,
+  marker,
+  onOpenAgentConversationLink,
+}: AgentConversationLinkCardProps) {
+  const title = marker?.title?.trim() || "Task";
+
+  return (
+    <span
+      className="my-1 flex min-w-0 max-w-xl overflow-hidden rounded-lg border border-border/70 bg-muted/35 align-top"
+      data-agent-conversation-link=""
+      title={href}
+    >
+      <span className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2">
+        <span
+          aria-hidden
+          className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-background p-2.5 text-muted-foreground shadow-xs ring-1 ring-border/60"
+        >
+          <ClipboardPlus className="size-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium text-foreground">
+            Task
+          </span>
+          <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+            {title}
+          </span>
+        </span>
+        {interactive ? (
+          <button
+            aria-label={`Open task: ${title}`}
+            className="inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-input bg-background px-3 text-xs font-medium text-foreground shadow-xs transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenAgentConversationLink(link);
+            }}
+            type="button"
+          >
+            Open
+          </button>
+        ) : null}
+      </span>
+    </span>
   );
 }
 
@@ -1815,8 +1894,12 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
-      const { imetaByUrl, onOpenAgentConversationLink, onOpenMessageLink } =
-        runtimeRef.current;
+      const {
+        agentConversationMarkers,
+        imetaByUrl,
+        onOpenAgentConversationLink,
+        onOpenMessageLink,
+      } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -1881,24 +1964,40 @@ function createMarkdownComponents(
             </a>
           );
         }
-
-        if (isAgentConversationLink(href)) {
-          const parsed = parseAgentConversationLink(href);
-          if (parsed.ok) {
+        const agentConversationLinkTarget =
+          resolveAgentConversationLinkRenderTarget({
+            href,
+            label: getReactNodeText(children),
+          });
+        if (agentConversationLinkTarget.kind !== "none") {
+          if (agentConversationLinkTarget.kind === "card") {
             return (
-              <a
-                {...props}
-                className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
+              <AgentConversationLinkCard
                 href={href}
-                onClick={(event) => {
-                  event.preventDefault();
-                  onOpenAgentConversationLink(parsed.value);
-                }}
-              >
-                {children}
-              </a>
+                interactive={interactive}
+                link={agentConversationLinkTarget.link}
+                marker={findAgentConversationMarker(
+                  agentConversationMarkers,
+                  agentConversationLinkTarget.link,
+                )}
+                onOpenAgentConversationLink={onOpenAgentConversationLink}
+              />
             );
           }
+
+          return (
+            <a
+              {...props}
+              className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
+              href={href}
+              onClick={(event) => {
+                event.preventDefault();
+                onOpenAgentConversationLink(agentConversationLinkTarget.link);
+              }}
+            >
+              {children}
+            </a>
+          );
         }
         // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
@@ -2181,7 +2280,7 @@ function createMarkdownComponents(
     },
     "message-link": ({ children }: { children?: React.ReactNode }) => {
       const { channels, onOpenMessageLink } = runtimeRef.current;
-      const href = String(children ?? "");
+      const href = getReactNodeText(children);
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
         // Malformed `buzz://message?…` — render the raw URL as plain text
@@ -2204,36 +2303,32 @@ function createMarkdownComponents(
     }: {
       children?: React.ReactNode;
     }) => {
-      const { onOpenAgentConversationLink } = runtimeRef.current;
-      const href = String(children ?? "");
+      const { agentConversationMarkers, onOpenAgentConversationLink } =
+        runtimeRef.current;
+      const href = getReactNodeText(children);
       const parsed = parseAgentConversationLink(href);
       if (!parsed.ok) {
-        return <span>{href}</span>;
-      }
-
-      if (!interactive) {
-        return <span className="font-medium text-current">Open task</span>;
+        return <span data-agent-conversation-link="">{href}</span>;
       }
 
       return (
-        <button
-          type="button"
-          data-agent-conversation-link=""
-          aria-label="Open task"
-          title={href}
-          className="cursor-pointer font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80"
-          onClick={() => {
-            onOpenAgentConversationLink(parsed.value);
-          }}
-        >
-          Open task
-        </button>
+        <AgentConversationLinkCard
+          href={href}
+          interactive={interactive}
+          link={parsed.value}
+          marker={findAgentConversationMarker(
+            agentConversationMarkers,
+            parsed.value,
+          )}
+          onOpenAgentConversationLink={onOpenAgentConversationLink}
+        />
       );
     },
   } as Components;
 }
 
 function MarkdownInner({
+  agentConversationMarkers,
   channelNames,
   className,
   content,
@@ -2252,6 +2347,14 @@ function MarkdownInner({
   const onOpenChannel = React.useCallback(
     (channelId: string) => {
       void goChannel(channelId);
+    },
+    [goChannel],
+  );
+  const onOpenAgentConversationLink = React.useCallback(
+    (link: ParsedAgentConversationLink) => {
+      void goChannel(link.channelId, {
+        taskReplyId: link.agentReplyId,
+      });
     },
     [goChannel],
   );
@@ -2281,6 +2384,7 @@ function MarkdownInner({
   );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
+    agentConversationMarkers,
     channels,
     imetaByUrl,
     mentionPubkeysByName,
@@ -2372,6 +2476,7 @@ export const Markdown = React.memo(
   MarkdownInner,
   (prev, next) =>
     prev.content === next.content &&
+    prev.agentConversationMarkers === next.agentConversationMarkers &&
     prev.className === next.className &&
     prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&

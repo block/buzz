@@ -560,6 +560,7 @@ export function MessageThreadPanel({
           <div className="rounded-2xl">
             <MessageRow
               actionBarPlacement="inside"
+              agentConversationMarkers={agentConversationMarkers}
               agentPubkeys={agentPubkeys}
               channelId={channelId}
               isFollowingThread={isFollowingThread}
@@ -624,6 +625,7 @@ export function MessageThreadPanel({
                   >
                     {showUnreadDivider ? <UnreadDivider /> : null}
                     <MessageRow
+                      agentConversationMarkers={agentConversationMarkers}
                       agentPubkeys={agentPubkeys}
                       channelId={channelId}
                       isUnread={isMessageUnreadById?.(entry.message.id)}

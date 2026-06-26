@@ -1,7 +1,7 @@
 /**
  * Remark plugin that detects bare `buzz://task?…` URLs and replaces each with
- * a custom task-link element. The renderer turns that element into an in-app
- * task link instead of leaving a raw custom-scheme URL as inert text.
+ * a custom task-link element. The renderer turns that element into the same
+ * native task card shown when a dedicated conversation is started.
  */
 
 import { createRemarkPrefixPlugin } from "../../shared/lib/createRemarkPrefixPlugin.ts";

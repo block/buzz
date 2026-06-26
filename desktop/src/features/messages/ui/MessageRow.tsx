@@ -4,6 +4,7 @@ import type {
   TimelineMessage,
   TimelineReaction,
 } from "@/features/messages/types";
+import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -119,6 +120,7 @@ export const MessageRow = React.memo(
     highlightThreadLineDepths,
     hoverBackground = true,
     actionBarPlacement = "floating",
+    agentConversationMarkers,
     collapseDescendantsLabel,
     isFollowingThread,
     isUnread,
@@ -143,6 +145,7 @@ export const MessageRow = React.memo(
     agentPubkeys,
     videoReviewContext,
   }: {
+    agentConversationMarkers?: readonly AgentConversationMarker[];
     agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
     collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
@@ -354,6 +357,7 @@ export const MessageRow = React.memo(
           return (
             <Markdown
               channelNames={channelNames}
+              agentConversationMarkers={agentConversationMarkers}
               className={cn(
                 "max-w-full text-sm",
                 emojiOnly &&
