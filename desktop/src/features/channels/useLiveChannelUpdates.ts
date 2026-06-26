@@ -15,6 +15,10 @@ import {
   CHANNEL_MESSAGE_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import {
+  createTrailingDebounce,
+  type TrailingDebounce,
+} from "@/shared/lib/trailingDebounce";
 
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
 
@@ -108,18 +112,20 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
-  const channelsInvalidateTimeoutRef = React.useRef<number | undefined>(
-    undefined,
-  );
-  const invalidateChannelsDebounced = React.useCallback(() => {
-    if (channelsInvalidateTimeoutRef.current !== undefined) {
-      return;
-    }
-    channelsInvalidateTimeoutRef.current = window.setTimeout(() => {
-      channelsInvalidateTimeoutRef.current = undefined;
-      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+  const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
+  if (channelsInvalidateRef.current === null) {
+    channelsInvalidateRef.current = createTrailingDebounce(() => {
+      // cancelRefetch:false: let an in-flight (multi-second) get_channels finish
+      // rather than restarting it.
+      void queryClient.invalidateQueries(
+        { queryKey: channelsQueryKey },
+        { cancelRefetch: false },
+      );
     }, CHANNELS_INVALIDATE_DEBOUNCE_MS);
-  }, [queryClient]);
+  }
+  const invalidateChannelsDebounced = React.useCallback(() => {
+    channelsInvalidateRef.current?.trigger();
+  }, []);
   const liveChannelIds = React.useMemo(
     () => new Set(channels.map((channel) => channel.id)),
     [channels],
@@ -487,10 +493,7 @@ export function useLiveChannelUpdates(
 
   React.useEffect(() => {
     return () => {
-      if (channelsInvalidateTimeoutRef.current !== undefined) {
-        window.clearTimeout(channelsInvalidateTimeoutRef.current);
-        channelsInvalidateTimeoutRef.current = undefined;
-      }
+      channelsInvalidateRef.current?.cancel();
 
       for (const dispose of liveSubsRef.current.values()) {
         void dispose().catch(() => {});
