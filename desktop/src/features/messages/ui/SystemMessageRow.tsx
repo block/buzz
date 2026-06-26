@@ -8,7 +8,6 @@ import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import { ProfileIdentityTrigger } from "@/features/profile/ui/ProfileIdentityTrigger";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -146,12 +145,14 @@ function SystemMessageAvatar({
 
     if (singlePubkey) {
       return (
-        <ProfileIdentityTrigger
-          buttonClassName="shrink-0 rounded-full"
-          pubkey={singlePubkey}
-        >
-          {avatar}
-        </ProfileIdentityTrigger>
+        <UserProfilePopover pubkey={singlePubkey}>
+          <button
+            className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            type="button"
+          >
+            {avatar}
+          </button>
+        </UserProfilePopover>
       );
     }
 
@@ -184,12 +185,14 @@ function SystemMessageAvatar({
   );
 
   return (
-    <ProfileIdentityTrigger
-      buttonClassName="shrink-0 rounded-full"
-      pubkey={actorPubkey}
-    >
-      {dualAvatar}
-    </ProfileIdentityTrigger>
+    <UserProfilePopover pubkey={actorPubkey}>
+      <button
+        className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        type="button"
+      >
+        {dualAvatar}
+      </button>
+    </UserProfilePopover>
   );
 }
 

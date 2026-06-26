@@ -3,11 +3,6 @@ import { ChevronRight, Cpu, MessageSquare } from "lucide-react";
 import type { ManagedAgent } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import {
-  ProfilePanelIcon,
-  ProfilePanelRow,
-  ProfilePanelSurface,
-} from "@/features/profile/ui/ProfilePanelPrimitives";
-import {
   type ProfileField,
   ProfileFieldRows,
 } from "@/features/profile/ui/UserProfilePanelFields";
@@ -72,7 +67,7 @@ function AgentConfigurationRows({
   }
 
   return (
-    <ProfilePanelSurface>
+    <div className="overflow-hidden rounded-2xl bg-muted/20">
       <AgentDetailsRows
         fields={fields}
         instruction={instruction}
@@ -81,7 +76,7 @@ function AgentConfigurationRows({
         showInstructionPlaceholder={showInstructionPlaceholder}
         showModel={showModel}
       />
-    </ProfilePanelSurface>
+    </div>
   );
 }
 
@@ -164,7 +159,9 @@ export function AgentInstructionRow({
     trimmedInstruction.length > 0 && onOpenInstructions !== undefined;
   const rowContent = (
     <>
-      <ProfilePanelIcon icon={MessageSquare} />
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <MessageSquare className="h-4 w-4 text-muted-foreground" />
+      </span>
       <div className="min-w-0 flex-1 text-left">
         <div className="text-xs font-medium text-foreground">Instructions</div>
         {trimmedInstruction ? (
@@ -249,11 +246,19 @@ export function AgentInstructionsFocusedView({
 
 function AgentModelRow({ modelLabel }: { modelLabel: string }) {
   return (
-    <ProfilePanelRow
-      icon={Cpu}
-      label="Model"
-      testId="user-profile-model"
-      value={modelLabel}
-    />
+    <div
+      className="flex items-center gap-3 px-4 py-3"
+      data-testid="user-profile-model"
+    >
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Cpu className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-xs font-medium text-foreground">Model</span>
+        <span className="mt-0.5 block truncate text-sm text-muted-foreground">
+          {modelLabel}
+        </span>
+      </span>
+    </div>
   );
 }

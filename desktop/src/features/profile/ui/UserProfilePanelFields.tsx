@@ -1,6 +1,8 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
+  ArrowUpRight,
+  Copy,
   Cpu,
   Ear,
   Fingerprint,
@@ -9,14 +11,10 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
-import { runtimeLabel } from "@/features/profile/lib/agentLabels";
 import { truncatePubkey as truncatePubkeyShort } from "@/features/profile/lib/identity";
-import {
-  ProfilePanelRow,
-  ProfilePanelSurface,
-} from "@/features/profile/ui/ProfilePanelPrimitives";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type {
   AgentPersona,
@@ -24,6 +22,22 @@ import type {
   Profile,
   RelayAgent,
 } from "@/shared/api/types";
+
+const RUNTIME_LABELS: Record<string, string> = {
+  goose: "Goose",
+  "claude-code": "Claude Code",
+  "codex-acp": "Codex",
+  aider: "Aider",
+};
+
+function runtimeLabel(command: string): string {
+  return RUNTIME_LABELS[command] ?? command;
+}
+
+async function copyToClipboard(value: string, label?: string) {
+  await navigator.clipboard.writeText(value);
+  toast.success(label ? `Copied ${label}` : "Copied to clipboard");
+}
 
 export type ProfileField = {
   copyValue?: string;
@@ -445,24 +459,78 @@ export function ProfileFieldRows({ fields }: { fields: ProfileField[] }) {
 export function ProfileFieldGroup({ fields }: { fields: ProfileField[] }) {
   return (
     <section>
-      <ProfilePanelSurface>
+      <div className="overflow-hidden rounded-2xl bg-muted/20">
         <ProfileFieldRows fields={fields} />
-      </ProfilePanelSurface>
+      </div>
     </section>
   );
 }
 
 function ProfileFieldRow({ field }: { field: ProfileField }) {
+  const Icon = field.icon;
+  const isCopyable = Boolean(field.copyValue);
+  const isActionable = Boolean(field.onClick);
+
+  const content = (
+    <>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block text-xs font-medium text-foreground">
+          {field.label}
+        </span>
+        <span
+          className="mt-0.5 block truncate text-sm text-muted-foreground"
+          title={field.displayValue}
+        >
+          {field.displayNode ?? field.displayValue}
+        </span>
+      </span>
+      {isActionable ? (
+        <ArrowUpRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : isCopyable ? (
+        <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : null}
+    </>
+  );
+
+  if (isActionable) {
+    return (
+      <button
+        aria-label={`Open ${field.label}`}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        data-testid={field.testId}
+        onClick={field.onClick}
+        title={`Open ${field.label}`}
+        type="button"
+      >
+        {content}
+      </button>
+    );
+  }
+
+  if (isCopyable && field.copyValue) {
+    return (
+      <button
+        aria-label={`Copy ${field.label}`}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        data-testid={field.testId}
+        onClick={() => void copyToClipboard(field.copyValue ?? "", field.label)}
+        title={`Copy ${field.label}`}
+        type="button"
+      >
+        {content}
+      </button>
+    );
+  }
+
   return (
-    <ProfilePanelRow
-      copyLabel={field.label}
-      copyValue={field.copyValue}
-      icon={field.icon}
-      label={field.label}
-      onClick={field.onClick}
-      testId={field.testId}
-      value={field.displayNode ?? field.displayValue}
-      valueTitle={field.displayValue}
-    />
+    <div
+      className="flex items-center gap-3 px-4 py-3"
+      data-testid={field.testId}
+    >
+      {content}
+    </div>
   );
 }

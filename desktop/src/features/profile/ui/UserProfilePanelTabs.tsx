@@ -11,10 +11,6 @@ import {
   ProfileFieldGroup,
   ProfileFieldRows,
 } from "@/features/profile/ui/UserProfilePanelFields";
-import {
-  ProfilePanelIcon,
-  ProfilePanelSurface,
-} from "@/features/profile/ui/ProfilePanelPrimitives";
 import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtils";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -45,7 +41,9 @@ export function ProfileIngressRow({
       onClick={onClick}
       type="button"
     >
-      <ProfilePanelIcon icon={Icon} />
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </span>
       <span className="min-w-0 flex-1 text-sm font-medium text-foreground">
         {label}
       </span>
@@ -339,12 +337,12 @@ export function ProfileRuntimeTabContent({
   return (
     <div className="space-y-2">
       {showInstructionBlock ? (
-        <ProfilePanelSurface>
+        <div className="overflow-hidden rounded-2xl bg-muted/20">
           <AgentInstructionRow
             instruction={agentInstruction}
             onOpenInstructions={onOpenInstructions}
           />
-        </ProfilePanelSurface>
+        </div>
       ) : null}
       {statusDiagnosticsFields.length > 0 ? (
         <ProfileFieldGroup fields={statusDiagnosticsFields} />
@@ -359,7 +357,7 @@ export function ProfileRuntimeTabContent({
         />
       ) : null}
       {hasRuntimeRows ? (
-        <ProfilePanelSurface>
+        <div className="overflow-hidden rounded-2xl bg-muted/20">
           <AgentDetailsRows
             fields={runtimeConfigurationFields}
             managedAgent={managedAgent}
@@ -369,7 +367,7 @@ export function ProfileRuntimeTabContent({
           {runtimeSettingsFields.length > 0 ? (
             <ProfileFieldRows fields={runtimeSettingsFields} />
           ) : null}
-        </ProfilePanelSurface>
+        </div>
       ) : null}
       {detailDiagnosticsFields.length > 0 ? (
         <ProfileFieldGroup fields={detailDiagnosticsFields} />

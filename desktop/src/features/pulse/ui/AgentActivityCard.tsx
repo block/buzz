@@ -2,7 +2,7 @@ import { Bot, ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
 import type { AgentNoteGroup } from "@/features/pulse/lib/groupAgentNotes";
-import { ProfileIdentityTrigger } from "@/features/profile/ui/ProfileIdentityTrigger";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -55,15 +55,20 @@ export function AgentActivityCard({
     <div className="rounded-2xl px-1 py-4 sm:px-2">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <ProfileIdentityTrigger
+        <UserProfilePopover
           botIdenticonValue={displayName}
-          buttonClassName="relative flex shrink-0 rounded-xl pt-1"
           pubkey={group.pubkey}
-          authorRole="bot"
+          role={"bot" as const}
         >
-          <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
-          <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
-        </ProfileIdentityTrigger>
+          <button
+            aria-label={`Open profile for ${displayName}`}
+            className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            type="button"
+          >
+            <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
+          </button>
+        </UserProfilePopover>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-semibold leading-none">

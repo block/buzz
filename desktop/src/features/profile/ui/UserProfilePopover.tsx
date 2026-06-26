@@ -9,9 +9,8 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { runtimeLabel } from "@/features/profile/lib/agentLabels";
 import { truncatePubkey } from "@/features/profile/lib/identity";
-import { AgentWorkingBadge } from "@/features/profile/ui/AgentWorkingBadge";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useChannelsQuery } from "@/features/channels/hooks";
@@ -24,6 +23,7 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
+import { useNow } from "@/shared/lib/useNow";
 
 type UserProfilePopoverProps = {
   children: React.ReactNode;
@@ -37,6 +37,17 @@ type UserProfilePopoverProps = {
 
 const HOVER_OPEN_DELAY_MS = 300;
 const HOVER_CLOSE_DELAY_MS = 200;
+
+const RUNTIME_LABELS: Record<string, string> = {
+  goose: "Goose",
+  "claude-code": "Claude Code",
+  "codex-acp": "Codex",
+  aider: "Aider",
+};
+
+function runtimeLabel(command: string): string {
+  return RUNTIME_LABELS[command] ?? command;
+}
 
 function InfoBadge({ children }: { children: React.ReactNode }) {
   return (
@@ -264,11 +275,10 @@ export function UserProfilePopover({
           {activeTurns.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {activeTurns.map(({ channelId, anchorAt }) => (
-                <AgentWorkingBadge
-                  anchorAt={anchorAt}
+                <PopoverWorkingBadge
                   key={channelId}
                   name={channelIdToName[channelId] ?? channelId}
-                  variant="popover"
+                  anchorAt={anchorAt}
                 />
               ))}
             </div>
@@ -297,5 +307,21 @@ export function UserProfilePopover({
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+function PopoverWorkingBadge({
+  name,
+  anchorAt,
+}: {
+  name: string;
+  anchorAt: number;
+}) {
+  const now = useNow(1000);
+
+  return (
+    <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary motion-safe:animate-pulse">
+      Working in #{name} · {formatElapsed(now - anchorAt)}
+    </span>
   );
 }
