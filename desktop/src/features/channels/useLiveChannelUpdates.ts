@@ -21,6 +21,7 @@ import {
 } from "@/shared/lib/trailingDebounce";
 
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
+import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
@@ -115,12 +116,14 @@ export function useLiveChannelUpdates(
   const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
   if (channelsInvalidateRef.current === null) {
     channelsInvalidateRef.current = createTrailingDebounce(() => {
-      // cancelRefetch:false: let an in-flight (multi-second) get_channels finish
-      // rather than restarting it.
-      void queryClient.invalidateQueries(
-        { queryKey: channelsQueryKey },
-        { cancelRefetch: false },
-      );
+      refreshChannelsWhenIdle({
+        isFetching: () =>
+          queryClient.isFetching({ queryKey: channelsQueryKey }),
+        invalidate: () => {
+          void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        },
+        reArm: () => channelsInvalidateRef.current?.trigger(),
+      });
     }, CHANNELS_INVALIDATE_DEBOUNCE_MS);
   }
   const invalidateChannelsDebounced = React.useCallback(() => {
