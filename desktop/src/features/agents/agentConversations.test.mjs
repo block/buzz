@@ -2,12 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildAgentConversationMentionPubkeys,
   buildAgentConversation,
   buildAgentConversationRecap,
   buildAgentConversationMarkers,
   deriveAgentConversationTitle,
-  getAutoRoutedAgentConversationPubkeys,
   getHiddenAgentConversationMessageIds,
   parseAgentConversationMarker,
   readPersistedAgentConversations,
@@ -60,48 +58,6 @@ test("continued conversation title condenses a refined Buzz data thread", () => 
     status: "resolved",
     title: "Data in Buzz app",
   });
-});
-
-test("continued conversation auto-routes only a single messageable agent", () => {
-  assert.deepEqual(
-    getAutoRoutedAgentConversationPubkeys([
-      { canMessage: true, pubkey: "agent-one" },
-    ]),
-    ["agent-one"],
-  );
-
-  assert.deepEqual(
-    getAutoRoutedAgentConversationPubkeys([
-      { canMessage: true, pubkey: "agent-one" },
-      { canMessage: true, pubkey: "agent-two" },
-    ]),
-    [],
-  );
-
-  assert.deepEqual(
-    getAutoRoutedAgentConversationPubkeys([
-      { canMessage: false, pubkey: "agent-one" },
-    ]),
-    [],
-  );
-});
-
-test("continued conversation mention routing preserves explicit multi-agent mentions", () => {
-  assert.deepEqual(
-    buildAgentConversationMentionPubkeys({
-      autoRouteAgentPubkeys: [],
-      mentionPubkeys: ["agent-one"],
-    }),
-    ["agent-one"],
-  );
-
-  assert.deepEqual(
-    buildAgentConversationMentionPubkeys({
-      autoRouteAgentPubkeys: ["AGENT-ONE"],
-      mentionPubkeys: ["agent-one", "agent-two"],
-    }),
-    ["AGENT-ONE", "agent-two"],
-  );
 });
 
 function markerEvent({ content = {}, createdAt = 1, id = "marker" } = {}) {

@@ -6,7 +6,6 @@ import {
   KIND_AGENT_CONVERSATION,
   KIND_AGENT_CONVERSATION_COMPAT,
 } from "@/shared/constants/kinds";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   collectConversationContextMessages,
   deriveTitleFromContext,
@@ -80,11 +79,6 @@ export type AgentConversationRecapInput = {
   messages: readonly TimelineMessage[];
 };
 
-export type AgentConversationRouteableParticipant = {
-  canMessage: boolean;
-  pubkey: string;
-};
-
 function normalizeAgentConversationStorageScope(
   workspaceScope: string | null | undefined,
 ): string {
@@ -104,46 +98,6 @@ export function agentConversationsStorageKey(
   workspaceScope: string | null | undefined,
 ): string {
   return `${AGENT_CONVERSATIONS_STORAGE_PREFIX}:${normalizeAgentConversationStorageScope(workspaceScope)}:${pubkey}`;
-}
-
-export function getAutoRoutedAgentConversationPubkeys(
-  participants: readonly AgentConversationRouteableParticipant[],
-): string[] {
-  if (participants.length !== 1) {
-    return [];
-  }
-
-  const [participant] = participants;
-  return participant.canMessage ? [participant.pubkey] : [];
-}
-
-export function buildAgentConversationMentionPubkeys({
-  autoRouteAgentPubkeys,
-  mentionPubkeys,
-}: {
-  autoRouteAgentPubkeys: readonly string[];
-  mentionPubkeys: readonly string[];
-}): string[] {
-  const seenPubkeys = new Set<string>();
-  const merged: string[] = [];
-  const add = (pubkey: string) => {
-    const normalized = normalizePubkey(pubkey);
-    if (!normalized || seenPubkeys.has(normalized)) {
-      return;
-    }
-
-    seenPubkeys.add(normalized);
-    merged.push(pubkey);
-  };
-
-  for (const pubkey of autoRouteAgentPubkeys) {
-    add(pubkey);
-  }
-  for (const pubkey of mentionPubkeys) {
-    add(pubkey);
-  }
-
-  return merged;
 }
 
 export function readHiddenAgentConversationIds(
