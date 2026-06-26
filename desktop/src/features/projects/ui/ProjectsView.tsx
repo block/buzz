@@ -28,7 +28,13 @@ import {
   useProjectsQuery,
 } from "@/features/projects/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { topChromeInset } from "@/shared/layout/chromeLayout";
+import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
+import {
+  channelChrome,
+  channelContentTopPaddingMeasurement,
+  topChromeInset,
+} from "@/shared/layout/chromeLayout";
+import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -368,7 +374,10 @@ function ProjectsToolbar({
   ];
 
   return (
-    <div className="flex flex-col gap-3 px-5 py-2" data-tauri-drag-region>
+    <div
+      className="pointer-events-auto flex flex-col gap-3 px-5 py-2"
+      data-tauri-drag-region
+    >
       <div className="flex min-h-9 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -708,6 +717,11 @@ function ProjectListRow({
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
+  const mainInsetRef = useMainInsetRef();
+  const projectsHeaderChromeRef = useMeasuredCssVariable({
+    targetRef: mainInsetRef,
+    ...channelContentTopPaddingMeasurement,
+  });
   const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const projects = projectsQuery.data ?? [];
@@ -841,7 +855,14 @@ export function ProjectsView() {
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className={cn(topChromeInset.headerBase, topChromeInset.divider)}>
+      <div
+        className={cn(
+          "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+          channelChrome.negativeMargin,
+          topChromeInset.divider,
+        )}
+        ref={projectsHeaderChromeRef}
+      >
         <ProjectsToolbar
           filter={filter}
           onFilterChange={handleFilterChange}
@@ -854,7 +875,7 @@ export function ProjectsView() {
         />
       </div>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)+1rem)]">
         {visibleProjects.length === 0 ? (
           <EmptyFilteredState />
         ) : viewMode === "grid" ? (
