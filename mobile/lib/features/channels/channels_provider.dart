@@ -1,18 +1,24 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart' show channelDetailsProvider;
 import 'read_state/read_state_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
+import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
+const _unreadCatchUpLimit = 1000;
+const _participatedRootIdsPrefix = 'buzz-thread-participation.v1';
+const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 
 /// Loads the user's channel list from the relay over WebSocket.
 ///
@@ -30,10 +36,22 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   final List<void Function()> _unsubscribers = [];
   int _subscriptionVersion = 0;
   Timer? _backstopTimer;
-  final Map<String, int> _latestHighPriorityByChannel = {};
+  final Map<String, int> _latestObservedByChannel = {};
+  final Map<String, Map<String, ObservedUnreadEvent>>
+  _observedUnreadEventsByChannel = {};
+  Set<String> _participatedRootIds = {};
+  Set<String> _authoredRootIds = {};
+  String? _threadInterestPubkey;
 
-  Map<String, int> get latestHighPriorityByChannel =>
-      Map.unmodifiable(_latestHighPriorityByChannel);
+  Map<String, int> get latestObservedByChannel =>
+      Map.unmodifiable(_latestObservedByChannel);
+
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel =>
+      Map<String, Map<String, ObservedUnreadEvent>>.unmodifiable({
+        for (final entry in _observedUnreadEventsByChannel.entries)
+          entry.key: Map<String, ObservedUnreadEvent>.unmodifiable(entry.value),
+      });
 
   @override
   Future<List<Channel>> build() {
@@ -50,14 +68,16 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     ref.onDispose(() {
       _clearLiveSubscriptions();
-      _latestHighPriorityByChannel.clear();
+      _latestObservedByChannel.clear();
+      _observedUnreadEventsByChannel.clear();
       _backstopTimer?.cancel();
       _backstopTimer = null;
     });
 
     if (sessionState.status != SessionStatus.connected) {
       _clearLiveSubscriptions();
-      _latestHighPriorityByChannel.clear();
+      _latestObservedByChannel.clear();
+      _observedUnreadEventsByChannel.clear();
       // Preserve the last successfully loaded channels while reconnecting
       // instead of re-entering a loading/error state. The UI will show cached
       // channels with a "Reconnecting…" banner overlay, which is far better
@@ -79,6 +99,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) throw StateError('No signing identity available');
+    _loadThreadInterestStores(myPk);
 
     final session = ref.read(relaySessionProvider.notifier);
 
@@ -399,9 +420,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     _unsubscribers.addAll(subscriptions.whereType<void Function()>());
 
-    // Backfill high-priority map from recent history so unread @mentions that
-    // arrived before app launch are correctly classified as high-priority tier.
-    unawaited(_backfillHighPriority(channels));
+    unawaited(_catchUpUnreadEvents(channels));
 
     _backstopTimer?.cancel();
     _backstopTimer = Timer.periodic(
@@ -410,83 +429,76 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
   }
 
-  Future<void> _backfillHighPriority(List<Channel> channels) async {
+  Future<void> _catchUpUnreadEvents(List<Channel> channels) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) return;
 
     final session = ref.read(relaySessionProvider.notifier);
-    final readState = ref.read(readStateProvider);
+    final ReadStateState readState;
+    try {
+      readState = ref.read(readStateProvider);
+    } catch (error) {
+      debugPrint('[ChannelsNotifier] unread catch-up skipped: $error');
+      return;
+    }
     final futures = <Future<void>>[];
 
     for (final channel in channels) {
       if (!channel.isMember || channel.isArchived) continue;
-
-      // All DM messages are high-priority — no need to scan event history.
-      if (channel.isDm) {
-        final lastMsg = channel.lastMessageAt;
-        if (lastMsg != null) {
-          _latestHighPriorityByChannel[channel.id] =
-              lastMsg.millisecondsSinceEpoch ~/ 1000;
-        }
-        continue;
-      }
-
       final readAt = readState.effectiveTimestamp(channel.id);
       futures.add(
-        _backfillHighPriorityForChannel(session, channel, myPk, readAt),
+        _catchUpUnreadEventsForChannel(session, channel, myPk, readAt),
       );
     }
 
-    // Batch into groups of 5 to avoid saturating the relay.
     const batchSize = 5;
     for (var i = 0; i < futures.length; i += batchSize) {
       await Future.wait(futures.sublist(i, min(i + batchSize, futures.length)));
     }
 
-    // Trigger unreadBadgeProvider to re-evaluate now that the map is populated.
     state = state.whenData((channels) => List<Channel>.of(channels));
   }
 
-  Future<void> _backfillHighPriorityForChannel(
+  Future<void> _catchUpUnreadEventsForChannel(
     RelaySessionNotifier session,
     Channel channel,
     String myPk,
     int? readAt,
   ) async {
-    // For non-DM channels, fetch events since the last read timestamp and scan
-    // for high-priority ones. Using `since` avoids fetching messages the user
-    // has already seen, and `limit: 200` covers deep mention backfills.
     try {
       final events = await session.fetchHistory(
         NostrFilter(
-          kinds: EventKind.channelEventKinds,
+          kinds: EventKind.channelMessageEventKinds,
           tags: {
             '#h': [channel.id],
           },
-          since: readAt ?? 0,
-          limit: 200,
+          since: readAt == null ? 0 : readAt + 1,
+          limit: _unreadCatchUpLimit,
         ),
       );
 
-      var maxHighPriority = 0;
       for (final event in events) {
-        if (event.pubkey == myPk) continue;
-        if (!EventKind.channelMessageEventKinds.contains(event.kind)) continue;
-        if (isHighPriorityEvent(event.tags, myPk) &&
-            event.createdAt > maxHighPriority) {
-          maxHighPriority = event.createdAt;
+        if (event.pubkey.toLowerCase() == myPk.toLowerCase()) {
+          _recordSelfThreadInterest(event, myPk);
         }
       }
 
-      if (maxHighPriority > 0) {
-        final current = _latestHighPriorityByChannel[channel.id] ?? 0;
-        if (maxHighPriority > current) {
-          _latestHighPriorityByChannel[channel.id] = maxHighPriority;
+      for (final event in events) {
+        if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
+        if (readAt != null && event.createdAt <= readAt) continue;
+        if (!shouldNotifyForEvent(
+          event,
+          myPk,
+          participatedRootIds: _participatedRootIds,
+          authoredRootIds: _authoredRootIds,
+        )) {
+          continue;
         }
+        _recordUnreadEvent(channel, event, myPk);
       }
     } catch (error) {
       debugPrint(
-        '[ChannelsNotifier] backfill failed for ${channel.id}: $error',
+        '[ChannelsNotifier] unread catch-up failed for ${channel.id}: $error',
       );
     }
   }
@@ -506,7 +518,18 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
 
-      if (myPk != null && shouldNotifyForEvent(event, myPk)) {
+      if (myPk != null && event.pubkey.toLowerCase() == myPk.toLowerCase()) {
+        _recordSelfThreadInterest(event, myPk);
+      }
+
+      if (myPk != null &&
+          shouldNotifyForEvent(
+            event,
+            myPk,
+            participatedRootIds: _participatedRootIds,
+            authoredRootIds: _authoredRootIds,
+          )) {
+        _recordUnreadEvent(channel, event, myPk);
         final eventTime = DateTime.fromMillisecondsSinceEpoch(
           event.createdAt * 1000,
           isUtc: true,
@@ -517,17 +540,89 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
 
-      if (myPk != null &&
-          event.pubkey != myPk &&
-          (channel.isDm || isHighPriorityEvent(event.tags, myPk))) {
-        final current = _latestHighPriorityByChannel[channelId] ?? 0;
-        if (event.createdAt > current) {
-          _latestHighPriorityByChannel[channelId] = event.createdAt;
-        }
-      }
-
       return updated;
     });
+  }
+
+  void _loadThreadInterestStores(String pubkey) {
+    final normalizedPubkey = pubkey.toLowerCase();
+    if (_threadInterestPubkey == normalizedPubkey) return;
+    _threadInterestPubkey = normalizedPubkey;
+    try {
+      final prefs = ref.read(savedPrefsProvider);
+      _participatedRootIds = _readRootIdSet(
+        prefs.getString('$_participatedRootIdsPrefix:$normalizedPubkey'),
+      );
+      _authoredRootIds = _readRootIdSet(
+        prefs.getString('$_authoredRootIdsPrefix:$normalizedPubkey'),
+      );
+    } catch (_) {
+      _participatedRootIds = {};
+      _authoredRootIds = {};
+    }
+  }
+
+  void _recordSelfThreadInterest(NostrEvent event, String pubkey) {
+    final ref = event.threadReference;
+    final target = ref.rootId != null ? _participatedRootIds : _authoredRootIds;
+    final id = ref.rootId ?? event.id;
+    if (!target.add(id)) return;
+    _writeThreadInterestStores(pubkey);
+  }
+
+  void _writeThreadInterestStores(String pubkey) {
+    final normalizedPubkey = pubkey.toLowerCase();
+    try {
+      final prefs = ref.read(savedPrefsProvider);
+      prefs.setString(
+        '$_participatedRootIdsPrefix:$normalizedPubkey',
+        _encodeRootIdSet(_participatedRootIds),
+      );
+      prefs.setString(
+        '$_authoredRootIdsPrefix:$normalizedPubkey',
+        _encodeRootIdSet(_authoredRootIds),
+      );
+    } catch (_) {
+      // Ignore storage failures; in-memory interest still works this session.
+    }
+  }
+
+  void _recordUnreadEvent(Channel channel, NostrEvent event, String myPk) {
+    final isThreadedReply =
+        event.threadReference.parentId != null && !_isBroadcastReply(event);
+    final isHighPriority =
+        channel.isDm || isHighPriorityEvent(event.tags, myPk);
+    recordObservedUnreadEvent(
+      _observedUnreadEventsByChannel,
+      channel.id,
+      makeObservedUnreadEvent(
+        id: event.id,
+        createdAt: event.createdAt,
+        rootId: _observedUnreadRootId(event),
+        highPriority: isHighPriority,
+        channelType: channel.channelType,
+        isThreadedReply: isThreadedReply,
+      ),
+      _unreadCatchUpLimit,
+    );
+
+    final current = _latestObservedByChannel[channel.id] ?? 0;
+    if (event.createdAt > current) {
+      _latestObservedByChannel[channel.id] = event.createdAt;
+    }
+  }
+
+  void clearObservedUnreadForChannel(String channelId) {
+    _latestObservedByChannel.remove(channelId);
+    _observedUnreadEventsByChannel.remove(channelId);
+    state = state.whenData((channels) => List<Channel>.of(channels));
+  }
+
+  void clearObservedUnreadCoveredByRead(String channelId, int readAt) {
+    final latest = _latestObservedByChannel[channelId];
+    if (latest != null && latest <= readAt) {
+      clearObservedUnreadForChannel(channelId);
+    }
   }
 
   /// Backstop refresh that preserves existing state on transient failure.
@@ -580,3 +675,26 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 final channelsProvider = AsyncNotifierProvider<ChannelsNotifier, List<Channel>>(
   ChannelsNotifier.new,
 );
+
+String? _observedUnreadRootId(NostrEvent event) =>
+    _isBroadcastReply(event) ? null : event.threadReference.rootId;
+
+bool _isBroadcastReply(NostrEvent event) => event.tags.any(
+  (tag) => tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+);
+
+Set<String> _readRootIdSet(String? raw) {
+  if (raw == null || raw.isEmpty) return {};
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return {};
+    return {
+      for (final value in decoded)
+        if (value is String) value,
+    };
+  } catch (_) {
+    return {};
+  }
+}
+
+String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());

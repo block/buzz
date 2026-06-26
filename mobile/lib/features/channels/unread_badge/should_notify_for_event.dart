@@ -1,9 +1,14 @@
 import '../../../shared/relay/nostr_models.dart';
 
-bool shouldNotifyForEvent(NostrEvent event, String myPubkey) {
+bool shouldNotifyForEvent(
+  NostrEvent event,
+  String myPubkey, {
+  Set<String> participatedRootIds = const {},
+  Set<String> authoredRootIds = const {},
+}) {
   if (!EventKind.channelMessageEventKinds.contains(event.kind)) return false;
 
-  if (event.pubkey == myPubkey) return false;
+  if (event.pubkey.toLowerCase() == myPubkey.toLowerCase()) return false;
 
   final ref = event.threadReference;
   if (ref.parentId == null) return true;
@@ -23,5 +28,8 @@ bool shouldNotifyForEvent(NostrEvent event, String myPubkey) {
     }
   }
 
-  return false;
+  final rootId = ref.rootId;
+  return rootId != null &&
+      (participatedRootIds.contains(rootId) ||
+          authoredRootIds.contains(rootId));
 }

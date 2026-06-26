@@ -64,6 +64,7 @@ int? _channelReadTimestamp({
   if (events != null && events.isNotEmpty) {
     var latest = 0;
     for (final event in events) {
+      if (event.threadReference.parentId != null) continue;
       if (event.createdAt > latest) {
         latest = event.createdAt;
       }
@@ -132,6 +133,9 @@ class ChannelDetailPage extends HookConsumerWidget {
         ref
             .read(readStateProvider.notifier)
             .markContextRead(channel.id, readTimestamp);
+        ref
+            .read(channelsProvider.notifier)
+            .clearObservedUnreadCoveredByRead(channel.id, readTimestamp);
       });
     }, [channel.id, readState.isReady, readTimestamp]);
 
