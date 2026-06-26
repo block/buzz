@@ -185,6 +185,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
     }
 
+    final hiddenDmIds = await _fetchHiddenDmIds(session, myPk);
+
     final channels = <Channel>[];
     for (final event in dedupedMetas) {
       final channel = _channelFromMeta(
@@ -192,6 +194,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         isMember: true,
         displayNames: displayNames,
       );
+      if (channel.isDm && hiddenDmIds.contains(channel.id)) continue;
       // Ephemeral (TTL) channels are surfaced in the list with an
       // `_EphemeralBadge` rendered in `channels_page.dart` — they shouldn't be
       // hidden. Desktop shows them too. Previously dropped here unconditionally,
@@ -327,6 +330,28 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       await _subscribeLive(channels);
     }
     return channels;
+  }
+
+  Future<Set<String>> _fetchHiddenDmIds(
+    RelaySessionNotifier session,
+    String myPk,
+  ) async {
+    try {
+      final events = await session.fetchHistory(NostrFilters.hiddenDms(myPk));
+      if (events.isEmpty) return const {};
+      NostrEvent latest = events.first;
+      for (final event in events.skip(1)) {
+        if (event.createdAt > latest.createdAt) {
+          latest = event;
+        }
+      }
+      return {
+        for (final tag in latest.tags)
+          if (tag.length >= 2 && tag[0] == 'h') tag[1],
+      };
+    } catch (_) {
+      return const {};
+    }
   }
 
   /// Build a [Channel] from a kind:39000 metadata event.

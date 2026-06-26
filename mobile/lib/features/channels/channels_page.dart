@@ -21,6 +21,7 @@ import '../pairing/pairing_provider.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channel_management_provider.dart';
+import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
@@ -349,9 +350,10 @@ class _SliverChannelsList extends HookConsumerWidget {
     final forumChannels = visibleChannels
         .where((channel) => channel.isForum)
         .toList();
-    final dmChannels = visibleChannels
-        .where((channel) => channel.isDm)
-        .toList();
+    final dmChannels = sortDmChannelsByDisplayLabel(
+      visibleChannels.where((channel) => channel.isDm),
+      currentPubkey: currentPubkey,
+    );
 
     final starredExpanded = useState(true);
     final channelsExpanded = useState(true);
@@ -1027,7 +1029,10 @@ class _ChannelTile extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      channel.displayLabel(currentPubkey: currentPubkey),
+                      resolveDmChannelDisplayLabel(
+                        channel,
+                        currentPubkey: currentPubkey,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: context.textTheme.bodyMedium?.copyWith(
@@ -1291,16 +1296,37 @@ class _DmAvatar extends ConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final presenceMap = ref.watch(presenceCacheProvider);
     final normalizedCurrent = currentPubkey?.toLowerCase();
+    final otherPubkeys = [
+      for (final pk in channel.participantPubkeys)
+        if (pk.toLowerCase() != normalizedCurrent) pk.toLowerCase(),
+    ];
+    final visiblePubkeys = otherPubkeys.isNotEmpty
+        ? otherPubkeys
+        : channel.participantPubkeys.map((pk) => pk.toLowerCase()).toList();
 
-    // Find the other participant's pubkey.
-    String? otherPubkey;
-    for (final pk in channel.participantPubkeys) {
-      if (pk.toLowerCase() != normalizedCurrent) {
-        otherPubkey = pk.toLowerCase();
-        break;
-      }
+    if (visiblePubkeys.length > 1) {
+      return Container(
+        width: 22,
+        height: 22,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: context.colors.surfaceContainerHighest,
+          shape: BoxShape.circle,
+          border: Border.all(color: context.colors.outlineVariant),
+        ),
+        child: Text(
+          '${visiblePubkeys.length}',
+          style: context.textTheme.labelSmall?.copyWith(
+            fontSize: 10,
+            color: context.colors.onSurface,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
+        ),
+      );
     }
 
+    final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
     final profile = otherPubkey != null ? profiles[otherPubkey] : null;
 
     // Trigger fetches if not cached yet.

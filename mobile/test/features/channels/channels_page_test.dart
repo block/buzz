@@ -49,7 +49,7 @@ void main() {
     ),
     Channel(
       id: '3',
-      name: 'dm-alice',
+      name: 'DM',
       channelType: 'dm',
       visibility: 'open',
       description: 'Direct message',

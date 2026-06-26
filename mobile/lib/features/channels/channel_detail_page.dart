@@ -23,6 +23,7 @@ import 'channels_provider.dart';
 import 'compose_bar.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
+import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
@@ -165,7 +166,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                           children: [
                             Flexible(
                               child: Text(
-                                resolvedChannel.displayLabel(
+                                resolveDmChannelDisplayLabel(
+                                  resolvedChannel,
                                   currentPubkey: currentPubkey,
                                 ),
                                 overflow: TextOverflow.ellipsis,
@@ -1272,7 +1274,10 @@ class _DmAppBarTitle extends ConsumerWidget {
                 children: [
                   Flexible(
                     child: Text(
-                      channel.displayLabel(currentPubkey: currentPubkey),
+                      resolveDmChannelDisplayLabel(
+                        channel,
+                        currentPubkey: currentPubkey,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: context.textTheme.titleSmall,
