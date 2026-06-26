@@ -704,22 +704,14 @@ async fn create_session_and_apply_model(
         });
     }
 
-    // Emit session config for desktop consumption (config bridge tier 1b).
-    agent.acp.observe(
-        "session_config_captured",
-        serde_json::json!({
-            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
-            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
-            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
-            "modelOverridden": agent.model_overridden,
-        }),
-    );
-
     // Apply desired_model if set, matching against the fresh session/new response.
-    if let Some(ref desired) = agent.desired_model {
+    // Track whether the switch succeeded so session_config_captured reflects
+    // the post-switch state (not the pre-switch desired state).
+    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                true
             }
             None => {
                 tracing::warn!(
@@ -738,9 +730,27 @@ async fn create_session_and_apply_model(
                         "modelId": desired,
                     }),
                 );
+                false
             }
         }
-    }
+    } else {
+        false
+    };
+
+    // Emit session config for desktop consumption (config bridge tier 1b).
+    // Emitted AFTER desired_model resolution so the desktop caches the
+    // post-switch state. modelOverridden reflects whether the switch actually
+    // applied — false on the unsupported arm so the panel doesn't show a
+    // stale override badge.
+    agent.acp.observe(
+        "session_config_captured",
+        serde_json::json!({
+            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            "modelOverridden": agent.model_overridden && switch_succeeded,
+        }),
+    );
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support

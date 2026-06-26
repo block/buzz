@@ -3,6 +3,7 @@ import { toast } from "sonner";
 
 import { Spinner } from "@/shared/ui/spinner";
 import React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type {
   AgentModelsResponse,
@@ -16,7 +17,7 @@ import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
 import { subscribeControlResults } from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { useAgentConfigSurface } from "@/features/agents/hooks";
+import { useAgentConfigSurface, managedAgentsQueryKey } from "@/features/agents/hooks";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -42,6 +43,7 @@ export function ModelPicker({
   const [hasRequestedModels, setHasRequestedModels] = React.useState(false);
 
   const { data: configSurface } = useAgentConfigSurface(agent.pubkey);
+  const queryClient = useQueryClient();
 
   const isRunning = agent.status === "running" || agent.status === "deployed";
   const activeTurns = useActiveAgentTurns(agent.pubkey);
@@ -158,6 +160,7 @@ export function ModelPicker({
         pubkey: agent.pubkey,
         model: modelId === modelsData?.agentDefaultModel ? null : modelId,
       });
+      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
       if (isRunning) {
         setNeedsRestart(true);
       }

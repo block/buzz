@@ -32,7 +32,8 @@ pub(crate) fn read_config_surface(
     let record_provider = record
         .env_vars
         .get(runtime_meta.and_then(|m| m.provider_env_var).unwrap_or(""))
-        .cloned();
+        .cloned()
+        .or_else(|| record.provider.clone()); // structured provider field as fallback
 
     let supports_acp_model = runtime_meta.is_some_and(|m| m.supports_acp_model_switching);
     let model_env_var = runtime_meta.and_then(|m| m.model_env_var);
@@ -45,7 +46,15 @@ pub(crate) fn read_config_surface(
         .unwrap_or(&[]);
 
     // Tier 1b: ACP configOptions from session cache.
-    let acp_model = session_cache.and_then(|c| c.current_model.clone());
+    // For unstable/switchable agents, current_model comes from the `models`
+    // field. For stable agents that only report model via configOptions
+    // (category="model", current_value), fall back to find_config_option_value
+    // so their current model is surfaced in the panel.
+    let acp_model = session_cache.and_then(|c| {
+        c.current_model
+            .clone()
+            .or_else(|| find_config_option_value(c, "model"))
+    });
     let acp_mode = session_cache.and_then(|c| find_config_option_value(c, "mode"));
     let acp_effort = session_cache.and_then(|c| find_config_option_value(c, "effort"));
     let record_effort = thinking_env_var
@@ -235,6 +244,9 @@ fn build_model_field(
     } else if let Some(ref m) = file_model {
         (Some(m.clone()), ConfigOrigin::ConfigFile)
     } else {
+        // No value from any tier. EnvVar is the sentinel origin for "no value
+        // resolved" — there is no dedicated None-origin variant. The panel
+        // renders this as an empty/absent field.
         (None, ConfigOrigin::EnvVar)
     };
 

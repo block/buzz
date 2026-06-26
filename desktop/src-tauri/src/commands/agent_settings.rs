@@ -27,8 +27,12 @@ pub fn set_managed_agent_start_on_app_launch(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+    let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+    if sync_changed {
         save_managed_agents(&app, &records)?;
+    }
+    for pubkey in &exited_pubkeys {
+        state.clear_session_cache(pubkey);
     }
 
     {

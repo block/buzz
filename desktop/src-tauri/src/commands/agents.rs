@@ -289,27 +289,37 @@ async fn start_local_agent_with_preflight(
 
 /// Build the standard agent JSON payload for provider deploy calls.
 ///
-/// Reads the agent's pinned record snapshot — `env_vars`, `model`, `provider`,
-/// `agent_command`/`agent_args` were all captured from the persona at create
-/// time and never re-read live, so a provider-backed agent pins identically to a
-/// local one. A persona edit reaches it only via delete+respawn. The only
-/// read-time resolution is `relay_url`: a blank pin resolves to the active
-/// workspace relay here, matching the create-path contract that stores an empty
-/// override and defers the workspace fallback to read-time.
+/// Unlike local spawn (which uses only pinned `record.env_vars` for
+/// determinism), provider deploy re-reads live persona env vars and
+/// structured model/provider so remote agents receive current credentials
+/// and the same authoritative values that local spawn derives from
+/// `runtime_metadata_env_vars`. The only field still pinned is
+/// `agent_command`/`agent_args` — those were captured at create time.
+/// The only read-time resolution is `relay_url`: a blank pin resolves to
+/// the active workspace relay here, matching the create-path contract.
 ///
-/// Fails closed when the private key is unavailable (keyring outage leaves it
-/// empty after hydration): without this guard a provider deploy would serialize
-/// `"private_key_nsec": ""` and launch the agent with no identity — the same
-/// hazard the local spawn path refuses via `spawn_key_refusal`.
+/// Fails closed when the private key is unavailable (keyring outage leaves
+/// it empty after hydration): without this guard a provider deploy would
+/// serialize `"private_key_nsec": ""` and launch the agent with no
+/// identity — the same hazard the local spawn path refuses via
+/// `spawn_key_refusal`.
 fn build_deploy_payload(
     app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
-    // Merge persona env_vars + agent env_vars for provider deploy. Same
-    // precedence as local spawn: persona first, agent overrides last. Without
-    // this, provider-backed agents wouldn't receive credentials saved on the
-    // persona or the agent itself.
+    // Fails closed when the private key is unavailable — same guard as local
+    // spawn. Without this, a keyring outage would serialize `"private_key_nsec": ""`
+    // and launch the agent with no identity.
+    if let Some(err) = crate::managed_agents::spawn_key_refusal(record) {
+        return Err(err);
+    }
+
+    // Merge persona env_vars + agent env_vars for provider deploy. Provider
+    // deploy re-reads live persona env vars so remote agents receive current
+    // credentials; local spawn uses only pinned record.env_vars for determinism
+    // across restarts. Without this, provider-backed agents wouldn't receive
+    // credentials saved on the persona or the agent itself.
     let persona_env =
         crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
     let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
@@ -457,8 +467,12 @@ pub fn list_managed_agents(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+    let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+    if sync_changed {
         save_managed_agents(&app, &records)?;
+    }
+    for pubkey in &exited_pubkeys {
+        state.clear_session_cache(pubkey);
     }
 
     let personas = load_personas(&app).unwrap_or_default();
@@ -521,8 +535,12 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
             save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
         }
         if let Some(persona_id) = requested_persona_id.as_deref() {
             let personas = load_personas(&app)?;
@@ -587,8 +605,12 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
             save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
         }
 
         // Guard against a duplicate pubkey appearing between phase 1 and phase 3
@@ -973,8 +995,12 @@ pub async fn start_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
             save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
@@ -1229,8 +1255,12 @@ pub fn stop_managed_agent(
         .lock()
         .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+    let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+    if sync_changed {
         save_managed_agents(&app, &records)?;
+    }
+    for pubkey in &exited_pubkeys {
+        state.clear_session_cache(pubkey);
     }
 
     {
@@ -1272,8 +1302,12 @@ pub fn delete_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
 
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+        let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
             save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
         }
 
         // Guard: reject deletion of deployed remote agents unless explicitly forced.

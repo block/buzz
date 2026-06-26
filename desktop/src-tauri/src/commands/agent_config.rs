@@ -10,7 +10,7 @@ use crate::{
                 NormalizedField, RuntimeConfigSurface, SessionConfigCache,
             },
         },
-        effective_agent_command, known_acp_runtime, load_managed_agents, load_personas,
+        effective_agent_command, current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
     },
@@ -81,7 +81,7 @@ fn resolve_config_surface(
         }
     }
     if !had_model {
-        record.model = persona_model;
+        record.model = persona_model.clone();
     }
     if !had_provider && !provider_env_key.is_empty() {
         if let Some(prov) = persona_provider {
@@ -105,6 +105,22 @@ fn resolve_config_surface(
     }
     if !had_provider && !provider_env_key.is_empty() {
         retag_persona_default(&mut surface.normalized.provider);
+    }
+
+    // Re-tag persona-snapshotted model from BuzzExplicit to PersonaDefault.
+    // Persona-created agents have record.model set at create time from the
+    // persona snapshot — had_model is true, but the model came from the persona,
+    // not an explicit user choice. Re-tag when the record model matches the
+    // persona model and no live override is active. Only applies when a persona
+    // is actually linked — non-persona agents with an explicit model keep BuzzExplicit.
+    if had_model && !model_overridden && record.persona_id.is_some() {
+        if let (Some(ref record_model), Some(ref persona_model_val)) =
+            (&record.model, &persona_model)
+        {
+            if record_model == persona_model_val {
+                retag_persona_default(&mut surface.normalized.model);
+            }
+        }
     }
 
     surface
@@ -141,7 +157,7 @@ pub async fn get_agent_config_surface(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)).0 {
             save_managed_agents(&app, &records)?;
         }
         records

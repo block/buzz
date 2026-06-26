@@ -6,6 +6,8 @@ import type { ControlResultFrame } from "@/shared/api/types";
 import { getIdentity, putAgentSessionConfig } from "@/shared/api/tauri";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { useQueryClient } from "@tanstack/react-query";
+import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
 import type {
   ConnectionState,
   ObserverEvent,
@@ -57,6 +59,17 @@ const controlResultListeners = new Map<
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
+
+// Callback invoked when session_config_captured is received, so React Query
+// can invalidate the config-surface query for the affected agent. Wired up
+// by useManagedAgentObserverBridge via setSessionConfigCapturedCallback.
+let onSessionConfigCaptured: ((pubkey: string) => void) | null = null;
+
+export function setSessionConfigCapturedCallback(
+  cb: ((pubkey: string) => void) | null,
+) {
+  onSessionConfigCaptured = cb;
+}
 
 function recomputeKnownAgentPubkeys() {
   knownAgentPubkeys.clear();
@@ -201,6 +214,7 @@ async function handleRelayObserverEvent(
     appendAgentEvent(agentPubkey, parsed);
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
+      onSessionConfigCaptured?.(agentPubkey);
     } else if (parsed.kind === "control_result") {
       dispatchControlResult(agentPubkey, parsed.payload);
     }
@@ -397,6 +411,17 @@ export function useManagedAgentObserverBridge(
     }
     void ensureRelayObserverSubscription();
   }, [hasActiveAgent]);
+
+  // Wire up config-surface query invalidation when session_config_captured fires.
+  const queryClient = useQueryClient();
+  React.useEffect(() => {
+    setSessionConfigCapturedCallback((pubkey) => {
+      void queryClient.invalidateQueries({
+        queryKey: agentConfigSurfaceQueryKey(pubkey),
+      });
+    });
+    return () => setSessionConfigCapturedCallback(null);
+  }, [queryClient]);
 }
 
 export function resetAgentObserverStore() {
@@ -410,6 +435,7 @@ export function resetAgentObserverStore() {
   snapshotByAgent.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  onSessionConfigCaptured = null;
   connectionState = "idle";
   errorMessage = null;
   notifyListeners();

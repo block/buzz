@@ -1241,7 +1241,7 @@ pub fn sync_managed_agent_processes(
     records: &mut [ManagedAgentRecord],
     runtimes: &mut HashMap<String, ManagedAgentProcess>,
     instance_id: &str,
-) -> bool {
+) -> (bool, Vec<String>) {
     let mut changed = false;
     let mut exited = Vec::new();
 
@@ -1281,6 +1281,7 @@ pub fn sync_managed_agent_processes(
         exited.push(pubkey.clone());
     }
 
+    let mut exited_pubkeys: Vec<String> = exited.clone();
     for pubkey in exited {
         runtimes.remove(&pubkey);
     }
@@ -1307,9 +1308,10 @@ pub fn sync_managed_agent_processes(
             record.last_stopped_at = Some(now_iso());
         }
         changed = true;
+        exited_pubkeys.push(record.pubkey.clone());
     }
 
-    changed
+    (changed, exited_pubkeys)
 }
 
 /// Classify an agent's persona against the live catalog for the Agents-menu

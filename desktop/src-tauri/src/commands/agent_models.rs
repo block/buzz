@@ -41,7 +41,7 @@ pub async fn get_agent_models(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)).0 {
             save_managed_agents(&app, &records)?;
         }
 
