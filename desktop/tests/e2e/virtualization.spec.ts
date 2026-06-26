@@ -3,15 +3,6 @@ import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-// Screenshot capture for the desktop list-virtualization pass (PR #1089). Each
-// shot is gated by an assertion so a geometry regression fails the run rather
-// than silently producing a misleading image. The shots are the empirical gate
-// that closes the correctness residual flagged in review: the absolute-position
-// / scrollMargin geometry under live dynamic measurement, and the
-// content-visibility "rows stay committed" claim on the dnd-coupled surface.
-// Artifacts land in test-results/virtualization/.
-const SHOTS = "test-results/virtualization";
-
 const WATERCOOLER_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
 const FORUM_THREAD_ID = "mock-forum-release-thread";
 const FORUM_DEEPLINK_REPLY_ID = "mock-forum-release-deeplink";
@@ -52,7 +43,7 @@ async function dragOver(page: Page, source: Locator, target: Locator) {
   await page.mouse.up();
 }
 
-test.describe("list virtualization screenshots", () => {
+test.describe("list virtualization", () => {
   test("01 — Pulse windowed feed with sticky composer pinned mid-scroll", async ({
     page,
   }) => {
@@ -89,8 +80,6 @@ test.describe("list virtualization screenshots", () => {
         ),
       )
       .toBeLessThan(80);
-
-    await page.screenshot({ path: `${SHOTS}/01-pulse-sticky-composer.png` });
   });
 
   test("02 — forum deep-link lands on an offscreen reply", async ({ page }) => {
@@ -116,8 +105,6 @@ test.describe("list virtualization screenshots", () => {
         }),
       )
       .toBe(true);
-
-    await page.screenshot({ path: `${SHOTS}/02-forum-deeplink-offscreen.png` });
   });
 
   test("03 — members search shows both sticky titles under content-visibility", async ({
@@ -145,10 +132,6 @@ test.describe("list virtualization screenshots", () => {
     await expect(
       page.locator('[data-testid^="channel-user-search-result-"]').first(),
     ).toBeVisible();
-
-    await page.screenshot({
-      path: `${SHOTS}/03-members-both-sticky-titles.png`,
-    });
   });
 
   test("06 — custom-section dnd reorder commits under content-visibility", async ({
@@ -182,8 +165,6 @@ test.describe("list virtualization screenshots", () => {
       );
     expect(await sectionOrder()).toEqual(["Priority", "Archive"]);
 
-    await page.screenshot({ path: `${SHOTS}/06a-sections-before-reorder.png` });
-
     // Drag "Priority" past "Archive" — onDragEnd commits arrayMove and persists
     // the new order. The drop must land for the order to flip.
     await dragOver(page, topHeader, bottomHeader);
@@ -193,7 +174,5 @@ test.describe("list virtualization screenshots", () => {
     // Both section rows stayed committed in the DOM across the reorder — the
     // content-visibility invariant the divergence rests on (no unmount).
     await expect(headers).toHaveCount(2);
-
-    await page.screenshot({ path: `${SHOTS}/06b-sections-after-reorder.png` });
   });
 });

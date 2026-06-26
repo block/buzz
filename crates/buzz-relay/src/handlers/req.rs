@@ -91,7 +91,6 @@ pub async fn handle_req(
 
     let channel_id = extract_channel_id_from_filters(&filters);
 
-    // ── Channel access + stale-cache repair (BEFORE search & registration) ───
     // Confirm channel access up front so the repaired `accessible_channels`
     // vector reaches every downstream consumer: the NIP-50 search branch
     // below, subscription registration, historical delivery, and COUNT. A
@@ -132,7 +131,6 @@ pub async fn handle_req(
         }
     }
 
-    // ── #p / engram gating for globally-stored sensitive kinds ───────────────
     // Applied BEFORE the NIP-50 search branch so that an authenticated member
     // cannot use `{"search":"...","kinds":[30174]}` (or similar for p-gated
     // kinds) to harvest indexed-but-globally-stored sensitive events. Search
@@ -166,7 +164,6 @@ pub async fn handle_req(
         }
     }
 
-    // ── NIP-50 search: one-shot, no persistent subscription ──────────────────
     // Search filters hit Typesense and return historical hits, then EOSE.
     // They are not registered for fan-out. The sensitive-kind gates above
     // already ran, so an authed member cannot use search to bypass author/#p
@@ -1227,8 +1224,6 @@ mod tests {
         );
     }
 
-    // ── NIP-AE engram read gating ────────────────────────────────────────
-
     /// Three real x-only pubkeys (valid for `PublicKey::from_hex`). Distinct,
     /// so we can label them clearly in tests.
     fn three_pubkeys() -> (String, String, String) {
@@ -1338,7 +1333,6 @@ mod tests {
         assert!(!engram_filters_authorized(&[f], &agent));
     }
 
-    // ── NIP-50 search bypass regressions ─────────────────────────────────
     // These filters are the shape an authenticated relay member would send
     // to try to harvest indexed engram envelopes via the search path. The
     // gate must reject them regardless of the presence of `search`.

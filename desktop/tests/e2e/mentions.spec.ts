@@ -46,6 +46,46 @@ function commandCount(commands: string[], command: string) {
   return commands.filter((entry) => entry === command).length;
 }
 
+async function emitMockMessage(
+  page: import("@playwright/test").Page,
+  channelName: string,
+  content: string,
+  options?: {
+    parentEventId?: string;
+    pubkey?: string;
+  },
+) {
+  const event = await page.evaluate(
+    ({ ch, msg, parentEventId, pubkey }) => {
+      return (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            parentEventId?: string | null;
+            pubkey?: string;
+          }) => { id: string; created_at: number; pubkey: string };
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: ch,
+        content: msg,
+        parentEventId: parentEventId ?? undefined,
+        pubkey: pubkey ?? undefined,
+      });
+    },
+    {
+      ch: channelName,
+      msg: content,
+      parentEventId: options?.parentEventId ?? null,
+      pubkey: options?.pubkey ?? TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+  if (!event) {
+    throw new Error("Mock message emitter is not installed");
+  }
+  return event;
+}
+
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -133,6 +173,78 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   expect(fizzIndex).toBeLessThan(bobIndex);
   expect(aliceIndex).toBeLessThan(charlieIndex);
   expect(bobIndex).toBeLessThan(charlieIndex);
+});
+
+test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey:
+          "9999999999999999999999999999999999999999999999999999999999999999",
+        name: "Brain With A Very Long Name",
+        status: "stopped",
+      },
+      {
+        pubkey:
+          "9999999999999999999999999999999999999999999999999999999999999998",
+        name: "Brainstorming Assistant With A Long Name",
+        status: "stopped",
+      },
+      {
+        pubkey:
+          "9999999999999999999999999999999999999999999999999999999999999997",
+        name: "Brainy Helper With Another Long Name",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.setViewportSize({ width: 900, height: 640 });
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem("buzz.desktop.thread-panel-width", "300");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.setViewportSize({ width: 760, height: 640 });
+
+  await emitMockMessage(page, "general", "Reply to open the thread", {
+    parentEventId: "mock-general-welcome",
+  });
+  const threadSummary = page.getByTestId("message-thread-summary").first();
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const panelBox = await threadPanel.boundingBox();
+  expect(panelBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(320);
+
+  const input = threadPanel.getByTestId("message-input");
+  await input.fill("@Brain");
+
+  const dropdown = threadPanel.getByTestId("mention-autocomplete");
+  await expect(dropdown).toBeVisible();
+
+  for (const name of [
+    "Brain With A Very Long Name",
+    "Brainstorming Assistant With A Long Name",
+    "Brainy Helper With Another Long Name",
+  ]) {
+    const row = dropdown.locator("button", { hasText: name });
+    await expect(row).toBeVisible();
+    await expect(
+      row.getByTestId("mention-suggestion-avatar-fallback"),
+    ).toBeVisible();
+    await expect(row.getByText("agent")).toBeVisible();
+    await expect(row.getByText(/owned by npub1mock/)).toBeVisible();
+
+    await expect(row.getByText(name)).not.toHaveCSS(
+      "text-overflow",
+      "ellipsis",
+    );
+  }
 });
 
 test("autocomplete filters suggestions as user types", async ({ page }) => {

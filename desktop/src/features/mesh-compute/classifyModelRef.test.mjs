@@ -3,8 +3,6 @@ import test from "node:test";
 
 import { classifyModelRef, modelRefHintLabel } from "./classifyModelRef.ts";
 
-// ── classifyModelRef ──────────────────────────────────────────────────
-
 test("empty string → unknown", () => {
   assert.deepEqual(classifyModelRef(""), { kind: "unknown" });
   assert.deepEqual(classifyModelRef("   "), { kind: "unknown" });
@@ -59,8 +57,6 @@ test("trims whitespace before classifying", () => {
     name: "Qwen3-8B-Q4_K_M",
   });
 });
-
-// ── modelRefHintLabel ─────────────────────────────────────────────────
 
 test("hint labels are user-facing strings", () => {
   assert.equal(

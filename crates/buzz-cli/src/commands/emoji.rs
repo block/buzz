@@ -308,10 +308,6 @@ async fn cmd_import(
     publish_own_set(client, &final_set).await
 }
 
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
-
 pub async fn dispatch(cmd: crate::EmojiCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::EmojiCmd;
     match cmd {

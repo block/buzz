@@ -108,7 +108,6 @@ class ForumPostCard extends ConsumerWidget {
             ),
             const SizedBox(height: Grid.xxs),
 
-            // Content preview
             ShaderMask(
               shaderCallback: (bounds) => const LinearGradient(
                 begin: Alignment.topCenter,

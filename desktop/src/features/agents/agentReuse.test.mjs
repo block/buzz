@@ -27,8 +27,6 @@ function makeAgent(overrides = {}) {
   };
 }
 
-// --- commandsMatch ---
-
 test("commandsMatch: bare names match", () => {
   assert.equal(commandsMatch("goose", "goose"), true);
 });
@@ -65,8 +63,6 @@ test("commandsMatch: different commands do not match", () => {
   assert.equal(commandsMatch("goose", "claude-acp"), false);
 });
 
-// --- parseTimestamp ---
-
 test("parseTimestamp: valid ISO string", () => {
   const result = parseTimestamp("2026-01-15T00:00:00Z");
   assert.equal(result, Date.parse("2026-01-15T00:00:00Z"));
@@ -87,8 +83,6 @@ test("parseTimestamp: empty string returns 0", () => {
 test("parseTimestamp: invalid string returns 0", () => {
   assert.equal(parseTimestamp("not-a-date"), 0);
 });
-
-// --- pickPreferredManagedAgent ---
 
 test("pickPreferredManagedAgent: empty array returns undefined", () => {
   assert.equal(pickPreferredManagedAgent([]), undefined);
@@ -169,8 +163,6 @@ test("pickPreferredManagedAgent: undefined updatedAt treated as epoch 0", () => 
   assert.equal(result.id, "ts");
 });
 
-// --- findReusablePersonaAgent ---
-
 test("findReusablePersonaAgent: finds agent with matching personaId", () => {
   const agent = makeAgent({ personaId: "persona-1", pubkey: PUB_A });
   const channelMembers = new Set([PUB_B]);
@@ -222,8 +214,6 @@ test("findReusablePersonaAgent: pubkey comparison is case-insensitive", () => {
   const result = findReusablePersonaAgent([agent], "p1", channelMembers);
   assert.equal(result, undefined);
 });
-
-// --- findReusableGenericAgent ---
 
 test("findReusableGenericAgent: finds agent with matching command and no persona/prompt", () => {
   const agent = makeAgent({
@@ -317,8 +307,6 @@ test("findReusableGenericAgent: command matching uses normalization", () => {
   );
   assert.equal(result, agent);
 });
-
-// --- findReusableAgent (unified entry point) ---
 
 test("findReusableAgent: routes to persona search when personaId provided", () => {
   const agent = makeAgent({ personaId: "p1", pubkey: PUB_A });

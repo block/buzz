@@ -373,8 +373,6 @@ function stopPruneInterval() {
   }
 }
 
-// ─── Public API ──────────────────────────────────────────────────────────────
-
 export function subscribeActiveAgentTurns(listener: () => void) {
   listeners.add(listener);
   if (listeners.size === 1) {

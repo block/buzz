@@ -18,8 +18,6 @@ function eventWithTags(tags) {
   return { id: FULL_TARGET.eventId, tags };
 }
 
-// ── hasNavigableTarget ──────────────────────────────────────────────────────
-
 test("hasNavigableTarget_full_target_is_navigable", () => {
   assert.equal(hasNavigableTarget(FULL_TARGET), true);
 });
@@ -39,8 +37,6 @@ test("hasNavigableTarget_empty_eventId_is_not_navigable", () => {
 test("hasNavigableTarget_empty_authorPubkey_is_not_navigable", () => {
   assert.equal(hasNavigableTarget({ ...FULL_TARGET, authorPubkey: "" }), false);
 });
-
-// ── resolveReminderDestination ──────────────────────────────────────────────
 
 test("resolveReminderDestination_nested_reply_lands_in_thread", async () => {
   const fetchEvent = async () =>

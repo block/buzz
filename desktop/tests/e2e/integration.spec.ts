@@ -428,13 +428,11 @@ test("multiple channels independent", async ({ page }) => {
   await installRelayBridge(page, "tyler");
   await page.goto("/");
 
-  // Create channel A
   await page.getByRole("button", { name: "Create a channel" }).click();
   await page.getByTestId("create-channel-name").fill(channelA);
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelA);
 
-  // Create channel B
   await page.getByRole("button", { name: "Create a channel" }).click();
   await page.getByTestId("create-channel-name").fill(channelB);
   await page.getByTestId("create-channel-submit").click();

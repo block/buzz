@@ -38,6 +38,8 @@ type UseAnchoredScrollOptions = {
    *  restoration re-run trigger so the anchor reasserts itself around the
    *  prepend on the fetch-state toggle, not only on the `messages` change. */
   isFetchingOlder?: boolean;
+  /** Re-runs restoration when surrounding chrome changes size without changing messages. */
+  layoutShiftKey?: string | number | null;
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
@@ -212,6 +214,7 @@ export function useAnchoredScroll({
   fetchOlder,
   hasOlderMessages = false,
   isFetchingOlder = false,
+  layoutShiftKey = null,
   targetMessageId = null,
   onTargetReached,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
@@ -363,7 +366,7 @@ export function useAnchoredScroll({
   // before the render. This is the single mechanism for keeping scroll
   // stable across prepends, appends, image loads, embed expansions, etc.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `isFetchingOlder` is an intentional re-run trigger, not a read. It re-runs restoration on fetch-state toggles so the anchor reasserts itself around the prepend; the correction is a no-op when nothing above the anchor moved.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `isFetchingOlder` and `layoutShiftKey` are intentional re-run triggers, not reads. They re-run restoration when fetch state or surrounding layout changes so the anchor reasserts itself; the correction is a no-op when nothing above the anchor moved.
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -456,6 +459,7 @@ export function useAnchoredScroll({
   }, [
     isFetchingOlder,
     isLoading,
+    layoutShiftKey,
     messages,
     onTargetReached,
     scrollContainerRef,

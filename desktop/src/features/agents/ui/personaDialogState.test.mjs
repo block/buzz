@@ -184,8 +184,6 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
   });
 });
 
-// ── Provider round-trip tests ─────────────────────────────────────────────────
-
 test("editPersonaDialogState preserves provider=databricks", () => {
   const state = editPersonaDialogState({
     id: "persona-provider",

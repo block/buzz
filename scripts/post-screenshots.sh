@@ -66,6 +66,8 @@ for i in "${!PNGS[@]}"; do
 done
 
 if [[ -n "$BODY_FILE" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  "$SCRIPT_DIR/check-pr-image-urls.sh" "$BODY_FILE"
   COMMENT_BODY="$(cat "$BODY_FILE")"
   UNREFERENCED=()
   for NAME in "${!IMAGE_URL_MAP[@]}"; do

@@ -1,6 +1,8 @@
 import type * as React from "react";
 
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
+import { cn } from "@/shared/lib/cn";
+import { PANEL_ENTER_MOTION_CLASS } from "@/shared/ui/OverlayPanelBackdrop";
 
 type RightAuxiliaryPaneProps = {
   canResetWidth: boolean;
@@ -23,7 +25,10 @@ export function RightAuxiliaryPane({
 }: RightAuxiliaryPaneProps) {
   return (
     <aside
-      className="group/right-pane relative flex h-full shrink-0 flex-col overflow-hidden bg-background before:pointer-events-none before:absolute before:bottom-0 before:left-0 before:top-0 before:z-40 before:w-px before:bg-border/80 before:content-['']"
+      className={cn(
+        "group/right-pane relative flex h-full shrink-0 flex-col overflow-hidden bg-background before:pointer-events-none before:absolute before:bottom-0 before:left-0 before:top-0 before:z-40 before:w-px before:bg-border/80 before:content-['']",
+        PANEL_ENTER_MOTION_CLASS,
+      )}
       data-testid={testId}
       style={{
         maxWidth: constrainToAvailableSpace

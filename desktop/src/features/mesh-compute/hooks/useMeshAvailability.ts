@@ -44,7 +44,6 @@ export function useMeshAvailability(): {
     };
   }, []);
 
-  // Initial fetch on mount.
   React.useEffect(() => fetchOnce(), [fetchOnce]);
 
   // Slow polling — availability changes when members are admitted/removed or

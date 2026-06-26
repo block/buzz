@@ -2,7 +2,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../channels_provider.dart';
 import '../read_state/read_state_provider.dart';
-import '../read_state/read_state_time.dart';
+import '../read_state/read_state_format.dart';
+import 'observed_unread_event.dart';
 
 class UnreadBadgeState {
   const UnreadBadgeState({
@@ -20,42 +21,58 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
 
   return channelsAsync.when(
     data: (channels) {
-      // Safe to ref.read the notifier here: _latestHighPriorityByChannel is
-      // only mutated inside _handleLiveEvent's state.whenData block, which
-      // always emits a new channelsProvider state — so the ref.watch above
-      // guarantees we re-run whenever the map changes.
       final notifier = ref.read(channelsProvider.notifier);
-      final highPriorityMap = notifier.latestHighPriorityByChannel;
+      final observedEventsByChannel = notifier.observedUnreadEventsByChannel;
+      final latestObservedByChannel = notifier.latestObservedByChannel;
 
-      int highPriority = 0;
-      int general = 0;
+      var highPriority = 0;
+      var general = 0;
 
       for (final channel in channels) {
         if (!channel.isMember || channel.isArchived) continue;
 
-        final isLocallyForced = readState.locallyForcedChannelIds.contains(
-          channel.id,
+        if (readState.locallyForcedChannelIds.contains(channel.id)) {
+          general++;
+          continue;
+        }
+
+        if (!latestObservedByChannel.containsKey(channel.id)) continue;
+
+        final observedEvents = observedEventsByChannel[channel.id];
+        final channelReadAt = readState.effectiveTimestamp(channel.id);
+        int? readAtForObservedEvent(ObservedUnreadEvent event) =>
+            observedUnreadEventReadAt(
+              event,
+              channelReadAt,
+              (rootId) =>
+                  readState.effectiveTimestamp(threadContextKey(rootId)),
+              (messageId) =>
+                  readState.effectiveTimestamp(msgContextKey(messageId)),
+            );
+
+        final unreadCount = countUnreadObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
         );
-        final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
-        if (lastMessageAt == null && !isLocallyForced) continue;
+        if (unreadCount == 0) continue;
 
-        final readAt = readState.effectiveTimestamp(channel.id);
-        final isUnread =
-            isLocallyForced ||
-            readAt == null ||
-            (lastMessageAt != null && lastMessageAt > readAt);
-        if (!isUnread) continue;
-
-        if (channel.isDm) {
-          highPriority++;
+        if (channel.isDm ||
+            countUnreadHighPriorityObservedEvents(
+                  observedEvents,
+                  readAtForObservedEvent,
+                ) >
+                0) {
+          final appBadgeCount = countUnreadAppBadgeObservedEvents(
+            observedEvents,
+            readAtForObservedEvent,
+          );
+          highPriority += appBadgeCount > 0 ? appBadgeCount : 1;
         } else {
-          final highPriorityAt = highPriorityMap[channel.id];
-          if (highPriorityAt != null &&
-              (readAt == null || highPriorityAt > readAt)) {
-            highPriority++;
-          } else {
-            general++;
-          }
+          final badgeCount = countUnreadBadgeObservedEvents(
+            observedEvents,
+            readAtForObservedEvent,
+          );
+          general += badgeCount > 0 ? badgeCount : 1;
         }
       }
 

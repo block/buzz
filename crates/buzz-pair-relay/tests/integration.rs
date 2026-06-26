@@ -13,12 +13,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 use buzz_pair_relay::{run_server, Relay};
 
-// ── Crypto imports (for real event signing) ───────────────────────────────────
-
 use secp256k1::{Keypair, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
-
-// ── Constants ─────────────────────────────────────────────────────────────────
 
 /// A valid 64-char lowercase hex string (all 'a's).
 const P_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -31,8 +27,6 @@ const EV_ID: &str = "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 const PUBKEY: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 /// A valid sig (128 'e's) — used only in pre-sig-check rejection tests.
 const SIG: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-
-// ── Test infrastructure ───────────────────────────────────────────────────────
 
 type WS = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -91,8 +85,6 @@ async fn assert_closed(ws: &mut WS) {
         Ok(Some(Ok(other))) => panic!("expected close, got {:?}", other),
     }
 }
-
-// ── Crypto helpers ────────────────────────────────────────────────────────────
 
 /// Generate a random keypair; returns `(SecretKey, pubkey_hex)`.
 fn gen_keypair() -> (SecretKey, String) {
@@ -205,8 +197,6 @@ async fn subscribe(ws: &mut WS, sub_id: &str, p_hex: &str) {
     assert_eq!(eose[0], "EOSE", "expected EOSE, got {eose}");
     assert_eq!(eose[1], sub_id);
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// 1. No replay: events published before a subscription are not delivered.
 ///    With tightening #2, publishing with no live subscriber is rejected

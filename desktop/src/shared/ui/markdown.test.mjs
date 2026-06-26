@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// ── Inlined pure functions from markdownUtils.ts ──────────────────────
 // These are copied here to avoid importing from .ts files that depend on
 // React (which isn't resolvable outside the bundler). Same pattern as
 // useMediaUpload.test.mjs inlining shortHash.
@@ -56,8 +55,6 @@ function hasBlockMedia(childArray) {
   const { imageChildren, nonImageChildren } = classifyChildren(childArray);
   return imageChildren.length >= 1 && nonImageChildren.length === 0;
 }
-
-// ── Inlined rehypeImageGallery (HAST-level) ───────────────────────────
 
 function isHastElement(node) {
   return node && node.type === "element";
@@ -121,8 +118,6 @@ function rehypeImageGallery() {
   };
 }
 
-// ── shallowArrayEqual ─────────────────────────────────────────────────
-
 test("shallowArrayEqual: identical references return true", () => {
   const arr = ["a", "b"];
   assert.equal(shallowArrayEqual(arr, arr), true);
@@ -152,8 +147,6 @@ test("shallowArrayEqual: one undefined returns false", () => {
 test("shallowArrayEqual: empty arrays return true", () => {
   assert.equal(shallowArrayEqual([], []), true);
 });
-
-// ── classifyChildren ──────────────────────────────────────────────────
 
 test("classifyChildren: elements with data-block-media are image children", () => {
   const children = [fakeElement("span", { "data-block-media": "" })];
@@ -222,8 +215,6 @@ test("classifyChildren: media with only whitespace and br between them", () => {
   assert.equal(nonImageChildren.length, 0);
 });
 
-// ── isImageOnlyParagraph ──────────────────────────────────────────────
-
 test("isImageOnlyParagraph: two media with br returns true", () => {
   const media = { "data-block-media": "" };
   const children = [
@@ -279,8 +270,6 @@ test("isImageOnlyParagraph: non-media component + media is not image-only", () =
   assert.equal(isImageOnlyParagraph(children), false);
 });
 
-// ── hasBlockMedia ─────────────────────────────────────────────────────
-
 test("hasBlockMedia: single media element returns true", () => {
   assert.equal(
     hasBlockMedia([fakeElement("span", { "data-block-media": "" })]),
@@ -330,8 +319,6 @@ test("hasBlockMedia: React component without data-block-media returns false", ()
   const LinkComponent = () => null;
   assert.equal(hasBlockMedia([fakeElement(LinkComponent)]), false);
 });
-
-// ── rehypeImageGallery (HAST-level grouping) ──────────────────────────
 
 function hastImg(src) {
   return { type: "element", tagName: "img", properties: { src }, children: [] };
@@ -428,7 +415,6 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
   assert.equal(tree.children.length, 3);
 });
 
-// ── messageLinkUrlTransform: buzz:// link preservation ──────────────
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
 // which would break copy → paste → click for `buzz://message?…` links
@@ -533,7 +519,6 @@ test("remarkSpoilers: block delimiter spoilers expose a block prop to React", ()
   assert.equal(spoilerProps?.["data-block-spoiler"], "");
 });
 
-// ── remarkMessageLinks: bare-URL → message-link node ──────────────────
 // `remark-gfm`'s autolinker only covers http(s)://, so bare `buzz://message`
 // URLs in plain text never reach any rendering path without this plugin.
 // The plugin emits a custom `message-link` HAST element which markdown.tsx

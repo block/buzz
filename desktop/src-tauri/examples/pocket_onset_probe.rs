@@ -134,7 +134,6 @@ fn main() {
             prompt, first, p1, r1, p5, r5, p20, r20
         );
 
-        // Dump raw WAV for inspection.
         let safe: String = prompt
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })

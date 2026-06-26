@@ -4,10 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 NostrEvent _textMsg({
   required String id,
   String pubkey = 'alice',
@@ -144,10 +140,6 @@ NostrEvent _reaction({
   content: content,
   sig: '',
 );
-
-// ---------------------------------------------------------------------------
-// SystemEvent.fromContent
-// ---------------------------------------------------------------------------
 
 void main() {
   group('SystemEvent.fromContent', () {
@@ -573,10 +565,6 @@ void main() {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // NostrEvent.threadReference
-  // -------------------------------------------------------------------------
-
   group('NostrEvent.threadReference', () {
     test('returns nulls for top-level message (no e-tags)', () {
       final event = _textMsg(id: 'a');
@@ -637,10 +625,6 @@ void main() {
     });
   });
 
-  // -------------------------------------------------------------------------
-  // formatTimeline — threading fields
-  // -------------------------------------------------------------------------
-
   group('formatTimeline threading', () {
     test('root messages have null parentId and rootId', () {
       final events = [_textMsg(id: 'a')];
@@ -672,10 +656,6 @@ void main() {
       expect(nested.rootId, 'root1');
     });
   });
-
-  // -------------------------------------------------------------------------
-  // buildMainTimelineEntries
-  // -------------------------------------------------------------------------
 
   group('buildMainTimelineEntries', () {
     test('returns only root messages', () {

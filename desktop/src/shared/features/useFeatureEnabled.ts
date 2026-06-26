@@ -3,10 +3,6 @@ import { getFeature } from "./manifest";
 import { resolveEnabled } from "./resolveEnabled";
 import { getOverrides, setOverride, OVERRIDES_KEY } from "./store";
 
-// ---------------------------------------------------------------------------
-// Reactive store — components re-render when overrides change
-// ---------------------------------------------------------------------------
-
 type Listener = () => void;
 const listeners = new Set<Listener>();
 
@@ -32,21 +28,16 @@ function subscribe(listener: Listener): () => void {
 
 /** Notify all subscribers that feature state changed */
 export function emitChange(): void {
-  // Invalidate cached snapshot
   cachedRaw = null;
   cachedParsed = null;
   for (const listener of listeners) listener();
 }
 
-// ---------------------------------------------------------------------------
-// Cached snapshot
-//
 // useSyncExternalStore requires getSnapshot to return a referentially stable
 // value when nothing has changed. Returning `JSON.stringify(getOverrides())`
 // fresh on every render would produce a new string each tick → infinite
 // re-render. We cache the serialized form and only mint a new parsed object
 // when the serialized form changes.
-// ---------------------------------------------------------------------------
 
 let cachedRaw: string | null = null;
 let cachedParsed: Record<string, boolean> | null = null;
@@ -72,14 +63,9 @@ function getSnapshot(): string {
 const getServerSnapshot = (): string => "{}";
 
 function getParsedSnapshot(): Record<string, boolean> {
-  // Ensure snapshot is fresh
   getSnapshot();
   return cachedParsed ?? emptyOverrides;
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /**
  * Returns the current parsed feature overrides.
@@ -172,5 +158,4 @@ export function usePreviewFeatureWarning(featureId: string): void {
   }, [feature, enabled]);
 }
 
-// Re-export for consumers that imported from here
 export { resolveEnabled } from "./resolveEnabled";

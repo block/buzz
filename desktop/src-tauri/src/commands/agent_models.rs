@@ -6,9 +6,9 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
-        known_acp_runtime, load_managed_agents, load_personas, managed_agent_avatar_url,
-        missing_command_message, normalize_agent_args, resolve_command,
+        build_managed_agent_summary, current_instance_id, default_agent_workdir,
+        find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
         UpdateManagedAgentResponse,
@@ -37,7 +37,7 @@ pub async fn get_agent_models(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app)) {
             save_managed_agents(&app, &records)?;
         }
 
@@ -166,7 +166,7 @@ pub async fn update_managed_agent(
             .managed_agent_processes
             .lock()
             .map_err(|e| e.to_string())?;
-        sync_managed_agent_processes(&mut records, &mut runtimes);
+        sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
 

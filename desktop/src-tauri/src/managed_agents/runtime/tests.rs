@@ -544,3 +544,35 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
         ]
     );
 }
+
+// ── name_matches_known_binary / name_matches_interpreter tests ───────────
+
+#[test]
+fn name_matches_known_binary_rejects_node() {
+    // `node` must NOT be in KNOWN_AGENT_BINARIES — adding it there would
+    // sweep all node processes on the machine regardless of ownership.
+    assert!(!super::name_matches_known_binary("node"));
+}
+
+#[test]
+fn name_matches_interpreter_accepts_node() {
+    // `node` IS a known script interpreter and must be recognized.
+    assert!(super::name_matches_interpreter("node"));
+}
+
+#[test]
+fn name_matches_interpreter_rejects_unknown() {
+    // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
+    assert!(!super::name_matches_interpreter("python3"));
+    assert!(!super::name_matches_interpreter("deno"));
+    assert!(!super::name_matches_interpreter("bun"));
+}
+
+#[test]
+fn name_matches_interpreter_rejects_node_prefix() {
+    // A name that starts with "node" but is longer must not match —
+    // exact equality is required to avoid false positives.
+    assert!(!super::name_matches_interpreter("node_modules"));
+    assert!(!super::name_matches_interpreter("nodejs"));
+    assert!(!super::name_matches_interpreter("node-gyp"));
+}

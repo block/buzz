@@ -279,10 +279,6 @@ pub async fn pick_team_directory(app: AppHandle) -> Result<Option<String>, Strin
     Ok(path.map(|p| p.to_string()))
 }
 
-// ---------------------------------------------------------------------------
-// Import / Export
-// ---------------------------------------------------------------------------
-
 const MAX_TEAM_JSON_BYTES: usize = 5 * 1024 * 1024;
 
 #[tauri::command]

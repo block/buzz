@@ -153,8 +153,6 @@ pub fn d_tag(k_c: &ConversationKey, slug: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-// ── Bodies ──────────────────────────────────────────────────────────────────
-
 /// A decoded engram body. The slug discriminates the variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Body {
@@ -368,8 +366,6 @@ fn parse_strict_json(bytes: &[u8]) -> Result<serde_json::Value, EngramError> {
     Ok(v)
 }
 
-// ── Reference extraction (`[[slug]]`) ───────────────────────────────────────
-
 /// Extract `[[slug]]` references from a body's free-form text field
 /// (`profile` for [`Body::Core`], `value` for [`Body::Memory`]).
 ///
@@ -430,8 +426,6 @@ pub fn extract_refs(body: &str) -> Vec<String> {
     }
     out
 }
-
-// ── Envelope build / parse ──────────────────────────────────────────────────
 
 /// Build a signed `kind:30174` event for a given body.
 ///
@@ -618,9 +612,7 @@ mod tests {
         Keys::parse(s).unwrap()
     }
 
-    // ── Reference test vectors from docs/nips/NIP-AE.md §"Reference test
     //    vectors". Pinning these as CI invariants is the single best
-    //    interop guarantee for this implementation. ──
 
     const SECKEY_A: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     const SECKEY_O: &str = "0000000000000000000000000000000000000000000000000000000000000002";
@@ -894,8 +886,6 @@ mod tests {
         let err = build_event(&agent, &owner.public_key(), &body, 1).unwrap_err();
         assert!(matches!(err, EngramError::BodyTooLarge(_)));
     }
-
-    // ── extract_refs ────────────────────────────────────────────────────────
 
     #[test]
     fn extract_refs_empty_body() {

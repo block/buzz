@@ -46,8 +46,6 @@ use buzz_db::EventQuery;
 
 use crate::state::AppState;
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
 /// Maximum age of a hook callback (seconds). Push is synchronous so 30s is generous.
 const MAX_CALLBACK_AGE_SECS: u64 = 30;
 
@@ -110,8 +108,6 @@ impl From<Denial> for DenialResponse {
     }
 }
 
-// ── HMAC Verification ────────────────────────────────────────────────────────
-
 /// Compute the canonical HMAC payload.
 ///
 /// Format (length-prefixed, `|`-separated, structurally unambiguous):
@@ -164,8 +160,6 @@ fn verify_hmac(secret: &[u8], req: &HookCallbackRequest) -> bool {
     use subtle::ConstantTimeEq;
     expected.ct_eq(&provided).into()
 }
-
-// ── Handler ──────────────────────────────────────────────────────────────────
 
 /// `POST /internal/git/policy` — pre-receive hook callback.
 ///
@@ -383,8 +377,6 @@ pub async fn hook_policy_check(
     }
 }
 
-// ── HMAC Generation (for the relay to pass to the hook) ──────────────────────
-
 /// Generate the HMAC signature for a hook callback payload.
 ///
 /// Called by the relay when setting up the pre-receive hook environment.
@@ -407,8 +399,6 @@ pub fn generate_hook_hmac(
     let mac_bytes = compute_hmac(secret, &req);
     hex::encode(mac_bytes)
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

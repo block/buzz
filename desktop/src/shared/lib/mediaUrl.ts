@@ -112,7 +112,6 @@ export function rewriteRelayUrl(url: string): string {
     return mediaProxyUrl(cachedPort, m[1]);
   }
 
-  // Kick off fetch if we haven't yet.
   if (!portPromise && typeof window !== "undefined") {
     portPromise = fetchProxyPort();
   }

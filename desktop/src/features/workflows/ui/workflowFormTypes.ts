@@ -1,9 +1,5 @@
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export const TRIGGER_TYPES = [
   "message_posted",
   "reaction_added",
@@ -130,10 +126,6 @@ function parseTimeoutSecs(timeoutSecs: string | undefined): number | undefined {
   const parsed = Number(trimmed);
   return parsed > 0 ? parsed : undefined;
 }
-
-// ---------------------------------------------------------------------------
-// Serialization helpers
-// ---------------------------------------------------------------------------
 
 function actionFieldsForStep(step: StepFormState): Record<string, unknown> {
   const fields: Record<string, unknown> = {};

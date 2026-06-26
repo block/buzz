@@ -1616,6 +1616,8 @@ function resetMockMesh() {
 }
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
+// Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
+const tauriEventListeners = new Map<string, Set<() => void>>();
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
     pubkey: ALICE_PUBKEY,
@@ -6685,6 +6687,61 @@ export function maybeInstallE2eTauriMocks() {
         return handleDeletePersona(
           payload as Parameters<typeof handleDeletePersona>[0],
         );
+      case "reconcile_inbound_persona_event": {
+        const nostrEvent = JSON.parse(
+          (payload as { eventJson: string }).eventJson,
+        ) as {
+          kind: number;
+          tags: string[][];
+          content: string;
+          created_at: number;
+        };
+        if (nostrEvent.kind === 30175) {
+          // Persona upsert — parse content and upsert into mockPersonas by d-tag
+          const dTag = nostrEvent.tags.find((t) => t[0] === "d")?.[1];
+          if (dTag) {
+            const content = JSON.parse(nostrEvent.content) as {
+              display_name?: string;
+              system_prompt?: string;
+            };
+            const now = new Date().toISOString();
+            const existing = mockPersonas.find((p) => p.id === dTag);
+            if (existing) {
+              existing.display_name =
+                content.display_name ?? existing.display_name;
+              existing.system_prompt =
+                content.system_prompt ?? existing.system_prompt;
+              existing.updated_at = now;
+            } else {
+              mockPersonas.push({
+                id: dTag,
+                display_name: content.display_name ?? dTag,
+                avatar_url: null,
+                system_prompt: content.system_prompt ?? "",
+                is_builtin: false,
+                is_active: true,
+                env_vars: {},
+                created_at: now,
+                updated_at: now,
+              });
+            }
+          }
+        } else if (nostrEvent.kind === 5) {
+          // Tombstone — extract d-tag from a-tag "30175:<pubkey>:<d_tag>" and remove
+          const aTagValue = nostrEvent.tags.find((t) => t[0] === "a")?.[1];
+          if (aTagValue) {
+            const dTag = aTagValue.split(":")[2];
+            if (dTag) {
+              mockPersonas = mockPersonas.filter((p) => p.id !== dTag);
+            }
+          }
+        }
+        // Mirror the real Rust backend: emit "agents-data-changed" after reconcile.
+        for (const cb of tauriEventListeners.get("agents-data-changed") ?? []) {
+          cb();
+        }
+        return undefined;
+      }
       case "set_persona_active":
         return handleSetPersonaActive(
           payload as Parameters<typeof handleSetPersonaActive>[0],
@@ -7068,6 +7125,27 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
   mockIPC(handleMockCommand);
+
+  // Wire up __TAURI_INTERNALS__.listen so tests can subscribe to backend-emitted
+  // events (e.g. "agents-data-changed"). mockIPC already ensures __TAURI_INTERNALS__
+  // exists; we just add the listen property without clobbering invoke.
+  (
+    window as unknown as {
+      __TAURI_INTERNALS__: {
+        listen?: (event: string, cb: () => void) => Promise<() => void>;
+      };
+    }
+  ).__TAURI_INTERNALS__.listen = async (event: string, cb: () => void) => {
+    let listeners = tauriEventListeners.get(event);
+    if (!listeners) {
+      listeners = new Set();
+      tauriEventListeners.set(event, listeners);
+    }
+    listeners.add(cb);
+    return () => {
+      tauriEventListeners.get(event)?.delete(cb);
+    };
+  };
 
   installed = true;
 }

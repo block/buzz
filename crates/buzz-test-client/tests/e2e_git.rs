@@ -448,8 +448,6 @@ async fn git_concurrent_push_one_wins_and_repo_recovers() {
     );
 }
 
-// ── tiny tempdir (avoid an extra dep) ─────────────────────────────────────────
-
 struct TempDir(PathBuf);
 impl TempDir {
     fn path(&self) -> &Path {

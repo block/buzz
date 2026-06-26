@@ -89,10 +89,6 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // CRUD delegates
-  // -------------------------------------------------------------------------
-
   void createSection(String name) => _manager?.createSection(name);
 
   void renameSection(String sectionId, String newName) =>
@@ -110,10 +106,6 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
 
   void unassignChannel(String channelId) =>
       _manager?.unassignChannel(channelId);
-
-  // -------------------------------------------------------------------------
-  // Internal
-  // -------------------------------------------------------------------------
 
   void _emitManagerState(ChannelSectionsManager manager) {
     if (_manager != manager) return;

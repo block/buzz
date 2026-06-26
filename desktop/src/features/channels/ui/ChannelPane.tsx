@@ -669,6 +669,9 @@ export const ChannelPane = React.memo(function ChannelPane({
             hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
             isFetchingOlder={isFetchingOlder}
+            layoutShiftKey={
+              useSplitAuxiliaryPane ? (openThreadHeadId ?? "closed") : "overlay"
+            }
             isFollowingThreadById={isFollowingThreadById}
             isMessageUnreadById={isMessageUnreadById}
             personaLookup={personaLookup}
@@ -791,7 +794,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     {hasTypingActivity ? (
                       <TypingIndicatorRow
                         channel={activeChannel}
-                        className="min-w-0 flex-1 px-0 py-0"
+                        className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
                         currentPubkey={currentPubkey}
                         profiles={profiles}
                         typingPubkeys={typingPubkeys}

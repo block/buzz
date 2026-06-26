@@ -109,7 +109,6 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    // ── Git server configuration ─────────────────────────────────────────────
     /// Root directory for the relay's local git state. No per-repo bare repos
     /// live here — runtime reads/writes hydrate ephemeral repos from object
     /// storage. Holds only the name-reservation index at `{git_repo_path}/.names/`.
@@ -124,7 +123,6 @@ pub struct Config {
     /// Used to authenticate internal policy endpoint requests.
     pub git_hook_hmac_secret: String,
 
-    // ── Web UI serving ────────────────────────────────────────────────────────
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the SPA from this directory for browser requests.
     /// When unset, no static file serving happens (relay behaves as before).

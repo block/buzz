@@ -65,7 +65,6 @@ class PairingPage extends HookConsumerWidget {
                     children: [
                       const Spacer(flex: 2),
 
-                      // Branding
                       Icon(
                         LucideIcons.hexagon,
                         size: 64,
@@ -98,7 +97,6 @@ class PairingPage extends HookConsumerWidget {
 
                       const SizedBox(height: Grid.sm),
 
-                      // Divider
                       Row(
                         children: [
                           const Expanded(child: Divider()),

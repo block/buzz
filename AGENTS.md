@@ -218,12 +218,17 @@ Desktop E2E: `cd desktop && pnpm exec playwright test`
 
 See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
-### Desktop Screenshots (Playwright)
+### PR Screenshots
 
 > **Do NOT use `buzz upload`, the relay media endpoint, or any third-party
 > image host for PR screenshots.** Relay media URLs fail through GitHub's camo
-> proxy. Always use `scripts/post-screenshots.sh` — see the `desktop-screenshot`
-> skill for the full workflow.
+> proxy. Always use `scripts/post-screenshots.sh` for PNGs before linking them
+> from a PR body/comment. If you hand-edit PR markdown, run
+> `scripts/check-pr-image-urls.sh <markdown-file>` first to catch relay URLs.
+
+For mobile simulator screenshots, save the PNGs in a local directory and run
+`./scripts/post-screenshots.sh <PR-number> <png-dir>` or use the third argument
+with a markdown template containing `{{filename}}` placeholders.
 
 The desktop app requires the E2E mock bridge to render — it cannot run in a plain
 browser. Use `just desktop-screenshot` to capture screenshots (builds frontend,

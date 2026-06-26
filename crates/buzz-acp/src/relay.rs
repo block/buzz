@@ -20,8 +20,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-// ─── Named constants ──────────────────────────────────────────────────────────
-
 /// Default capacity of the event channel from background task to harness.
 /// Override with `BUZZ_ACP_EVENT_BUFFER` env var at startup.
 const EVENT_CHANNEL_CAPACITY_DEFAULT: usize = 256;
@@ -75,8 +73,6 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::ChannelFilter;
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 /// Metadata about a channel, populated at discovery time.
 #[derive(Debug, Clone)]
@@ -197,8 +193,6 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
-    // ── NIP-98 signing ────────────────────────────────────────────────────
-
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
@@ -246,8 +240,6 @@ impl RestClient {
     ) -> Result<String, RelayError> {
         Ok(format!("Nostr {}", self.sign_nip98(method, url, body)?))
     }
-
-    // ── Retry helper ──────────────────────────────────────────────────────
 
     /// Retry helper: executes `build_request` up to 4 times (1 attempt + 3 retries)
     /// on transient failures (429, 502, 503, 504, timeout, connect errors).
@@ -305,8 +297,6 @@ impl RestClient {
         Err(last_err
             .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries"))))
     }
-
-    // ── Bridge methods ────────────────────────────────────────────────────
 
     /// POST with NIP-98 auth and retry. Re-signs on each attempt.
     async fn bridge_post(
@@ -410,8 +400,6 @@ impl From<nostr::event::builder::Error> for RelayError {
     }
 }
 
-// ── Internal relay message types ──────────────────────────────────────────────
-
 /// A parsed NIP-01 relay message.
 #[derive(Debug, Clone)]
 enum RelayMessage {
@@ -438,8 +426,6 @@ enum RelayMessage {
         challenge: String,
     },
 }
-
-// ── Commands sent from HarnessRelay to the background task ───────────────────
 
 /// Subscription ID for the global membership notification subscription.
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
@@ -472,11 +458,7 @@ enum RelayCommand {
     SetStartupWatermark { ts: u64 },
 }
 
-// ── WebSocket stream type alias ───────────────────────────────────────────────
-
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
-// ── HarnessRelay ──────────────────────────────────────────────────────────────
 
 /// Harness-side relay client.
 ///
@@ -525,8 +507,6 @@ impl RelayEventPublisher {
 }
 
 impl HarnessRelay {
-    // ── Public API ────────────────────────────────────────────────────────────
-
     /// Connect to relay and authenticate via NIP-42.
     ///
     /// `auth_tag` is an optional NIP-OA owner attestation included in the AUTH
@@ -857,8 +837,6 @@ impl Drop for HarnessRelay {
         }
     }
 }
-
-// ── Background task ───────────────────────────────────────────────────────────
 
 /// Two-generation dedup set with bounded memory.
 ///
@@ -1371,7 +1349,6 @@ async fn run_background_task(
         }
 
         tokio::select! {
-                   // ── Incoming WebSocket message ────────────────────────────────────
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -1454,7 +1431,6 @@ async fn run_background_task(
                        }
                    }
 
-                   // ── Command from HarnessRelay ─────────────────────────────────────
                    cmd = cmd_rx.recv() => {
                        match cmd {
                            Some(RelayCommand::Reconnect) => {
@@ -1526,7 +1502,6 @@ async fn run_background_task(
                        }
                    }
 
-                   // ── Finding #31: client-initiated ping ────────────────────────────
                    _ = ping_interval.tick() => {
                        if ping_sent && last_pong.elapsed() > PONG_TIMEOUT {
                            // No pong received after our last ping — connection is dead.
@@ -2576,8 +2551,6 @@ async fn send_auth_response(
     Ok(())
 }
 
-// ── Free functions ────────────────────────────────────────────────────────────
-
 /// Convert a WebSocket URL to its HTTP equivalent.
 ///
 /// `ws://host:port` → `http://host:port`
@@ -2737,8 +2710,6 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
     }
 }
 
-// ── Connection helpers ────────────────────────────────────────────────────────
-
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
 ///
 /// Returns `(ws, buffer)` on success.
@@ -2760,13 +2731,10 @@ async fn do_connect(
     let mut ws = ws;
     let mut buffer: VecDeque<RelayMessage> = VecDeque::new();
 
-    // ── Step 1: Wait for AUTH challenge ───────────────────────────────────
     let challenge = wait_for_auth_challenge(&mut ws, &mut buffer, AUTH_TIMEOUT).await?;
 
-    // ── Step 2: Build and send kind:22242 auth event ──────────────────────
     send_auth_response(&mut ws, &challenge, relay_url, keys, auth_tag).await?;
 
-    // ── Step 3: Wait for OK ───────────────────────────────────────────────
     let event_id = {
         // We need the event_id that was just sent. Re-derive it by signing again
         // just to get the ID — but that's wasteful. Instead, parse the last sent
@@ -2914,13 +2882,9 @@ async fn wait_for_any_ok(
     }
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── relay_ws_to_http ──────────────────────────────────────────────────────
 
     #[test]
     fn relay_ws_to_http_plain() {
@@ -2962,8 +2926,6 @@ mod tests {
         );
     }
 
-    // ── channel_sub_id ────────────────────────────────────────────────────────
-
     #[test]
     fn channel_sub_id_format() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -2995,8 +2957,6 @@ mod tests {
     fn channel_id_from_sub_id_empty() {
         assert!(channel_id_from_sub_id("").is_none());
     }
-
-    // ── merge_discovered_channels (archived skip) ─────────────────────────────
 
     fn meta_event(uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
         let mut tags = vec![
@@ -3062,8 +3022,6 @@ mod tests {
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
     }
-
-    // ── parse_relay_message ───────────────────────────────────────────────────
 
     #[test]
     fn parse_ok_accepted() {
@@ -3227,8 +3185,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── channel_sub_id subscription format ───────────────────────────────────
-
     #[test]
     fn subscription_id_starts_with_ch_prefix() {
         let uuid = Uuid::new_v4();
@@ -3242,8 +3198,6 @@ mod tests {
         let sub_id = channel_sub_id(uuid);
         assert_eq!(sub_id, "ch-12345678-1234-5678-1234-567812345678");
     }
-
-    // ── BgState: seen_ids deduplication ──────────────────────────────────────
 
     /// Build a real signed Nostr event for testing BgState.
     ///
@@ -3299,8 +3253,6 @@ mod tests {
         assert!(state.record_event(channel_id, &event1));
         assert!(state.record_event(channel_id, &event2));
     }
-
-    // ── BgState: last_seen tracking ───────────────────────────────────────────
 
     #[test]
     fn bg_state_last_seen_set_on_first_event() {
@@ -3444,8 +3396,6 @@ mod tests {
         );
     }
 
-    // ── Bug 5: channel_dropped_since tracking ─────────────────────────────────
-
     /// Test 8: channel_dropped_since records the OLDEST dropped timestamp.
     ///
     /// Simulates the backpressure path directly on BgState:
@@ -3564,8 +3514,6 @@ mod tests {
         );
     }
 
-    // ── Membership dedup regression tests (M4) ───────────────────────────
-
     /// Membership dedup must NOT contaminate per-channel `last_seen`.
     /// Using `record_event()` for membership notifications would update
     /// `last_seen[channel_uuid]`, causing channel resubscribe to use a
@@ -3623,8 +3571,6 @@ mod tests {
             "after backpressure removal, replay must be accepted"
         );
     }
-
-    // ── drop_channel_on_access_denied (Phenomenon A: reconnect loop) ──────────
 
     /// Subscribe a channel via the production command path so the test exercises
     /// real subscription state (active_subscriptions + active_filters + since).

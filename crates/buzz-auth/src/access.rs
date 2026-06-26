@@ -82,8 +82,6 @@ pub async fn check_write_access(
     }
 }
 
-// ── Test-only mock ───────────────────────────────────────────────────────────
-
 /// In-memory [`ChannelAccessChecker`] for unit tests.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct MockAccessChecker {

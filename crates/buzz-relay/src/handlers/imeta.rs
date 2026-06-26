@@ -329,8 +329,6 @@ pub async fn verify_imeta_blobs(
     Ok(())
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
 /// Whether a string is a well-formed `type/subtype` MIME token.
 ///
 /// Structural check only — does not enforce a known type. The authoritative

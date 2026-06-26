@@ -2,19 +2,13 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-// Screenshot capture for the user-owned custom-emoji rebuild (PR 816). Not a
-// hard assertion suite — it documents the two user-visible surfaces Tyler asked
-// to verify: the composer rendering and the settings card's own-vs-workspace
-// split. Artifacts land in test-results/.
 const SHORTCODE = "buzz";
-const SHOTS = "test-results/custom-emoji";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
   // The mock emoji sets point at example.com placeholder URLs that don't
-  // resolve, so the <img> would render broken in screenshots. Serve a visible
-  // square glyph for any example.com emoji image so the captures show the
-  // custom-emoji sizing/alignment rather than a broken-image icon.
+  // resolve, so the <img> would render broken. Serve a visible square glyph
+  // for any example.com emoji image so sizing/alignment can be asserted.
   const SVG = `
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
       <rect width="32" height="32" rx="7" fill="#22c55e"/>
@@ -35,8 +29,6 @@ test("composer renders a custom emoji inline", async ({ page }) => {
   await input.click();
   await input.pressSequentially(`shipping it :${SHORTCODE}:`);
   await expect(input.locator("img[data-custom-emoji]")).toHaveCount(1);
-
-  await page.screenshot({ path: `${SHOTS}/01-composer-inline-emoji.png` });
 });
 
 test("settings card splits My emoji from read-only Workspace emoji", async ({
@@ -63,11 +55,6 @@ test("settings card splits My emoji from read-only Workspace emoji", async ({
   await expect(
     workspace.getByRole("button", { name: /^Remove :/ }),
   ).toHaveCount(0);
-
-  await page.screenshot({
-    path: `${SHOTS}/02-settings-own-vs-workspace.png`,
-    fullPage: true,
-  });
 });
 
 test("message list renders inline and emoji-only messages with Slack-style emoji sizing", async ({
@@ -126,8 +113,4 @@ test("message list renders inline and emoji-only messages with Slack-style emoji
       return emojiOnlyBox.height / inlineBox.height;
     })
     .toBeGreaterThan(1.8);
-
-  await page.screenshot({
-    path: `${SHOTS}/03-message-list-emoji-sizing.png`,
-  });
 });

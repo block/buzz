@@ -28,7 +28,6 @@ export function useTypingBroadcast(
       return;
     }
 
-    // Reset throttle when channel changes.
     if (lastChannelRef.current !== id) {
       lastChannelRef.current = id;
       lastSentRef.current = 0;

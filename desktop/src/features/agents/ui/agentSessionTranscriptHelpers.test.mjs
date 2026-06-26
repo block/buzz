@@ -11,8 +11,6 @@ import {
 const HEX = "a".repeat(64);
 const HEX_UPPER = "A".repeat(64);
 
-// --- parsePromptText: no section headers ---
-
 test("parsePromptText returns the empty/Prompt fallback for whitespace-only input", () => {
   // The early `sections.length === 0` branch only fires when there are no
   // section bodies at all (e.g. empty/whitespace input).
@@ -39,8 +37,6 @@ test("parsePromptText wraps header-less free text in a single Prompt section", (
   assert.equal(result.userTitle, "Buzz event");
   assert.equal(result.userPubkey, null);
 });
-
-// --- parsePromptText: Buzz event section ---
 
 test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () => {
   const text = [
@@ -104,8 +100,6 @@ test("parsePromptText leading text before a header becomes a Prompt section", ()
   );
 });
 
-// --- extractPromptText ---
-
 test("extractPromptText joins text blocks from params.prompt", () => {
   const payload = {
     params: {
@@ -161,8 +155,6 @@ test("extractToolIdentity still recognizes explicit Buzz tool fields", () => {
     buzzToolName: "get_feed",
   });
 });
-
-// --- parseSystemPromptSections: deterministic Base/System split ---
 
 test("parseSystemPromptSections splits both prompts into Base and System", () => {
   const framed = "[Base]\nbase text\n\n[System]\npersona text";

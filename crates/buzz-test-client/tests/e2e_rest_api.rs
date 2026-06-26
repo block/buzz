@@ -31,8 +31,6 @@ use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use reqwest::Client;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 /// WebSocket relay URL (e.g. `ws://localhost:3001`).
 fn relay_ws_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3001".to_string())
@@ -179,8 +177,6 @@ async fn set_profile_via_event(
         resp.status()
     );
 }
-
-// ── Channel tests ─────────────────────────────────────────────────────────────
 
 /// GET /api/channels returns a non-empty list with the expected fields.
 #[tokio::test]
@@ -341,8 +337,6 @@ async fn test_channels_requires_auth() {
     );
 }
 
-// ── Search tests ──────────────────────────────────────────────────────────────
-
 /// GET /api/search returns results scoped to the authenticated user's accessible channels.
 #[tokio::test]
 #[ignore]
@@ -453,8 +447,6 @@ async fn test_search_empty_query_returns_all() {
     assert!(body["hits"].is_array(), "'hits' must be an array");
     assert!(body["found"].is_number(), "'found' must be a number");
 }
-
-// ── Presence tests ────────────────────────────────────────────────────────────
 
 /// GET /api/presence returns "offline" for a pubkey with no presence event.
 #[tokio::test]
@@ -752,8 +744,6 @@ async fn test_set_presence_missing_field() {
     );
 }
 
-// ── Agents tests ──────────────────────────────────────────────────────────────
-
 /// GET /api/agents returns a JSON array with the expected fields.
 #[tokio::test]
 #[ignore]
@@ -851,8 +841,6 @@ async fn test_agents_scoped_to_accessible_channels() {
         }
     }
 }
-
-// ── Feed tests ────────────────────────────────────────────────────────────────
 
 /// GET /api/feed returns a structured feed with the expected shape.
 ///
@@ -1012,8 +1000,6 @@ async fn test_feed_requires_auth() {
     );
 }
 
-// ── Auth edge cases ───────────────────────────────────────────────────────────
-
 /// An invalid X-Pubkey header is rejected with 401.
 #[tokio::test]
 #[ignore]
@@ -1048,8 +1034,6 @@ async fn test_valid_pubkey_header_accepted() {
 
     assert_eq!(resp.status(), 200, "expected 200 for valid X-Pubkey header");
 }
-
-// ── Public profile tests ──────────────────────────────────────────────────────
 
 /// GET /api/users/:pubkey/profile returns the profile for a known user.
 #[tokio::test]
@@ -1309,8 +1293,6 @@ async fn test_batch_profiles_case_normalized() {
     assert_eq!(profiles.len(), 1, "uppercase pubkey should match");
 }
 
-// ── NIP-05 tests ──────────────────────────────────────────────────────────────
-
 /// GET /.well-known/nostr.json?name=nonexistent returns empty names and relays.
 #[tokio::test]
 #[ignore]
@@ -1446,8 +1428,6 @@ async fn test_nip05_clear_handle() {
     );
 }
 
-// ── Agent Channel Protection tests ───────────────────────────────────────────
-
 /// PUT /api/users/me/channel-add-policy updates the policy and returns the new value.
 /// Cycles through owner_only → nobody → anyone to verify each round-trip.
 #[tokio::test]
@@ -1524,10 +1504,6 @@ async fn test_set_channel_add_policy_rejects_invalid() {
     .await;
     assert_eq!(resp.status(), 400, "invalid policy value should return 400");
 }
-
-// ── Thread reply mention p-tag tests ──────────────────────────────────────────
-
-// ── Notes (kind:1) tests ──────────────────────────────────────────────────────
 
 /// Phase 1: GET /api/events/{id} must return 200 for kind:1 text note.
 #[tokio::test]
@@ -1697,7 +1673,6 @@ async fn test_get_contact_list_returns_latest() {
     let keys = Keys::generate();
     let pubkey_hex = keys.public_key().to_hex();
 
-    // ── First contact list: 2 contacts ───────────────────────────────────────
     let contact1 = Keys::generate().public_key().to_hex();
     let contact2 = Keys::generate().public_key().to_hex();
     let tags_v1 = vec![
@@ -1726,7 +1701,6 @@ async fn test_get_contact_list_returns_latest() {
     // Wait 1 second so the replacement event gets a strictly greater created_at.
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    // ── Second contact list: 1 different contact ──────────────────────────────
     let contact3 = Keys::generate().public_key().to_hex();
     let tags_v2 = vec![Tag::parse(["p", &contact3]).unwrap()];
     let event_v2 = EventBuilder::new(Kind::Custom(3), "")
@@ -1748,7 +1722,6 @@ async fn test_get_contact_list_returns_latest() {
         resp.status()
     );
 
-    // ── Fetch and assert replacement ──────────────────────────────────────────
     let url = format!("{}/api/users/{}/contact-list", relay_http_url(), pubkey_hex);
     let resp = authed_get(&client, &url, &pubkey_hex).await;
     assert_eq!(

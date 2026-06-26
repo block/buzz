@@ -128,8 +128,6 @@ async fn run(cli: Cli) -> Result<i32> {
     }
 }
 
-// ── Member management subcommands ─────────────────────────────────────────────
-
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
     if let Err(msg) = validate_role(&role) {
         eprintln!("error: {msg}");
@@ -245,8 +243,6 @@ async fn cmd_list_members() -> Result<i32> {
 
     Ok(0)
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Validate that `role` is `"member"` or `"admin"`. Rejects `"owner"`.
 fn validate_role(role: &str) -> std::result::Result<(), String> {

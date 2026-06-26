@@ -221,19 +221,15 @@ export function usePersonaActions() {
     exportPersonaJsonMutation.isPending;
 
   return {
-    // Queries
     personasQuery,
     acpRuntimesQuery,
-    // Mutations (for error/pending access)
     createPersonaMutation,
     updatePersonaMutation,
     setPersonaActiveMutation,
-    // Derived state
     catalogPersonas,
     libraryPersonas,
     personaLabelsById,
     isPending,
-    // UI state
     personaDialogState,
     setPersonaDialogState,
     personaToDelete,
@@ -246,9 +242,7 @@ export function usePersonaActions() {
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
-    // Import actions (composed)
     personaImportActions,
-    // Handlers
     handleSubmit,
     handleDelete,
     handleSetActive,

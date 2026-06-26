@@ -1916,8 +1916,6 @@ async fn test_membership_notification_mixed_filter_rejected() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ─── Private channel membership permission tests ───────────────────────────────
-
 /// Create a private channel over WebSocket and return the channel UUID.
 async fn create_private_channel_ws(client: &mut BuzzTestClient, keys: &Keys) -> String {
     let channel_uuid = uuid::Uuid::new_v4().to_string();

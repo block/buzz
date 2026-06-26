@@ -24,8 +24,6 @@ use std::time::Duration;
 use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
 }
@@ -256,8 +254,6 @@ async fn query_channel_messages(keys: &Keys, channel_id: &str) -> Vec<serde_json
     body.as_array().cloned().unwrap_or_default()
 }
 
-// ── Phase 1: NIP-50 Search ────────────────────────────────────────────────────
-
 /// Send a message with unique content, then search for it.
 /// Verify: events returned before EOSE, content matches, EOSE received.
 /// Verify: no live events delivered after EOSE (search is one-shot).
@@ -436,8 +432,6 @@ async fn test_nip50_search_empty_results() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── Phase 2: NIP-10 Threads ───────────────────────────────────────────────────
-
 /// Send a root message via REST, then send a WS reply with NIP-10 e-tags.
 /// Verify: relay accepts the reply. Query thread via REST and verify reply appears.
 #[tokio::test]
@@ -587,8 +581,6 @@ async fn test_nip10_root_mismatch_rejected() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── Phase 3: NIP-17 Gift Wraps ────────────────────────────────────────────────
 
 /// Create a kind:1059 event signed by an ephemeral key (different from auth key).
 /// Verify: relay accepts despite pubkey mismatch (gift wraps are exempt).
@@ -760,8 +752,6 @@ async fn test_nip17_gift_wrap_recipient_receives() {
     client_b.disconnect().await.expect("disconnect B");
 }
 
-// ── Phase 4: DM Discovery ─────────────────────────────────────────────────────
-
 /// Create a DM via REST, then subscribe as a participant to verify discovery events.
 /// Verify: kind:39000 event received with `hidden` and `private` tags.
 /// Verify: kind:44100 membership notification received.
@@ -788,7 +778,6 @@ async fn test_dm_discovery_events_emitted() {
         .await
         .expect("client A connect");
 
-    // ── kind:44100 membership notification addressed to A ──
     let sid_membership = sub_id("dm-discovery-44100");
     let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tag(
         SingleLetterTag::lowercase(Alphabet::P),
@@ -824,7 +813,6 @@ async fn test_dm_discovery_events_emitted() {
         membership.tags
     );
 
-    // ── kind:39000 discovery event for this DM channel ──
     let sid_discovery = sub_id("dm-discovery-39000");
     let discovery_filter = Filter::new()
         .kind(Kind::Custom(39000))
@@ -871,8 +859,6 @@ async fn test_dm_discovery_events_emitted() {
 
     client_a.disconnect().await.expect("disconnect");
 }
-
-// ── Phase 5: Regression Tests ─────────────────────────────────────────────────
 
 /// Send a non-broadcast NIP-10 reply AND a broadcast (`["broadcast","1"]`)
 /// reply, then prove the relay's real top-level rule both directions.
@@ -1220,8 +1206,6 @@ async fn test_empty_kinds_returns_zero_events() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── Phase 6: NIP-DV DM Visibility ─────────────────────────────────────────────
 
 /// Helper: read the viewer's latest relay-signed NIP-DV snapshot event
 /// (kind:30622, queried by `#p` since snapshots are `#p`-gated to their owner).

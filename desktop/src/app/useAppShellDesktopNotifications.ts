@@ -14,6 +14,10 @@ import {
   sendDesktopNotification,
 } from "@/features/notifications/lib/desktop";
 import {
+  formatNotificationTitle,
+  truncateNotificationBody,
+} from "@/features/notifications/lib/notificationFormat";
+import {
   playNotificationSound,
   resolveSlotSound,
 } from "@/features/notifications/lib/sound";
@@ -54,13 +58,7 @@ export function useAppShellDesktopNotifications({
       }
 
       const channelName = channel.name?.trim() || "Direct message";
-      const content = event.content.trim();
-      const body =
-        content.length > 0
-          ? content.length > 140
-            ? `${content.slice(0, 137).trimEnd()}...`
-            : content
-          : "New message";
+      const body = truncateNotificationBody(event.content, "New message");
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
       void sendDesktopNotification({
@@ -100,19 +98,16 @@ export function useAppShellDesktopNotifications({
         return;
       }
 
-      const channel = channels.find((entry) => entry.id === channelId);
-      const channelName = channel?.name?.trim() || "Thread";
-      const content = event.content.trim();
-      const body =
-        content.length > 0
-          ? content.length > 140
-            ? `${content.slice(0, 137).trimEnd()}...`
-            : content
-          : "New reply";
+      const resolvedChannel = channels.find((c) => c.id === channelId);
+      const channelName = resolvedChannel?.name?.trim() ?? null;
+      // channelLabel is "#name" for the toast title; channelName is the raw
+      // name stored in the navigation target for click-through routing.
+      const channelLabel = channelName ? `#${channelName}` : null;
+      const body = truncateNotificationBody(event.content, "New reply");
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
       void sendDesktopNotification({
-        title: `Reply in ${channelName}`,
+        title: formatNotificationTitle({ prefix: "Reply", channelLabel }),
         body,
         target: {
           channelId,

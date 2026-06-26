@@ -4,8 +4,10 @@ use serde_json::json;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 
+use crate::builtin;
 use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
 use crate::handoff::HandoffOutcome;
+use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
@@ -25,6 +27,8 @@ pub struct RunCtx<'a> {
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
     pub mcp: &'a Arc<McpRegistry>,
+    /// Skills discovered at session creation; used by the built-in `load_skill` tool.
+    pub skills: &'a [SkillEntry],
     pub wire: &'a WireSender,
     pub cancel: &'a mut watch::Receiver<bool>,
     pub history: &'a mut Vec<HistoryItem>,
@@ -90,7 +94,11 @@ impl RunCtx<'_> {
                 }
             }
 
-            let tools = self.mcp.tools();
+            let mut tools = self.mcp.tools();
+            // Inject the built-in load_skill tool when skills are available.
+            if !self.skills.is_empty() {
+                tools.push(builtin::load_skill_def());
+            }
             round = round.saturating_add(1);
             let response = tokio::select! {
                 biased;
@@ -246,6 +254,17 @@ impl RunCtx<'_> {
                 return Some(StopReason::Cancelled);
             }
             emit_pending(self.wire, self.session_id, call).await;
+
+            // Built-in load_skill: execute inline, no MCP round-trip.
+            if call.name == builtin::LOAD_SKILL_TOOL {
+                emit_in_progress(self.wire, self.session_id, call).await;
+                let mut result = builtin::call_load_skill(&call.arguments, self.skills).await;
+                result.provider_id = call.provider_id.clone();
+                emit_completed(self.wire, self.session_id, call, &result).await;
+                results[idx] = Some(result);
+                continue;
+            }
+
             // Hook tools (bare name starts with `_`) are invisible to the
             // LLM and only callable via `call_hooks`. Treat any direct
             // invocation as if the tool didn't exist.

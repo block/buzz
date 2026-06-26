@@ -3,10 +3,6 @@ use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
 
-// ---------------------------------------------------------------------------
-// Create issue — publish kind:1621
-// ---------------------------------------------------------------------------
-
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -37,10 +33,6 @@ pub async fn cmd_create_issue(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Get issue — query kind:1621 by event id
-// ---------------------------------------------------------------------------
-
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
     validate_hex64(event)?;
     let filter = serde_json::json!({
@@ -51,10 +43,6 @@ pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliEr
     println!("{resp}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// List issues — query kind:1621 by repo coordinate, with optional filters
-// ---------------------------------------------------------------------------
 
 pub async fn cmd_list_issues(
     client: &BuzzClient,
@@ -88,10 +76,6 @@ pub async fn cmd_list_issues(
     println!("{resp}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Status — publish kind:1630/1631/1632/1633 against an issue
-// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_issue_status(
@@ -159,10 +143,6 @@ pub async fn cmd_issue_status(
     println!("{resp}");
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Dispatch
-// ---------------------------------------------------------------------------
 
 pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::IssuesCmd;

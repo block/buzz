@@ -61,8 +61,6 @@ fn team_delete_event(keys: &Keys, d_tag: &str) -> nostr::Event {
         .unwrap()
 }
 
-// ── Publish and query back ───────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore]
 async fn test_team_publish_and_query() {
@@ -108,8 +106,6 @@ async fn test_team_publish_and_query() {
     client.disconnect().await.expect("disconnect");
 }
 
-// ── NIP-33 replacement semantics ─────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore]
 async fn test_team_nip33_replacement_newer_wins() {
@@ -154,8 +150,6 @@ async fn test_team_nip33_replacement_newer_wins() {
 
     client.disconnect().await.expect("disconnect");
 }
-
-// ── NIP-09 coordinate deletion (tombstone) ───────────────────────────────────
 
 /// The a-tag tombstone is the only state-destroying op in the team flow: it
 /// removes the team for every client and across reboots. This proves the relay

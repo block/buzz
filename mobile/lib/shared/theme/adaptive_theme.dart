@@ -11,10 +11,6 @@ import 'package:flutter/material.dart';
 import 'color_scheme.dart' show contrastForeground;
 import 'theme_catalog.dart';
 
-// ---------------------------------------------------------------------------
-// Color utilities
-// ---------------------------------------------------------------------------
-
 double _luminance(Color c) => c.computeLuminance();
 
 int _to255(double v) => (v * 255.0).round().clamp(0, 255);
@@ -30,10 +26,6 @@ Color _adjust(Color c, double amount) {
   final target = amount > 0 ? const Color(0xFFFFFFFF) : const Color(0xFF000000);
   return _mix(c, target, amount.abs());
 }
-
-// ---------------------------------------------------------------------------
-// Chrome color calculation (sidebar/chrome area, slightly darker than editor)
-// ---------------------------------------------------------------------------
 
 const _contrastValue = 0.035;
 const _contrastOffset = 0.0135;
@@ -93,10 +85,6 @@ Color _findColorWithLuminance(Color base, double targetLum) {
     primary: _findColorWithLuminance(syntaxBg, lumDiff),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Public API: generate a ColorScheme from theme colors
-// ---------------------------------------------------------------------------
 
 /// Generate a full Material 3 [ColorScheme] from syntax theme colors.
 ///
