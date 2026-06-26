@@ -3,6 +3,7 @@ import {
   BookOpen,
   Bot,
   Check,
+  ChevronDown,
   CircleDot,
   Copy,
   ExternalLink,
@@ -22,6 +23,7 @@ import {
   type ProjectRepoSnapshot,
   useProjectQuery,
   useProjectRepoSnapshotQuery,
+  useRepoStateQuery,
 } from "@/features/projects/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
@@ -40,6 +42,13 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
@@ -82,12 +91,17 @@ function CloneUrlRow({ url }: { url: string }) {
 
 function RepositorySourceCard({
   branch,
+  branchOptions,
   cloneUrls,
+  onBranchChange,
 }: {
   branch: string;
+  branchOptions: string[];
   cloneUrls: string[];
+  onBranchChange: (branch: string) => void;
 }) {
   if (cloneUrls.length === 0 && !branch) return null;
+  const canSelectBranch = branchOptions.length > 1;
 
   return (
     <Card className="space-y-3 border-border/50 bg-card/60 p-4 shadow-none">
@@ -98,9 +112,37 @@ function RepositorySourceCard({
             <p className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
               Branch
             </p>
-            <p className="truncate font-mono text-sm font-semibold text-foreground">
-              {branch || "—"}
-            </p>
+            {canSelectBranch ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    className="-ml-2 h-7 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <span className="truncate">{branch || "—"}</span>
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-56">
+                  <DropdownMenuRadioGroup
+                    onValueChange={onBranchChange}
+                    value={branch}
+                  >
+                    {branchOptions.map((option) => (
+                      <DropdownMenuRadioItem key={option} value={option}>
+                        <span className="truncate font-mono">{option}</span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : (
+              <p className="truncate font-mono text-sm font-semibold text-foreground">
+                {branch || "—"}
+              </p>
+            )}
           </div>
         </div>
         <div className="min-w-0 space-y-1.5">
@@ -439,8 +481,34 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   });
   const projectQuery = useProjectQuery(projectId);
   const project = projectQuery.data;
-  const activeBranch = project?.defaultBranch ?? null;
+  const repoStateQuery = useRepoStateQuery(project);
+  const branchOptions = React.useMemo(() => {
+    const names = [
+      project?.defaultBranch,
+      ...(repoStateQuery.data?.branches.map((branch) => branch.name) ?? []),
+    ].filter((name): name is string => Boolean(name));
+    return [...new Set(names)];
+  }, [project?.defaultBranch, repoStateQuery.data?.branches]);
+  const [selectedBranch, setSelectedBranch] = React.useState<string | null>(
+    null,
+  );
+  const activeBranch =
+    selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
+
+  React.useEffect(() => {
+    if (!project) {
+      setSelectedBranch(null);
+      return;
+    }
+
+    setSelectedBranch((currentBranch) => {
+      if (currentBranch && branchOptions.includes(currentBranch)) {
+        return currentBranch;
+      }
+      return project.defaultBranch ?? branchOptions[0] ?? null;
+    });
+  }, [project, branchOptions]);
 
   const peoplePubkeys = React.useMemo(
     () => (project ? projectPeople(project) : []),
@@ -575,8 +643,10 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             </div>
 
             <RepositorySourceCard
-              branch={activeBranch ?? project.defaultBranch}
+              branch={activeBranch ?? ""}
+              branchOptions={branchOptions}
               cloneUrls={project.cloneUrls}
+              onBranchChange={setSelectedBranch}
             />
           </section>
 

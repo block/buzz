@@ -300,7 +300,7 @@ async function deleteProject(project: Project): Promise<void> {
 
   const event = await signRelayEvent({
     kind: KIND_DELETION,
-    content: `Delete branch ${project.name}`,
+    content: `Delete project ${project.name}`,
     tags: [["a", project.repoAddress]],
   });
 

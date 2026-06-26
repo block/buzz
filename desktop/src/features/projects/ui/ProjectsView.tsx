@@ -2,8 +2,6 @@ import {
   Bot,
   CalendarDays,
   FolderGit2,
-  GitBranch,
-  GitFork,
   LayoutGrid,
   List,
   MessageSquare,
@@ -145,10 +143,6 @@ function projectPeople(
       ].map(normalizePubkey),
     ),
   ];
-}
-
-function getCloneLabel(project: Project) {
-  return project.cloneUrls[0] ?? "Internal git clone URL pending";
 }
 
 function getDiscussionLabel(project: Project) {
@@ -352,18 +346,14 @@ function ProjectsToolbar({
   onFilterChange,
   onSortChange,
   onViewModeChange,
-  projectCount,
   sort,
-  totalProjectCount,
   viewMode,
 }: {
   filter: ProjectsFilter;
   onFilterChange: (filter: ProjectsFilter) => void;
   onSortChange: (sort: ProjectsSort) => void;
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
-  projectCount: number;
   sort: ProjectsSort;
-  totalProjectCount: number;
   viewMode: ProjectsViewMode;
 }) {
   const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
@@ -379,21 +369,9 @@ function ProjectsToolbar({
       data-tauri-drag-region
     >
       <div className="flex min-h-9 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold text-foreground">Projects</h2>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
-              {pluralize(projectCount, "project")}
-              {projectCount !== totalProjectCount
-                ? ` of ${totalProjectCount}`
-                : ""}
-            </span>
-          </div>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Internal git projects bring code, issues, discussion, and agent work
-            into one shared space.
-          </p>
-        </div>
+        <h2 className="min-w-0 text-lg font-semibold text-foreground">
+          Projects
+        </h2>
         <ProjectsViewModeToggle
           onViewModeChange={onViewModeChange}
           viewMode={viewMode}
@@ -502,7 +480,7 @@ function ProjectActionsMenu({
             }}
           >
             <Trash2 className="h-4 w-4" />
-            Delete branch
+            Delete project
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -510,10 +488,10 @@ function ProjectActionsMenu({
         data-testid={`project-delete-confirm-${project.dtag}`}
       >
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete branch?</AlertDialogTitle>
+          <AlertDialogTitle>Delete project?</AlertDialogTitle>
           <AlertDialogDescription>
             Delete {project.name} from Projects for everyone. This can only be
-            done for branches you own and cannot be undone.
+            done for projects you own and cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -535,7 +513,7 @@ function ProjectActionsMenu({
               type="button"
               variant="destructive"
             >
-              {disabled ? "Deleting..." : "Delete branch"}
+              {disabled ? "Deleting..." : "Delete project"}
             </Button>
           </AlertDialogAction>
         </AlertDialogFooter>
@@ -580,9 +558,6 @@ function ProjectGridCard({
                 <span className="block truncate text-sm font-semibold text-foreground">
                   {project.name}
                 </span>
-                <p className="truncate font-mono text-2xs text-muted-foreground/70">
-                  {project.dtag}
-                </p>
               </div>
             </div>
           </div>
@@ -602,7 +577,6 @@ function ProjectGridCard({
         </p>
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <MetadataItem icon={GitBranch}>{project.defaultBranch}</MetadataItem>
           <MetadataItem icon={Users}>
             {pluralize(people.length, "person", "people")}
           </MetadataItem>
@@ -623,10 +597,6 @@ function ProjectGridCard({
                 workOwnerPubkey={project.owner}
               />
             </div>
-          </div>
-          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/80">
-            <GitFork className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate font-mono">{getCloneLabel(project)}</span>
           </div>
         </div>
       </div>
@@ -675,9 +645,6 @@ function ProjectListRow({
 
         <div className="min-w-0 space-y-1">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <MetadataItem icon={GitBranch}>
-              {project.defaultBranch}
-            </MetadataItem>
             <MetadataItem icon={Users}>
               {pluralize(people.length, "person", "people")}
             </MetadataItem>
@@ -687,10 +654,6 @@ function ProjectListRow({
             <MetadataItem icon={CalendarDays}>
               {formatCreatedDate(project.createdAt)}
             </MetadataItem>
-          </div>
-          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/75">
-            <GitFork className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate font-mono">{getCloneLabel(project)}</span>
           </div>
         </div>
 
@@ -820,10 +783,10 @@ export function ProjectsView() {
     async (project: Project) => {
       try {
         await deleteProjectMutation.mutateAsync(project);
-        toast.success("Branch deleted");
+        toast.success("Project deleted");
       } catch (error) {
         toast.error(
-          error instanceof Error ? error.message : "Failed to delete branch",
+          error instanceof Error ? error.message : "Failed to delete project",
         );
       }
     },
@@ -868,9 +831,7 @@ export function ProjectsView() {
           onFilterChange={handleFilterChange}
           onSortChange={handleSortChange}
           onViewModeChange={handleViewModeChange}
-          projectCount={visibleProjects.length}
           sort={sort}
-          totalProjectCount={projects.length}
           viewMode={viewMode}
         />
       </div>
