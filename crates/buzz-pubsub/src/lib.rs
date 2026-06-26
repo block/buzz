@@ -464,6 +464,88 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn same_channel_id_in_two_communities_release_one_keeps_other_live() {
+        let pool = make_test_pool();
+        let manager = Arc::new(
+            PubSubManager::with_config(
+                PubSubConfig::new("redis://127.0.0.1:6379")
+                    .with_unsubscribe_debounce(Duration::from_millis(25)),
+                pool,
+            )
+            .await
+            .expect("Failed to create PubSubManager"),
+        );
+        let mut rx = manager.subscribe_local();
+
+        let manager_clone = manager.clone();
+        tokio::spawn(async move { manager_clone.run_subscriber().await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let ctx_a = ctx(0xaaaa, "a.example");
+        let ctx_b = ctx(0xbbbb, "b.example");
+        let channel_id = Uuid::from_u128(0xcccc);
+        let topic = EventTopic::Channel(channel_id);
+
+        manager.retain_topic(&ctx_a, topic).await;
+        manager.retain_topic(&ctx_b, topic).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        assert_eq!(manager.topic_refcount(&ctx_a, topic).await, 1);
+        assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 1);
+
+        let keys = Keys::generate();
+        let event_before_release = EventBuilder::new(Kind::TextNote, "before A release")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("signing failed");
+
+        manager
+            .publish_event(&ctx_b, topic, &event_before_release)
+            .await
+            .expect("publish before release failed");
+
+        let received_before_release =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout before release")
+                .expect("channel closed before release");
+        assert_eq!(received_before_release.community_id, ctx_b.community());
+        assert_eq!(received_before_release.topic, topic);
+        assert_eq!(received_before_release.event.id, event_before_release.id);
+
+        manager.release_topic(&ctx_a, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx_a, topic).await, 0);
+        assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 1);
+
+        // Wait past A's debounce. A buggy implementation that keyed active
+        // Redis subscriptions by channel id alone would unsubscribe B here too.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let event_after_release = EventBuilder::new(Kind::TextNote, "after A release")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("signing failed");
+
+        manager
+            .publish_event(&ctx_b, topic, &event_after_release)
+            .await
+            .expect("publish after release failed");
+
+        let received_after_release =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout after release")
+                .expect("channel closed after release");
+        assert_eq!(received_after_release.community_id, ctx_b.community());
+        assert_eq!(received_after_release.topic, topic);
+        assert_eq!(received_after_release.event.id, event_after_release.id);
+
+        manager.release_topic(&ctx_b, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 0);
+    }
+
+    #[tokio::test]
     async fn retain_release_refcounts_and_debounces_last_release() {
         let pool = make_test_pool();
         let manager = PubSubManager::with_config(
