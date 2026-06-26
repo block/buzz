@@ -135,6 +135,7 @@ export function useAppNavigation() {
       options?: {
         messageId?: string;
         replace?: boolean;
+        taskReplyId?: string;
         threadRootId?: string | null;
       },
     ) =>
@@ -144,16 +145,19 @@ export function useAppNavigation() {
           params: {
             channelId,
           },
-          search: options?.messageId
-            ? {
-                messageId: options.messageId,
-                threadRootId: options.threadRootId ?? undefined,
-              }
-            : {},
+          search:
+            options?.messageId || options?.taskReplyId
+              ? {
+                  messageId: options.messageId,
+                  taskReplyId: options.taskReplyId,
+                  threadRootId: options.threadRootId ?? undefined,
+                }
+              : {},
         },
         {
           replace: options?.replace,
-          resetScroll: options?.messageId ? true : undefined,
+          resetScroll:
+            options?.messageId || options?.taskReplyId ? true : undefined,
         },
       ),
     [commitNavigation],

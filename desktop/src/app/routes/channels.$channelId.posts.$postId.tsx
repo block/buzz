@@ -41,6 +41,7 @@ function ForumPostRouteComponent() {
       <ChannelRouteScreen
         channelId={channelId}
         selectedPostId={postId}
+        targetAgentConversationReplyId={null}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}
         targetThreadRootId={null}

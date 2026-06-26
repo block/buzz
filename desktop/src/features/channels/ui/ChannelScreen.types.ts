@@ -12,6 +12,7 @@ export type ChannelScreenProps = {
   onCloseForumPost: () => void;
   onSelectForumPost: (postId: string) => void;
   selectedForumPostId: string | null;
+  targetAgentConversationReplyId: string | null;
   targetForumReplyId: string | null;
   targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;

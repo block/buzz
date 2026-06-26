@@ -17,6 +17,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 type ChannelRouteScreenProps = {
   channelId: string;
   selectedPostId: string | null;
+  targetAgentConversationReplyId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
   targetThreadRootId: string | null;
@@ -96,6 +97,7 @@ async function fetchRouteTargetEvents(
 export function ChannelRouteScreen({
   channelId,
   selectedPostId,
+  targetAgentConversationReplyId,
   targetMessageId,
   targetReplyId,
   targetThreadRootId,
@@ -140,7 +142,12 @@ export function ChannelRouteScreen({
     // deep-linked message, the spliced event is the only copy — dropping it on
     // param-clear blanks the timeline. Resetting on channel / forum-post change
     // is handled by the effect below; here we only fetch when there's a target.
-    if ((!targetMessageId && !targetThreadRootId) || selectedPostId) {
+    if (
+      (!targetAgentConversationReplyId &&
+        !targetMessageId &&
+        !targetThreadRootId) ||
+      selectedPostId
+    ) {
       return () => {
         isCancelled = true;
       };
@@ -156,6 +163,7 @@ export function ChannelRouteScreen({
     }
 
     const eventIds = [
+      targetAgentConversationReplyId,
       targetMessageId,
       targetThreadRootId && targetThreadRootId !== targetMessageId
         ? targetThreadRootId
@@ -164,7 +172,7 @@ export function ChannelRouteScreen({
 
     void fetchRouteTargetEvents(
       eventIds,
-      targetMessageId,
+      targetAgentConversationReplyId ?? targetMessageId,
       targetThreadRootId,
     ).then((events) => {
       if (!isCancelled) {
@@ -181,7 +189,12 @@ export function ChannelRouteScreen({
     return () => {
       isCancelled = true;
     };
-  }, [selectedPostId, targetMessageId, targetThreadRootId]);
+  }, [
+    selectedPostId,
+    targetAgentConversationReplyId,
+    targetMessageId,
+    targetThreadRootId,
+  ]);
 
   if (channelsQuery.isPending && !activeChannel) {
     return (
@@ -204,6 +217,7 @@ export function ChannelRouteScreen({
         void goForumPost(channelId, postId);
       }}
       selectedForumPostId={selectedPostId}
+      targetAgentConversationReplyId={targetAgentConversationReplyId}
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
