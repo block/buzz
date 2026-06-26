@@ -39,6 +39,8 @@ type UseLoadOlderOnScrollOptions = {
     getVirtualizer: () => ListVirtualizer | null;
     indexByMessageId: Map<string, number>;
     itemCount: number;
+    /** Live (non-deferred) message count for growth detection during load-older. */
+    liveMessageCount?: number;
   } | null;
 };
 
@@ -160,11 +162,10 @@ export function useLoadOlderOnScroll({
             // one-shot, never an overlapping second target.
             const instance = virt.getVirtualizer();
             const container = scrollContainerRef.current;
-            // Read the live count from the virtualizer instance rather than
-            // virt.itemCount: virt.itemCount is derived from deferredMessages
-            // (stale during a fetch), so the growth check would never fire.
-            const previousCount =
-              instance?.options.count ?? virt.itemCount;
+            // Use liveMessageCount (live, non-deferred) rather than itemCount
+            // or instance.options.count — both are derived from deferredMessages
+            // and are stale during a fetch, so the growth check would never fire.
+            const previousCount = virt.liveMessageCount ?? virt.itemCount;
 
             void fetchOlder().then(() => {
               // Claim scroll ownership for the whole re-aim window so the
@@ -221,8 +222,7 @@ export function useLoadOlderOnScroll({
               const waitForPrepend = () => {
                 const after = virtualizerRef.current;
                 const grew =
-                  (after?.getVirtualizer()?.options.count ?? previousCount) >
-                  previousCount;
+                  (after?.liveMessageCount ?? previousCount) > previousCount;
                 // Resolve this frame's target offset. Two cases, one mechanism:
                 //   - Abandon: the user jumped to bottom while this loop owned
                 //     scroll. Hold the BOTTOM (last row's end offset), not the
@@ -249,8 +249,7 @@ export function useLoadOlderOnScroll({
                   instance: grew ? instance : null,
                   abandonedToBottom,
                   lastIndex:
-                    (after?.getVirtualizer()?.options.count ?? previousCount) -
-                    1,
+                    (after?.liveMessageCount ?? previousCount) - 1,
                   newIndex,
                   anchorTop,
                 });

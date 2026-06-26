@@ -269,9 +269,10 @@ const MessageTimelineBase = React.forwardRef<
             getVirtualizer,
             indexByMessageId: timelineItems.indexByMessageId,
             itemCount: timelineItems.items.length,
+            liveMessageCount: messages.length,
           }
         : null,
-    [getVirtualizer, timelineItems],
+    [getVirtualizer, timelineItems, messages.length],
   );
   const isDeferredSnapshotStale = isDeferredTimelineSnapshotStale({
     deferredSnapshot,
