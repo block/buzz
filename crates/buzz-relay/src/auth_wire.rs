@@ -70,8 +70,9 @@ impl AuthErrorWireCategory {
     /// Stable, byte-identical user-visible message for this category.
     ///
     /// Two `AuthError` values that map to the same category MUST produce the
-    /// same bytes here — that's the property-test invariant in
-    /// `tests/auth_error_payload_oracle.rs`.
+    /// same bytes here — that's the property-test invariant proved in the
+    /// in-module `#[cfg(test)] mod tests` below (see
+    /// `verification_class_all_coalesce` and `internal_two_communities_byte_identical`).
     pub fn message(self) -> &'static str {
         match self {
             // Coalesces Nip98Invalid, Nip98Replay, InvalidSignature,
@@ -102,9 +103,13 @@ impl AuthErrorWireCategory {
 /// Map an [`AuthError`] to its wire category.
 ///
 /// **Do not stringify `AuthError` for the wire by any other path.** This
-/// function is the only sanctioned conversion; the CI grep-lint enforces
-/// that no other call site uses `auth_err.to_string()` or `format!("{}", auth_err)`
-/// in a response-construction chain (P5).
+/// function is the only sanctioned conversion. The load-bearing fence is
+/// the wildcard-free match below: adding any new `AuthError` variant fails
+/// to compile here until a wire-class decision is made — that catches the
+/// cause (a new variant lacks a wire class), not just the symptom (raw
+/// stringification). A `scripts/check-no-authror-leak.sh` grep-lint (P5 in
+/// the audit note) is planned as a belt-and-suspenders follow-up but is
+/// not yet wired into CI.
 pub fn auth_error_wire(err: &AuthError) -> AuthErrorWireCategory {
     match err {
         // Verification class — coalesce.
