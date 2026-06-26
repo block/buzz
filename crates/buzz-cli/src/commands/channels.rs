@@ -528,6 +528,11 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     }
 
     // Check if this policy is allowed by the deployment.
+    // NOTE: This gate covers only the `buzz channels set-add-policy` CLI path.
+    // A client that submits a kind:10100 event directly to the relay bypasses
+    // this check. Full enforcement requires relay-side validation, which is
+    // intentionally out of scope for this change (see team decision: no
+    // relay-side enforcement of client behavior).
     if let Ok(allowed_raw) = std::env::var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES") {
         let allowed: Vec<&str> = allowed_raw
             .split(',')
@@ -663,7 +668,8 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{name_matches, validate_ttl_seconds, ChannelSummary};
+    use super::{cmd_set_add_policy, name_matches, validate_ttl_seconds, ChannelSummary};
+    use crate::client::BuzzClient;
     use crate::CliError;
     use serde_json::json;
 
@@ -822,5 +828,44 @@ mod tests {
             result.is_ok(),
             "empty allowed list should permit any policy: {result:?}"
         );
+    }
+
+    // --- Integration test: full env-var → cmd_set_add_policy() path ---
+    //
+    // This test calls cmd_set_add_policy directly with the env var set. The function
+    // returns early with an error before any network call, so no relay is needed.
+    // If the BUZZ_ALLOWED_CHANNEL_ADD_POLICIES check were removed from cmd_set_add_policy,
+    // this test would fail (it would proceed to sign_event and return a different error).
+
+    fn make_test_client() -> BuzzClient {
+        // Scalar = 1 is the smallest valid secp256k1 private key.
+        let keys = nostr::Keys::parse(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .expect("valid test key");
+        BuzzClient::new("ws://localhost:3000".to_string(), keys, None, None)
+            .expect("client construction should not fail")
+    }
+
+    #[tokio::test]
+    async fn set_add_policy_env_gate_rejects_disallowed_via_full_path() {
+        std::env::set_var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES", "owner_only,nobody");
+        let client = make_test_client();
+        let result = cmd_set_add_policy(&client, "anyone").await;
+        std::env::remove_var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES");
+
+        assert!(
+            result.is_err(),
+            "cmd_set_add_policy should reject 'anyone' when not in allowed set"
+        );
+        match result.unwrap_err() {
+            crate::CliError::Usage(msg) => {
+                assert!(
+                    msg.contains("not permitted"),
+                    "error should mention 'not permitted': {msg}"
+                );
+            }
+            other => panic!("expected CliError::Usage, got {other:?}"),
+        }
     }
 }

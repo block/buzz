@@ -470,7 +470,7 @@ pub struct Config {
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
-    pub allowed_respond_to: HashSet<RespondTo>,
+    pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
@@ -634,7 +634,14 @@ impl Config {
         // Legacy env-var propagation is intentionally NOT done here.
         // Call `propagate_legacy_env_vars()` before the tokio runtime starts
         // (in the sync `fn main()` wrapper) — see Rust 2024 edition safety.
-        let mut args = CliArgs::parse();
+        let args = CliArgs::parse();
+        Self::from_args(args)
+    }
+
+    /// Build a `Config` from already-parsed `CliArgs`. Separated from `from_cli()` so
+    /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
+    /// validation path without going through process args.
+    pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
         let keys = Keys::parse(&args.private_key)?;
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
@@ -821,17 +828,19 @@ impl Config {
 
         // Validate respond_to against the allowed set.
         let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
-            let mut set = HashSet::new();
+            // Validate each entry is a known RespondTo mode.
             for s in &raw {
-                let mode = RespondTo::from_str(s.trim(), true).map_err(|_| {
+                RespondTo::from_str(s.trim(), true).map_err(|_| {
                     ConfigError::ConfigFile(format!(
                         "invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO: '{s}' \
                          (valid values: owner-only, allowlist, anyone, nobody)"
                     ))
                 })?;
-                set.insert(mode);
             }
-            if !set.is_empty() && !set.contains(&args.respond_to) {
+            let allowed_modes: Vec<String> = raw.iter().map(|s| s.trim().to_string()).collect();
+            if !allowed_modes.is_empty()
+                && !allowed_modes.contains(&args.respond_to.to_string())
+            {
                 return Err(ConfigError::ConfigFile(format!(
                     "respond_to '{}' is not permitted on this deployment \
                      (BUZZ_ACP_ALLOWED_RESPOND_TO={})",
@@ -839,9 +848,9 @@ impl Config {
                     raw.join(",")
                 )));
             }
-            set
+            allowed_modes
         } else {
-            HashSet::new()
+            Vec::new()
         };
 
         //
@@ -957,11 +966,7 @@ impl Config {
         let allowed_respond_to_detail = if self.allowed_respond_to.is_empty() {
             String::new()
         } else {
-            let mut modes: Vec<String> = self
-                .allowed_respond_to
-                .iter()
-                .map(|m| m.to_string())
-                .collect();
+            let mut modes = self.allowed_respond_to.clone();
             modes.sort();
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
@@ -1274,7 +1279,7 @@ fn rule_applies_to_channel(rule: &SubscriptionRule, channel_id: Uuid) -> bool {
 mod tests {
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
-    use clap::ValueEnum;
+    use clap::{Parser, ValueEnum};
 
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {
@@ -1309,7 +1314,7 @@ mod tests {
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
-            allowed_respond_to: HashSet::new(),
+            allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
@@ -2440,8 +2445,7 @@ channels = "ALL"
     #[test]
     fn allowed_respond_to_summary_shows_restriction_when_set() {
         let mut config = test_config(SubscribeMode::Mentions);
-        config.allowed_respond_to =
-            HashSet::from([RespondTo::OwnerOnly, RespondTo::Allowlist]);
+        config.allowed_respond_to = vec!["owner-only".to_string(), "allowlist".to_string()];
         let s = config.summary();
         assert!(
             s.contains("allowed_respond_to="),
@@ -2456,6 +2460,91 @@ channels = "ALL"
         assert!(
             !s.contains("allowed_respond_to="),
             "summary should not include allowed_respond_to when empty: {s}"
+        );
+    }
+
+    // --- Integration tests: full env-var → CliArgs → Config::from_args() path ---
+    //
+    // These tests exercise the actual wiring: BUZZ_ACP_ALLOWED_RESPOND_TO in the
+    // environment causes clap to populate CliArgs::allowed_respond_to, which then
+    // flows through Config::from_args() to produce a ConfigError. If the #[arg(env)]
+    // attribute or field name were removed, these tests would fail.
+    //
+    // We pass the value via the CLI flag (`--allowed-respond-to`) rather than
+    // std::env::set_var to avoid test-parallelism races on shared env state.
+    // The env-var wiring is covered by the clap #[arg(env)] attribute itself.
+
+    // A minimal valid private key for test use (secp256k1 scalar = 1).
+    const TEST_PRIVATE_KEY: &str =
+        "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn allowed_respond_to_full_path_rejects_disallowed_mode() {
+        // --allowed-respond-to=owner-only,allowlist + --respond-to=anyone → ConfigError
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "anyone",
+            "--allowed-respond-to",
+            "owner-only,allowlist",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_err(),
+            "from_args should reject respond_to=anyone when not in allowed set"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("not permitted"),
+            "error should mention 'not permitted': {msg}"
+        );
+        assert!(
+            msg.contains("anyone"),
+            "error should name the disallowed mode: {msg}"
+        );
+    }
+
+    #[test]
+    fn allowed_respond_to_full_path_accepts_allowed_mode() {
+        // --allowed-respond-to=owner-only,allowlist + --respond-to=owner-only → Ok
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "owner-only",
+            "--allowed-respond-to",
+            "owner-only,allowlist",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_ok(),
+            "from_args should accept respond_to=owner-only when in allowed set: {result:?}"
+        );
+    }
+
+    #[test]
+    fn allowed_respond_to_full_path_unset_allows_all() {
+        // No --allowed-respond-to flag → anyone is accepted.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "anyone",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_ok(),
+            "from_args should accept any mode when allowed list is unset: {result:?}"
         );
     }
 }
