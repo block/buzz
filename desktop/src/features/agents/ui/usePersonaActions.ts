@@ -125,12 +125,15 @@ export function usePersonaActions() {
           return;
         }
 
-        const persona = await createPersonaMutation.mutateAsync(input);
         const avatarUrl = await resolveManagedAgentAvatarUrl(
-          persona.avatarUrl,
+          input.avatarUrl,
           undefined,
           runtime.avatarUrl,
         );
+        const persona = await createPersonaMutation.mutateAsync({
+          ...input,
+          avatarUrl,
+        });
         const agentInput: CreateManagedAgentInput = {
           name: persona.displayName,
           acpCommand: "buzz-acp",
@@ -140,7 +143,7 @@ export function usePersonaActions() {
           personaId: persona.id,
           harnessOverride: true,
           systemPrompt: persona.systemPrompt,
-          avatarUrl,
+          avatarUrl: persona.avatarUrl ?? avatarUrl,
           model: persona.model ?? undefined,
           spawnAfterCreate: true,
           startOnAppLaunch: true,

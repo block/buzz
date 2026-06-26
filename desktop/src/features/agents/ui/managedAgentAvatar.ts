@@ -1,4 +1,10 @@
-import { type BlobDescriptor, uploadMediaBytes } from "@/shared/api/tauri";
+type BlobDescriptor = {
+  url: string;
+  sha256: string;
+  size: number;
+  type: string;
+  uploaded: number;
+};
 
 type UploadMediaBytes = (
   data: number[],
@@ -7,7 +13,7 @@ type UploadMediaBytes = (
 
 export async function resolveManagedAgentAvatarUrl(
   avatarUrl: string | null | undefined,
-  upload: UploadMediaBytes = uploadMediaBytes,
+  upload: UploadMediaBytes = defaultUploadMediaBytes,
   fallbackAvatarUrl?: string | null,
 ): Promise<string | undefined> {
   const resolvedAvatarUrl = avatarUrl?.trim() || undefined;
@@ -27,6 +33,11 @@ export async function resolveManagedAgentAvatarUrl(
     console.warn("Avatar upload failed, proceeding without avatar:", err);
     return safeFallbackAvatarUrl(fallbackAvatarUrl);
   }
+}
+
+async function defaultUploadMediaBytes(data: number[], filename?: string) {
+  const { uploadMediaBytes } = await import("@/shared/api/tauri");
+  return uploadMediaBytes(data, filename);
 }
 
 function safeFallbackAvatarUrl(avatarUrl: string | null | undefined) {
