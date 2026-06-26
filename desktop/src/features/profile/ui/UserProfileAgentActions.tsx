@@ -312,7 +312,7 @@ function AgentDeleteConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>Delete this agent?</AlertDialogTitle>
           <AlertDialogDescription>
-            Delete {agent.name} from My Agents and this workspace.
+            Deleting this agent stops and removes the agent from this workspace.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
@@ -323,11 +323,11 @@ function AgentDeleteConfirmDialog({
               ? "Requests remote deletion; if it is online, Buzz first sends a shutdown command when possible. If the deployment cannot be reached through a channel, the remote process may keep running without local management."
               : "Stops any local agent process before deleting the record"}
           </li>
-          <li>
-            This is different from archiving: archived agents can be unarchived,
-            while deleted agents must be created or deployed again.
-          </li>
         </ul>
+        <p className="text-sm text-muted-foreground">
+          You can also archive this agent from the profile settings menu if you
+          want to hide the agent instead of removing it.
+        </p>
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">

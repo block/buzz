@@ -39,7 +39,7 @@ export function ArchiveConfirmDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{title}</AlertDialogTitle>
           <AlertDialogDescription>
-            Archiving removes {subject} from this space.
+            Archiving hides {subject} from the space.
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The list + closing paragraph sit outside AlertDialogDescription on
