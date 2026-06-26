@@ -781,10 +781,7 @@ mod tests {
 
     // --- BUZZ_ALLOWED_CHANNEL_ADD_POLICIES gate ---
 
-    fn check_allowed_channel_add_policy(
-        allowed_raw: &str,
-        policy: &str,
-    ) -> Result<(), CliError> {
+    fn check_allowed_channel_add_policy(allowed_raw: &str, policy: &str) -> Result<(), CliError> {
         let allowed: Vec<&str> = allowed_raw
             .split(',')
             .map(str::trim)
@@ -802,7 +799,10 @@ mod tests {
     #[test]
     fn set_add_policy_rejects_disallowed_policy() {
         let result = check_allowed_channel_add_policy("owner_only,nobody", "anyone");
-        assert!(result.is_err(), "anyone should be rejected when not in allowed set");
+        assert!(
+            result.is_err(),
+            "anyone should be rejected when not in allowed set"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("not permitted"),
@@ -839,10 +839,9 @@ mod tests {
 
     fn make_test_client() -> BuzzClient {
         // Scalar = 1 is the smallest valid secp256k1 private key.
-        let keys = nostr::Keys::parse(
-            "0000000000000000000000000000000000000000000000000000000000000001",
-        )
-        .expect("valid test key");
+        let keys =
+            nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+                .expect("valid test key");
         BuzzClient::new("ws://localhost:3000".to_string(), keys, None, None)
             .expect("client construction should not fail")
     }

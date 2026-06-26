@@ -386,8 +386,7 @@ mod tests {
     }
 
     /// Setting an agent owner then reading back the policy should return
-    /// the default "owner_only" policy (migration 0005 tightened the default)
-    /// and the owner pubkey.
+    /// the default "anyone" policy and the owner pubkey.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_and_get_policy() {
@@ -412,7 +411,7 @@ mod tests {
             .expect("get_agent_channel_policy");
 
         let (policy, owner) = result.expect("should return Some for known pubkey");
-        assert_eq!(policy, "owner_only", "default policy should be 'owner_only'");
+        assert_eq!(policy, "anyone", "default policy should be 'anyone'");
         assert_eq!(
             owner,
             Some(owner_pk),

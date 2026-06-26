@@ -838,9 +838,7 @@ impl Config {
                 })?;
             }
             let allowed_modes: Vec<String> = raw.iter().map(|s| s.trim().to_string()).collect();
-            if !allowed_modes.is_empty()
-                && !allowed_modes.contains(&args.respond_to.to_string())
-            {
+            if !allowed_modes.is_empty() && !allowed_modes.contains(&args.respond_to.to_string()) {
                 return Err(ConfigError::ConfigFile(format!(
                     "respond_to '{}' is not permitted on this deployment \
                      (BUZZ_ACP_ALLOWED_RESPOND_TO={})",
@@ -2366,9 +2364,7 @@ channels = "ALL"
 
     // --- BUZZ_ACP_ALLOWED_RESPOND_TO gate ---
 
-    fn parse_allowed_respond_to(
-        raw: &[&str],
-    ) -> Result<HashSet<RespondTo>, ConfigError> {
+    fn parse_allowed_respond_to(raw: &[&str]) -> Result<HashSet<RespondTo>, ConfigError> {
         let mut set = HashSet::new();
         for s in raw {
             let mode = RespondTo::from_str(s.trim(), true).map_err(|_| {
@@ -2400,8 +2396,7 @@ channels = "ALL"
 
     #[test]
     fn allowed_respond_to_rejects_disallowed_mode() {
-        let result =
-            check_allowed_respond_to(&["owner-only", "allowlist"], RespondTo::Anyone);
+        let result = check_allowed_respond_to(&["owner-only", "allowlist"], RespondTo::Anyone);
         assert!(
             result.is_err(),
             "anyone should be rejected when not in allowed set"
@@ -2415,8 +2410,7 @@ channels = "ALL"
 
     #[test]
     fn allowed_respond_to_accepts_allowed_mode() {
-        let result =
-            check_allowed_respond_to(&["owner-only", "allowlist"], RespondTo::OwnerOnly);
+        let result = check_allowed_respond_to(&["owner-only", "allowlist"], RespondTo::OwnerOnly);
         assert!(result.is_ok(), "owner-only should be accepted: {result:?}");
     }
 
@@ -2439,7 +2433,10 @@ channels = "ALL"
             msg.contains("invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO"),
             "error should name the env var: {msg}"
         );
-        assert!(msg.contains("badvalue"), "error should name the bad value: {msg}");
+        assert!(
+            msg.contains("badvalue"),
+            "error should name the bad value: {msg}"
+        );
     }
 
     #[test]

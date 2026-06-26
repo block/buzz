@@ -128,7 +128,7 @@ mod tests {
     fn embedded_migrator_contains_all_schema_migrations() {
         let migrations: Vec<_> = MIGRATOR.iter().collect();
 
-        assert_eq!(migrations.len(), 4);
+        assert_eq!(migrations.len(), 3);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(
@@ -159,20 +159,6 @@ mod tests {
                 .contains("ADD COLUMN not_before BIGINT")
                 && migrations[2].sql.as_str().contains("idx_events_not_before"),
             "third migration should add the NIP-ER reminder columns and index"
-        );
-
-        // version 4 (channel_encryption_latch) is on an unmerged branch — version 5 is intentionally next
-        assert_eq!(migrations[3].version, 5);
-        assert_eq!(
-            &*migrations[3].description,
-            "default channel add policy owner only"
-        );
-        assert!(
-            migrations[3]
-                .sql
-                .as_str()
-                .contains("ALTER COLUMN channel_add_policy SET DEFAULT"),
-            "fifth migration should tighten the channel_add_policy column default"
         );
     }
 
@@ -234,7 +220,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3, 5]);
+        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3]);
         let events_exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'events')",
         )
@@ -267,7 +253,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("baseline migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3, 5]);
+        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3]);
         let allowlist_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pubkey_allowlist")
             .fetch_one(&pool)
             .await
