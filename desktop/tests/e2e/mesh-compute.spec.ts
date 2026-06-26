@@ -69,15 +69,16 @@ async function triggerManagedAgentPrimaryAction(
   pubkey: string,
 ) {
   // Agent lifecycle actions moved from the old per-row dropdown into the
-  // profile sidebar (PR #1200): the Agents-page row now exposes a "Manage"
-  // button that opens the profile panel, where a single primary-action button
-  // toggles Stop (when running/deployed) / Start (when stopped). Open the panel
-  // for this agent if it isn't already showing it, then click that toggle.
+  // profile sidebar (PR #1200): the Agents-page surfaces each agent as an
+  // identity card that opens the profile panel on click, where a single
+  // primary-action button toggles Stop (when running/deployed) / Start (when
+  // stopped). Open the panel for this agent if it isn't already showing it,
+  // then click that toggle.
   const panel = page.getByTestId("user-profile-panel");
   const primaryAction = panel.getByTestId("user-profile-agent-primary-action");
   if (!(await primaryAction.isVisible().catch(() => false))) {
-    const row = page.getByTestId(`managed-agent-${pubkey}`);
-    await row.getByRole("button", { name: "Manage" }).click();
+    const card = page.getByTestId(`managed-agent-${pubkey}`);
+    await card.getByRole("button", { name: /agent profile$/ }).click();
     await expect(panel).toBeVisible();
   }
   await expect(primaryAction).toBeEnabled();
