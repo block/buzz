@@ -2927,7 +2927,6 @@ fn dispatch_heartbeat(
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
-
         },
     );
     *heartbeat_in_flight = true;
@@ -3371,7 +3370,6 @@ mod owner_control_command_tests {
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
-
             },
         );
 
@@ -3872,7 +3870,6 @@ mod error_outcome_emission_tests {
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
-
         }
     }
 
@@ -3895,7 +3892,6 @@ mod error_outcome_emission_tests {
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
-
             },
         );
 
