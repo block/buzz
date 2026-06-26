@@ -175,8 +175,8 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   },
   {
     id: "push-to-talk",
-    label: "Push to talk",
-    description: "Hold to unmute in a huddle",
+    label: "Push to Talk",
+    description: "Hold the global huddle shortcut to transmit when enabled",
     keys: "Ctrl+Space",
     keysWindows: "Ctrl+Space",
     category: "Messages",

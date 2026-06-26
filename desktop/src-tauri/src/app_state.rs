@@ -11,6 +11,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
 use crate::managed_agents::ManagedAgentProcess;
+use crate::ptt_shortcut::PttShortcutRuntimeState;
 
 pub struct AppState {
     pub keys: Mutex<Keys>,
@@ -22,11 +23,8 @@ pub struct AppState {
     pub channel_templates_store_lock: Mutex<()>,
     pub managed_agent_processes: Mutex<HashMap<String, ManagedAgentProcess>>,
     pub huddle_state: Mutex<HuddleState>,
-    /// Tauri app handle — stored after setup so huddle commands can emit
-    /// `huddle-state-changed` events without needing the handle threaded
-    /// through every call site.
-    ///
-    /// Set once during `setup()` in `lib.rs`; never cleared.
+    pub ptt_shortcut: PttShortcutRuntimeState,
+    /// Tauri app handle, set once during setup.
     pub app_handle: Mutex<Option<AppHandle>>,
     /// Selected audio output device name. `None` = system default.
     /// Used by `connect_audio_relay` and TTS pipeline when opening sinks.
@@ -93,6 +91,7 @@ pub fn build_app_state() -> AppState {
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),
         huddle_state: Mutex::new(HuddleState::default()),
+        ptt_shortcut: PttShortcutRuntimeState::default(),
         app_handle: Mutex::new(None),
         audio_output_device: Mutex::new(None),
         media_proxy_port: AtomicU16::new(0),
@@ -127,6 +126,7 @@ impl AppState {
             Err(_) => return,
         };
         let Some(app) = app else { return };
+        crate::ptt_shortcut::refresh_registration(&app, self);
         let snapshot = match self.huddle_state.lock() {
             Ok(hs) => hs.clone(),
             Err(_) => return,

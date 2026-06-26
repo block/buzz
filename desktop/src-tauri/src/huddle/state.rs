@@ -13,7 +13,7 @@ use super::{stt, tts};
 
 /// Voice input mode: push-to-talk (PTT) or voice-activity detection (VAD).
 ///
-/// PTT: mic is gated by a global shortcut (Ctrl+Space). Pressing the key sets
+/// PTT: mic is gated by the configured global shortcut (Ctrl+Space by default). Pressing the key sets
 /// `ptt_active` and immediately cancels any playing TTS. Releasing the key
 /// (after a 200 ms delay) stops mic capture and flushes the utterance.
 ///

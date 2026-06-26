@@ -22,7 +22,7 @@ export type AudioWorkletHandle = {
   /** Send PTT state to the worklet processor. */
   setTransmitting: (active: boolean) => void;
   /** Switch voice input mode. In VAD mode, always transmitting (PTT events ignored).
-   *  In PTT mode, gated by Ctrl+Space. */
+   *  In PTT mode, gated by the PTT shortcut. */
   setMode: (mode: "push_to_talk" | "voice_activity") => void;
   /** Set mic input gain (0–1). Adjusts the GainNode between source and worklet. */
   setGain: (value: number) => void;
@@ -98,18 +98,18 @@ export async function setupAudioWorklet(
 
   // Track the current mode so PTT events are only forwarded in PTT mode.
   // In VAD mode, the worklet stays in transmitting=true regardless of
-  // Ctrl+Space presses — prevents accidental muting. (Crossfire fix I1.)
+  // the PTT shortcut presses — prevents accidental muting. (Crossfire fix I1.)
   let currentMode: "push_to_talk" | "voice_activity" = initialTransmitting
     ? "voice_activity"
     : "push_to_talk";
 
-  // Listen for PTT state from Rust global shortcut (Ctrl+Space press/release).
+  // Listen for PTT state from Rust global shortcut (the PTT shortcut press/release).
   // Direction: Rust→main→worklet. The Tauri event carries a boolean payload.
   let pttUnlisten: UnlistenFn | null = null;
   try {
     pttUnlisten = await listen<boolean>("ptt-state", (event) => {
       // Only forward PTT events to the worklet when in PTT mode.
-      // In VAD mode, Ctrl+Space is ignored — the worklet stays open.
+      // In VAD mode, the PTT shortcut is ignored — the worklet stays open.
       if (currentMode === "push_to_talk") {
         workletNode.port.postMessage({ type: "ptt", active: event.payload });
       }

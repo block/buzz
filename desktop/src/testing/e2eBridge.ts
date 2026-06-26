@@ -6577,6 +6577,22 @@ export function maybeInstallE2eTauriMocks() {
           },
         };
       }
+      case "get_ptt_shortcut_settings":
+        return {
+          enabled: true,
+          shortcut: "Ctrl+Space",
+          display: "Ctrl+Space",
+          registered: false,
+          error: null,
+        };
+      case "set_ptt_shortcut_enabled":
+        return {
+          enabled: (payload as { enabled?: boolean } | null)?.enabled ?? true,
+          shortcut: "Ctrl+Space",
+          display: "Ctrl+Space",
+          registered: false,
+          error: null,
+        };
       case "get_identity":
         if (identity) {
           return {

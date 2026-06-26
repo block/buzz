@@ -21,6 +21,87 @@ type HuddleJoinInfo = {
 
 type VoiceInputMode = "push_to_talk" | "voice_activity";
 
+export type PttShortcutSettings = {
+  enabled: boolean;
+  shortcut: string;
+  display: string;
+  registered: boolean;
+  error: string | null;
+};
+
+export const DEFAULT_PTT_SHORTCUT_SETTINGS: PttShortcutSettings = {
+  enabled: true,
+  shortcut: "Ctrl+Space",
+  display: "Ctrl+Space",
+  registered: false,
+  error: null,
+};
+
+const PTT_SHORTCUT_SETTINGS_EVENT = "ptt-shortcut-settings-changed";
+
+export function usePttShortcutSettings() {
+  const [settings, setSettings] = React.useState<PttShortcutSettings>(
+    DEFAULT_PTT_SHORTCUT_SETTINGS,
+  );
+  const [isUpdating, setIsUpdating] = React.useState(false);
+
+  const refresh = React.useCallback(() => {
+    invoke<PttShortcutSettings>("get_ptt_shortcut_settings")
+      .then(setSettings)
+      .catch((error) => {
+        setSettings({
+          ...DEFAULT_PTT_SHORTCUT_SETTINGS,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Could not load push-to-talk shortcut settings.",
+        });
+      });
+  }, []);
+
+  React.useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    listen<PttShortcutSettings>(PTT_SHORTCUT_SETTINGS_EVENT, (event) => {
+      if (!cancelled) setSettings(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const setEnabled = React.useCallback(async (enabled: boolean) => {
+    setIsUpdating(true);
+    try {
+      const next = await invoke<PttShortcutSettings>(
+        "set_ptt_shortcut_enabled",
+        { enabled },
+      );
+      setSettings(next);
+    } catch (error) {
+      setSettings((current) => ({
+        ...current,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Could not update push-to-talk shortcut settings.",
+      }));
+    } finally {
+      setIsUpdating(false);
+    }
+  }, []);
+
+  return { settings, setEnabled, isUpdating, refresh };
+}
+
 const MIC_ANALYSER_UPDATE_INTERVAL_MS = 33;
 const MIC_INITIAL_NOISE_FLOOR = 0.01;
 const MIC_VOICE_GATE_ON_RMS = 0.018;
@@ -207,7 +288,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   // to avoid exhausting the browser's ~6 concurrent AudioContext limit.
   const pttAudioCtxRef = React.useRef<AudioContext | null>(null);
 
-  // PTT state from Rust (Ctrl+Space). UI feedback + 50ms audio cue when mic active.
+  // PTT state from Rust (the PTT shortcut). UI feedback + 50ms audio cue when mic active.
   // Actual audio gating is in audioWorklet.ts → worklet.js.
   React.useEffect(() => {
     let cancelled = false;

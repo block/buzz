@@ -10,6 +10,7 @@ mod migration;
 mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
+mod ptt_shortcut;
 mod relay;
 mod secret_store;
 mod templates;
@@ -114,6 +115,7 @@ use managed_agents::{
     restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
     try_regenerate_nest, BackendKind, ManagedAgentProcess,
 };
+use ptt_shortcut::{get_ptt_shortcut_settings, set_ptt_shortcut_enabled};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -566,6 +568,8 @@ pub fn run() {
                 *guard = Some(app_handle.clone());
             }
 
+            ptt_shortcut::initialize(&app_handle, &state);
+
             // Bring up the runtime-owned relay-mesh call-me-now listener now,
             // before any saved agent restore can request a connection. Its
             // lifetime is tied to the runtime, not a UI mount — this is what
@@ -637,16 +641,6 @@ pub fn run() {
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
-            }
-
-            // Non-fatal: huddle works without the shortcut (user can switch to VAD mode).
-            #[cfg(desktop)]
-            {
-                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
-                let shortcut = Shortcut::new(Some(Modifiers::CONTROL), Code::Space);
-                if let Err(e) = app.handle().global_shortcut().register(shortcut) {
-                    eprintln!("buzz-desktop: failed to register PTT shortcut: {e}");
-                }
             }
 
             // Handle deep link URLs received while the app is running (macOS)
@@ -898,6 +892,8 @@ pub fn run() {
             get_huddle_agent_pubkeys,
             set_voice_input_mode,
             get_voice_input_mode,
+            get_ptt_shortcut_settings,
+            set_ptt_shortcut_enabled,
             list_audio_output_devices,
             set_audio_output_device,
             get_audio_output_device,

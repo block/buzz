@@ -6,6 +6,7 @@ import type { CSSProperties } from "react";
 import { cn } from "@/shared/lib/cn";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { Button } from "@/shared/ui/button";
+import type { PttShortcutSettings } from "../HuddleContext";
 import {
   Popover,
   PopoverAnchor,
@@ -23,6 +24,7 @@ type MicControlsProps = {
   pttActive: boolean;
   micConnected: boolean;
   micLevel: number;
+  pttShortcut: PttShortcutSettings;
   onSelectVoiceInputMode: (mode: VoiceInputMode) => void | Promise<void>;
   audioDevices: MediaDeviceInfo[];
   selectedDeviceId: string;
@@ -92,6 +94,7 @@ export function MicControls({
   pttActive,
   micConnected,
   micLevel,
+  pttShortcut,
   onSelectVoiceInputMode,
   audioDevices,
   selectedDeviceId,
@@ -102,8 +105,8 @@ export function MicControls({
   const micUnavailable = !micConnected;
   const showMicMeter = micConnected && !isMuted;
   const isMac = isMacPlatform();
+  const pttShortcutLabel = pttShortcut.display;
   const prefersReducedMotion = usePrefersReducedMotion();
-  const pushToTalkShortcut = isMac ? "⌃Space" : "Ctrl+Space";
   const barHeights: [number, number, number] = prefersReducedMotion
     ? MIC_METER_IDLE_HEIGHTS
     : micMeterHeights(showMicMeter ? micLevel : 0);
@@ -217,10 +220,27 @@ export function MicControls({
                 className={cn("h-3 w-3 shrink-0", !isPttMode && "invisible")}
               />
               <span className="font-medium">Push to Talk</span>
-              <kbd className="ml-auto rounded border border-foreground/10 px-1.5 py-0.5 text-2xs font-medium text-foreground/60">
-                {pushToTalkShortcut}
-              </kbd>
+              {pttShortcut.enabled ? (
+                <kbd className="ml-auto rounded border border-foreground/10 px-1.5 py-0.5 text-2xs font-medium text-foreground/60">
+                  {pttShortcutLabel}
+                </kbd>
+              ) : (
+                <span className="ml-auto text-2xs text-muted-foreground">
+                  Shortcut off
+                </span>
+              )}
             </button>
+            {isPttMode && !pttShortcut.enabled ? (
+              <p className="mt-1 pl-5 text-xs leading-snug text-muted-foreground">
+                Background shortcut disabled. Enable it in Settings → Keyboard
+                Shortcuts.
+              </p>
+            ) : null}
+            {isPttMode && pttShortcut.error ? (
+              <p className="mt-1 pl-5 text-xs leading-snug text-destructive">
+                {pttShortcut.error}
+              </p>
+            ) : null}
             <span className="sr-only" aria-live="polite">
               {isPttMode
                 ? "Push to Talk is enabled."

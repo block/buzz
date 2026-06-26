@@ -18,7 +18,7 @@ import { Button } from "@/shared/ui/button";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { useHuddle } from "../HuddleContext";
+import { useHuddle, usePttShortcutSettings } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { HuddleParticipantsControl } from "./ParticipantList";
@@ -144,6 +144,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const { burstHuddleReaction } = useEmojiBurst();
+  const { settings: pttShortcutSettings } = usePttShortcutSettings();
 
   const isPttMode = voiceInputMode === "push_to_talk";
   const [state, setState] = React.useState<HuddleState | null>(null);
@@ -411,6 +412,11 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
   // far-end reference. The AEC follow-up PR flips this constant in the
   // same diff that moves playout into WebAudio.
   const aecMissing = true;
+  const pttInstruction = isPttMode
+    ? pttShortcutSettings.enabled
+      ? `push to talk, hold ${pttShortcutSettings.display} to transmit`
+      : "push to talk, background shortcut disabled"
+    : "voice activity detection";
 
   async function handleLeave() {
     if (isLeaving) return;
@@ -525,6 +531,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
             pttActive={pttActive}
             micConnected={micConnected}
             micLevel={micLevel}
+            pttShortcut={pttShortcutSettings}
             onSelectVoiceInputMode={setVoiceInputMode}
             audioDevices={audioDevices}
             selectedDeviceId={selectedDeviceId}
@@ -671,7 +678,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
         {micConnected
           ? "In huddle, microphone connected"
           : "In huddle, no microphone"}
-        {`, voice input: ${isPttMode ? "push to talk, press Ctrl+Space to transmit" : "voice activity detection"}`}
+        {`, voice input: ${pttInstruction}`}
         {modelStatus &&
           modelStatus.stt !== "ready" &&
           `, STT model ${modelStatus.stt}`}

@@ -97,6 +97,8 @@ pub async fn set_voice_input_mode(
             && hs.stt_pipeline.is_some()
     };
 
+    crate::ptt_shortcut::refresh_registration_from_state(&state);
+
     if needs_restart {
         let eph_id = {
             let hs = state.huddle()?;
