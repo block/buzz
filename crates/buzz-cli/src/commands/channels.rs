@@ -533,7 +533,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     // this check. Full enforcement requires relay-side validation, which is
     // intentionally out of scope for this change (see team decision: no
     // relay-side enforcement of client behavior).
-    if let Ok(allowed_raw) = std::env::var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES") {
+    if let Ok(allowed_raw) = std::env::var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES") {
         let allowed: Vec<&str> = allowed_raw
             .split(',')
             .map(str::trim)
@@ -542,7 +542,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         if !allowed.is_empty() && !allowed.contains(&policy) {
             return Err(CliError::Usage(format!(
                 "channel_add_policy '{policy}' is not permitted on this deployment \
-                 (BUZZ_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
+                 (BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
             )));
         }
     }
@@ -779,7 +779,7 @@ mod tests {
         assert!(validate_ttl_seconds(i32::MAX as i64 + 1).is_err());
     }
 
-    // --- BUZZ_ALLOWED_CHANNEL_ADD_POLICIES gate ---
+    // --- BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES gate ---
 
     fn check_allowed_channel_add_policy(allowed_raw: &str, policy: &str) -> Result<(), CliError> {
         let allowed: Vec<&str> = allowed_raw
@@ -790,7 +790,7 @@ mod tests {
         if !allowed.is_empty() && !allowed.contains(&policy) {
             return Err(CliError::Usage(format!(
                 "channel_add_policy '{policy}' is not permitted on this deployment \
-                 (BUZZ_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
+                 (BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES={allowed_raw})"
             )));
         }
         Ok(())
@@ -834,7 +834,7 @@ mod tests {
     //
     // This test calls cmd_set_add_policy directly with the env var set. The function
     // returns early with an error before any network call, so no relay is needed.
-    // If the BUZZ_ALLOWED_CHANNEL_ADD_POLICIES check were removed from cmd_set_add_policy,
+    // If the BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES check were removed from cmd_set_add_policy,
     // this test would fail (it would proceed to sign_event and return a different error).
 
     fn make_test_client() -> BuzzClient {
@@ -848,10 +848,10 @@ mod tests {
 
     #[tokio::test]
     async fn set_add_policy_env_gate_rejects_disallowed_via_full_path() {
-        std::env::set_var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES", "owner_only,nobody");
+        std::env::set_var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES", "owner_only,nobody");
         let client = make_test_client();
         let result = cmd_set_add_policy(&client, "anyone").await;
-        std::env::remove_var("BUZZ_ALLOWED_CHANNEL_ADD_POLICIES");
+        std::env::remove_var("BUZZ_ACP_ALLOWED_CHANNEL_ADD_POLICIES");
 
         assert!(
             result.is_err(),
