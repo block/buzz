@@ -66,6 +66,11 @@ export type UseLiveChannelUpdatesOptions = {
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 
+// get_channels is an expensive O(channels) relay fan-out. Incoming traffic for
+// non-active channels arrives in bursts, so coalesce the refetch into a single
+// trailing invalidation instead of one per event.
+const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
+
 // Only "new content" kinds should bump unread state. Shared with the
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
@@ -103,6 +108,18 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
+  const channelsInvalidateTimeoutRef = React.useRef<number | undefined>(
+    undefined,
+  );
+  const invalidateChannelsDebounced = React.useCallback(() => {
+    if (channelsInvalidateTimeoutRef.current !== undefined) {
+      return;
+    }
+    channelsInvalidateTimeoutRef.current = window.setTimeout(() => {
+      channelsInvalidateTimeoutRef.current = undefined;
+      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+    }, CHANNELS_INVALIDATE_DEBOUNCE_MS);
+  }, [queryClient]);
   const liveChannelIds = React.useMemo(
     () => new Set(channels.map((channel) => channel.id)),
     [channels],
@@ -186,7 +203,7 @@ export function useLiveChannelUpdates(
 
     if (!liveChannelIds.has(channelId)) {
       if (channelId !== activeChannelId) {
-        void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        invalidateChannelsDebounced();
       }
       return;
     }
@@ -470,6 +487,11 @@ export function useLiveChannelUpdates(
 
   React.useEffect(() => {
     return () => {
+      if (channelsInvalidateTimeoutRef.current !== undefined) {
+        window.clearTimeout(channelsInvalidateTimeoutRef.current);
+        channelsInvalidateTimeoutRef.current = undefined;
+      }
+
       for (const dispose of liveSubsRef.current.values()) {
         void dispose().catch(() => {});
       }
