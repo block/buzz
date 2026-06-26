@@ -47,6 +47,7 @@ pub(crate) struct KnownAcpRuntime {
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const AMP_AVATAR_URL: &str = "https://ampcode.com/img/amp-logo.png";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -130,6 +131,27 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_hint: "Install the Codex CLI via the official install script.",
         adapter_install_hint: "Install the Codex ACP adapter via npm.",
         skill_dir: Some(".codex/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+    },
+    KnownAcpRuntime {
+        id: "amp",
+        label: "Amp",
+        commands: &["amp-acp"],
+        aliases: &[],
+        avatar_url: AMP_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("amp"),
+        cli_install_commands: &[],
+        adapter_install_commands: &["npm install -g amp-acp"],
+        install_instructions_url: "https://github.com/tao12345666333/amp-acp",
+        cli_install_hint: "Install Amp via https://ampcode.com.",
+        adapter_install_hint: "Install the Amp ACP adapter via npm.",
+        skill_dir: None,
         supports_acp_model_switching: false,
         model_env_var: None,
         provider_env_var: None,
