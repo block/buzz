@@ -23,6 +23,13 @@ const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
 /// alongside its `_body` serializer.
 type OpenAiParse = fn(Value) -> Result<LlmResponse, AgentError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatabricksV2Route {
+    OpenAiResponses,
+    AnthropicMessages,
+    MlflowChatCompletions,
+}
+
 pub struct Llm {
     http: Client,
     /// One-shot sticky flag: set when a Chat Completions request comes
@@ -83,6 +90,23 @@ impl Llm {
                 })
                 .await
             }
+            Provider::DatabricksV2 => {
+                self.databricks_v2_request(cfg, |route| match route {
+                    DatabricksV2Route::OpenAiResponses => (
+                        responses_body(cfg, system_prompt, history, tools),
+                        parse_responses as OpenAiParse,
+                    ),
+                    DatabricksV2Route::AnthropicMessages => (
+                        anthropic_body(cfg, system_prompt, history, tools),
+                        parse_anthropic as OpenAiParse,
+                    ),
+                    DatabricksV2Route::MlflowChatCompletions => (
+                        openai_body(cfg, system_prompt, history, tools),
+                        parse_openai as OpenAiParse,
+                    ),
+                })
+                .await
+            }
         }
     }
 
@@ -137,6 +161,46 @@ impl Llm {
                     .await?;
                 Ok(r.text)
             }
+            Provider::DatabricksV2 => {
+                let r = self
+                    .databricks_v2_request(cfg, |route| match route {
+                        DatabricksV2Route::OpenAiResponses => (
+                            json!({
+                                "model": cfg.model,
+                                "max_output_tokens": max_output_tokens,
+                                "instructions": system_prompt,
+                                "input": user_prompt,
+                            }),
+                            parse_responses as OpenAiParse,
+                        ),
+                        DatabricksV2Route::AnthropicMessages => (
+                            json!({
+                                "model": cfg.model,
+                                "max_tokens": max_output_tokens,
+                                "system": system_prompt,
+                                "messages": [{
+                                    "role": "user",
+                                    "content": [{ "type": "text", "text": user_prompt }],
+                                }],
+                            }),
+                            parse_anthropic as OpenAiParse,
+                        ),
+                        DatabricksV2Route::MlflowChatCompletions => (
+                            json!({
+                                "model": cfg.model,
+                                "stream": false,
+                                "max_completion_tokens": max_output_tokens,
+                                "messages": [
+                                    { "role": "system", "content": system_prompt },
+                                    { "role": "user", "content": user_prompt },
+                                ],
+                            }),
+                            parse_openai as OpenAiParse,
+                        ),
+                    })
+                    .await?;
+                Ok(r.text)
+            }
         }
     }
 
@@ -174,6 +238,22 @@ impl Llm {
             }
             Err(e) => Err(e),
         }
+    }
+
+    async fn databricks_v2_request<F>(
+        &self,
+        cfg: &Config,
+        mut build: F,
+    ) -> Result<LlmResponse, AgentError>
+    where
+        F: FnMut(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
+    {
+        let route = databricks_v2_route_for_model(&cfg.model);
+        let (body, parse) = build(route);
+        parse(
+            self.post_openai(cfg, databricks_v2_path(route), &body)
+                .await?,
+        )
     }
 
     /// POST to an OpenAI-family endpoint. For OpenAI-compat this is just
@@ -515,6 +595,25 @@ fn is_responses_required_error(body: &str) -> bool {
     b.contains("/v1/responses")
         || b.contains("responses api instead")
         || b.contains("use the responses api")
+}
+
+fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("gpt-5") || lower.contains("gpt5") {
+        DatabricksV2Route::OpenAiResponses
+    } else if lower.contains("claude") {
+        DatabricksV2Route::AnthropicMessages
+    } else {
+        DatabricksV2Route::MlflowChatCompletions
+    }
+}
+
+fn databricks_v2_path(route: DatabricksV2Route) -> &'static str {
+    match route {
+        DatabricksV2Route::OpenAiResponses => "/ai-gateway/openai/v1/responses",
+        DatabricksV2Route::AnthropicMessages => "/ai-gateway/anthropic/v1/messages",
+        DatabricksV2Route::MlflowChatCompletions => "/ai-gateway/mlflow/v1/chat/completions",
+    }
 }
 
 fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
@@ -886,7 +985,7 @@ fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> 
         Provider::Anthropic | Provider::OpenAi => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
-        Provider::Databricks => {
+        Provider::Databricks | Provider::DatabricksV2 => {
             if !cfg.api_key.is_empty() {
                 return Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())));
             }
@@ -1196,6 +1295,31 @@ mod tests {
             ("", false),
         ] {
             assert_eq!(is_responses_required_error(body), want, "body={body:?}");
+        }
+    }
+
+    #[test]
+    fn databricks_v2_routes_by_model_family() {
+        for (model, route, path) in [
+            (
+                "databricks-gpt-5-5",
+                DatabricksV2Route::OpenAiResponses,
+                "/ai-gateway/openai/v1/responses",
+            ),
+            (
+                "databricks-claude-opus-4-7",
+                DatabricksV2Route::AnthropicMessages,
+                "/ai-gateway/anthropic/v1/messages",
+            ),
+            (
+                "custom-tool-model",
+                DatabricksV2Route::MlflowChatCompletions,
+                "/ai-gateway/mlflow/v1/chat/completions",
+            ),
+        ] {
+            let got = databricks_v2_route_for_model(model);
+            assert_eq!(got, route, "model={model}");
+            assert_eq!(databricks_v2_path(got), path, "model={model}");
         }
     }
 

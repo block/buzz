@@ -129,7 +129,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | `anthropic`, `openai`, or `databricks`. If unset, or if `anthropic`/`openai` is selected but its API key is missing, Databricks is auto-selected when `DATABRICKS_HOST` + `DATABRICKS_MODEL` are set. |
+| `BUZZ_AGENT_PROVIDER` | — | `anthropic`, `openai`, `databricks`, or `databricks_v2`. If unset, or if `anthropic`/`openai` is selected but its API key is missing, Databricks is auto-selected when `DATABRICKS_HOST` + `DATABRICKS_MODEL` are set. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic unless Databricks fallback is configured. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
@@ -158,7 +158,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 ## Providers
 
-`buzz-agent` speaks two HTTP dialects. Pick with `BUZZ_AGENT_PROVIDER`.
+`buzz-agent` speaks a few HTTP dialects. Pick with `BUZZ_AGENT_PROVIDER`.
 
 | Provider | `BUZZ_AGENT_PROVIDER` | Endpoint (auto) | Tested with |
 |---|---|---|---|
@@ -170,6 +170,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
+| Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
 If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent automatically falls back to Databricks OAuth when `DATABRICKS_HOST` and `DATABRICKS_MODEL` are set. The same Databricks fallback applies when `BUZZ_AGENT_PROVIDER` is unset. Explicit Anthropic/OpenAI API keys always win.
 
@@ -177,7 +178,7 @@ If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `
 
 By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
 
-`Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a third provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
+`Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
 
 ## MCP Servers
 

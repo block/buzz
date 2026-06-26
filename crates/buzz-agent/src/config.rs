@@ -33,6 +33,9 @@ pub enum Provider {
     /// with a dynamically-acquired bearer (OAuth 2.0 PKCE, or static `DATABRICKS_TOKEN`).
     /// Wire format is OpenAI-chat-compatible — reuses the same body builder and parser.
     Databricks,
+    /// Databricks AI Gateway v2. Routes by model family through the gateway's
+    /// OpenAI Responses, Anthropic Messages, or MLflow Chat Completions paths.
+    DatabricksV2,
 }
 
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
@@ -114,8 +117,8 @@ impl Config {
         // bad value can't break an Anthropic-only deployment.
         //
         // Databricks borrows api_key as the *optional* `DATABRICKS_TOKEN` escape
-        // hatch — empty means "use OAuth PKCE." The model lives in the URL path,
-        // not the request body (see `EndpointStrategy::DatabricksServing`).
+        // hatch — empty means "use OAuth PKCE." Legacy Databricks encodes the
+        // model in the URL path; Databricks v2 keeps it in the request body.
         let (api_key, model, base_url, openai_api) = match provider {
             Provider::Anthropic => (
                 req("ANTHROPIC_API_KEY")?,
@@ -137,12 +140,12 @@ impl Config {
                 env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
-            Provider::Databricks => (
+            Provider::Databricks | Provider::DatabricksV2 => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
                 resolve_model(databricks_model.as_deref(), buzz_agent_model.as_deref())
                     .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
-                OpenAiApi::Chat, // Databricks invocations is chat-shaped
+                OpenAiApi::Chat, // unused by Databricks v2; legacy Databricks is chat-shaped
             ),
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
@@ -318,6 +321,7 @@ fn resolve_provider(
                     "config: OPENAI_COMPAT_API_KEY required (or set DATABRICKS_HOST and DATABRICKS_MODEL for Databricks OAuth fallback)".into(),
                 ),
                 "databricks" => Ok(Provider::Databricks),
+                "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 _ => Err(format!(
                     "config: BUZZ_AGENT_PROVIDER={raw} not supported"
                 )),

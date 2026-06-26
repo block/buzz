@@ -89,13 +89,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
-/// provider and persist the result, then exit. Today the only provider is
-/// `databricks` (OAuth 2.0 PKCE). Reads `DATABRICKS_HOST` from env; needs
-/// a browser on the machine.
+/// provider and persist the result, then exit. Today this supports Databricks
+/// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the
+/// machine.
 async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let provider = args.first().map(String::as_str);
     match provider {
-        Some("databricks") => {
+        Some("databricks" | "databricks_v2" | "databricks-v2") => {
             let host = std::env::var("DATABRICKS_HOST")
                 .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
             let pkce = auth::PkceOAuthConfig {
