@@ -503,11 +503,6 @@ export function PersonaDialog({
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
     setIsCustomProviderEditing(false);
     setProvider(nextProvider);
-    if (nextProvider.trim().length === 0) {
-      setModel("");
-      setIsCustomModelEditing(false);
-      return;
-    }
     if (
       !isCustomModelEditing &&
       shouldClearKnownModelForSelectionScope({
