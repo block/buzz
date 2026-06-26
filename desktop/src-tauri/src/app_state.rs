@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     io::Write,
-    sync::{atomic::AtomicU16, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU16},
+        Arc, Mutex,
+    },
 };
 
 use nostr::{Keys, ToBech32};
@@ -35,6 +38,13 @@ pub struct AppState {
     pub media_proxy_port: AtomicU16,
     /// IOKit power assertion state — prevents idle sleep while agents run.
     pub prevent_sleep: Arc<Mutex<crate::prevent_sleep::PreventSleepState>>,
+    /// When true, closing the main window hides it to the system tray instead
+    /// of quitting. Mirrors the user's "Keep Buzz running in the tray" setting,
+    /// pushed from the frontend on launch and whenever the toggle changes.
+    pub close_to_tray: Arc<AtomicBool>,
+    /// Set just before a real quit (tray "Quit", app menu) so the
+    /// `CloseRequested` handler lets the window close instead of hiding it.
+    pub quitting: Arc<AtomicBool>,
     /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
@@ -99,6 +109,8 @@ pub fn build_app_state() -> AppState {
         prevent_sleep: Arc::new(Mutex::new(
             crate::prevent_sleep::PreventSleepState::default(),
         )),
+        close_to_tray: Arc::new(AtomicBool::new(false)),
+        quitting: Arc::new(AtomicBool::new(false)),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
         #[cfg(feature = "mesh-llm")]

@@ -13,6 +13,7 @@ mod prevent_sleep;
 mod relay;
 mod secret_store;
 mod templates;
+mod tray;
 mod util;
 
 #[cfg(not(feature = "mesh-llm"))]
@@ -516,6 +517,7 @@ pub fn run() {
     let shutdown_started = Arc::new(AtomicBool::new(false));
     let restore_shutdown_started = Arc::clone(&shutdown_started);
     let app = builder
+        .on_window_event(tray::handle_window_event)
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -528,6 +530,10 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
+
+            // The close-to-tray tray icon is created lazily by `set_close_to_tray`
+            // when the frontend pushes the enabled preference, so users who never
+            // opt in never see a tray icon.
 
             // Run all pre-identity data migrations before state loads from disk.
             migration::run_boot_migrations(&app_handle);
@@ -908,6 +914,7 @@ pub fn run() {
             validate_repos_dir,
             get_active_workspace,
             set_prevent_sleep_active,
+            set_close_to_tray,
             get_agent_memory,
             relay_reconnect_hook,
         ])
@@ -941,6 +948,12 @@ pub fn run() {
     let run_shutdown_done = Arc::clone(&shutdown_done);
     app.run(move |app_handle, event| match event {
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            // Mark a genuine quit so the close-to-tray window handler lets the
+            // window close instead of hiding it during teardown.
+            app_handle
+                .state::<AppState>()
+                .quitting
+                .store(true, Ordering::SeqCst);
             shutdown_started.store(true, Ordering::SeqCst);
             if !run_shutdown_done.swap(true, Ordering::SeqCst) {
                 prevent_sleep::release(&app_handle.state::<AppState>().prevent_sleep);
@@ -948,6 +961,12 @@ pub fn run() {
                     eprintln!("buzz-desktop: failed to stop managed agents: {error}");
                 }
             }
+        }
+        // macOS: clicking the dock icon while the window is hidden to the tray
+        // re-shows it (the standard re-open affordance).
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            tray::show_main_window(app_handle);
         }
         _ => {}
     });

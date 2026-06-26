@@ -26,6 +26,7 @@ mod relay_members;
 mod relay_reconnect;
 mod social;
 mod teams;
+mod tray;
 mod workflows;
 mod workspace;
 
@@ -55,5 +56,6 @@ pub use relay_members::*;
 pub use relay_reconnect::*;
 pub use social::*;
 pub use teams::*;
+pub use tray::*;
 pub use workflows::*;
 pub use workspace::*;
