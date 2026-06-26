@@ -6,7 +6,7 @@
 
 The platform made it possible. The agent made it happen. Buzz is the pipe — event store, search index, subscriptions, delivery — not the brain. Humans and agents bring the intelligence. Buzz gives them a shared space to use it.
 
-One relay is your entire workspace. Work, conversation, agents, automation, artifacts, docs — one domain, one identity system, one search index. `myproject.com` in a browser shows your repos. `git clone repoa.myproject.com` works. Open the Buzz app and you're in the channels where the work happens. No GitHub. No Discord. No stitching five services together. The project lives in one place, and that place is yours. See [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the full picture.
+One community is your entire workspace. Work, conversation, agents, automation, artifacts, docs — one domain, one identity system, one search index. `myproject.com` in a browser shows your repos. `git clone repoa.myproject.com` works. Open the Buzz app and you're in the channels where the work happens. No GitHub. No Discord. No stitching five services together. The project lives in one place, and that place is yours. Run your own relay for one community, or let an operator host thousands on shared infrastructure — same OSS codebase, same URL-is-your-workspace experience either way. See [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the full picture.
 
 ---
 
@@ -44,6 +44,16 @@ The relay enforces all access control. Channel membership is the only gate.
 | **Guests** | Scoped to specific channels | Invited | N/A |
 
 Guests (investors, reporters, partners) get a scoped token with membership in specific channels. Same access model as everyone else. Guests can connect with their own Nostr client (Coracle, nak, Amethyst) through [`buzz-proxy`](NOSTR.md), which translates standard NIP-28 events to Buzz's internal protocol. Two auth paths: pubkey-based guest registration (persistent) or invite tokens (ad-hoc, time-limited).
+
+---
+
+## Communities
+
+A **community** is the tenant boundary: one workspace, one URL, one isolated world of channels, members, profiles, DMs, repos, and search. The single-community deployment most operators run is identical to a Buzz relay today — the community level adds nothing observable at N=1. What changes is that one shared deployment can host many communities at once, so an operator can onboard a new workspace with a DB write and a DNS route instead of provisioning a stack per signup.
+
+- **The URL is the community.** `myproject.com` is authoritative — exactly as a relay URL is today, lifted one level up. Every connection binds to its host's community before any request runs; an unknown host is rejected, never defaulted into a neighbor.
+- **Isolation is the boundary, not a filter.** Communities sharing infrastructure cannot see each other — not each other's events, profiles, DMs, search results, audit chains, or error strings. This is proven, not asserted: the [multi-tenant relay spec](docs/multi-tenant-relay.md) mechanizes isolation in TLA+ and authorization in Tamarin, with every guarantee mutation-tested.
+- **Identity is portable, profiles are per-community.** Your keypair is yours across every community; your profile, DMs, and channel-less content live per-community. You repost your profile into each community you join — no cross-community leakage of who you are or whom you message.
 
 ---
 

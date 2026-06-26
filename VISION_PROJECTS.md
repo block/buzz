@@ -4,7 +4,7 @@
 >
 > Bug report to merged patch. One place. One search index. One identity system. The branch channel was the pull request, the CI dashboard, and the discussion thread.
 
-This document is the software-forge slice of the broader Buzz platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code.
+This document is the software-forge slice of the broader Buzz platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code. In multi-community Buzz, the same rule is lifted one level up: a project domain or subdomain selects the community first, and repositories, workflows, approvals, Blossom artifacts, and git ref updates under that host are community-local even if an operator runs many communities on shared backend infrastructure.
 
 ---
 
@@ -12,7 +12,7 @@ This document is the software-forge slice of the broader Buzz platform. [VISION.
 
 A project lives on the relay. `myproject.com` in a browser shows the project home. Click a repo and you're at `repoa.myproject.com` — README rendered, file tree navigable, code syntax-highlighted, clone URL at the top. The same URL serves HTML to a browser and git protocol to `git clone`. Content negotiation. One URL, two audiences.
 
-Git transport is standard Smart HTTP — `git clone`, `git push`, nothing special. Your npub signs pushes. Same domain, same auth, same identity as everything else on the relay.
+Git transport is standard Smart HTTP — `git clone`, `git push`, nothing special. Your npub signs pushes. Same domain, same auth, same identity as everything else on the relay. The host in the clone/push URL is also the community selector: the same `owner/repo` name may exist in two communities without sharing refs, branch protections, workflow runs, approvals, or repo announcements.
 
 The portable representation is a NIP-34 repo announcement (kind:30617) — standard metadata that any NIP-34 client can discover and render. Buzz extends it with `buzz-` prefixed tags for channel binding and visibility:
 
@@ -105,7 +105,7 @@ The approval event is signed by the maintainer's npub. The merge status referenc
 
 ## The Web of Trust
 
-Every contributor — human or agent — has a verifiable identity and a queryable contribution history across every project on the network.
+Every contributor — human or agent — has a verifiable identity and a queryable contribution history across every project on the network. Within Buzz, that history is queried through a community boundary: one community can choose to surface reputation from other communities later, but profiles, DMs, memberships, and project records are not implicitly shared across hosts.
 
 A new contributor submits a patch. Before you read the code:
 
@@ -125,7 +125,7 @@ Workflows orchestrate. Agents perform the compute. The relay is the message bus,
 
 A push to a branch channel triggers the CI workflow. The workflow engine coordinates the steps — build, test, lint. Agents run the actual jobs on their own infrastructure: your server, a cloud function, a laptop. Results post back to the branch channel alongside the conversation.
 
-Workflows live in the repo (`.buzz/workflows/`) or are defined at the project level and inherited by every branch channel automatically — no per-branch configuration, no copy-pasting YAML.
+Workflows live in the repo (`.buzz/workflows/`) or are defined at the project level and inherited by every branch channel automatically — no per-branch configuration, no copy-pasting YAML. Workflow definitions, schedules, webhooks, runs, and approval tokens inherit the project/community selected by the host, so a webhook or cron trigger for one community cannot resolve a same-named workflow in another.
 
 ```yaml
 name: CI
