@@ -10,6 +10,7 @@ import {
   READ_STATE_D_TAG_PREFIX,
   READ_STATE_FETCH_LIMIT,
   READ_STATE_HORIZON_SECONDS,
+  READ_STATE_MAX_PLAINTEXT_BYTES,
   MSG_PREFIX,
   THREAD_PREFIX,
   isValidBlob,
@@ -120,6 +121,49 @@ export function applyRemoteContextTimestamp(args: {
     contextSourceCreatedAt.set(contextId, eventCreatedAt);
   }
   return result;
+}
+
+/**
+ * Trim a contexts map to fit within `maxBytes` when serialized as the JSON
+ * blob `{v:1, client_id, contexts}`. Evicts oldest `msg:` entries first
+ * (lowest timestamp), then oldest `thread:` entries. Channel keys are never
+ * evicted. Returns the number of entries removed.
+ *
+ * Exported for unit testing; callers should prefer `currentContexts()`.
+ */
+export function trimContextsToBudget(
+  contexts: Record<string, number>,
+  clientId: string,
+  maxBytes: number,
+): number {
+  const encoder = new TextEncoder();
+  const blobFor = (c: Record<string, number>) =>
+    JSON.stringify({ v: 1, client_id: clientId, contexts: c });
+
+  if (encoder.encode(blobFor(contexts)).length <= maxBytes) {
+    return 0;
+  }
+
+  const msgEntries: [string, number][] = [];
+  const threadEntries: [string, number][] = [];
+  for (const [key, ts] of Object.entries(contexts)) {
+    if (key.startsWith(MSG_PREFIX)) {
+      msgEntries.push([key, ts]);
+    } else if (key.startsWith(THREAD_PREFIX)) {
+      threadEntries.push([key, ts]);
+    }
+  }
+  // Oldest-first within each tier.
+  msgEntries.sort((a, b) => a[1] - b[1]);
+  threadEntries.sort((a, b) => a[1] - b[1]);
+
+  let evicted = 0;
+  for (const [key] of [...msgEntries, ...threadEntries]) {
+    if (encoder.encode(blobFor(contexts)).length <= maxBytes) break;
+    delete contexts[key];
+    evicted++;
+  }
+  return evicted;
 }
 
 export class ReadStateManager {
@@ -595,24 +639,19 @@ export class ReadStateManager {
       contexts[ctx] = ts;
     }
 
-    // Evict oldest per-thread/per-message entries when approaching the
-    // MAX_CONTEXTS cap (10,000). Channel keys are never evicted. This prevents
-    // silent blob rejection by isValidBlob().
-    const EVICTION_THRESHOLD = 8_000;
-    const contextCount = Object.keys(contexts).length;
-    if (contextCount > EVICTION_THRESHOLD) {
-      const detailEntries: [string, number][] = [];
-      for (const [key, ts] of Object.entries(contexts)) {
-        if (key.startsWith(THREAD_PREFIX) || key.startsWith(MSG_PREFIX)) {
-          detailEntries.push([key, ts]);
-        }
-      }
-      // Sort oldest-first (lowest timestamp = oldest)
-      detailEntries.sort((a, b) => a[1] - b[1]);
-      const toEvict = contextCount - EVICTION_THRESHOLD;
-      for (let i = 0; i < Math.min(toEvict, detailEntries.length); i++) {
-        delete contexts[detailEntries[i][0]];
-      }
+    // Enforce a serialized byte-size budget before encryption. Entry count is
+    // the wrong metric — the relay rejects on byte size, not entry count. Evict
+    // oldest msg: entries first (lowest timestamp), then thread: entries, until
+    // the JSON fits. Channel keys are never evicted.
+    const evicted = trimContextsToBudget(
+      contexts,
+      this.clientId,
+      READ_STATE_MAX_PLAINTEXT_BYTES,
+    );
+    if (evicted > 0) {
+      console.warn(
+        `[ReadStateManager] currentContexts trimmed ${evicted} entries to fit byte budget`,
+      );
     }
 
     return contexts;

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   applyRemoteContextTimestamp,
   resolveEffectiveTimestamp,
+  trimContextsToBudget,
 } from "./readStateManager.ts";
 
 const threadKey = `thread:${"a".repeat(64)}`;
@@ -144,4 +145,101 @@ test("applyRemoteContextTimestamp keeps read markers monotonic even if sync even
   assert.equal(result, "advanced");
   assert.equal(effectiveState.get("channel-1"), 200);
   assert.equal(contextSourceCreatedAt.get("channel-1"), 11);
+});
+
+// ── trimContextsToBudget ──────────────────────────────────────────────────────
+
+const CLIENT_ID = "test-client-id";
+const MSG_ID = "a".repeat(64);
+const THREAD_ID = "b".repeat(64);
+
+test("trimContextsToBudget_underBudget_returnsZeroAndLeavesContextsUnchanged", () => {
+  const contexts = { [`msg:${MSG_ID}`]: 100 };
+  // A very large budget — nothing should be evicted.
+  const evicted = trimContextsToBudget(contexts, CLIENT_ID, 1_000_000);
+  assert.equal(evicted, 0);
+  assert.ok(`msg:${MSG_ID}` in contexts);
+});
+
+test("trimContextsToBudget_overBudget_evictsMsgEntriesOldestFirst", () => {
+  // Build a contexts map that exceeds a tiny budget.
+  // Three msg entries with timestamps 1 (oldest), 2, 3 (newest).
+  const contexts = {
+    [`msg:${MSG_ID}`]: 1,
+    [`msg:${"c".repeat(64)}`]: 3,
+    [`msg:${"d".repeat(64)}`]: 2,
+  };
+  const encoder = new TextEncoder();
+  const fullSize = encoder.encode(
+    JSON.stringify({ v: 1, client_id: CLIENT_ID, contexts }),
+  ).length;
+  // Budget that requires evicting at least one entry.
+  const budget = fullSize - 10;
+
+  const evicted = trimContextsToBudget(contexts, CLIENT_ID, budget);
+  assert.ok(evicted >= 1, `expected at least 1 eviction, got ${evicted}`);
+  // The oldest entry (ts=1) must be gone.
+  assert.ok(!(`msg:${MSG_ID}` in contexts), "oldest msg entry should be evicted");
+  // Result must fit within budget.
+  const resultSize = encoder.encode(
+    JSON.stringify({ v: 1, client_id: CLIENT_ID, contexts }),
+  ).length;
+  assert.ok(resultSize <= budget, `result ${resultSize} exceeds budget ${budget}`);
+});
+
+test("trimContextsToBudget_channelKeysNeverEvicted", () => {
+  // Fill with msg entries plus one channel key; budget forces eviction.
+  const contexts = {};
+  for (let i = 0; i < 50; i++) {
+    contexts[`msg:${i.toString().padStart(64, "0")}`] = i;
+  }
+  contexts["channel:some-channel-id"] = 999;
+
+  const encoder = new TextEncoder();
+  const fullSize = encoder.encode(
+    JSON.stringify({ v: 1, client_id: CLIENT_ID, contexts }),
+  ).length;
+  const budget = Math.floor(fullSize / 2);
+
+  trimContextsToBudget(contexts, CLIENT_ID, budget);
+
+  // Channel key must survive regardless of how many msg entries were evicted.
+  assert.ok("channel:some-channel-id" in contexts, "channel key must not be evicted");
+  const resultSize = encoder.encode(
+    JSON.stringify({ v: 1, client_id: CLIENT_ID, contexts }),
+  ).length;
+  assert.ok(resultSize <= budget, `result ${resultSize} exceeds budget ${budget}`);
+});
+
+test("trimContextsToBudget_msgEvictedBeforeThread", () => {
+  // One msg entry (older) and one thread entry (newer).
+  // Budget forces exactly one eviction; msg must go first.
+  const contexts = {
+    [`msg:${MSG_ID}`]: 1,
+    [`thread:${THREAD_ID}`]: 2,
+  };
+  const encoder = new TextEncoder();
+  const fullSize = encoder.encode(
+    JSON.stringify({ v: 1, client_id: CLIENT_ID, contexts }),
+  ).length;
+  // Tight budget: remove exactly one entry.
+  const oneEntrySize = encoder.encode(
+    JSON.stringify({
+      v: 1,
+      client_id: CLIENT_ID,
+      contexts: { [`thread:${THREAD_ID}`]: 2 },
+    }),
+  ).length;
+  const budget = oneEntrySize + 5; // fits one entry, not two
+
+  const evicted = trimContextsToBudget(contexts, CLIENT_ID, budget);
+  assert.equal(evicted, 1);
+  assert.ok(!(`msg:${MSG_ID}` in contexts), "msg entry should be evicted before thread");
+  assert.ok(`thread:${THREAD_ID}` in contexts, "thread entry should survive");
+});
+
+test("trimContextsToBudget_emptyContexts_returnsZero", () => {
+  const contexts = {};
+  const evicted = trimContextsToBudget(contexts, CLIENT_ID, 100);
+  assert.equal(evicted, 0);
 });
