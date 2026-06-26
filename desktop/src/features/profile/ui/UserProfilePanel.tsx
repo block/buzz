@@ -43,6 +43,7 @@ import {
   type PersonaDialogState,
 } from "@/features/agents/ui/personaDialogState";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useIdentityArchive } from "@/features/identity-archive/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import {
   useContactListQuery,
@@ -61,7 +62,7 @@ import {
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
-import { UserProfileAgentSettingsMenu } from "@/features/profile/ui/UserProfileAgentActions";
+import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
 import { submitProfilePersonaDialog } from "@/features/profile/ui/UserProfilePanelPersonaSubmit";
@@ -217,9 +218,6 @@ export function UserProfilePanel({
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
   const exportPersonaJsonMutation = useExportPersonaJsonMutation();
-  // kind:0-derived agent flag (verified NIP-OA `auth` tag). The relay-agent
-  // registry and local managed-agent list can both miss an owned agent that was
-  // deployed elsewhere, but the archive UI still needs bot-aware copy.
   const usersBatchQuery = useUsersBatchQuery(
     effectivePubkey ? [effectivePubkey] : [],
   );
@@ -752,30 +750,25 @@ export function UserProfilePanel({
   const canEditPersona =
     canManagePersona && resolvedPersona?.isBuiltIn !== true;
   const canDeletePersona = canManagePersona && !resolvedPersona?.sourceTeam;
-  const agentSettingsMenu =
-    viewerIsOwner && managedAgent ? (
-      <UserProfileAgentSettingsMenu
-        isPending={isAgentActionPending}
-        managedAgent={managedAgent}
-        onDelete={handleDeleteAgent}
-        onDuplicatePersona={
-          canManagePersona ? handleDuplicatePersona : undefined
-        }
-        onExportPersona={canManagePersona ? handleExportPersona : undefined}
-        onToggleAutoStart={handleToggleAgentAutoStart}
-        personaActionKey={resolvedPersona?.id}
-      />
-    ) : canInstantiateAgent ? (
-      <UserProfileAgentSettingsMenu
-        isPending={isAgentActionPending}
-        onDelete={canDeletePersona ? handleDeletePersona : undefined}
-        onDuplicatePersona={
-          canManagePersona ? handleDuplicatePersona : undefined
-        }
-        onExportPersona={canManagePersona ? handleExportPersona : undefined}
-        personaActionKey={resolvedPersona?.id}
-      />
-    ) : null;
+  const archiveActions = useIdentityArchive(effectivePubkey);
+  const agentSettingsMenu = (
+    <UserProfileAgentSettingsMenuSlot
+      archiveActions={archiveActions}
+      canDeletePersona={canDeletePersona}
+      canInstantiateAgent={canInstantiateAgent}
+      canManagePersona={canManagePersona}
+      isAgentActionPending={isAgentActionPending}
+      isBot={isBot}
+      managedAgent={managedAgent}
+      onDeleteAgent={handleDeleteAgent}
+      onDeletePersona={handleDeletePersona}
+      onDuplicatePersona={handleDuplicatePersona}
+      onExportPersona={handleExportPersona}
+      onToggleAutoStart={handleToggleAgentAutoStart}
+      personaActionKey={resolvedPersona?.id}
+      viewerIsOwner={viewerIsOwner}
+    />
+  );
   const {
     agentInfoFields,
     agentSettingsFields,
@@ -847,6 +840,7 @@ export function UserProfilePanel({
           handleEditPersona={canEditPersona ? handleEditPersona : undefined}
           handleInstantiateAgent={handleInstantiateAgent}
           handleMessage={handleMessage}
+          isArchived={archiveActions.isArchived === true}
           isMessagePending={isOpeningDm}
           isBot={isBot}
           isAgentActionPending={isAgentActionPending}

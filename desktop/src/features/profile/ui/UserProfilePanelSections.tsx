@@ -21,7 +21,6 @@ import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
-import { useIdentityArchive } from "@/features/identity-archive/hooks";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type {
   useFollowMutation,
@@ -33,7 +32,6 @@ import {
   ProfileFieldGroup,
 } from "@/features/profile/ui/UserProfilePanelFields";
 import { AGENT_DETAILS_FIELD_LABELS } from "@/features/profile/ui/UserProfilePanelAgentDetails";
-import { ProfileManageArchiveSection } from "@/features/profile/ui/ProfileManageArchiveSection";
 import {
   ProfileInfoTabContent,
   ProfileIngressRow,
@@ -78,6 +76,7 @@ export type ProfileSummaryViewProps = {
   handleEditPersona?: () => void;
   handleInstantiateAgent: () => void;
   handleMessage: () => void;
+  isArchived: boolean;
   isMessagePending: boolean;
   isBot: boolean;
   isAgentActionPending: boolean;
@@ -171,6 +170,7 @@ export function ProfileSummaryView({
   handleEditPersona,
   handleInstantiateAgent,
   handleMessage,
+  isArchived,
   isMessagePending,
   isBot,
   isAgentActionPending,
@@ -199,9 +199,8 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
-  const { goAgents, goChannel } = useAppNavigation();
+  const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
-  const archiveActions = useIdentityArchive(pubkey);
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
   const showInstructionBlock =
@@ -230,7 +229,10 @@ export function ProfileSummaryView({
     canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
   const showInfoTab =
-    agentInfoFields.length > 0 || showActivityIngress || !showRuntimeTab;
+    agentInfoFields.length > 0 ||
+    isArchived ||
+    showActivityIngress ||
+    !showRuntimeTab;
 
   const diagnosticsErrorField = diagnosticsFields.find(
     (field) => field.label === "Last error",
@@ -311,7 +313,6 @@ export function ProfileSummaryView({
     <div className="flex flex-col gap-6 pt-4">
       <ProfileHero
         displayName={displayName}
-        isArchived={archiveActions.isArchived === true}
         isBot={isBot}
         presenceStatus={presenceStatus}
         profile={profile}
@@ -379,6 +380,7 @@ export function ProfileSummaryView({
           {activeTab === "info" ? (
             <ProfileInfoTabContent
               agentInfoFields={agentInfoFields}
+              isArchived={isArchived}
               onOpenActivity={onOpenActivity}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
@@ -419,16 +421,6 @@ export function ProfileSummaryView({
           ) : null}
         </section>
       ) : null}
-
-      {archiveActions.canArchive && archiveActions.isArchived !== undefined ? (
-        <ProfileManageArchiveSection
-          archiveActions={archiveActions}
-          isBot={isBot}
-          onGoToAgents={() => {
-            void goAgents();
-          }}
-        />
-      ) : null}
     </div>
   );
 }
@@ -461,14 +453,12 @@ function ProfileWorkingBadge({
 
 function ProfileHero({
   displayName,
-  isArchived,
   isBot,
   presenceStatus,
   profile,
   userStatus,
 }: {
   displayName: string;
-  isArchived: boolean;
   isBot: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ProfileSummaryViewProps["profile"];
@@ -502,14 +492,6 @@ function ProfileHero({
           <h3 className="text-xl font-semibold tracking-tight">
             {displayName}
           </h3>
-          {isArchived ? (
-            <Badge
-              data-testid="user-profile-archived-flair"
-              variant="secondary"
-            >
-              Archived
-            </Badge>
-          ) : null}
           {isBot ? (
             <BotIdenticon
               className="shrink-0 rounded"

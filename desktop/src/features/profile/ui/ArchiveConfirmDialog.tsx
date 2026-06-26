@@ -21,14 +21,12 @@ export function ArchiveConfirmDialog({
   open,
   onOpenChange,
   onConfirm,
-  onGoToAgents,
   isBot,
   isPending,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
-  onGoToAgents: () => void;
   isBot: boolean;
   isPending: boolean;
 }) {
@@ -60,19 +58,8 @@ export function ArchiveConfirmDialog({
         </ul>
         {isBot ? (
           <p className="text-sm text-muted-foreground">
-            To permanently remove this agent instead, delete it in the{" "}
-            <Button
-              className="h-auto p-0 align-baseline text-sm"
-              onClick={() => {
-                onOpenChange(false);
-                onGoToAgents();
-              }}
-              type="button"
-              variant="link"
-            >
-              Agents tab
-            </Button>
-            .
+            You can also delete this agent from the profile settings menu if you
+            want to remove the agent instead of hiding it.
           </p>
         ) : null}
         <AlertDialogFooter>

@@ -79,6 +79,7 @@ export function useProfileAgentDeletion({
         presenceLookup,
         relayAgents: relayAgents ?? [],
         removeAgentFromAllChannels,
+        skipRemoteDeleteConfirm: true,
       }),
     [
       channels,

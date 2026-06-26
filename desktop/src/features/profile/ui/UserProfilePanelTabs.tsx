@@ -1,6 +1,6 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
-import { Activity, ChevronRight, Wrench } from "lucide-react";
+import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
 
 import {
   AgentDetailsRows,
@@ -15,6 +15,7 @@ import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtil
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export function ProfileIngressRow({
   disabled,
@@ -256,16 +257,30 @@ export function ProfileTabBar({
 
 export function ProfileInfoTabContent({
   agentInfoFields,
+  isArchived,
   onOpenActivity,
   pubkey,
   showActivityIngress,
 }: {
   agentInfoFields: ProfileField[];
+  isArchived: boolean;
   onOpenActivity: () => void;
   pubkey: string | null;
   showActivityIngress: boolean;
 }) {
-  const hasInfoFields = agentInfoFields.length > 0;
+  const infoFields: ProfileField[] = isArchived
+    ? [
+        ...agentInfoFields,
+        {
+          displayValue: "Archived",
+          icon: Archive,
+          label: "Visibility",
+          testId: "user-profile-archived-flair",
+          trailingNode: <ArchiveStatusTooltip />,
+        },
+      ]
+    : agentInfoFields;
+  const hasInfoFields = infoFields.length > 0;
 
   if (!hasInfoFields && !showActivityIngress) {
     return null;
@@ -282,8 +297,31 @@ export function ProfileInfoTabContent({
           trailing="View"
         />
       ) : null}
-      {hasInfoFields ? <ProfileFieldGroup fields={agentInfoFields} /> : null}
+      {hasInfoFields ? <ProfileFieldGroup fields={infoFields} /> : null}
     </div>
+  );
+}
+
+function ArchiveStatusTooltip() {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label="What archived means"
+          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          data-testid="user-profile-archived-info"
+          type="button"
+        >
+          <Info className="h-4 w-4" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent align="end" className="max-w-72 text-left" side="top">
+        <p className="text-sm">
+          Archived agents do not appear in search, autocomplete, or member-add
+          flows in this space. You can unarchive them at any time.
+        </p>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

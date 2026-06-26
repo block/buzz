@@ -47,6 +47,7 @@ export type ProfileField = {
   label: string;
   onClick?: () => void;
   testId?: string;
+  trailingNode?: React.ReactNode;
 };
 
 const AGENT_INFO_LABELS = new Set([
@@ -420,14 +421,17 @@ export function buildOwnerFields({
 }
 
 function orderProfileFields(fields: ProfileField[]) {
+  const visibilityLabel = "Visibility";
   const publicKeyLabel = "Public key";
   const ownedByLabel = "Owned by";
   const statusLabel = "Status";
   return [
+    ...fields.filter((field) => field.label === visibilityLabel),
     ...fields.filter((field) => field.label === publicKeyLabel),
     ...fields.filter((field) => field.label === ownedByLabel),
     ...fields.filter(
       (field) =>
+        field.label !== visibilityLabel &&
         field.label !== publicKeyLabel &&
         field.label !== ownedByLabel &&
         field.copyValue,
@@ -435,6 +439,7 @@ function orderProfileFields(fields: ProfileField[]) {
     ...fields.filter((field) => field.label === statusLabel),
     ...fields.filter((field) => {
       if (
+        field.label === visibilityLabel ||
         field.label === publicKeyLabel ||
         field.label === ownedByLabel ||
         field.label === statusLabel
@@ -487,6 +492,7 @@ function ProfileFieldRow({ field }: { field: ProfileField }) {
           {field.displayNode ?? field.displayValue}
         </span>
       </span>
+      {field.trailingNode}
       {isActionable ? (
         <ArrowUpRight className="h-4 w-4 shrink-0 text-muted-foreground" />
       ) : isCopyable ? (
