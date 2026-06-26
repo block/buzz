@@ -236,7 +236,10 @@ export class ReadStateManager {
     await this.startLiveSubscription();
     if (this.destroyed) return;
     const initContexts = this.currentContexts();
-    if (initContexts !== null && !this.isIdenticalToLastPublished(initContexts)) {
+    if (
+      initContexts !== null &&
+      !this.isIdenticalToLastPublished(initContexts)
+    ) {
       this.schedulePublish();
     }
 
