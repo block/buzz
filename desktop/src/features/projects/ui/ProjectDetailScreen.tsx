@@ -28,13 +28,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
-import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
-import {
-  channelChrome,
-  channelContentTopPaddingMeasurement,
-  topChromeInset,
-} from "@/shared/layout/chromeLayout";
-import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isSafeUrl } from "@/shared/lib/url";
@@ -431,12 +425,6 @@ type ProjectDetailScreenProps = {
 
 export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const { goChannel, goProjects } = useAppNavigation();
-  const mainInsetRef = useMainInsetRef();
-  const projectDetailHeaderChromeRef = useMeasuredCssVariable({
-    targetRef: mainInsetRef,
-    resetKey: projectId,
-    ...channelContentTopPaddingMeasurement,
-  });
   const projectQuery = useProjectQuery(projectId);
   const project = projectQuery.data;
   const activeBranch = project?.defaultBranch ?? null;
@@ -512,11 +500,10 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div
         className={cn(
-          "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-          channelChrome.negativeMargin,
+          topChromeInset.headerBase,
           topChromeInset.divider,
+          "pointer-events-none rounded-tl-xl",
         )}
-        ref={projectDetailHeaderChromeRef}
       >
         <div
           className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-5 py-2"
@@ -551,13 +538,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
         </div>
       </div>
 
-      <div
-        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4"
-        style={{
-          paddingTop:
-            "calc(var(--buzz-channel-content-top-padding, 5.75rem) + 1rem)",
-        }}
-      >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
         <div className="w-full space-y-5">
           <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
             <div className="flex min-w-0 items-start gap-3">

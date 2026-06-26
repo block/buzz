@@ -28,13 +28,7 @@ import {
   useProjectsQuery,
 } from "@/features/projects/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
-import {
-  channelChrome,
-  channelContentTopPaddingMeasurement,
-  topChromeInset,
-} from "@/shared/layout/chromeLayout";
-import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
@@ -717,11 +711,6 @@ function ProjectListRow({
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
-  const mainInsetRef = useMainInsetRef();
-  const projectsHeaderChromeRef = useMeasuredCssVariable({
-    targetRef: mainInsetRef,
-    ...channelContentTopPaddingMeasurement,
-  });
   const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const projects = projectsQuery.data ?? [];
@@ -857,11 +846,10 @@ export function ProjectsView() {
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div
         className={cn(
-          "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-          channelChrome.negativeMargin,
+          topChromeInset.headerBase,
           topChromeInset.divider,
+          "pointer-events-none rounded-tl-xl",
         )}
-        ref={projectsHeaderChromeRef}
       >
         <ProjectsToolbar
           filter={filter}
@@ -875,13 +863,7 @@ export function ProjectsView() {
         />
       </div>
 
-      <div
-        className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4"
-        style={{
-          paddingTop:
-            "calc(var(--buzz-channel-content-top-padding, 5.75rem) + 1rem)",
-        }}
-      >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4">
         {visibleProjects.length === 0 ? (
           <EmptyFilteredState />
         ) : viewMode === "grid" ? (
