@@ -488,6 +488,9 @@ class _SliverChannelsList extends HookConsumerWidget {
                     ref
                         .read(readStateProvider.notifier)
                         .markContextRead(channel.id, ts);
+                    ref
+                        .read(channelsProvider.notifier)
+                        .clearObservedUnreadCoveredByRead(channel.id, ts);
                   }
                 },
               ),
@@ -1104,6 +1107,9 @@ class _ChannelTile extends ConsumerWidget {
                         ref
                             .read(readStateProvider.notifier)
                             .markContextRead(channel.id, ts);
+                        ref
+                            .read(channelsProvider.notifier)
+                            .clearObservedUnreadCoveredByRead(channel.id, ts);
                       } else {
                         ref
                             .read(readStateProvider.notifier)

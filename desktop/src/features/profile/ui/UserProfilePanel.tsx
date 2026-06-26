@@ -50,6 +50,7 @@ import {
   useProfileQuery,
   useUnfollowMutation,
   useUserProfileQuery,
+  useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import {
   AgentInfoFocusedView,
@@ -216,6 +217,12 @@ export function UserProfilePanel({
   const deletePersonaMutation = useDeletePersonaMutation();
   const setPersonaActiveMutation = useSetPersonaActiveMutation();
   const exportPersonaJsonMutation = useExportPersonaJsonMutation();
+  // kind:0-derived agent flag (verified NIP-OA `auth` tag). The relay-agent
+  // registry and local managed-agent list can both miss an owned agent that was
+  // deployed elsewhere, but the archive UI still needs bot-aware copy.
+  const usersBatchQuery = useUsersBatchQuery(
+    effectivePubkey ? [effectivePubkey] : [],
+  );
   const channelsQuery = useChannelsQuery();
   const presenceQuery = usePresenceQuery(
     effectivePubkey ? [effectivePubkey] : [],
@@ -251,7 +258,11 @@ export function UserProfilePanel({
       ? managedAgent.pubkey
       : null,
   );
-  const isBot = Boolean(relayAgent || managedAgent || resolvedPersona);
+  const isAgentByOaOwner = Boolean(
+    usersBatchQuery.data?.profiles[pubkeyLower]?.isAgent,
+  );
+  const isBot =
+    Boolean(relayAgent || managedAgent || resolvedPersona) || isAgentByOaOwner;
   const managedAgentOwner = useIsManagedAgent(isBot ? effectivePubkey : null);
   // Does THIS desktop hold the agent's seckey (or is this an editable persona)?
   // Gates edit (which needs the key) and grants owner access when managed locally.

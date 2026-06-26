@@ -33,6 +33,7 @@ export function ChannelManagementAuxiliaryPanel({
 }: ChannelManagementAuxiliaryPanelProps) {
   const panel = (
     <ChannelManagementSheet
+      animateSplitEnter={isSinglePanelView && !useSplitAuxiliaryPane}
       channel={activeChannel}
       currentPubkey={currentPubkey}
       layout={useSplitAuxiliaryPane || isSinglePanelView ? "split" : "overlay"}

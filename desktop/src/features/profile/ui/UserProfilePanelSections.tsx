@@ -21,6 +21,7 @@ import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
+import { useIdentityArchive } from "@/features/identity-archive/hooks";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type {
   useFollowMutation,
@@ -32,6 +33,7 @@ import {
   ProfileFieldGroup,
 } from "@/features/profile/ui/UserProfilePanelFields";
 import { AGENT_DETAILS_FIELD_LABELS } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import { ProfileManageArchiveSection } from "@/features/profile/ui/ProfileManageArchiveSection";
 import {
   ProfileInfoTabContent,
   ProfileIngressRow,
@@ -197,8 +199,9 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
-  const { goChannel } = useAppNavigation();
+  const { goAgents, goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
+  const archiveActions = useIdentityArchive(pubkey);
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
   const showInstructionBlock =
@@ -308,6 +311,7 @@ export function ProfileSummaryView({
     <div className="flex flex-col gap-6 pt-4">
       <ProfileHero
         displayName={displayName}
+        isArchived={archiveActions.isArchived === true}
         isBot={isBot}
         presenceStatus={presenceStatus}
         profile={profile}
@@ -415,6 +419,16 @@ export function ProfileSummaryView({
           ) : null}
         </section>
       ) : null}
+
+      {archiveActions.canArchive && archiveActions.isArchived !== undefined ? (
+        <ProfileManageArchiveSection
+          archiveActions={archiveActions}
+          isBot={isBot}
+          onGoToAgents={() => {
+            void goAgents();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -447,12 +461,14 @@ function ProfileWorkingBadge({
 
 function ProfileHero({
   displayName,
+  isArchived,
   isBot,
   presenceStatus,
   profile,
   userStatus,
 }: {
   displayName: string;
+  isArchived: boolean;
   isBot: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ProfileSummaryViewProps["profile"];
@@ -486,9 +502,18 @@ function ProfileHero({
           <h3 className="text-xl font-semibold tracking-tight">
             {displayName}
           </h3>
+          {isArchived ? (
+            <Badge
+              data-testid="user-profile-archived-flair"
+              variant="secondary"
+            >
+              Archived
+            </Badge>
+          ) : null}
           {isBot ? (
             <BotIdenticon
               className="shrink-0 rounded"
+              data-testid="profile-bot-indicator"
               size={20}
               value={displayName}
             />
