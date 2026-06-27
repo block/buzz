@@ -314,7 +314,8 @@ export function InboxDetailPane({
 
         <div
           aria-busy={isThreadContextLoading}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
+          className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13"
+          data-testid="home-inbox-detail-scroll"
         >
           <div>
             {displayMessages.map((message, index) => (
