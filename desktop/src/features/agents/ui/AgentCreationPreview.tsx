@@ -172,6 +172,7 @@ export function AgentCreationPreview({
         className="flex min-h-9 items-center gap-2 rounded-lg px-2.5 py-1.5 transition-colors duration-150 ease-out focus-within:bg-muted/50"
         onSubmit={(event) => {
           event.preventDefault();
+          event.stopPropagation();
           applyAvatarUrl();
         }}
       >
