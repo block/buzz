@@ -419,6 +419,14 @@ const MessageTimelineBase = React.forwardRef<
         const lastIndex = virtualizerOption.itemCount - 1;
         if (!virtualizer || lastIndex < 0) return false;
         virtualizer.scrollToIndex(lastIndex, { align: "end" });
+        requestAnimationFrame(() => {
+          const container = scrollContainerRef.current;
+          if (!container) return;
+          container.scrollTo({
+            top: container.scrollHeight,
+            behavior: "auto",
+          });
+        });
         return true;
       }
     : () => false;

@@ -323,7 +323,7 @@ export function MessageThreadPanelSkeleton({
   const threadBody = (
     <div
       className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
+        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-40 [overflow-anchor:none]",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
@@ -500,16 +500,28 @@ export function MessageThreadPanel({
     [agentConversationMarkers],
   );
 
-  const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
-    useAnchoredScroll({
-      channelId: threadHeadId,
-      contentRef: threadContentRef,
-      isLoading: repliesRenderState === "pending",
-      messages: threadMessages,
-      onTargetReached: onScrollTargetResolved,
-      scrollContainerRef: threadBodyRef,
-      targetMessageId: scrollTargetId,
-    });
+  const {
+    isAtBottom,
+    newMessageCount,
+    onScroll,
+    scrollToBottom,
+    scrollToBottomOnNextUpdate,
+  } = useAnchoredScroll({
+    channelId: threadHeadId,
+    contentRef: threadContentRef,
+    isLoading: repliesRenderState === "pending",
+    messages: threadMessages,
+    onTargetReached: onScrollTargetResolved,
+    scrollContainerRef: threadBodyRef,
+    targetMessageId: scrollTargetId,
+  });
+  const handleSendReply = React.useCallback(
+    (content: string, mentionPubkeys: string[], mediaTags?: string[][]) => {
+      scrollToBottomOnNextUpdate();
+      return onSend(content, mentionPubkeys, mediaTags);
+    },
+    [onSend, scrollToBottomOnNextUpdate],
+  );
 
   if (!threadHead) {
     return null;
@@ -532,7 +544,7 @@ export function MessageThreadPanel({
   const threadScrollRegion = (
     <div
       className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
+        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-40 [overflow-anchor:none]",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
@@ -714,7 +726,7 @@ export function MessageThreadPanel({
             onCancelReply={composerReplyTarget ? onCancelReply : undefined}
             onEditLastOwnMessage={onEditLastOwnMessage}
             onEditSave={onEditSave}
-            onSend={onSend}
+            onSend={handleSendReply}
             placeholder={`Reply in thread to ${threadHead.author}`}
             profiles={profiles}
             replyTarget={composerReplyTarget}
