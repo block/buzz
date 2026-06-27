@@ -2370,14 +2370,6 @@ function MarkdownInner({
     },
     [goChannel],
   );
-  const onOpenAgentConversationLink = React.useCallback(
-    (link: ParsedAgentConversationLink) => {
-      void goChannel(link.channelId, {
-        taskReplyId: link.agentReplyId,
-      });
-    },
-    [goChannel],
-  );
   const onOpenMessageLink = React.useCallback(
     (link: ParsedMessageLink) => {
       // Always route through `goChannel` with `messageId` set: the channel
