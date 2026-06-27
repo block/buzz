@@ -341,6 +341,41 @@ impl WorkflowEngine {
         Ok(())
     }
 
+    /// Interval prefilter: decide whether the interval workflow should fire this
+    /// tick, applying the cold-start anchor seed as a side effect.
+    ///
+    /// `last` is the resolved anchor (in-memory entry if present, else the
+    /// durable `latest_scheduled_workflow_fire` read). Returns `true` to proceed
+    /// to the durable claim, `false` to suppress this tick.
+    ///
+    /// Cold-start liveness: a brand-new interval workflow has no in-memory entry
+    /// AND no prior claim, so `last` is `None`. `interval_should_fire` then reads
+    /// `last = now` and suppresses — correct for the first tick (wait a full
+    /// interval), but the in-memory anchor is only written *after* a successful
+    /// claim, and no claim is attempted until the prefilter passes. Without
+    /// seeding, every subsequent tick repeats with `last = None` and the workflow
+    /// suppresses forever. So on the `None` suppress path we seed `now`: the next
+    /// tick counts from a real anchor and the workflow fires after one interval.
+    /// We seed ONLY when `last` was `None`; when `last` is `Some` we are correctly
+    /// mid-interval and must not advance the anchor, or it would never elapse.
+    fn interval_prefilter_should_fire(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        dur: &str,
+        last: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        interval_prefilter_should_fire(
+            &self.last_fired,
+            community_id,
+            workflow_id,
+            dur,
+            last,
+            now,
+        )
+    }
+
     /// Background loop for scheduled (cron/interval) triggers.
     ///
     /// Ticks every 60 seconds. For each active workflow with a `Schedule`
@@ -452,7 +487,13 @@ impl WorkflowEngine {
                                 }
                             },
                         };
-                        if !interval_should_fire(dur, last, now, workflow.id) {
+                        if !self.interval_prefilter_should_fire(
+                            community_id,
+                            workflow.id,
+                            dur,
+                            last,
+                            now,
+                        ) {
                             continue;
                         }
                         match interval_fire_instant(dur, now, workflow.id) {
@@ -686,6 +727,31 @@ fn interval_should_fire(
             false
         }
     }
+}
+
+/// Interval prefilter decision + cold-start anchor seed. See the
+/// [`WorkflowEngine::interval_prefilter_should_fire`] wrapper for the liveness
+/// rationale. Free function over the `last_fired` map so it is unit-testable
+/// without a `Db`/Postgres: the only state it touches is the in-memory anchor.
+///
+/// Returns `true` to fire, `false` to suppress. On the cold-start `None` suppress
+/// path it seeds `now` so the next tick has a real anchor; it never advances an
+/// existing (`Some`) anchor, which is mid-interval and must elapse on its own.
+fn interval_prefilter_should_fire(
+    last_fired: &DashMap<(CommunityId, Uuid), DateTime<Utc>>,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    dur: &str,
+    last: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    if interval_should_fire(dur, last, now, workflow_id) {
+        return true;
+    }
+    if last.is_none() {
+        last_fired.insert((community_id, workflow_id), now);
+    }
+    false
 }
 
 /// Check emoji and filter-expression conditions that determine whether a
@@ -1038,6 +1104,90 @@ mod tests {
         assert!(
             interval_should_fire("1h", Some(last), now, wf_id),
             "should fire at exact interval boundary"
+        );
+    }
+
+    // ── Interval cold-start liveness (Max's blocker on the scheduled lane) ──
+    // A brand-new interval workflow has no in-memory anchor and no prior durable
+    // claim, so the prefilter resolves `last = None`. Without seeding, every tick
+    // reads `None`, suppresses, and writes nothing — the workflow never fires.
+    // `interval_prefilter_should_fire` must seed `now` on that first suppress so a
+    // real anchor exists for the next tick.
+
+    #[test]
+    fn interval_cold_start_seeds_anchor_then_fires_after_one_interval() {
+        let map: DashMap<(CommunityId, Uuid), DateTime<Utc>> = DashMap::new();
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let wf = Uuid::new_v4();
+        let t0 = Utc::now();
+
+        // Tick 1 (cold start): no in-memory entry, DB anchor is None → last = None.
+        let fired_1 = interval_prefilter_should_fire(&map, community, wf, "1h", None, t0);
+        assert!(!fired_1, "first tick must suppress (wait a full interval)");
+        let seeded = map.get(&(community, wf)).map(|v| *v);
+        assert_eq!(
+            seeded,
+            Some(t0),
+            "first suppressed tick must seed the anchor to `now`, else it suppresses forever"
+        );
+
+        // Tick 2, mid-interval: caller now passes the seeded anchor as `last`.
+        let t1 = t0 + chrono::Duration::minutes(30);
+        let last = map.get(&(community, wf)).map(|v| *v);
+        let fired_2 = interval_prefilter_should_fire(&map, community, wf, "1h", last, t1);
+        assert!(!fired_2, "still mid-interval → suppress");
+        assert_eq!(
+            map.get(&(community, wf)).map(|v| *v),
+            Some(t0),
+            "mid-interval suppress must NOT advance the anchor (or it would never elapse)"
+        );
+
+        // Tick 3, one interval elapsed → fire.
+        let t2 = t0 + chrono::Duration::hours(1);
+        let last = map.get(&(community, wf)).map(|v| *v);
+        let fired_3 = interval_prefilter_should_fire(&map, community, wf, "1h", last, t2);
+        assert!(
+            fired_3,
+            "after one full interval the cold-started workflow must fire"
+        );
+    }
+
+    #[test]
+    fn interval_prefilter_does_not_advance_existing_anchor_on_suppress() {
+        // Regression for the inverse bug: if a `Some` anchor were re-seeded to
+        // `now` on every suppressed tick, the interval would never elapse.
+        let map: DashMap<(CommunityId, Uuid), DateTime<Utc>> = DashMap::new();
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let wf = Uuid::new_v4();
+        let now = Utc::now();
+        let anchor = now - chrono::Duration::minutes(10); // 10m into a 1h interval
+        map.insert((community, wf), anchor);
+
+        let fired = interval_prefilter_should_fire(&map, community, wf, "1h", Some(anchor), now);
+        assert!(!fired, "mid-interval suppress");
+        assert_eq!(
+            map.get(&(community, wf)).map(|v| *v),
+            Some(anchor),
+            "existing anchor must be preserved exactly, not advanced to now"
+        );
+    }
+
+    #[test]
+    fn interval_prefilter_passes_through_a_due_fire_without_touching_anchor() {
+        // When the interval has elapsed the prefilter returns true and leaves the
+        // anchor to the post-claim update path (which writes `now` only on a won
+        // claim), so the prefilter must not seed here.
+        let map: DashMap<(CommunityId, Uuid), DateTime<Utc>> = DashMap::new();
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let wf = Uuid::new_v4();
+        let now = Utc::now();
+        let anchor = now - chrono::Duration::hours(2); // overdue on a 1h interval
+
+        let fired = interval_prefilter_should_fire(&map, community, wf, "1h", Some(anchor), now);
+        assert!(fired, "overdue interval must fire");
+        assert!(
+            map.get(&(community, wf)).is_none(),
+            "a firing tick must not seed via the prefilter; the post-claim path owns the write"
         );
     }
 
