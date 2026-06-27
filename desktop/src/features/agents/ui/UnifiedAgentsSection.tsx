@@ -4,20 +4,24 @@ import {
   ChevronRight,
   Ellipsis,
   OctagonX,
-  Plus,
   Trash2,
 } from "lucide-react";
 
-import { isPersonaActive } from "@/features/agents/lib/catalog";
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
+import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
-import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
+import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { ModelPicker } from "@/features/agents/ui/ModelPicker";
+import { useUserProfileQuery } from "@/features/profile/hooks";
 import type {
   AgentPersona,
   ManagedAgent,
   PresenceLookup,
 } from "@/shared/api/types";
-import { Badge } from "@/shared/ui/badge";
+import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -26,11 +30,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Skeleton } from "@/shared/ui/skeleton";
-import { AgentGroupRows } from "./AgentGroupRows";
+import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
+import { AgentIdentityCard } from "./AgentIdentityCard";
+import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
-import { PersonaIdentity } from "./PersonaIdentity";
-import { PersonaLibraryEntryPoints } from "./PersonaLibraryEntryPoints";
+import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
@@ -41,22 +45,14 @@ type UnifiedAgentsSectionProps = {
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
-  logContent: string | null;
-  logError: Error | null;
-  logLoading: boolean;
   personaLabelsById: Record<string, string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
-  onAddToChannel: (agent: ManagedAgent) => void;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
   onCreateAgent: () => void;
-  onDeleteAgent: (pubkey: string) => void;
-  onSelectLogAgent: (pubkey: string | null) => void;
-  onStartAgent: (pubkey: string) => void;
-  onStopAgent: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
-  selectedLogAgentPubkey: string | null;
+  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenPersonaProfile: (persona: AgentPersona) => void;
   canChooseCatalog: boolean;
   personas: AgentPersona[];
   personasError: Error | null;
@@ -74,62 +70,24 @@ type UnifiedAgentsSectionProps = {
   onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
 };
 
-type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
-
-function buildUnifiedGroups(personas: AgentPersona[], agents: ManagedAgent[]) {
-  const byPersonaId = new Map<string, ManagedAgent[]>();
-  const ungrouped: ManagedAgent[] = [];
-
-  for (const agent of agents) {
-    if (!agent.personaId) {
-      ungrouped.push(agent);
-    } else {
-      const list = byPersonaId.get(agent.personaId) ?? [];
-      list.push(agent);
-      byPersonaId.set(agent.personaId, list);
-    }
-  }
-
-  const matched = new Set<string>();
-  const groups: PersonaGroup[] = personas.map((p) => {
-    matched.add(p.id);
-    return { persona: p, agents: byPersonaId.get(p.id) ?? [] };
-  });
-
-  const unknown: ManagedAgent[] = [];
-  for (const [id, list] of byPersonaId) {
-    if (!matched.has(id)) unknown.push(...list);
-  }
-
-  return { groups, ungrouped, unknown };
-}
+const AGENT_CARD_COLUMN_CLASS = "w-full";
+const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} grid grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-start gap-3`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
     actionErrorMessage,
     actionNoticeMessage,
     agents,
-    channelIdToName,
-    channelsByPubkey,
     agentsError,
     isActionPending,
     isAgentsLoading,
-    logContent,
-    logError,
-    logLoading,
-    personaLabelsById,
     presenceLoaded,
     presenceLookup,
-    onAddToChannel,
     onBulkRemoveStopped,
     onBulkStopRunning,
     onCreateAgent,
-    onDeleteAgent,
-    onSelectLogAgent,
-    onStartAgent,
-    onStopAgent,
-    onToggleStartOnAppLaunch,
-    selectedLogAgentPubkey,
+    onOpenAgentProfile,
+    onOpenPersonaProfile,
     canChooseCatalog,
     personas,
     personasError,
@@ -147,14 +105,28 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onImportPersonaFile,
   } = props;
 
-  const runningCount = agents.filter((a) => isManagedAgentActive(a)).length;
+  const runningCount = agents.filter((agent) =>
+    isManagedAgentActive(agent),
+  ).length;
   const stoppedCount = agents.filter(
-    (a) => a.status === "stopped" || a.status === "not_deployed",
+    (agent) => agent.status === "stopped" || agent.status === "not_deployed",
   ).length;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents),
     [personas, agents],
   );
+  const additionalPersonaAgents = React.useMemo(() => {
+    const additional: ManagedAgent[] = [];
+    for (const group of groups) {
+      const primary = pickProfileAgent(group.agents);
+      for (const agent of group.agents) {
+        if (primary?.pubkey !== agent.pubkey) {
+          additional.push(agent);
+        }
+      }
+    }
+    return additional;
+  }, [groups]);
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   const {
     fileInputRef,
@@ -177,25 +149,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   useFeedbackToasts(personaFeedbackNoticeMessage, personaFeedbackErrorMessage);
   const isLoading = isAgentsLoading || isPersonasLoading;
 
-  const rowProps = {
-    channelIdToName,
-    channelsByPubkey,
-    isActionPending,
-    logContent,
-    logError,
-    logLoading,
-    personaLabelsById,
-    presenceLoaded,
-    presenceLookup,
-    selectedLogAgentPubkey,
-    onAddToChannel,
-    onDelete: onDeleteAgent,
-    onSelectLogAgent,
-    onStart: onStartAgent,
-    onStop: onStopAgent,
-    onToggleStartOnAppLaunch,
-  } as const;
-
   return (
     <section
       className="relative space-y-4"
@@ -212,98 +165,78 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 
       <SectionHeader
         agentCount={agents.length}
-        canChooseCatalog={canChooseCatalog}
         fileInputRef={fileInputRef}
         handleFileChange={handleFileChange}
         isActionPending={isActionPending}
-        isPersonasPending={isPersonasPending}
-        openFilePicker={openFilePicker}
         runningCount={runningCount}
         stoppedCount={stoppedCount}
         onBulkRemoveStopped={onBulkRemoveStopped}
         onBulkStopRunning={onBulkStopRunning}
-        onChooseCatalog={onChooseCatalog}
-        onCreateAgent={onCreateAgent}
-        onCreatePersona={onCreatePersona}
       />
 
       {isLoading ? <LoadingSkeleton /> : null}
 
-      {!isLoading && personas.length === 0 && agents.length === 0 ? (
-        <EmptyState
-          canChooseCatalog={canChooseCatalog}
-          isPersonasPending={isPersonasPending}
-          openFilePicker={openFilePicker}
-          onChooseCatalog={onChooseCatalog}
-          onCreatePersona={onCreatePersona}
-        />
-      ) : null}
-
-      {!isLoading && (personas.length > 0 || agents.length > 0) ? (
+      {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
-          {groups.map((g) => {
-            const isCollapsed = collapsed.has(g.persona.id);
-            const hasAgents = g.agents.length > 0;
-            const isDeactivated = !isPersonaActive(g.persona);
-            return (
-              <div
-                key={g.persona.id}
-                className={`overflow-hidden rounded-xl border border-border/70 bg-card/40${isDeactivated ? " opacity-60" : ""}`}
-              >
-                <div className="flex items-center gap-2 px-3 py-2 transition-colors hover:bg-muted/40">
-                  <button
-                    className="flex min-w-0 flex-1 items-center gap-2 py-1 text-left"
-                    onClick={() => toggle(g.persona.id)}
-                    type="button"
-                  >
-                    {isCollapsed ? (
-                      <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    )}
-                    <PersonaIdentity
-                      persona={g.persona}
-                      showPromptTooltip={false}
-                    />
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {hasAgents
-                        ? `${g.agents.length} instance${g.agents.length === 1 ? "" : "s"}`
-                        : "Not deployed"}
-                    </span>
-                  </button>
-                  <div className="flex shrink-0 items-center gap-1">
-                    {isDeactivated ? (
-                      <Badge variant="outline">Deactivated</Badge>
-                    ) : !hasAgents ? (
-                      <Badge variant="outline">Inactive</Badge>
-                    ) : null}
+          <div className={AGENT_CARD_GRID_CLASS}>
+            {groups.map((group) => {
+              const profileAgent = pickProfileAgent(group.agents);
+              return (
+                <AgentPersonaCard
+                  actions={
                     <PersonaActionsMenu
                       isActionPending={isActionPending}
                       isPending={isPersonasPending}
-                      persona={g.persona}
+                      persona={group.persona}
+                      onDeactivate={onDeactivatePersona}
+                      onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
                       onEdit={onEditPersona}
                       onShare={onSharePersona}
-                      onDeactivate={onDeactivatePersona}
-                      onDelete={onDeletePersona}
                     />
-                  </div>
-                </div>
-                {!isCollapsed && hasAgents ? (
-                  <AgentGroupRows agents={g.agents} {...rowProps} />
-                ) : null}
-              </div>
-            );
-          })}
+                  }
+                  agent={profileAgent}
+                  key={group.persona.id}
+                  persona={group.persona}
+                  presenceLoaded={presenceLoaded}
+                  presenceLookup={presenceLookup}
+                  onOpenAgentProfile={onOpenAgentProfile}
+                  onOpenPersonaProfile={onOpenPersonaProfile}
+                />
+              );
+            })}
+            <NewAgentCard
+              canChooseCatalog={canChooseCatalog}
+              isPersonasPending={isPersonasPending}
+              openFilePicker={openFilePicker}
+              onChooseCatalog={onChooseCatalog}
+              onCreateAgent={onCreateAgent}
+              onCreatePersona={onCreatePersona}
+            />
+          </div>
 
+          {additionalPersonaAgents.length > 0 ? (
+            <CollapsibleAgentGroup
+              agents={additionalPersonaAgents}
+              collapsed={collapsed}
+              groupKey="__additional_persona_agents__"
+              label="Additional agent instances"
+              presenceLoaded={presenceLoaded}
+              presenceLookup={presenceLookup}
+              onToggle={toggle}
+              onOpenAgentProfile={onOpenAgentProfile}
+            />
+          ) : null}
           {unknown.length > 0 ? (
             <CollapsibleAgentGroup
               agents={unknown}
               collapsed={collapsed}
               groupKey="__unknown__"
               label="Unknown Persona"
-              rowProps={rowProps}
+              presenceLoaded={presenceLoaded}
+              presenceLookup={presenceLookup}
               onToggle={toggle}
+              onOpenAgentProfile={onOpenAgentProfile}
             />
           ) : null}
           {ungrouped.length > 0 ? (
@@ -312,15 +245,19 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               groupKey="__ungrouped__"
               label="Custom Agents"
-              rowProps={rowProps}
+              presenceLoaded={presenceLoaded}
+              presenceLookup={presenceLookup}
               onToggle={toggle}
+              onOpenAgentProfile={onOpenAgentProfile}
             />
           ) : null}
         </div>
       ) : null}
 
       {!isLoading && stoppedCount > 0 ? (
-        <div className="flex items-center justify-between rounded-xl border border-border/60 bg-muted/30 px-4 py-2.5">
+        <div
+          className={`${AGENT_CARD_COLUMN_CLASS} flex items-center justify-between rounded-xl border border-border/60 bg-muted/30 px-4 py-2.5`}
+        >
           <p className="text-sm text-muted-foreground">
             {stoppedCount} stopped {stoppedCount === 1 ? "agent" : "agents"}
           </p>
@@ -338,12 +275,16 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       ) : null}
 
       {agentsError ? (
-        <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <p
+          className={`${AGENT_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
+        >
           {agentsError.message}
         </p>
       ) : null}
       {personasError ? (
-        <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <p
+          className={`${AGENT_CARD_COLUMN_CLASS} rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive`}
+        >
           {personasError.message}
         </p>
       ) : null}
@@ -351,43 +292,160 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   );
 }
 
+function AgentPersonaCard({
+  actions,
+  agent,
+  persona,
+  presenceLoaded,
+  presenceLookup,
+  onOpenAgentProfile,
+  onOpenPersonaProfile,
+}: {
+  actions?: React.ReactNode;
+  agent: ManagedAgent | undefined;
+  persona: AgentPersona;
+  presenceLoaded: boolean;
+  presenceLookup: PresenceLookup;
+  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenPersonaProfile: (persona: AgentPersona) => void;
+}) {
+  const title = persona.displayName;
+  const modelLabel = formatAgentModelLabel(agent?.model ?? persona.model);
+  const profileQuery = useUserProfileQuery(agent?.pubkey);
+  const avatarUrl = agent
+    ? firstAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
+    : persona.avatarUrl;
+  const friendlyError = agent
+    ? friendlyAgentLastError(agent.lastError)?.copy
+    : null;
+
+  return (
+    <AgentIdentityCard
+      actions={actions}
+      ariaLabel={`${title} agent profile`}
+      avatarUrl={avatarUrl}
+      dataTestId={`persona-agent-row-${persona.id}`}
+      errorLabel={friendlyError}
+      label={title}
+      modelControl={agent ? <ModelPicker agent={agent} /> : undefined}
+      modelLabel={modelLabel}
+      onClick={() => {
+        if (agent) {
+          onOpenAgentProfile(agent.pubkey);
+          return;
+        }
+        onOpenPersonaProfile(persona);
+      }}
+      status={
+        agent ? (
+          <AgentCardStatus
+            agent={agent}
+            presenceLoaded={presenceLoaded}
+            presenceLookup={presenceLookup}
+          />
+        ) : null
+      }
+    />
+  );
+}
+
+function StandaloneAgentCard({
+  agent,
+  presenceLoaded,
+  presenceLookup,
+  onOpenAgentProfile,
+}: {
+  agent: ManagedAgent;
+  presenceLoaded: boolean;
+  presenceLookup: PresenceLookup;
+  onOpenAgentProfile: (pubkey: string) => void;
+}) {
+  const title = agent.name;
+  const profileQuery = useUserProfileQuery(agent.pubkey);
+  const friendlyError = friendlyAgentLastError(agent.lastError)?.copy;
+
+  return (
+    <AgentIdentityCard
+      ariaLabel={`${title} agent profile`}
+      avatarUrl={profileQuery.data?.avatarUrl}
+      dataTestId={`managed-agent-${agent.pubkey}`}
+      errorLabel={friendlyError}
+      label={title}
+      modelControl={<ModelPicker agent={agent} />}
+      modelLabel={formatAgentModelLabel(agent.model)}
+      onClick={() => {
+        onOpenAgentProfile(agent.pubkey);
+      }}
+      status={
+        <AgentCardStatus
+          agent={agent}
+          presenceLoaded={presenceLoaded}
+          presenceLookup={presenceLookup}
+        />
+      }
+    />
+  );
+}
+
+function AgentCardStatus({
+  agent,
+  presenceLoaded,
+  presenceLookup,
+}: {
+  agent: ManagedAgent;
+  presenceLoaded: boolean;
+  presenceLookup: PresenceLookup;
+}) {
+  const activeTurns = useActiveAgentTurns(agent.pubkey);
+  const presenceStatus = presenceLookup[normalizePubkey(agent.pubkey)];
+
+  return (
+    <AgentStatusBadge
+      isWorking={activeTurns.length > 0}
+      presenceLoaded={presenceLoaded}
+      presenceStatus={presenceStatus}
+      status={agent.status}
+    />
+  );
+}
+
+function firstAvatarUrl(
+  ...candidates: Array<string | null | undefined>
+): string | null {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (trimmed) return trimmed;
+  }
+  return null;
+}
+
 function SectionHeader({
   agentCount,
-  canChooseCatalog,
   fileInputRef,
   handleFileChange,
   isActionPending,
-  isPersonasPending,
-  openFilePicker,
   runningCount,
   stoppedCount,
   onBulkRemoveStopped,
   onBulkStopRunning,
-  onChooseCatalog,
-  onCreateAgent,
-  onCreatePersona,
 }: {
   agentCount: number;
-  canChooseCatalog: boolean;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   isActionPending: boolean;
-  isPersonasPending: boolean;
-  openFilePicker: () => void;
   runningCount: number;
   stoppedCount: number;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
-  onChooseCatalog: () => void;
-  onCreateAgent: () => void;
-  onCreatePersona: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div
+      className={`${AGENT_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
+    >
       <div>
         <h3 className="text-sm font-semibold tracking-tight">Your Agents</h3>
-        <p className="text-sm text-muted-foreground">
-          Personas and their deployed agent instances.
+        <p className="text-sm text-secondary-foreground/75">
+          Agents in this workspace.
         </p>
       </div>
       <input
@@ -397,181 +455,113 @@ function SectionHeader({
         ref={fileInputRef}
         type="file"
       />
-      <div className="flex items-center gap-2">
-        {agentCount > 0 ? (
-          <DropdownMenu modal={false}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label="Bulk actions"
-                className="h-7 w-7"
-                size="icon"
-                variant="ghost"
-              >
-                <Ellipsis className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              onCloseAutoFocus={(e) => e.preventDefault()}
-            >
-              <DropdownMenuItem
-                disabled={isActionPending || runningCount === 0}
-                onClick={onBulkStopRunning}
-              >
-                <OctagonX className="h-4 w-4" />
-                Stop all running ({runningCount})
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                disabled={isActionPending || stoppedCount === 0}
-                onClick={onBulkRemoveStopped}
-              >
-                <Trash2 className="h-4 w-4" />
-                Remove all stopped ({stoppedCount})
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
+      {agentCount > 0 ? (
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
-            <Button size="sm" type="button" variant="default">
-              <Plus className="h-4 w-4" />
-              New
+            <Button
+              aria-label="Bulk actions"
+              className="h-7 w-7"
+              size="icon"
+              variant="ghost"
+            >
+              <Ellipsis className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="end"
-            onCloseAutoFocus={(e) => e.preventDefault()}
+            onCloseAutoFocus={(event) => event.preventDefault()}
           >
             <DropdownMenuItem
-              disabled={isPersonasPending}
-              onClick={onCreatePersona}
+              disabled={isActionPending || runningCount === 0}
+              onClick={onBulkStopRunning}
             >
-              Persona
+              <OctagonX className="h-4 w-4" />
+              Stop all running ({runningCount})
             </DropdownMenuItem>
-            {canChooseCatalog ? (
-              <DropdownMenuItem
-                disabled={isPersonasPending}
-                onClick={onChooseCatalog}
-              >
-                Choose from Catalog...
-              </DropdownMenuItem>
-            ) : null}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onCreateAgent}>
-              Custom Agent
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={openFilePicker}>
-              Import persona file
+            <DropdownMenuItem
+              className="text-destructive focus:text-destructive"
+              disabled={isActionPending || stoppedCount === 0}
+              onClick={onBulkRemoveStopped}
+            >
+              <Trash2 className="h-4 w-4" />
+              Remove all stopped ({stoppedCount})
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-      </div>
+      ) : null}
     </div>
   );
 }
 
-function LoadingSkeleton() {
-  return (
-    <div className="space-y-3">
-      {["a", "b", "c"].map((k, index) => (
-        <div
-          className="overflow-hidden rounded-xl border border-border/70 bg-card/40"
-          key={k}
-        >
-          <div className="flex items-center gap-2 px-3 py-2">
-            <div className="flex min-w-0 flex-1 items-center gap-2 py-1">
-              <Skeleton className="h-4 w-4 shrink-0 rounded-sm" />
-              <Skeleton className="h-8 w-8 shrink-0 rounded-lg" />
-              <div className="flex min-w-0 items-center gap-2">
-                <Skeleton className={index === 2 ? "h-4 w-36" : "h-4 w-32"} />
-                <Skeleton className="h-5 w-14 rounded-full" />
-              </div>
-              <Skeleton className="ml-1 h-3 w-20 shrink-0" />
-            </div>
-            {index === 1 ? (
-              <Skeleton className="h-5 w-16 rounded-full" />
-            ) : null}
-            <Skeleton className="h-8 w-8 shrink-0 rounded-lg" />
-          </div>
-          <div className="divide-y divide-border/50 border-t border-border/50">
-            <div className="flex items-start gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1.8fr)_minmax(120px,0.8fr)_minmax(0,1.1fr)] lg:gap-4">
-                  <div className="min-w-0">
-                    <div className="flex items-start gap-3">
-                      <Skeleton className="mt-0.5 h-4 w-4 shrink-0 rounded-sm" />
-                      <Skeleton className="mt-1 h-2 w-2 shrink-0 rounded-full" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Skeleton className="h-4 w-36" />
-                          <Skeleton className="h-5 w-16 rounded-full" />
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <Skeleton className="h-3 w-20" />
-                          <Skeleton className="h-3 w-24" />
-                        </div>
-                        {index === 0 ? (
-                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            <Skeleton className="h-5 w-20 rounded-full" />
-                            <Skeleton className="h-5 w-24 rounded-full" />
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Skeleton className="h-5 w-20 rounded-full" />
-                    <Skeleton className="h-3 w-24" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Skeleton className="h-4 w-28" />
-                    <Skeleton className="h-3 w-20" />
-                  </div>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-start gap-2 lg:pt-0.5">
-                <Skeleton className="h-7 w-24 rounded-md" />
-                <Skeleton className="h-7 w-7 rounded-md" />
-              </div>
-            </div>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function EmptyState({
+function NewAgentCard({
   canChooseCatalog,
   isPersonasPending,
   openFilePicker,
   onChooseCatalog,
+  onCreateAgent,
   onCreatePersona,
 }: {
   canChooseCatalog: boolean;
   isPersonasPending: boolean;
   openFilePicker: () => void;
   onChooseCatalog: () => void;
+  onCreateAgent: () => void;
   onCreatePersona: () => void;
 }) {
   return (
-    <div className="rounded-xl border border-dashed border-primary/40 px-6 py-10 text-center">
-      <p className="text-sm font-semibold tracking-tight">No agents yet</p>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Create a persona or choose one from the catalog, then deploy it to a
-        channel.
-      </p>
-      <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-        <PersonaLibraryEntryPoints
-          canChooseCatalog={canChooseCatalog}
-          isPending={isPersonasPending}
-          layout="empty"
-          onCreate={onCreatePersona}
-          onChooseCatalog={onChooseCatalog}
-          onImport={openFilePicker}
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <CreateIdentityCard
+          ariaLabel="New agent"
+          dataTestId="new-agent-card"
+          label="New agent"
         />
-      </div>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="start"
+        onCloseAutoFocus={(event) => event.preventDefault()}
+      >
+        <DropdownMenuItem
+          disabled={isPersonasPending}
+          onClick={onCreatePersona}
+        >
+          Persona
+        </DropdownMenuItem>
+        {canChooseCatalog ? (
+          <DropdownMenuItem
+            disabled={isPersonasPending}
+            onClick={onChooseCatalog}
+          >
+            Choose from Catalog...
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={onCreateAgent}>
+          Custom Agent
+        </DropdownMenuItem>
+        <DropdownMenuItem onClick={openFilePicker}>
+          Import persona file
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function LoadingSkeleton() {
+  return (
+    <div className={AGENT_CARD_GRID_CLASS}>
+      <IdentityCardSkeleton
+        footerSubtitleWidthClass="w-14"
+        footerTitleWidthClass="w-24"
+      />
+      <IdentityCardSkeleton
+        footerSubtitleWidthClass="w-20"
+        footerTitleWidthClass="w-32"
+      />
+      <IdentityCardSkeleton
+        footerSubtitleWidthClass="w-16"
+        footerTitleWidthClass="w-28"
+      />
     </div>
   );
 }
@@ -581,37 +571,49 @@ function CollapsibleAgentGroup({
   label,
   agents,
   collapsed,
+  presenceLoaded,
+  presenceLookup,
   onToggle,
-  rowProps,
+  onOpenAgentProfile,
 }: {
   groupKey: string;
   label: string;
   agents: ManagedAgent[];
   collapsed: ReadonlySet<string>;
+  presenceLoaded: boolean;
+  presenceLookup: PresenceLookup;
   onToggle: (key: string) => void;
-  rowProps: Omit<React.ComponentProps<typeof AgentGroupRows>, "agents">;
+  onOpenAgentProfile: (pubkey: string) => void;
 }) {
   const isCollapsed = collapsed.has(groupKey);
   return (
-    <div className="overflow-hidden rounded-xl border border-border/70 bg-card/40">
-      <div className="px-3 py-2 transition-colors hover:bg-muted/40">
-        <button
-          className="flex w-full items-center gap-2 py-1 text-left"
-          onClick={() => onToggle(groupKey)}
-          type="button"
-        >
-          {isCollapsed ? (
-            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-          ) : (
-            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-          )}
-          <span className="text-sm font-medium">{label}</span>
-          <span className="text-xs text-muted-foreground">
-            ({agents.length})
-          </span>
-        </button>
-      </div>
-      {!isCollapsed ? <AgentGroupRows agents={agents} {...rowProps} /> : null}
+    <div className={`${AGENT_CARD_COLUMN_CLASS} space-y-2`}>
+      <button
+        className="group flex items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+        onClick={() => onToggle(groupKey)}
+        type="button"
+      >
+        {isCollapsed ? (
+          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        ) : (
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+        )}
+        <span className="text-sm font-medium">{label}</span>
+        <span className="text-xs text-muted-foreground">({agents.length})</span>
+      </button>
+      {!isCollapsed ? (
+        <div className={AGENT_CARD_GRID_CLASS}>
+          {agents.map((agent) => (
+            <StandaloneAgentCard
+              agent={agent}
+              key={agent.pubkey}
+              presenceLoaded={presenceLoaded}
+              presenceLookup={presenceLookup}
+              onOpenAgentProfile={onOpenAgentProfile}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

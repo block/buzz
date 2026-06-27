@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
+import { AlertTriangle, Brain, ChevronDown, RefreshCw } from "lucide-react";
 
 import { useAgentMemoryGraph } from "@/features/agent-memory/hooks";
 import type { MemoryTreeNode } from "@/features/agent-memory/lib/buildMemoryGraph";
@@ -225,12 +225,16 @@ function MemoryGraphView({
   const isEmpty = !rootedTree && orphans.length === 0;
   if (isEmpty) {
     return (
-      <p
-        className="text-sm italic text-muted-foreground"
+      <div
+        className="flex min-h-56 flex-col items-center justify-center px-6 py-10 text-center"
         data-testid="agent-memory-empty"
       >
-        This agent has no memories yet.
-      </p>
+        <Brain className="mx-auto h-4 w-4 text-muted-foreground" />
+        <p className="mt-3 text-sm font-medium">Build this agent's memory</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Try telling this agent to remember something for next time.
+        </p>
+      </div>
     );
   }
 

@@ -14,6 +14,23 @@ clients and don't have company credentials.
 
 Both paths require NIP-42 authentication.
 
+## Community scope
+
+Buzz treats the relay URL/domain as authoritative for the community. Today's
+single-relay deployment has exactly one community behind that URL, so existing
+NIP-29/NIP-28 clients keep using the same WebSocket URL, event kinds, tags, and
+REST/media/git paths. In a multi-community deployment, each community is reached
+by its own domain or subdomain; the backend resolves the community from the host
+before handling AUTH, EVENT, REQ, REST, media, git, search, or workflow traffic.
+
+The Nostr wire format does not grow a tenant tag. Client-supplied `#h` tags still
+name channels/groups and are checked against the host-derived community. Events
+without `#h` — profiles, gift-wrapped DMs, membership notifications, lists,
+status, long-form notes, workflow/system events, and other "global" streams — are
+global only inside the connected community. A pubkey can join multiple
+communities and repost its profile in each one; DMs and profiles do not inherit
+across community domains.
+
 ---
 
 ## Path 1: NIP-29 Direct
@@ -55,15 +72,15 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 | **Group metadata (kind:39000)** | ✅ | Relay-signed; always `d`, `name`, `closed` tags; `about` only if description non-empty; `private` if applicable; `hidden` for DM channels |
 | **Group admins (kind:39001)** | ✅ | Relay-signed; `d` tag + `p` tags with roles (`owner`, `admin`) |
 | **Group members (kind:39002)** | ✅ | Relay-signed; `d` tag + `p` tags for all members |
-| **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, global scope |
-| **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers |
+| **Membership notifications** | ✅ | kind:44100 (added) / kind:44101 (removed); relay-signed, community-global scope (`channel_id=None` inside the connected community) |
+| **Presence (kind:20001)** | ✅ | Ephemeral; arbitrary status string (truncated to 128 chars); writes to Redis (`set_presence`/`clear_presence` on `"offline"`), then fan-out to local subscribers. In multi-community mode presence is scoped to the connected community. |
 | **Typing indicators (kind:20002)** | ✅ | Ephemeral, not stored; published via Redis pub/sub (multi-node capable unlike presence fan-out) |
 | **NIP-42 authentication** | ✅ | Proactive challenge; optional pubkey allowlist |
 | **NIP-11 relay info** | ✅ | `GET /` with `Accept: application/nostr+json` |
 | **Blossom media** | ✅ | `PUT /media/upload` (BUD-02), `GET /media/{sha256}.{ext}` (BUD-01) |
 | **NIP-50 search** | ✅ | One-shot search REQs: `{"search":"query","kinds":[9],"#h":["<uuid>"]}` → relevance-sorted results → EOSE. Not registered as persistent subscriptions. |
 | **NIP-10 threads** | ✅ | WS-submitted replies with `["e","<root>","","reply"]` tags create `thread_metadata` atomically. Visible in REST thread queries. Unknown parents rejected. |
-| **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored globally (channel_id=None). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
+| **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored community-globally (`channel_id=None` inside the connected community). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
 | **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
@@ -126,10 +143,10 @@ The relay emits relay-signed notifications when members are added or removed:
 
 | Kind | Meaning | Tags | Scope |
 |------|---------|------|-------|
-| **44100** | Member added | `p` = target pubkey, `h` = channel UUID | Global |
-| **44101** | Member removed | `p` = target pubkey, `h` = channel UUID | Global |
+| **44100** | Member added | `p` = target pubkey, `h` = channel UUID | Community-global |
+| **44101** | Member removed | `p` = target pubkey, `h` = channel UUID | Community-global |
 
-Stored globally (`channel_id = None`) so agents and clients can subscribe without knowing channel
+Stored community-globally (`channel_id = None` inside the connected community) so agents and clients can subscribe without knowing channel
 UUIDs in advance. Client-submitted kind:44100/44101 events are rejected — only the relay keypair
 may sign these.
 
@@ -474,7 +491,7 @@ is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 �
 ## Relay Membership (NIP-43)
 
 When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is checked against the
-`relay_members` table. Only pubkeys with a row in that table may use the relay. The relay owner
+`relay_members` table. In today's single-community deployment this is the relay-wide member list; in multi-community mode the same rule is scoped to the host-derived community. Only pubkeys with a row for that community may use that community. The relay owner
 is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup.
 
 ### CLI: Managing Members

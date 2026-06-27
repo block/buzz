@@ -9,6 +9,7 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { truncatePubkey } from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
@@ -54,14 +55,6 @@ function InfoBadge({ children }: { children: React.ReactNode }) {
       {children}
     </span>
   );
-}
-
-function truncatePubkey(pubkey: string) {
-  if (pubkey.length <= 16) {
-    return pubkey;
-  }
-
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
 }
 
 export function UserProfilePopover({

@@ -116,11 +116,15 @@ export type IdentityArchiveActions = {
  * dedupes the underlying subscriptions by queryKey, so a second hook call costs
  * a render, not a second network round-trip.
  */
-export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
+export function useIdentityArchive(
+  pubkey: string | null,
+): IdentityArchiveActions {
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
 
-  const pubkeyLower = pubkey.toLowerCase();
+  const targetPubkey = pubkey?.trim() ?? "";
+  const hasTargetPubkey = targetPubkey.length > 0;
+  const pubkeyLower = targetPubkey.toLowerCase();
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
 
@@ -129,11 +133,11 @@ export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
   // archiving *other* identities you own. Also defer until our own identity
   // resolves so we never fire the lookup against an unknown viewer.
   const oaOwnerQuery = useOaOwnerQuery(
-    pubkey,
-    currentPubkey !== undefined && !isSelf,
+    targetPubkey,
+    hasTargetPubkey && currentPubkey !== undefined && !isSelf,
   );
 
-  const isArchived = useIsIdentityArchived(pubkey);
+  const isArchived = useIsIdentityArchived(targetPubkey);
 
   const archiveMutation = useArchiveIdentityMutation();
   const unarchiveMutation = useUnarchiveIdentityMutation();
@@ -141,11 +145,13 @@ export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
   const myRole = myMembershipQuery.data?.role;
   const isRelayAdminOrOwner = myRole === "owner" || myRole === "admin";
   const isOaOwnerOfViewee = oaOwnerQuery.data?.isMe === true;
-  const canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee;
+  const canArchive =
+    hasTargetPubkey && (isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee);
 
   const archive = React.useCallback(() => {
+    if (!hasTargetPubkey) return;
     archiveMutation.mutate(
-      { targetPubkey: pubkey },
+      { targetPubkey },
       {
         onSuccess: () => toast.success("Archived on this relay"),
         onError: (error) =>
@@ -154,11 +160,12 @@ export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
           ),
       },
     );
-  }, [archiveMutation, pubkey]);
+  }, [archiveMutation, hasTargetPubkey, targetPubkey]);
 
   const unarchive = React.useCallback(() => {
+    if (!hasTargetPubkey) return;
     unarchiveMutation.mutate(
-      { targetPubkey: pubkey },
+      { targetPubkey },
       {
         onSuccess: () => toast.success("Unarchived on this relay"),
         onError: (error) =>
@@ -167,7 +174,7 @@ export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
           ),
       },
     );
-  }, [pubkey, unarchiveMutation]);
+  }, [hasTargetPubkey, targetPubkey, unarchiveMutation]);
 
   return {
     canArchive,

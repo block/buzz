@@ -21,33 +21,83 @@ import '../pairing/pairing_provider.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channel_management_provider.dart';
+import 'dm_channel_labels.dart';
+import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_sections/channel_sections_storage.dart';
 import 'channel_stars/channel_stars_provider.dart';
 import 'channels_provider.dart';
 import 'read_state/deferred_read_state_update.dart';
+import 'read_state/read_state_format.dart';
 import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
+import 'unread_badge/observed_unread_event.dart';
 
-enum _QuickAction { createChannel, createForum, newDm }
+enum _QuickAction { createChannel, newDm }
 
 /// Height of the [_ConnectionBanner]: vertical padding (Grid.quarter + 2) × 2
 /// plus the ~16px row content (12px spinner / labelSmall text).
 const double _kBannerHeight = 24.0;
 
-bool _isUnread(Channel channel, ReadStateState readState) {
-  if (readState.locallyForcedChannelIds.contains(channel.id)) {
-    return true;
+class _UnreadChannelState {
+  final Set<String> ids;
+  final Map<String, int> counts;
+
+  const _UnreadChannelState({required this.ids, required this.counts});
+}
+
+_UnreadChannelState _computeUnreadChannelState({
+  required Iterable<Channel> channels,
+  required ReadStateState readState,
+  required ChannelsNotifier channelsNotifier,
+}) {
+  if (!readState.isReady) {
+    return const _UnreadChannelState(ids: {}, counts: {});
   }
 
-  final lastMessageAt = dateTimeToUnixSeconds(channel.lastMessageAt);
-  if (lastMessageAt == null) {
-    return false;
+  final latestObservedByChannel = channelsNotifier.latestObservedByChannel;
+  final observedEventsByChannel =
+      channelsNotifier.observedUnreadEventsByChannel;
+  final ids = <String>{};
+  final counts = <String, int>{};
+
+  for (final channel in channels) {
+    if (readState.locallyForcedChannelIds.contains(channel.id)) {
+      ids.add(channel.id);
+      counts[channel.id] = 1;
+      continue;
+    }
+
+    final latestObserved = latestObservedByChannel[channel.id];
+    if (latestObserved == null) continue;
+
+    final channelReadAt = readState.effectiveTimestamp(channel.id);
+    if (channelReadAt != null && latestObserved <= channelReadAt) continue;
+
+    final observedEvents = observedEventsByChannel[channel.id];
+    int? readAtForObservedEvent(ObservedUnreadEvent event) =>
+        observedUnreadEventReadAt(
+          event,
+          channelReadAt,
+          (rootId) => readState.effectiveTimestamp(threadContextKey(rootId)),
+          (messageId) => readState.effectiveTimestamp(msgContextKey(messageId)),
+        );
+
+    final unreadCount = countUnreadObservedEvents(
+      observedEvents,
+      readAtForObservedEvent,
+    );
+    if (unreadCount == 0) continue;
+
+    ids.add(channel.id);
+    counts[channel.id] = countUnreadBadgeObservedEvents(
+      observedEvents,
+      readAtForObservedEvent,
+    );
   }
 
-  final readAt = readState.effectiveTimestamp(channel.id);
-  return readAt == null || lastMessageAt > readAt;
+  return _UnreadChannelState(ids: ids, counts: counts);
 }
 
 class ChannelsPage extends HookConsumerWidget {
@@ -103,16 +153,11 @@ class ChannelsPage extends HookConsumerWidget {
 
       switch (action) {
         case _QuickAction.createChannel:
-        case _QuickAction.createForum:
           final created = await showModalBottomSheet<Channel>(
             context: context,
             isScrollControlled: true,
             showDragHandle: true,
-            builder: (_) => _CreateChannelSheet(
-              channelType: action == _QuickAction.createForum
-                  ? 'forum'
-                  : 'stream',
-            ),
+            builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
           );
           if (created != null && context.mounted) {
             await openChannel(created);
@@ -297,16 +342,13 @@ class _SliverChannelsList extends HookConsumerWidget {
     final streamChannels = visibleChannels
         .where((channel) => channel.isStream)
         .toList();
-    final forumChannels = visibleChannels
-        .where((channel) => channel.isForum)
-        .toList();
-    final dmChannels = visibleChannels
-        .where((channel) => channel.isDm)
-        .toList();
+    final dmChannels = sortDmChannelsByDisplayLabel(
+      visibleChannels.where((channel) => channel.isDm),
+      currentPubkey: currentPubkey,
+    );
 
     final starredExpanded = useState(true);
     final channelsExpanded = useState(true);
-    final forumsExpanded = useState(true);
     final dmsExpanded = useState(true);
     final initialSeedComplete = useState(false);
     final seededPubkey = useRef<String?>(null);
@@ -343,16 +385,21 @@ class _SliverChannelsList extends HookConsumerWidget {
       });
     }, [readState.isReady, readState.pubkey, visibleChannels]);
 
-    final unreadChannelIds = readState.isReady
-        ? {
-            for (final channel in visibleChannels)
-              if ((seedCompleteForPubkey ||
-                      readState.effectiveTimestamp(channel.id) != null) &&
-                  _isUnread(channel, readState) &&
-                  !mutedChannelIds.contains(channel.id))
-                channel.id,
-          }
-        : const <String>{};
+    final unreadState = _computeUnreadChannelState(
+      channels: visibleChannels,
+      readState: readState,
+      channelsNotifier: ref.read(channelsProvider.notifier),
+    );
+    final unreadChannelIds = {
+      for (final channelId in unreadState.ids)
+        if (seedCompleteForPubkey ||
+            readState.effectiveTimestamp(channelId) != null)
+          channelId,
+    };
+    final unreadChannelCounts = {
+      for (final entry in unreadState.counts.entries)
+        if (unreadChannelIds.contains(entry.key)) entry.key: entry.value,
+    };
 
     // Build sorted user-defined sections and compute which stream channels
     // belong to each section. Channels not assigned to any valid section fall
@@ -406,6 +453,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
                 unreadChannelIds: unreadChannelIds,
+                unreadChannelCounts: unreadChannelCounts,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 emptyLabel: '',
@@ -423,6 +471,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                     )
                     .toList(),
                 unreadChannelIds: unreadChannelIds,
+                unreadChannelCounts: unreadChannelCounts,
                 mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
@@ -501,21 +550,10 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
+              unreadChannelCounts: unreadChannelCounts,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
-              onSelectChannel: onSelectChannel,
-            ),
-            _ChannelSection(
-              title: 'Forums',
-              icon: LucideIcons.messageSquareText,
-              expanded: forumsExpanded.value,
-              onToggle: () => forumsExpanded.value = !forumsExpanded.value,
-              channels: forumChannels,
-              unreadChannelIds: unreadChannelIds,
-              mutedChannelIds: mutedChannelIds,
-              currentPubkey: currentPubkey,
-              emptyLabel: 'No forums yet',
               onSelectChannel: onSelectChannel,
             ),
             _ChannelSection(
@@ -525,6 +563,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: dmChannels,
               unreadChannelIds: unreadChannelIds,
+              unreadChannelCounts: unreadChannelCounts,
               mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',
@@ -541,6 +580,7 @@ class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
+  final Map<String, int> unreadChannelCounts;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final bool expanded;
@@ -558,6 +598,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.section,
     required this.channels,
     required this.unreadChannelIds,
+    required this.unreadChannelCounts,
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.expanded,
@@ -592,6 +633,7 @@ class _CustomChannelSection extends StatelessWidget {
           for (final channel in channels)
             _ChannelTile(
               channel: channel,
+              unreadCount: unreadChannelCounts[channel.id],
               isUnread: unreadChannelIds.contains(channel.id),
               isMuted: mutedChannelIds.contains(channel.id),
               currentPubkey: currentPubkey,
@@ -759,6 +801,7 @@ class _ChannelSection extends StatelessWidget {
   final VoidCallback onToggle;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
+  final Map<String, int> unreadChannelCounts;
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
@@ -771,6 +814,7 @@ class _ChannelSection extends StatelessWidget {
     required this.onToggle,
     required this.channels,
     required this.unreadChannelIds,
+    required this.unreadChannelCounts,
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
@@ -808,6 +852,7 @@ class _ChannelSection extends StatelessWidget {
             for (final channel in channels)
               _ChannelTile(
                 channel: channel,
+                unreadCount: unreadChannelCounts[channel.id],
                 isUnread: unreadChannelIds.contains(channel.id),
                 isMuted: mutedChannelIds.contains(channel.id),
                 currentPubkey: currentPubkey,
@@ -903,6 +948,7 @@ class _SectionHeader extends StatelessWidget {
 
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
+  final int? unreadCount;
   final bool isUnread;
   final bool isMuted;
   final String? currentPubkey;
@@ -917,6 +963,7 @@ class _ChannelTile extends ConsumerWidget {
 
   const _ChannelTile({
     required this.channel,
+    this.unreadCount,
     required this.isUnread,
     required this.currentPubkey,
     required this.onTap,
@@ -934,7 +981,7 @@ class _ChannelTile extends ConsumerWidget {
       onTap: onTap,
       onLongPress: () => _showChannelActions(context, ref),
       child: Opacity(
-        opacity: isMuted ? 0.5 : 1.0,
+        opacity: isMuted && !isUnread ? 0.5 : 1.0,
         child: Padding(
           padding: const EdgeInsets.only(
             left: Grid.xs + Grid.xxs,
@@ -950,7 +997,7 @@ class _ChannelTile extends ConsumerWidget {
                 Icon(
                   channelIcon(channel),
                   size: 18,
-                  color: hasActivity
+                  color: isUnread || hasActivity
                       ? context.colors.onSurface
                       : context.colors.onSurfaceVariant,
                 ),
@@ -960,7 +1007,10 @@ class _ChannelTile extends ConsumerWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      channel.displayLabel(currentPubkey: currentPubkey),
+                      resolveDmChannelDisplayLabel(
+                        channel,
+                        currentPubkey: currentPubkey,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: context.textTheme.bodyMedium?.copyWith(
@@ -969,14 +1019,16 @@ class _ChannelTile extends ConsumerWidget {
                             : hasActivity
                             ? context.colors.onSurface
                             : context.colors.onSurfaceVariant,
-                        fontWeight: isUnread && !isMuted
-                            ? FontWeight.w700
-                            : null,
+                        fontWeight: isUnread ? FontWeight.w700 : null,
                       ),
                     ),
                   ],
                 ),
               ),
+              if (channel.isEphemeral) ...[
+                const SizedBox(width: Grid.xxs),
+                _EphemeralBadge(channel: channel),
+              ],
               if (isMuted) ...[
                 const SizedBox(width: Grid.xxs),
                 Icon(
@@ -984,17 +1036,10 @@ class _ChannelTile extends ConsumerWidget {
                   size: 12,
                   color: context.colors.onSurfaceVariant,
                 ),
-              ] else if (isUnread) ...[
+              ],
+              if (isUnread && !channel.isDm) ...[
                 const SizedBox(width: Grid.xxs),
-                Container(
-                  key: Key('channel-unread-${channel.id}'),
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    color: context.colors.primary,
-                    shape: BoxShape.circle,
-                  ),
-                ),
+                _UnreadBadge(channelId: channel.id, count: unreadCount ?? 0),
               ],
               if (!channel.isMember && !channel.isDm)
                 Padding(
@@ -1017,10 +1062,6 @@ class _ChannelTile extends ConsumerWidget {
                     ),
                   ),
                 ),
-              if (channel.isEphemeral) ...[
-                const SizedBox(width: Grid.xxs),
-                _EphemeralBadge(channel: channel),
-              ],
             ],
           ),
         ),
@@ -1233,16 +1274,37 @@ class _DmAvatar extends ConsumerWidget {
     final profiles = ref.watch(userCacheProvider);
     final presenceMap = ref.watch(presenceCacheProvider);
     final normalizedCurrent = currentPubkey?.toLowerCase();
+    final otherPubkeys = [
+      for (final pk in channel.participantPubkeys)
+        if (pk.toLowerCase() != normalizedCurrent) pk.toLowerCase(),
+    ];
+    final visiblePubkeys = otherPubkeys.isNotEmpty
+        ? otherPubkeys
+        : channel.participantPubkeys.map((pk) => pk.toLowerCase()).toList();
 
-    // Find the other participant's pubkey.
-    String? otherPubkey;
-    for (final pk in channel.participantPubkeys) {
-      if (pk.toLowerCase() != normalizedCurrent) {
-        otherPubkey = pk.toLowerCase();
-        break;
-      }
+    if (visiblePubkeys.length > 1) {
+      return Container(
+        width: 22,
+        height: 22,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: context.colors.surfaceContainerHighest,
+          shape: BoxShape.circle,
+          border: Border.all(color: context.colors.outlineVariant),
+        ),
+        child: Text(
+          '${visiblePubkeys.length}',
+          style: context.textTheme.labelSmall?.copyWith(
+            fontSize: 10,
+            color: context.colors.onSurface,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
+        ),
+      );
     }
 
+    final otherPubkey = visiblePubkeys.isNotEmpty ? visiblePubkeys.first : null;
     final profile = otherPubkey != null ? profiles[otherPubkey] : null;
 
     // Trigger fetches if not cached yet.
@@ -1332,12 +1394,6 @@ class _QuickActionsSheet extends StatelessWidget {
               subtitle: const Text('Start a new stream channel'),
               onTap: () =>
                   Navigator.of(context).pop(_QuickAction.createChannel),
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.messageSquareText),
-              title: const Text('Create forum'),
-              subtitle: const Text('Set up a threaded discussion space'),
-              onTap: () => Navigator.of(context).pop(_QuickAction.createForum),
             ),
             ListTile(
               leading: const Icon(LucideIcons.messagesSquare),
@@ -1670,6 +1726,57 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
   }
 }
 
+class _UnreadBadge extends StatelessWidget {
+  final String channelId;
+  final int count;
+
+  const _UnreadBadge({required this.channelId, required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    if (count <= 0) {
+      return SizedBox(
+        key: Key('channel-unread-dot-$channelId'),
+        width: 20,
+        height: 20,
+        child: Center(
+          child: Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              color: context.colors.primary,
+              shape: BoxShape.circle,
+            ),
+            child: Semantics(label: 'unread'),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      key: Key('channel-unread-$channelId'),
+      constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+      padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: context.colors.primary,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        _formatUnreadCount(count),
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onPrimary,
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+
+String _formatUnreadCount(int count) => count > 99 ? '99+' : count.toString();
+
 class _EphemeralBadge extends StatelessWidget {
   final Channel channel;
 
@@ -1677,54 +1784,18 @@ class _EphemeralBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = _label();
+    final display = ephemeralChannelDisplay(channel);
+    if (display == null) return const SizedBox.shrink();
 
     return Tooltip(
-      message: 'Ephemeral channel — cleans up after inactivity',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF59E0B).withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(Radii.sm),
-          border: Border.all(
-            color: const Color(0xFFF59E0B).withValues(alpha: 0.2),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(LucideIcons.clock, size: 10, color: _amberColor(context)),
-            if (label != null) ...[
-              const SizedBox(width: 3),
-              Text(
-                label,
-                style: context.textTheme.labelSmall?.copyWith(
-                  fontSize: 10,
-                  color: _amberColor(context),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ],
-          ],
-        ),
+      message: display.tooltipLabel,
+      child: Icon(
+        LucideIcons.clockFading,
+        key: Key('channel-ephemeral-${channel.id}'),
+        size: 16,
+        color: context.colors.onSurfaceVariant,
       ),
     );
-  }
-
-  Color _amberColor(BuildContext context) {
-    return context.colors.brightness == Brightness.light
-        ? const Color(0xFFB45309)
-        : const Color(0xFFFCD34D);
-  }
-
-  String? _label() {
-    final deadline = channel.ttlDeadline;
-    if (deadline == null) return null;
-    final diff = deadline.difference(DateTime.now());
-    if (diff.isNegative) return 'due';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}m';
-    if (diff.inHours < 24) return '${diff.inHours}h';
-    return '${diff.inDays}d';
   }
 }
 

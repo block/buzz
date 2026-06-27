@@ -111,6 +111,11 @@ pub async fn set_voice_input_mode(
         }
     }
 
+    // A mode switch changes whether the global shortcut should be reserved but
+    // does not otherwise emit; emit here so the frontend sees the new mode and
+    // the shortcut registration is re-synced.
+    state.emit_huddle_state_changed();
+
     Ok(())
 }
 

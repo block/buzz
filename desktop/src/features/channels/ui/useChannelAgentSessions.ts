@@ -28,6 +28,7 @@ type UseChannelAgentSessionsOptions = {
   handleOpenThread: (message: TimelineMessage) => void;
   managedAgents: ChannelAgentSessionAgent[];
   openAgentSessionPubkey: string | null;
+  profilePanelPubkey?: string | null;
   setChannelManagementOpen: (open: boolean) => void;
   setExpandedThreadReplyIds: (value: Set<string>) => void;
   setOpenAgentSessionPubkey: PanelValueSetter;
@@ -160,6 +161,7 @@ export function useChannelAgentSessions({
   handleOpenThread,
   managedAgents,
   openAgentSessionPubkey,
+  profilePanelPubkey = null,
   setChannelManagementOpen,
   setExpandedThreadReplyIds,
   setOpenAgentSessionPubkey,
@@ -178,6 +180,7 @@ export function useChannelAgentSessions({
       }),
     [activeChannel, activeChannelId, channelMembers, managedAgents],
   );
+  const agentSessionAgents = managedAgents;
 
   const closeAgentSession = React.useCallback(() => {
     setOpenAgentSessionPubkey(null);
@@ -189,7 +192,6 @@ export function useChannelAgentSessions({
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
       setThreadReplyTargetId(null);
-      setProfilePanelPubkey(null);
       setChannelManagementOpen(false);
       setOpenAgentSessionPubkey(pubkey);
     },
@@ -198,7 +200,6 @@ export function useChannelAgentSessions({
       setExpandedThreadReplyIds,
       setOpenAgentSessionPubkey,
       setOpenThreadHeadId,
-      setProfilePanelPubkey,
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     ],
@@ -234,7 +235,9 @@ export function useChannelAgentSessions({
     if (
       openAgentSessionPubkey &&
       agentsLoaded &&
-      !channelAgentSessionAgents.some(
+      normalizePubkey(profilePanelPubkey ?? "") !==
+        normalizePubkey(openAgentSessionPubkey) &&
+      !agentSessionAgents.some(
         (agent) =>
           normalizePubkey(agent.pubkey) ===
           normalizePubkey(openAgentSessionPubkey),
@@ -243,13 +246,15 @@ export function useChannelAgentSessions({
       setOpenAgentSessionPubkey(null, { replace: true });
     }
   }, [
+    agentSessionAgents,
     agentsLoaded,
-    channelAgentSessionAgents,
     openAgentSessionPubkey,
+    profilePanelPubkey,
     setOpenAgentSessionPubkey,
   ]);
 
   return {
+    agentSessionAgents,
     channelAgentSessionAgents,
     closeAgentSession,
     openAgentSession,

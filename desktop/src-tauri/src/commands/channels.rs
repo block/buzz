@@ -12,6 +12,7 @@ use crate::{
 
 #[tauri::command]
 pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>, String> {
+    let _profile_start = std::time::Instant::now();
     let my_pubkey = {
         let keys = state.keys.lock().map_err(|e| e.to_string())?;
         keys.public_key().to_hex()
@@ -39,6 +40,9 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         }
         all
     };
+
+    #[cfg(debug_assertions)]
+    let t_members = _profile_start.elapsed();
 
     let mut channel_ids: Vec<String> = member_events
         .iter()
@@ -75,6 +79,9 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         Vec::new()
     };
 
+    #[cfg(debug_assertions)]
+    let t_member_meta = _profile_start.elapsed();
+
     // Step 3: fetch ALL open channel metadata so the channel browser can show
     // discoverable channels the user hasn't joined yet. The relay's access
     // control allows reading kind:39000 for open channels regardless of membership.
@@ -86,6 +93,9 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         })],
     )
     .await?;
+
+    #[cfg(debug_assertions)]
+    let t_open_meta = _profile_start.elapsed();
 
     // Merge: member channels (marked as member) + open channels (not yet joined).
     let member_d_tags: std::collections::HashSet<String> = meta_events
@@ -156,6 +166,9 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         }
     }
 
+    #[cfg(debug_assertions)]
+    let t_member_counts = _profile_start.elapsed();
+
     // Populate last_message_at by fetching the most recent human message per
     // channel. Uses per-channel filters (single #h value each) so the relay can
     // push the query to its indexed channel_id column. Multi-value #h is NOT
@@ -201,6 +214,9 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         }
     }
 
+    #[cfg(debug_assertions)]
+    let t_last_message = _profile_start.elapsed();
+
     // NIP-DV: drop DMs the viewer has hidden. The relay maintains a per-viewer
     // parameterized-replaceable snapshot (kind:30622, d=my pubkey) whose `h`
     // tags list currently-hidden DM channel ids. The snapshot also carries
@@ -234,6 +250,22 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
     };
     if !hidden_dms.is_empty() {
         channels.retain(|c| c.channel_type != "dm" || !hidden_dms.contains(&c.id));
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let total = _profile_start.elapsed();
+        eprintln!(
+            "buzz-desktop: get_channels profile channels={} members={:?} member_meta={:?} open_meta={:?} member_counts={:?} last_message={:?} hidden_dm={:?} total={:?}",
+            channels.len(),
+            t_members,
+            t_member_meta - t_members,
+            t_open_meta - t_member_meta,
+            t_member_counts - t_open_meta,
+            t_last_message - t_member_counts,
+            total - t_last_message,
+            total,
+        );
     }
 
     Ok(channels)

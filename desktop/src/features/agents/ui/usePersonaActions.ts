@@ -195,7 +195,10 @@ export function usePersonaActions() {
     clearFeedback("library");
     try {
       const result = await parsePersonaFiles(fileBytes, fileName);
-      if (isSingleItemFile(fileBytes) && result.personas.length === 1) {
+      if (
+        isSingleItemFile(fileBytes, fileName) &&
+        result.personas.length === 1
+      ) {
         setShouldLoadAcpRuntimes(true);
         setPersonaDialogState(importPersonaDialogState(result.personas[0]));
       } else if (result.personas.length > 0) {

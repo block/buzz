@@ -226,6 +226,7 @@ export function useTeamActions(
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
+      setTeamDialogState(null);
     } catch (err) {
       actions.setActionErrorMessage(
         err instanceof Error

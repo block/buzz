@@ -218,6 +218,8 @@ impl HuddleState {
 pub fn emit_huddle_state(app: &tauri::AppHandle, state: &HuddleState) {
     use tauri::Emitter;
     let _ = app.emit("huddle-state-changed", state);
+    // Reserve Ctrl+Space with the OS only while a huddle is live in PTT mode.
+    crate::ptt_shortcut::sync_registration(app, state);
 }
 
 // ── Response types ────────────────────────────────────────────────────────────

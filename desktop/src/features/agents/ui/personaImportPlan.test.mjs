@@ -14,6 +14,7 @@ function createPersona(overrides = {}) {
     systemPrompt: "Be helpful.",
     runtime: null,
     model: null,
+    provider: null,
     namePool: [],
     isBuiltIn: false,
     isActive: true,
@@ -28,8 +29,10 @@ function createPreview(overrides = {}) {
     displayName: "Alice",
     systemPrompt: "Be helpful.",
     avatarDataUrl: null,
+    avatarRef: null,
     runtime: null,
     model: null,
+    provider: null,
     namePool: [],
     sourceFile: "alice.persona.json",
     ...overrides,
@@ -106,6 +109,19 @@ test("buildPersonaImportPlan detects model change", () => {
   assert.equal(plan.fields[0]?.label, "Preferred model");
 });
 
+test("buildPersonaImportPlan detects provider change", () => {
+  const plan = buildPersonaImportPlan({
+    persona: createPersona({ provider: "anthropic" }),
+    preview: createPreview({ provider: "databricks" }),
+  });
+
+  assert.equal(plan.fields.length, 1);
+  assert.equal(plan.fields[0]?.field, "provider");
+  assert.equal(plan.fields[0]?.label, "LLM provider");
+  assert.equal(plan.fields[0]?.existingValue, "anthropic");
+  assert.equal(plan.fields[0]?.importedValue, "databricks");
+});
+
 test("buildPersonaImportPlan detects name pool change", () => {
   const plan = buildPersonaImportPlan({
     persona: createPersona({ namePool: ["Birch", "Compass"] }),
@@ -123,17 +139,24 @@ test("buildPersonaImportPlan detects multiple field changes", () => {
       displayName: "Alice",
       systemPrompt: "Old prompt",
       model: "gpt-4o",
+      provider: "openai",
     }),
     preview: createPreview({
       displayName: "Alicia",
       systemPrompt: "New prompt",
       model: "claude-sonnet-4-20250514",
+      provider: "anthropic",
     }),
   });
 
-  assert.equal(plan.fields.length, 3);
+  assert.equal(plan.fields.length, 4);
   const fieldNames = plan.fields.map((f) => f.field);
-  assert.deepEqual(fieldNames, ["displayName", "systemPrompt", "model"]);
+  assert.deepEqual(fieldNames, [
+    "displayName",
+    "systemPrompt",
+    "model",
+    "provider",
+  ]);
 });
 
 test("hasAnyPersonaImportChanges returns false for empty plan", () => {
