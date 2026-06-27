@@ -20,6 +20,7 @@ use nostr::Filter;
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::AppState;
+use buzz_pubsub::EventTopic;
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
@@ -170,6 +171,7 @@ pub async fn handle_connection(
         conn_id,
         tx.clone(),
         cancel.clone(),
+        conn.tenant.community(),
         Arc::clone(&backpressure_count),
         subscriptions,
         state.config.slow_client_grace_limit,
@@ -201,7 +203,12 @@ pub async fn handle_connection(
     let _ = send_task.await;
     let _ = heartbeat_task.await;
 
-    state.sub_registry.remove_connection(conn.conn_id);
+    for removed in state.sub_registry.remove_connection(conn.conn_id) {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
+            .await;
+    }
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
         let remaining = state
@@ -445,5 +452,12 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
         }
+    }
+}
+
+fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
+    match channel_id {
+        Some(channel_id) => EventTopic::Channel(channel_id),
+        None => EventTopic::Global,
     }
 }

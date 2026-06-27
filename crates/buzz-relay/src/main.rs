@@ -456,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
                     // drop-set → no reconnect storm). Offline clients are caught
                     // by the archived=true skip in discover_channels on reconnect.
                     buzz_relay::handlers::side_effects::evict_all_channel_subscriptions(
+                        &tenant,
                         &reaper_state,
                         channel_id,
                     )
@@ -486,31 +487,11 @@ async fn main() -> anyhow::Result<()> {
                 batch_limit = scheduler_batch_limit,
                 "NIP-ER reminder scheduler started"
             );
-            // Resolve the deployment's community once — the scheduler is a
-            // background sweep with no inbound connection. Author-private
-            // reminders (kind:30300) publish to the deployment community's
-            // global Redis topic; the per-recipient author-only delivery gate
-            // (`filter_fanout_by_access`) is the actual isolation boundary, not
-            // the topic. NOTE: `DueReminder` does not yet carry a per-row
-            // `community_id`/`host`, so a multi-community deployment would route
-            // every community's reminders onto one community's topic. That is a
-            // buzz-db follow-up (enrich the `query_due_reminders` SELECT like the
-            // reaper's `ReapedEphemeralChannel`), tracked for Mari's lane.
-            let scheduler_tenant = match buzz_relay::tenant::bind_deployment_community(
-                &scheduler_state.db,
-                &scheduler_state.config.relay_url,
-            )
-            .await
-            {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    error!(
-                        error = ?e,
-                        "reminder scheduler exiting: relay host is not mapped to a community"
-                    );
-                    return;
-                }
-            };
+            // The scheduler is a background sweep with no inbound connection,
+            // so it cannot use a request Host header as tenant provenance. Each
+            // DueReminder row carries `(community_id, host)` from the DB row's
+            // community join (mirroring the ephemeral-channel reaper); publish
+            // each reminder to that row's community-global topic.
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(scheduler_interval_secs)).await;
 
@@ -538,10 +519,14 @@ async fn main() -> anyhow::Result<()> {
                     // stays unclaimed and will be retried next tick. If claim
                     // fails after a successful publish, duplicate fan-out on the
                     // next tick is harmless (subscribers dedup by event ID).
+                    let reminder_tenant = buzz_core::tenant::TenantContext::resolved(
+                        reminder.community_id,
+                        reminder.host.clone(),
+                    );
                     if let Err(e) = scheduler_state
                         .pubsub
                         .publish_event(
-                            &scheduler_tenant,
+                            &reminder_tenant,
                             buzz_pubsub::EventTopic::Global,
                             &reminder_to_event(&reminder),
                         )
@@ -617,7 +602,8 @@ async fn main() -> anyhow::Result<()> {
                         // pubkeys, so applying the tenant-local op by key is
                         // correct regardless of community; the `community_id`
                         // scope rides the Redis topic, not the moka key.
-                        state_for_cache.apply_cache_invalidation(scoped.invalidation);
+                        state_for_cache
+                            .apply_cache_invalidation(scoped.community_id, scoped.invalidation);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);

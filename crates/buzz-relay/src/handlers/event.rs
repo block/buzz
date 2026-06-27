@@ -65,6 +65,17 @@ pub async fn filter_fanout_by_access(
     stored_event: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 ) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    // First enforce the receiver-side tenant label. Subscription indexes are
+    // community-scoped, but stale/injected matches and future fan-out helpers
+    // must still fail closed at the send chokepoint: a connection bound to
+    // community A may never receive an event labelled community B.
+    let matches: Vec<_> = matches
+        .into_iter()
+        .filter(|(conn_id, _)| {
+            state.conn_manager.community_for_conn(*conn_id) == Some(community_id)
+        })
+        .collect();
+
     // Author-only kinds (NIP-ER reminders) may only ever be delivered to the
     // event's own author. This gate lives here — the chokepoint shared by the
     // ingest fan-out path and the Redis cross-node `subscribe_local` path, the
@@ -144,7 +155,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     community_id: CommunityId,
     stored: &StoredEvent,
 ) {
-    let matches = state.sub_registry.fan_out(stored);
+    let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     let matches = filter_fanout_by_access(state, community_id, stored, matches).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
@@ -196,7 +207,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
         return;
     }
 
-    let matches = state.sub_registry.fan_out(&stored);
+    let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
     let matches = filter_fanout_by_access(state, community_id, &stored, matches).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
@@ -252,7 +263,9 @@ pub(crate) async fn dispatch_persistent_event(
         warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
     }
 
-    let matches = state.sub_registry.fan_out(stored_event);
+    let matches = state
+        .sub_registry
+        .fan_out_scoped(tenant.community(), stored_event);
     let matches = filter_fanout_by_access(state, tenant.community(), stored_event, matches).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
@@ -1101,6 +1114,7 @@ mod tests {
                 conn_id,
                 tx,
                 CancellationToken::new(),
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
@@ -1546,6 +1560,7 @@ mod tests {
                 conn_id,
                 tx,
                 CancellationToken::new(),
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 Arc::new(AtomicU8::new(0)),
                 Arc::new(Mutex::new(HashMap::new())),
                 3,
@@ -1582,16 +1597,17 @@ mod tests {
         async fn open_channel_event_passes_through_unfiltered() {
             let state = test_state().await;
             let channel_id = Uuid::new_v4();
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
             state
                 .channel_visibility_cache
-                .insert(channel_id, "open".to_string());
+                .insert((community_id, channel_id), "open".to_string());
             // A connection with no authenticated pubkey would be dropped on a
             // private channel; on open it must pass untouched.
             let conn = register_conn(&state, None);
             let matches = vec![(conn, "s".to_string())];
             let out = filter_fanout_by_access(
                 &state,
-                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                community_id,
                 &channel_event(Some(channel_id)),
                 matches.clone(),
             )
@@ -1603,18 +1619,19 @@ mod tests {
         async fn private_channel_keeps_member_drops_non_member_and_unknown() {
             let state = test_state().await;
             let channel_id = Uuid::new_v4();
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
             state
                 .channel_visibility_cache
-                .insert(channel_id, "private".to_string());
+                .insert((community_id, channel_id), "private".to_string());
 
             let member_pk = vec![1u8; 32];
             let non_member_pk = vec![2u8; 32];
             state
                 .membership_cache
-                .insert((channel_id, member_pk.clone()), true);
+                .insert((community_id, channel_id, member_pk.clone()), true);
             state
                 .membership_cache
-                .insert((channel_id, non_member_pk.clone()), false);
+                .insert((community_id, channel_id, non_member_pk.clone()), false);
 
             let member = register_conn(&state, Some(member_pk));
             let non_member = register_conn(&state, Some(non_member_pk));
@@ -1627,7 +1644,7 @@ mod tests {
             ];
             let out = filter_fanout_by_access(
                 &state,
-                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                community_id,
                 &channel_event(Some(channel_id)),
                 matches,
             )
@@ -1674,6 +1691,143 @@ mod tests {
             // Only the author's subscription survives; the non-author and the
             // unauthenticated connection are both dropped.
             assert_eq!(out, vec![(author_conn, "a".to_string())]);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Red-team — Attack 4 (cross-community read)
+    // ---------------------------------------------------------------------
+    //
+    // Spec property pinned: `Inv_NonInterference` / `Inv_ReadConfinement` /
+    // `Inv_LabelPropagation` from `docs/spec/MultiTenantRelay.tla` (lines
+    // 985+). Seam action this exercises: `ReadMessageRows` for the receiving
+    // connection — the relay must never deliver to a community-A connection an
+    // event labelled `{B}` for any `B != A`.
+    //
+    // Mutation class (per the TLA+ header lines 43-91): M1/M3/M12 family —
+    // unscoped read/fan-out paths where the receiver's tenant is not consulted
+    // against the event's tenant.
+    //
+    // What this module proves about the code at `fb0d6a4ea`:
+    //
+    //  * `ConnEntry` (`crates/buzz-relay/src/state.rs:30-44`) records
+    //    `authenticated_pubkey` but NO community/tenant binding. The fan-out
+    //    path has no way to ask "what community is this socket bound to."
+    //  * `SubscriptionRegistry` (`crates/buzz-relay/src/subscription.rs:57+`)
+    //    indexes subscriptions by `(channel_id, kind)` / `(kind, #p)` / `kind`
+    //    / wildcard — never by community.
+    //  * `filter_fanout_by_access` (this file, line 62) accepts the *event*'s
+    //    `community_id` (from the publishing tenant / Redis topic) but never
+    //    compares it to the *receiving* connection's tenant. For channel-less
+    //    (global) events the function short-circuits to `return matches`
+    //    (line 89-91) — pass-through with no isolation check.
+    //
+    // Consequence: when a single pod hosts connections from multiple
+    // communities (the rewrite's explicit design — stateless workers, any pod
+    // serves any community), a same-pod ingest of a community-B global event
+    // matches and delivers to a community-A connection whose subscription's
+    // event-content predicates happen to match (e.g. a presence sub keyed on a
+    // pubkey that exists in both communities, an `#p`-tagged membership
+    // notification, or any wildcard global sub). That is the literal negation
+    // of `Inv_NonInterference`.
+    //
+    // The two tests below pin the contract. The first documents the current
+    // (broken) behavior so the gap is named in code; it MUST be deleted in the
+    // same change that fixes the leak. The second is the regression guard —
+    // it goes red on this revision (the relay delivers the cross-community
+    // event) and turns green when the structural fix lands: connection-level
+    // tenant binding (`ConnEntry { community: CommunityId, .. }`) plus a
+    // tenant cross-check in `filter_fanout_by_access` such that a match where
+    // `conn.community != event.community` is dropped.
+    //
+    // Routing: per Eva (lane partition, fb0d6a4ea handoff thread), the patch
+    // is owned by Max — the same structural fix his reminder-fanout lane
+    // already needs. This module is the spec for "closed."
+    mod redteam {
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+
+        use buzz_core::kind::KIND_PRESENCE_UPDATE;
+        use buzz_core::StoredEvent;
+        use nostr::{EventBuilder, Keys, Kind};
+        use tokio::sync::{mpsc, Mutex};
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        use crate::handlers::event::filter_fanout_by_access;
+        use crate::state::AppState;
+
+        async fn test_state() -> Arc<AppState> {
+            super::fanout_access::test_state().await
+        }
+
+        fn register_conn(
+            state: &AppState,
+            community_id: buzz_core::tenant::CommunityId,
+            pubkey: Option<Vec<u8>>,
+        ) -> Uuid {
+            let conn_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(1);
+            state.conn_manager.register(
+                conn_id,
+                tx,
+                CancellationToken::new(),
+                community_id,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            if let Some(pk) = pubkey {
+                state.conn_manager.set_authenticated_pubkey(conn_id, pk);
+            }
+            conn_id
+        }
+
+        /// Regression gate for the Inv_NonInterference fix.
+        ///
+        /// This test asserts the CORRECT shape: when the receiving
+        /// connection is bound to community A and the event is labelled
+        /// community B, `filter_fanout_by_access` must drop the recipient.
+        ///
+        /// This regression failed on `fb0d6a4ea` (the red-team artifact;
+        /// the leak was the failure). The structural fix it pins:
+        ///
+        ///   1. `ConnEntry` carries a `community: CommunityId` set when the
+        ///      socket's host resolves at handshake.
+        ///   2. `ConnectionManager` exposes
+        ///      `community_for_conn(conn_id) -> Option<CommunityId>`.
+        ///   3. `filter_fanout_by_access` (or a wrapper at the call sites)
+        ///      drops any `(conn_id, sub_id)` where
+        ///      `community_for_conn(conn_id) != Some(event_community)`.
+        ///
+        /// Turning this test green is the definition of "Attack 4 is
+        /// closed" for the global-event seam.
+        #[tokio::test]
+        async fn channel_less_event_must_drop_recipient_in_different_community() {
+            let state = test_state().await;
+
+            // Same pubkey on two different community-bound sockets — the
+            // multi-tenant pod case the rewrite must serve safely.
+            let shared_pk = vec![7u8; 32];
+            let community_a = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+            let community_b = buzz_core::tenant::CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+            let a_socket = register_conn(&state, community_a, Some(shared_pk.clone()));
+
+            let presence = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), "online")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign presence");
+            let stored = StoredEvent::new(presence, None);
+
+            let matches = vec![(a_socket, "presence".to_string())];
+            let out = filter_fanout_by_access(&state, community_b, &stored, matches).await;
+
+            // Correct behavior: A-socket dropped because its tenant != B.
+            assert!(
+                out.is_empty(),
+                "Inv_NonInterference: a connection bound to community A \
+                 must not receive a community-B event. Got: {out:?}"
+            );
         }
     }
 }

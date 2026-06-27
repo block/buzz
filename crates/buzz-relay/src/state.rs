@@ -33,6 +33,9 @@ use crate::subscription::SubscriptionRegistry;
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
     cancel: CancellationToken,
+    /// Community resolved from the connection host at handshake. This is the
+    /// receiver-side tenant label fan-out must compare against the event label.
+    community_id: CommunityId,
     /// Shared with `ConnectionState` — both direct sends and fan-out
     /// broadcasts track the same consecutive-full counter.
     backpressure_count: Arc<AtomicU8>,
@@ -61,6 +64,7 @@ impl ConnectionManager {
         conn_id: Uuid,
         tx: mpsc::Sender<WsMessage>,
         cancel: CancellationToken,
+        community_id: CommunityId,
         backpressure_count: Arc<AtomicU8>,
         subscriptions: ConnectionSubscriptions,
         grace_limit: u8,
@@ -70,6 +74,7 @@ impl ConnectionManager {
             ConnEntry {
                 tx,
                 cancel,
+                community_id,
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
@@ -117,6 +122,13 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Return the server-resolved community that the connection's host bound to.
+    pub fn community_for_conn(&self, conn_id: Uuid) -> Option<CommunityId> {
+        self.connections
+            .get(&conn_id)
+            .map(|entry| entry.community_id)
     }
 
     /// Return the subscription map for a connection, if it is still live.
@@ -215,17 +227,15 @@ pub struct AppState {
     /// consumer skips them to avoid double delivery. Entries expire after
     /// 60 seconds via moka's TTL eviction — bounded regardless of subscriber health.
     pub local_event_ids: Arc<moka::sync::Cache<[u8; 32], ()>>,
-    /// Membership cache: (channel_id, pubkey_bytes) → is_member.
+    /// Membership cache: (community_id, channel_id, pubkey_bytes) → is_member.
     /// Short TTL (10s) — membership changes are rare but must propagate.
-    /// Multi-pod: other pods rely on TTL expiry; only local caches are invalidated.
-    pub membership_cache: Arc<moka::sync::Cache<(Uuid, Vec<u8>), bool>>,
-    /// Accessible channel IDs cache: pubkey_bytes → channel UUIDs.
+    pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
+    /// Accessible channel IDs cache: (community_id, pubkey_bytes) → channel UUIDs.
     /// Short TTL (10s) — invalidated on membership or channel visibility changes.
-    /// Multi-pod: other pods rely on TTL expiry; only local caches are invalidated.
-    pub accessible_channels_cache: Arc<moka::sync::Cache<Vec<u8>, Vec<Uuid>>>,
-    /// Per-channel visibility string, used to gate the private-channel fan-out
+    pub accessible_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
-    pub channel_visibility_cache: Arc<moka::sync::Cache<Uuid, String>>,
+    pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
 
     /// Bounded channel for audit logging — backpressure instead of unbounded spawns.
     /// Uses .send().await (blocks caller if full) because audit entries must not be lost.
@@ -413,7 +423,7 @@ impl AppState {
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<bool, buzz_db::DbError> {
-        let key = (channel_id, pubkey.to_vec());
+        let key = (community_id, channel_id, pubkey.to_vec());
         if let Some(cached) = self.membership_cache.get(&key) {
             metrics::counter!("buzz_membership_cache_hits_total").increment(1);
             return Ok(cached);
@@ -431,7 +441,7 @@ impl AppState {
     /// publish is spawned, not awaited: the local drop is already done, and a
     /// dropped publish is backstopped by the REQ denial-path DB confirmation.
     pub fn invalidate_membership(&self, tenant: &TenantContext, channel_id: Uuid, pubkey: &[u8]) {
-        self.invalidate_membership_local(channel_id, pubkey);
+        self.invalidate_membership_local(tenant.community(), channel_id, pubkey);
         self.spawn_cache_invalidation(
             tenant,
             CacheInvalidation::Membership {
@@ -443,10 +453,16 @@ impl AppState {
 
     /// Local-only membership drop. The cross-pod consumer calls this directly so
     /// applying a received drop never re-publishes it.
-    pub(crate) fn invalidate_membership_local(&self, channel_id: Uuid, pubkey: &[u8]) {
+    pub(crate) fn invalidate_membership_local(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) {
         self.membership_cache
-            .invalidate(&(channel_id, pubkey.to_vec()));
-        self.accessible_channels_cache.invalidate(&pubkey.to_vec());
+            .invalidate(&(community_id, channel_id, pubkey.to_vec()));
+        self.accessible_channels_cache
+            .invalidate(&(community_id, pubkey.to_vec()));
     }
 
     /// Invalidate all users' accessible-channels cache (e.g. new open channel created).
@@ -462,13 +478,18 @@ impl AppState {
 
     /// Invalidate the cached visibility for a single channel (e.g. after a flip).
     pub fn invalidate_channel_visibility(&self, tenant: &TenantContext, channel_id: Uuid) {
-        self.invalidate_channel_visibility_local(channel_id);
+        self.invalidate_channel_visibility_local(tenant.community(), channel_id);
         self.spawn_cache_invalidation(tenant, CacheInvalidation::Visibility { channel_id });
     }
 
     /// Local-only visibility drop. See [`invalidate_membership_local`].
-    pub(crate) fn invalidate_channel_visibility_local(&self, channel_id: Uuid) {
-        self.channel_visibility_cache.invalidate(&channel_id);
+    pub(crate) fn invalidate_channel_visibility_local(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) {
+        self.channel_visibility_cache
+            .invalidate(&(community_id, channel_id));
     }
 
     /// Invalidate all caches after a channel is deleted.
@@ -507,16 +528,20 @@ impl AppState {
 
     /// Apply a cache-key drop received from another pod. Calls the local-only
     /// drop variants so a received drop is never re-published (no fan-out loop).
-    pub fn apply_cache_invalidation(&self, invalidation: CacheInvalidation) {
+    pub fn apply_cache_invalidation(
+        &self,
+        community_id: CommunityId,
+        invalidation: CacheInvalidation,
+    ) {
         match invalidation {
             CacheInvalidation::Membership { channel_id, pubkey } => {
-                self.invalidate_membership_local(channel_id, &pubkey);
+                self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
             CacheInvalidation::AccessibleAll => {
                 self.invalidate_all_accessible_channels_local();
             }
             CacheInvalidation::Visibility { channel_id } => {
-                self.invalidate_channel_visibility_local(channel_id);
+                self.invalidate_channel_visibility_local(community_id, channel_id);
             }
             CacheInvalidation::ChannelDeleted => {
                 self.invalidate_channel_deleted_local();
@@ -530,7 +555,7 @@ impl AppState {
         community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
-        let key = pubkey.to_vec();
+        let key = (community_id, pubkey.to_vec());
         if let Some(cached) = self.accessible_channels_cache.get(&key) {
             metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
             return Ok(cached);
@@ -558,7 +583,10 @@ impl AppState {
         community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<String, buzz_db::DbError> {
-        if let Some(cached) = self.channel_visibility_cache.get(&channel_id) {
+        if let Some(cached) = self
+            .channel_visibility_cache
+            .get(&(community_id, channel_id))
+        {
             return Ok(cached);
         }
         let visibility = self
@@ -568,7 +596,7 @@ impl AppState {
             .visibility;
         if visibility == "private" {
             self.channel_visibility_cache
-                .insert(channel_id, visibility.clone());
+                .insert((community_id, channel_id), visibility.clone());
         }
         Ok(visibility)
     }
@@ -647,6 +675,7 @@ mod tests {
             conn_id,
             tx,
             cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             Arc::clone(&bp),
             Arc::new(Mutex::new(HashMap::new())),
             3,
@@ -733,6 +762,7 @@ mod tests {
             conn_id,
             tx,
             cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             Arc::clone(&bp),
             Arc::clone(&conn.subscriptions),
             3,
@@ -770,7 +800,15 @@ mod tests {
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-        mgr.register(conn_id, tx, cancel, bp, Arc::clone(&subscriptions), 3);
+        mgr.register(
+            conn_id,
+            tx,
+            cancel,
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            bp,
+            Arc::clone(&subscriptions),
+            3,
+        );
 
         let pubkey = vec![7u8; 32];
         mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
@@ -787,7 +825,15 @@ mod tests {
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-        mgr.register(conn_id, tx, cancel, bp, subscriptions, 3);
+        mgr.register(
+            conn_id,
+            tx,
+            cancel,
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            bp,
+            subscriptions,
+            3,
+        );
 
         assert_eq!(mgr.pubkey_for_conn(conn_id), None);
         let pubkey = vec![9u8; 32];

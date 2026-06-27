@@ -35,6 +35,7 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
 }
 
 async fn evict_live_channel_subscriptions(
+    tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     target_pubkey: &[u8],
@@ -42,32 +43,39 @@ async fn evict_live_channel_subscriptions(
     let conn_ids = state.conn_manager.connection_ids_for_pubkey(target_pubkey);
 
     for conn_id in conn_ids {
-        evict_conn_channel_subscriptions(state, channel_id, conn_id).await;
+        evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;
     }
 }
 
 /// Close every live channel-scoped subscription on `conn_id`, removing them from
 /// the connection's local map and sending `CLOSED restricted` for each.
 async fn evict_conn_channel_subscriptions(
+    tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     conn_id: uuid::Uuid,
 ) {
-    let removed = state
-        .sub_registry
-        .remove_channel_subscriptions(conn_id, channel_id);
+    let removed = state.sub_registry.remove_channel_subscriptions_scoped(
+        tenant.community(),
+        conn_id,
+        channel_id,
+    );
     if removed.is_empty() {
         return;
     }
 
     if let Some(subscriptions) = state.conn_manager.subscriptions_for(conn_id) {
         let mut conn_subscriptions = subscriptions.lock().await;
-        for sub_id in &removed {
+        for (sub_id, _) in &removed {
             conn_subscriptions.remove(sub_id);
         }
     }
 
-    for sub_id in removed {
+    for (sub_id, removed_scope) in removed {
+        state
+            .pubsub
+            .release_topic(tenant, topic_for_subscription(removed_scope.channel_id))
+            .await;
         let _ = state.conn_manager.send_to(
             conn_id,
             RelayMessage::closed(&sub_id, "restricted: channel access revoked"),
@@ -89,13 +97,16 @@ async fn evict_non_member_channel_subscriptions(
     let member_pubkeys: std::collections::HashSet<Vec<u8>> =
         members.into_iter().map(|m| m.pubkey).collect();
 
-    for conn_id in state.sub_registry.channel_subscriber_conns(channel_id) {
+    for conn_id in state
+        .sub_registry
+        .channel_subscriber_conns_scoped(tenant.community(), channel_id)
+    {
         let is_member = match state.conn_manager.pubkey_for_conn(conn_id) {
             Some(pubkey) => member_pubkeys.contains(&pubkey),
             None => false,
         };
         if !is_member {
-            evict_conn_channel_subscriptions(state, channel_id, conn_id).await;
+            evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;
         }
     }
     Ok(())
@@ -110,9 +121,16 @@ async fn evict_non_member_channel_subscriptions(
 /// connected agent drops just that channel and keeps its socket — no reconnect
 /// storm. Offline/reconnecting clients are covered by the discovery-time
 /// `archived=true` skip in `discover_channels`.
-pub async fn evict_all_channel_subscriptions(state: &Arc<AppState>, channel_id: Uuid) {
-    for conn_id in state.sub_registry.channel_subscriber_conns(channel_id) {
-        evict_conn_channel_subscriptions(state, channel_id, conn_id).await;
+pub async fn evict_all_channel_subscriptions(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+) {
+    for conn_id in state
+        .sub_registry
+        .channel_subscriber_conns_scoped(tenant.community(), channel_id)
+    {
+        evict_conn_channel_subscriptions(tenant, state, channel_id, conn_id).await;
     }
 }
 
@@ -1043,7 +1061,7 @@ async fn handle_remove_user(
         .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
         .await?;
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
-    evict_live_channel_subscriptions(state, channel_id, &target_pubkey).await;
+    evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
 
     let actor_hex = hex::encode(&actor_bytes);
     let target_hex = hex::encode(&target_pubkey);
@@ -1662,7 +1680,7 @@ async fn handle_leave_request(
         .remove_member(tenant.community(), channel_id, &actor_bytes, &actor_bytes)
         .await?;
     state.invalidate_membership(tenant, channel_id, &actor_bytes);
-    evict_live_channel_subscriptions(state, channel_id, &actor_bytes).await;
+    evict_live_channel_subscriptions(tenant, state, channel_id, &actor_bytes).await;
 
     let actor_hex = hex::encode(&actor_bytes);
     emit_system_message(
@@ -2742,4 +2760,11 @@ pub async fn publish_nipia_unarchived(
         None,
     )
     .await
+}
+
+fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
+    match channel_id {
+        Some(channel_id) => EventTopic::Channel(channel_id),
+        None => EventTopic::Global,
+    }
 }

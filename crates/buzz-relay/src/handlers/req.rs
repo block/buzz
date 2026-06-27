@@ -12,6 +12,7 @@ use buzz_core::kind::{
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
+use buzz_pubsub::EventTopic;
 use hex;
 use nostr::Filter;
 
@@ -204,9 +205,23 @@ pub async fn handle_req(
         subs.insert(sub_id.clone(), filters.clone());
     }
 
+    let replaced = state.sub_registry.register_scoped(
+        conn.tenant.community(),
+        conn_id,
+        sub_id.clone(),
+        filters.clone(),
+        channel_id,
+    );
+    if let Some(replaced) = replaced {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .await;
+    }
     state
-        .sub_registry
-        .register(conn_id, sub_id.clone(), filters.clone(), channel_id);
+        .pubsub
+        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
+        .await;
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -1424,5 +1439,12 @@ mod tests {
             ))
             .search("x");
         assert!(!p_gated_filters_authorized(&[f], &agent));
+    }
+}
+
+fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
+    match channel_id {
+        Some(channel_id) => EventTopic::Channel(channel_id),
+        None => EventTopic::Global,
     }
 }

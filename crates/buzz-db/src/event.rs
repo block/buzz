@@ -1094,6 +1094,10 @@ pub async fn insert_event_with_thread_metadata(
 /// A due reminder row returned by [`query_due_reminders`].
 #[derive(Debug)]
 pub struct DueReminder {
+    /// Server-resolved community this reminder row belongs to.
+    pub community_id: CommunityId,
+    /// Normalized host mapped to that community.
+    pub host: String,
     /// The event's raw ID bytes.
     pub id: Vec<u8>,
     /// The event's pubkey bytes.
@@ -1125,15 +1129,16 @@ pub async fn query_due_reminders(
     let kind_i32 = KIND_EVENT_REMINDER as i32;
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (pubkey, d_tag)
-            id, pubkey, created_at, kind, tags, content, sig, channel_id
-        FROM events
-        WHERE kind = $1
-          AND not_before IS NOT NULL
-          AND not_before <= $2
-          AND deleted_at IS NULL
-          AND delivered_at IS NULL
-        ORDER BY pubkey, d_tag, created_at DESC, id ASC
+        SELECT DISTINCT ON (e.community_id, e.pubkey, e.d_tag)
+            e.community_id, c.host, e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.channel_id
+        FROM events AS e
+        JOIN communities AS c ON c.id = e.community_id
+        WHERE e.kind = $1
+          AND e.not_before IS NOT NULL
+          AND e.not_before <= $2
+          AND e.deleted_at IS NULL
+          AND e.delivered_at IS NULL
+        ORDER BY e.community_id, e.pubkey, e.d_tag, e.created_at DESC, e.id ASC
         LIMIT $3
         "#,
     )
@@ -1146,6 +1151,8 @@ pub async fn query_due_reminders(
     let results = rows
         .into_iter()
         .map(|row| DueReminder {
+            community_id: CommunityId::from_uuid(row.get("community_id")),
+            host: row.get("host"),
             id: row.get("id"),
             pubkey: row.get("pubkey"),
             created_at: row.get("created_at"),
@@ -1436,5 +1443,61 @@ mod tests {
             vec![Tag::parse(["not_before", "not-a-number"]).unwrap()],
         );
         assert_eq!(extract_not_before(&event), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_due_reminders_returns_row_community_and_host_per_tenant() {
+        let pool = setup_pool().await;
+        let community_a_uuid = make_test_community(&pool).await;
+        let community_b_uuid = make_test_community(&pool).await;
+        let community_a = CommunityId::from_uuid(community_a_uuid);
+        let community_b = CommunityId::from_uuid(community_b_uuid);
+        let host_a: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community_a_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("load host A");
+        let host_b: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community_b_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("load host B");
+
+        let not_before = Utc::now().timestamp() - 1;
+        let keys_a = Keys::generate();
+        let keys_b = Keys::generate();
+        let event_a = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "a")
+            .tags([
+                Tag::parse(["d", "due-reminder-scope-a"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys_a)
+            .expect("sign A");
+        let event_b = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "b")
+            .tags([
+                Tag::parse(["d", "due-reminder-scope-b"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys_b)
+            .expect("sign B");
+
+        insert_event(&pool, community_a, &event_a, None)
+            .await
+            .expect("insert A");
+        insert_event(&pool, community_b, &event_b, None)
+            .await
+            .expect("insert B");
+
+        let due = query_due_reminders(&pool, Utc::now().timestamp(), 100)
+            .await
+            .expect("query due reminders");
+
+        assert!(due.iter().any(|row| {
+            row.id == event_a.id.as_bytes() && row.community_id == community_a && row.host == host_a
+        }));
+        assert!(due.iter().any(|row| {
+            row.id == event_b.id.as_bytes() && row.community_id == community_b && row.host == host_b
+        }));
     }
 }
