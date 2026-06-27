@@ -133,13 +133,21 @@ impl RunCtx<'_> {
             // exactly the history that was just sent to `complete()` (the
             // assistant response is appended below, after this point). Pairing
             // them lets the gate add a conservative estimate for any history
-            // appended before the next request. Preserve both when a response
-            // omits usage (`None`) rather than clobbering — a one-off missing
-            // field shouldn't blind the gate or zero the growth baseline.
+            // appended before the next request. Uses `context_pressure_bytes`
+            // (the same measure the gate's `current_bytes` uses) so the
+            // `grown` delta is coherent — an image contributes its visual-
+            // token equivalent here, not its base64 length. Preserve both when
+            // a response omits usage (`None`) rather than clobbering — a
+            // one-off missing field shouldn't blind the gate or zero the
+            // growth baseline.
             if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
-                *self.last_request_history_bytes =
-                    Some(self.history.iter().map(HistoryItem::estimated_bytes).sum());
+                *self.last_request_history_bytes = Some(
+                    self.history
+                        .iter()
+                        .map(HistoryItem::context_pressure_bytes)
+                        .sum(),
+                );
             }
 
             if !response.text.is_empty() {
