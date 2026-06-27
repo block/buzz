@@ -75,6 +75,10 @@ const ADVANCED_FIELDS_MOTION_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
+function hasText(value: string | null | undefined): boolean {
+  return (value?.trim().length ?? 0) > 0;
+}
+
 export function PersonaDialog({
   open,
   title,
@@ -120,6 +124,12 @@ export function PersonaDialog({
     [runtimes],
   );
   const shouldReduceMotion = useReducedMotion();
+  const initialModelProviderEditableWithoutRuntime = Boolean(
+    initialValues &&
+      "id" in initialValues &&
+      !hasText(initialValues.runtime) &&
+      (hasText(initialValues.model) || hasText(initialValues.provider)),
+  );
 
   React.useEffect(() => {
     if (!open || !initialValues) {
@@ -307,10 +317,13 @@ export function PersonaDialog({
 
     const trimmedRuntime = runtime.trim();
     const previousRuntime = initialValues.runtime?.trim() ?? "";
+    const modelProviderEditableWithoutRuntime =
+      initialModelProviderEditableWithoutRuntime && trimmedRuntime.length === 0;
     const shouldPreserveHiddenModelProvider =
       "id" in initialValues &&
       previousRuntime.length === 0 &&
-      trimmedRuntime.length === 0;
+      trimmedRuntime.length === 0 &&
+      !modelProviderEditableWithoutRuntime;
     const namePool = parsePersonaNamePoolText(namePoolText);
     const namePoolInput =
       namePool.length > 0
@@ -323,16 +336,18 @@ export function PersonaDialog({
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt.trim(),
       runtime: trimmedRuntime || undefined,
-      model: trimmedRuntime
-        ? model.trim() || undefined
-        : shouldPreserveHiddenModelProvider
-          ? initialValues.model
-          : undefined,
-      provider: trimmedRuntime
-        ? provider.trim() || undefined
-        : shouldPreserveHiddenModelProvider
-          ? initialValues.provider
-          : undefined,
+      model:
+        trimmedRuntime || modelProviderEditableWithoutRuntime
+          ? model.trim() || undefined
+          : shouldPreserveHiddenModelProvider
+            ? initialValues.model
+            : undefined,
+      provider:
+        trimmedRuntime || modelProviderEditableWithoutRuntime
+          ? provider.trim() || undefined
+          : shouldPreserveHiddenModelProvider
+            ? initialValues.provider
+            : undefined,
       namePool: namePoolInput,
       envVars,
     };
@@ -365,7 +380,10 @@ export function PersonaDialog({
   });
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
-  const llmProviderFieldVisible = runtime.trim().length > 0;
+  const blankRuntimeModelProviderEditable =
+    initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
+  const llmProviderFieldVisible =
+    runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const modelFieldVisible = llmProviderFieldVisible;
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =

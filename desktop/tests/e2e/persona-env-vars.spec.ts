@@ -269,10 +269,7 @@ test("persona model options follow the selected LLM provider", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("agents-library-personas")
-    .getByRole("button", { name: "New", exact: true })
-    .click();
+  await page.getByTestId("new-agent-card").click();
   await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
   const provider = page.locator("#persona-runtime");
