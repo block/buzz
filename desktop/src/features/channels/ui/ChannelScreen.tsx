@@ -81,6 +81,7 @@ import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useResetChannelSurfaceTabOnRouteOpen } from "./useResetChannelSurfaceTabOnRouteOpen";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
@@ -163,10 +164,12 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the surface when the channel or route targets change.
-  React.useEffect(() => {
-    setActiveSurfaceTab("messages");
-  }, [activeChannelId, openThreadHeadId, targetMessageId]);
+  useResetChannelSurfaceTabOnRouteOpen({
+    activeChannelId,
+    openThreadHeadId,
+    setActiveSurfaceTab,
+    targetMessageId,
+  });
   const effectiveOpenThreadHeadId =
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId

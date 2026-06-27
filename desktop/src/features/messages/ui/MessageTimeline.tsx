@@ -457,11 +457,16 @@ const MessageTimelineBase = React.forwardRef<
     }
   }, [isAtBottom]);
   const showUnreadPill =
+    !isAtBottom &&
     !isUnreadPillDismissed &&
     unreadCount > 0 &&
     firstUnreadMessageId !== null &&
     !showTimelineSkeleton;
-  if (showUnreadPill) hasShownPillRef.current = true;
+  React.useEffect(() => {
+    if (showUnreadPill) {
+      hasShownPillRef.current = true;
+    }
+  }, [showUnreadPill]);
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
     if (firstUnreadMessageId) {

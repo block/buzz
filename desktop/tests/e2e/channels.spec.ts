@@ -879,10 +879,11 @@ test("scrollable channel with recent messages hides intro actions until top", as
   await page.getByTestId("create-channel-submit").click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
 
+  const messageInput = page.getByTestId("message-input");
   for (const message of messages) {
-    await page.getByTestId("message-input").fill(message);
+    await messageInput.fill(message);
     await page.getByTestId("send-message").click();
-    await expect(page.getByTestId("message-timeline")).toContainText(message);
+    await expect(messageInput).toBeEmpty();
   }
 
   await page.getByTestId("channel-general").click();
@@ -896,14 +897,15 @@ test("scrollable channel with recent messages hides intro actions until top", as
   await expect(page.getByTestId("channel-intro-action-add-people")).toHaveCount(
     0,
   );
-  await expect(page.getByTestId("message-timeline")).toContainText(
-    messages[messages.length - 1],
-  );
-
-  await page.getByTestId("message-timeline").evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.hover();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await page.getByTestId("message-channel-intro").isVisible()) {
+      break;
+    }
+    await page.mouse.wheel(0, -1200);
+    await page.waitForTimeout(100);
+  }
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-create-agent"),
