@@ -20,6 +20,7 @@ import {
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { isAgentConversationLink } from "@/features/agents/agentConversationLink";
 import {
   isMessageLink,
   parseMessageLink,
@@ -254,13 +255,16 @@ function MarkdownVideoPlayer({
 }
 
 /**
- * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
- * links. The default transform strips unknown schemes (returns `""`) before
- * the `a` component override can see them, which would break copy → paste →
- * click end-to-end. Everything else delegates to `defaultUrlTransform`.
+ * `urlTransform` for `<ReactMarkdown>` that preserves internal Buzz links. The
+ * default transform strips unknown schemes (returns `""`) before component
+ * overrides can see them, which would break copy → paste → click end-to-end.
+ * Everything else delegates to `defaultUrlTransform`.
  */
 function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
+  if (
+    key === "href" &&
+    (isMessageLink(value) || isAgentConversationLink(value))
+  ) {
     return value;
   }
   return defaultUrlTransform(value);

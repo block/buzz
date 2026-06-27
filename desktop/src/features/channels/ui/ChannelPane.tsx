@@ -205,28 +205,9 @@ type ChannelPaneProps = {
 
 type ChannelTaskItem = {
   marker: AgentConversationMarker;
-  message: TimelineMessage;
-  threadMessage: TimelineMessage;
+  message: TimelineMessage | null;
+  threadMessage: TimelineMessage | null;
 };
-
-function buildTaskFallbackMessage(
-  marker: AgentConversationMarker,
-): TimelineMessage {
-  const createdAt = marker.startedAt || marker.createdAt;
-
-  return {
-    author: marker.agentName,
-    avatarUrl: null,
-    body: "",
-    createdAt,
-    depth: 0,
-    id: marker.agentReplyId,
-    parentId: marker.parentMessageId,
-    pubkey: marker.agentPubkey,
-    rootId: marker.threadRootId,
-    time: formatTime(createdAt),
-  };
-}
 
 function formatTaskStartedAt(unixSeconds: number): string {
   return `${formatDayHeading(unixSeconds)} at ${formatTime(unixSeconds)}`;
@@ -243,7 +224,7 @@ function ChannelTaskRow({
 }: {
   currentPubkey?: string;
   marker: AgentConversationMarker;
-  message: TimelineMessage;
+  message: TimelineMessage | null;
   onOpenAgentConversation?: (
     message: TimelineMessage,
     options?: { publishMarker?: boolean },
@@ -254,7 +235,7 @@ function ChannelTaskRow({
     threadMessage: TimelineMessage,
   ) => void;
   profiles?: UserProfileLookup;
-  threadMessage: TimelineMessage;
+  threadMessage: TimelineMessage | null;
 }) {
   const startedAt = marker.startedAt || marker.createdAt;
   const starterName = resolveUserLabel({
@@ -291,8 +272,12 @@ function ChannelTaskRow({
           <Button
             className="h-8 rounded-lg px-3 text-xs font-medium"
             data-testid="channel-task-go-to-thread"
-            disabled={!onGoToTaskMessage}
-            onClick={() => onGoToTaskMessage?.(marker, message, threadMessage)}
+            disabled={!onGoToTaskMessage || !message || !threadMessage}
+            onClick={() => {
+              if (message && threadMessage) {
+                onGoToTaskMessage?.(marker, message, threadMessage);
+              }
+            }}
             title="Go to source message in channel"
             type="button"
             variant="secondary"
@@ -302,10 +287,12 @@ function ChannelTaskRow({
           <Button
             className="h-8 rounded-lg px-3 text-xs font-medium"
             data-testid="channel-task-open"
-            disabled={!onOpenAgentConversation}
-            onClick={() =>
-              onOpenAgentConversation?.(message, { publishMarker: false })
-            }
+            disabled={!onOpenAgentConversation || !message}
+            onClick={() => {
+              if (message) {
+                onOpenAgentConversation?.(message, { publishMarker: false });
+              }
+            }}
             type="button"
             variant="outline"
           >
@@ -353,14 +340,13 @@ function ChannelTasksView({
     return (agentConversationMarkers ?? [])
       .filter((marker) => !channelId || marker.channelId === channelId)
       .map((marker) => {
-        const message =
-          messageById.get(marker.agentReplyId) ??
-          buildTaskFallbackMessage(marker);
+        const message = messageById.get(marker.agentReplyId) ?? null;
         const threadMessage =
           messageById.get(marker.threadRootMessageId ?? "") ??
           messageById.get(marker.threadRootId) ??
           messageById.get(marker.parentMessageId ?? "") ??
-          message;
+          message ??
+          null;
         return {
           marker,
           message,

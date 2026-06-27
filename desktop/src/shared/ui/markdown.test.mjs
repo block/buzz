@@ -417,9 +417,9 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `buzz://message?…` links
+// which would break copy → paste → click for internal `buzz://…` links
 // end-to-end. We pass a custom `urlTransform` that delegates to the
-// default for `buzz://message` and legacy `buzz://message` hrefs.
+// default for external/unsafe hrefs.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
 // and asserts the link href survives to the rendered DOM. Mirrors the
@@ -429,11 +429,15 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
+import { isAgentConversationLink } from "../../features/agents/agentConversationLink.ts";
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 function messageLinkUrlTransform(value, key) {
-  if (key === "href" && isMessageLink(value)) {
+  if (
+    key === "href" &&
+    (isMessageLink(value) || isAgentConversationLink(value))
+  ) {
     return value;
   }
   return defaultUrlTransform(value);
@@ -467,6 +471,11 @@ test("messageLinkUrlTransform: preserves buzz://message href with thread", () =>
     "[link](buzz://message?channel=c1&id=m1&thread=t1)",
   );
   assert.match(html, /href="buzz:\/\/message\?[^"]*thread=t1"/);
+});
+
+test("messageLinkUrlTransform: preserves buzz://task href", () => {
+  const html = renderMarkdown("[task](buzz://task?channel=c1&reply=m1)");
+  assert.match(html, /href="buzz:\/\/task\?channel=c1&(?:amp;)?reply=m1"/);
 });
 
 test("messageLinkUrlTransform: still strips javascript: scheme", () => {

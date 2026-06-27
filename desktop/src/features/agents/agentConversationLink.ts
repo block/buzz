@@ -22,3 +22,16 @@ export function buildAgentConversationLink(
 
   return `${AGENT_CONVERSATION_LINK_SCHEME}//${AGENT_CONVERSATION_LINK_HOST}?${params.toString()}`;
 }
+
+export function isAgentConversationLink(
+  href: string | undefined | null,
+): boolean {
+  if (!href) return false;
+  return (
+    href.startsWith(
+      `${AGENT_CONVERSATION_LINK_SCHEME}//${AGENT_CONVERSATION_LINK_HOST}?`,
+    ) ||
+    href ===
+      `${AGENT_CONVERSATION_LINK_SCHEME}//${AGENT_CONVERSATION_LINK_HOST}`
+  );
+}
