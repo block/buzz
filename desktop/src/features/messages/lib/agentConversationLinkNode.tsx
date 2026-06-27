@@ -122,7 +122,7 @@ function registerAgentConversationLinkMarkdownIt(
     return true;
   };
 
-  md.inline.ruler.before("link", RULE_NAME, rule);
+  md.inline.ruler.before("text", RULE_NAME, rule);
 
   // biome-ignore lint/suspicious/noExplicitAny: markdown-it token
   md.renderer.rules[TOKEN_TYPE] = (tokens: any[], idx: number): string => {

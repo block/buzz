@@ -223,6 +223,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         case "message":
           return (
             <MessageRowItem
+              agentConversationMarkers={agentConversationMarkers}
               agentPubkeys={agentPubkeys}
               agentConversationMarker={agentConversationMarkerByMessageId.get(
                 item.entry.message.id,
@@ -256,6 +257,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       }
     },
     [
+      agentConversationMarkers,
       agentPubkeys,
       agentConversationMarkerByMessageId,
       channelId,
@@ -344,6 +346,7 @@ function SystemRow({
 type MessageRowItemProps = Pick<
   TimelineMessageListProps,
   | "agentPubkeys"
+  | "agentConversationMarkers"
   | "channelId"
   | "currentPubkey"
   | "followThreadById"
@@ -372,6 +375,7 @@ type MessageRowItemProps = Pick<
 
 function MessageRowItem({
   agentPubkeys,
+  agentConversationMarkers,
   agentConversationMarker,
   channelId,
   currentPubkey,
