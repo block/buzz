@@ -137,6 +137,41 @@ pub fn normalize_host(host: &str) -> String {
     host
 }
 
+/// Extract the authority (host plus an explicit non-default port, if present)
+/// from a relay URL in the same normalized shape as request `Host` headers and
+/// `communities.host`.
+///
+/// Shared by the relay's host-resolution seam (startup community seeding and
+/// the deployment-community bind), the relay's `bind_deployment_community`, and
+/// the `buzz-admin` CLI's tenant resolution. All of these must derive the
+/// *byte-identical* authority that live request resolution
+/// ([`crate::tenant::normalize_host`]) produces from an inbound `Host`, or a
+/// bootstrapped/looked-up community lands under a host no request resolves to.
+///
+/// In particular this preserves an explicit non-default port (`relay:8443` →
+/// `relay:8443`) and IPv6 brackets (`[::1]:3000`) — both of which a naive
+/// `Url::host_str()` drops. Returns the empty string when `relay_url` has no
+/// parseable host (the caller fails closed on empty).
+#[must_use]
+pub fn relay_url_authority(relay_url: &str) -> String {
+    let Ok(url) = url::Url::parse(relay_url) else {
+        return String::new();
+    };
+    let Some(host) = url.host() else {
+        return String::new();
+    };
+    let host = match host {
+        url::Host::Domain(domain) => domain.to_string(),
+        url::Host::Ipv4(addr) => addr.to_string(),
+        url::Host::Ipv6(addr) => format!("[{addr}]"),
+    };
+    let authority = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
+    normalize_host(&authority)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +230,40 @@ mod tests {
         // Empty / whitespace-only resolves to empty; resolution fails closed.
         assert_eq!(normalize_host(""), "");
         assert_eq!(normalize_host("   "), "");
+    }
+
+    #[test]
+    fn relay_url_authority_keeps_explicit_nondefault_port() {
+        // The default dev seed: startup, bind_deployment_community, and
+        // buzz-admin must all derive `localhost:3000` (NOT bare `localhost`),
+        // or the admin lookup misses the community startup seeded.
+        assert_eq!(relay_url_authority("ws://localhost:3000"), "localhost:3000");
+        assert_eq!(
+            relay_url_authority("wss://relay.example:8443"),
+            "relay.example:8443"
+        );
+    }
+
+    #[test]
+    fn relay_url_authority_collapses_default_ports() {
+        // Default ports collapse to the bare host, matching how an inbound
+        // `Host` header for the same deployment normalizes.
+        assert_eq!(relay_url_authority("wss://relay.example:443"), "relay.example");
+        assert_eq!(relay_url_authority("ws://relay.example:80"), "relay.example");
+        assert_eq!(relay_url_authority("wss://relay.example"), "relay.example");
+    }
+
+    #[test]
+    fn relay_url_authority_preserves_ipv6_brackets() {
+        // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
+        // must keep both so the authority matches `communities.host`.
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+    }
+
+    #[test]
+    fn relay_url_authority_unparseable_is_empty() {
+        // No parseable host → empty authority; callers fail closed.
+        assert_eq!(relay_url_authority("not a url"), "");
+        assert_eq!(relay_url_authority(""), "");
     }
 }

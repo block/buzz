@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
-use buzz_core::tenant::{normalize_host, TenantContext};
+use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
@@ -405,15 +405,14 @@ async fn connect_db() -> Result<Db> {
 async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     let relay_url =
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
-    let raw_host = url::Url::parse(
-        &relay_url
-            .replace("ws://", "http://")
-            .replace("wss://", "https://"),
-    )
-    .ok()
-    .and_then(|u| u.host_str().map(|h| h.to_string()))
-    .unwrap_or_default();
-    let host = normalize_host(&raw_host);
+    // Derive the authority the *same* way startup seeding and live request
+    // resolution do (`buzz_core::tenant::relay_url_authority`): host plus an
+    // explicit non-default port, IPv6 brackets preserved. A plain
+    // `Url::host_str()` drops the port/brackets, so for `ws://localhost:3000`
+    // the admin would look up `localhost` while startup seeded `localhost:3000`
+    // — and `wss://relay.example:8443` would resolve `relay.example`. Sharing
+    // the helper keeps buzz-admin byte-identical to the community startup seeds.
+    let host = relay_url_authority(&relay_url);
     let record = db.lookup_community_by_host(&host).await?.ok_or_else(|| {
         anyhow::anyhow!(
             "RELAY_URL host '{host}' is not mapped to a community.\n\

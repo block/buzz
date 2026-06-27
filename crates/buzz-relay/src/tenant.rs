@@ -105,7 +105,7 @@ pub async fn bind_deployment_community<R: HostResolver>(
     resolver: &R,
     relay_url: &str,
 ) -> Result<TenantContext, BindError<R::Error>> {
-    bind_community(resolver, &relay_url_authority(relay_url)).await
+    bind_community(resolver, &buzz_core::tenant::relay_url_authority(relay_url)).await
 }
 
 /// Extract the relay URL authority in the same normalized shape as request
@@ -115,26 +115,12 @@ pub async fn bind_deployment_community<R: HostResolver>(
 /// `pub` so startup ([`crate::main`], a separate binary crate) can seed the
 /// deployment's own community under the *same* normalized host that live request
 /// resolution ([`bind_community`]) will derive — the two must agree or the
-/// bootstrapped owner lands in a community no request ever resolves to. Returns
-/// the empty string when `relay_url` has no parseable host.
-pub fn relay_url_authority(relay_url: &str) -> String {
-    let Ok(url) = url::Url::parse(relay_url) else {
-        return String::new();
-    };
-    let Some(host) = url.host() else {
-        return String::new();
-    };
-    let host = match host {
-        url::Host::Domain(domain) => domain.to_string(),
-        url::Host::Ipv4(addr) => addr.to_string(),
-        url::Host::Ipv6(addr) => format!("[{addr}]"),
-    };
-    let authority = match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
-    };
-    normalize_host(&authority)
-}
+/// bootstrapped owner lands in a community no request ever resolves to.
+///
+/// This is a thin re-export of [`buzz_core::tenant::relay_url_authority`]: the
+/// canonical implementation lives in `buzz-core` so the relay seam *and* the
+/// `buzz-admin` CLI derive a byte-identical authority (same port/IPv6 handling).
+pub use buzz_core::tenant::relay_url_authority;
 
 /// Production [`HostResolver`]: the relay resolves hosts against the durable
 /// `communities` host map in Postgres.
