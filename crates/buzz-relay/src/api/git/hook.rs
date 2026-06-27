@@ -174,3 +174,32 @@ pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
     info!(repo = %repo_path.display(), "pre-receive hook installed");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::PRE_RECEIVE_HOOK;
+
+    #[test]
+    fn runtime_image_installs_pre_receive_hook_tools() {
+        let dockerfile = include_str!("../../../../../Dockerfile");
+        let runtime_stage = dockerfile
+            .split("FROM debian:${DEBIAN_VERSION}-slim AS runtime")
+            .nth(1)
+            .expect("Dockerfile should have a runtime stage");
+        let runtime_setup = runtime_stage
+            .split("COPY --from=builder")
+            .next()
+            .expect("runtime stage should copy built artifacts after package setup");
+
+        for tool in ["curl", "openssl"] {
+            assert!(
+                PRE_RECEIVE_HOOK.contains(tool),
+                "test setup expected the pre-receive hook to invoke {tool}"
+            );
+            assert!(
+                runtime_setup.contains(&format!("\n        {tool} \\")),
+                "relay runtime image must install {tool}; the git pre-receive hook uses it and fails closed without it"
+            );
+        }
+    }
+}
