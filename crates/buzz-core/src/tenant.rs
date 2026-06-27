@@ -10,12 +10,19 @@
 //! model (conformance "row zero"): a request's community is *resolved from the
 //! connection host by the server*, never supplied or influenced by the client.
 //!
-//! [`TenantContext`] encodes that invariant in the type system. It has no
-//! `Default`, no `Deserialize`, and no public constructor other than
-//! [`TenantContext::resolved`], which is meant to be called *only* from the
-//! host-resolution path. Downstream code receives `&TenantContext` and can read
-//! the community but cannot mint one — so "the client chose this community"
-//! cannot type-check anywhere outside resolution.
+//! [`TenantContext`] expresses that invariant in the type system as far as the
+//! type system can carry it: there is no `Default`, no `Deserialize`, and no
+//! way to *parse* a community from client input. A `CommunityId` only ever
+//! comes from host resolution or from a DB row the server already scoped.
+//!
+//! This is a **lint-and-review fence, not a compiler fence.**
+//! [`TenantContext::resolved`] and [`CommunityId::from_uuid`] are public so the
+//! host-resolution path (in another crate) can call them — which means a
+//! determined caller elsewhere *could* call them too. The migration-lint
+//! harness forbids constructing a `TenantContext` outside host resolution and
+//! tests; the type only removes the *accidental* path (deserializing a
+//! client-chosen community), and review/lint closes the deliberate one. We say
+//! this plainly rather than overclaim a guarantee the `pub` API doesn't give.
 
 use std::fmt;
 use uuid::Uuid;
@@ -90,6 +97,46 @@ impl TenantContext {
     }
 }
 
+/// Normalize a connection `Host` into the canonical form used as the community
+/// lookup key.
+///
+/// This is the *one* normalization rule shared by both sides of the fence:
+/// the `communities.host` column is stored already-normalized, and host
+/// resolution normalizes the incoming `Host` header with this same function
+/// before looking it up. Because both sides agree by construction,
+/// `Relay.Example`, `relay.example.`, and `relay.example:443` all resolve to
+/// the one community — they can never split into distinct tenants.
+///
+/// Rules (host only — the caller has already split off any path/scheme):
+/// - ASCII-lowercase (hosts are case-insensitive per RFC 3986);
+/// - strip a single trailing dot (the FQDN root label);
+/// - strip a default port suffix (`:80`, `:443`) — non-default ports are kept,
+///   since a deployment may legitimately serve different communities on
+///   different ports of the same name.
+///
+/// The input is trimmed of surrounding whitespace. An empty result (e.g. the
+/// caller passed `""`) is returned as-is; resolution treats an empty or
+/// unmapped host as a fail-closed rejection, never a default tenant.
+#[must_use]
+pub fn normalize_host(host: &str) -> String {
+    let host = host.trim();
+    let mut host = host.to_ascii_lowercase();
+    // Strip default ports. We only touch a `:port` suffix that is exactly a
+    // default port, so IPv6 literals like `[::1]` (which contain colons but no
+    // trailing `:80`/`:443`) are left intact.
+    if let Some(stripped) = host
+        .strip_suffix(":443")
+        .or_else(|| host.strip_suffix(":80"))
+    {
+        host = stripped.to_string();
+    }
+    // Strip a single trailing FQDN-root dot.
+    if let Some(stripped) = host.strip_suffix('.') {
+        host = stripped.to_string();
+    }
+    host
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +155,45 @@ mod tests {
         let ctx = TenantContext::resolved(CommunityId::from_uuid(u), "relay.example");
         assert_eq!(ctx.community().as_uuid(), &u);
         assert_eq!(ctx.host(), "relay.example");
+    }
+
+    #[test]
+    fn normalize_host_collapses_tenant_split_variants() {
+        // All of these are the SAME tenant and must normalize identically —
+        // this is the property that stops accidental split-tenant.
+        let canonical = "relay.example";
+        for variant in [
+            "relay.example",
+            "Relay.Example",
+            "RELAY.EXAMPLE",
+            "relay.example.",    // trailing FQDN root dot
+            "relay.example:443", // default https port
+            "relay.example:80",  // default http port
+            "Relay.Example.:443",
+            "  relay.example  ", // surrounding whitespace
+        ] {
+            assert_eq!(normalize_host(variant), canonical, "variant {variant:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_host_keeps_nondefault_port() {
+        // A non-default port is a legitimate distinct selector — keep it.
+        assert_eq!(normalize_host("relay.example:8443"), "relay.example:8443");
+        assert_eq!(normalize_host("relay.example:3000"), "relay.example:3000");
+    }
+
+    #[test]
+    fn normalize_host_leaves_ipv6_literal_intact() {
+        // IPv6 literals contain colons but no trailing default-port suffix.
+        assert_eq!(normalize_host("[::1]"), "[::1]");
+        assert_eq!(normalize_host("[::1]:443"), "[::1]");
+    }
+
+    #[test]
+    fn normalize_host_empty_stays_empty() {
+        // Empty / whitespace-only resolves to empty; resolution fails closed.
+        assert_eq!(normalize_host(""), "");
+        assert_eq!(normalize_host("   "), "");
     }
 }

@@ -37,7 +37,7 @@ pub use error::VerificationError;
 pub use event::StoredEvent;
 pub use nostr::{Event, EventId, Filter, Keys, Kind, PublicKey};
 pub use presence::PresenceStatus;
-pub use tenant::{CommunityId, TenantContext};
+pub use tenant::{normalize_host, CommunityId, TenantContext};
 pub use verification::verify_event;
 
 #[cfg(any(test, feature = "test-utils"))]
