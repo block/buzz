@@ -1,5 +1,8 @@
 const AGENT_CONVERSATION_LINK_SCHEME = "buzz:";
 const AGENT_CONVERSATION_LINK_HOST = "task";
+export const AGENT_CONVERSATION_LINK_URL_PATTERN =
+  /buzz:\/\/task\?[^\s<>"')\]]+/g;
+const TRAILING_PUNCTUATION_PATTERN = /[.,;:!?]+$/;
 
 export type AgentConversationLinkInput = {
   agentReplyId: string;
@@ -78,4 +81,18 @@ export function isAgentConversationLink(
     href ===
       `${AGENT_CONVERSATION_LINK_SCHEME}//${AGENT_CONVERSATION_LINK_HOST}`
   );
+}
+
+function isUnmatchedClosing(value: string): boolean {
+  const closing = value[value.length - 1];
+  const opening = closing === ")" ? "(" : "[";
+  return value.split(closing).length > value.split(opening).length;
+}
+
+export function trimAgentConversationLinkMatch(matchText: string) {
+  let value = matchText.replace(TRAILING_PUNCTUATION_PATTERN, "");
+  while (/[)\]]$/.test(value) && isUnmatchedClosing(value)) {
+    value = value.slice(0, -1).replace(TRAILING_PUNCTUATION_PATTERN, "");
+  }
+  return { value, trailing: matchText.slice(value.length) };
 }

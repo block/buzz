@@ -535,9 +535,15 @@ test("remarkSpoilers: block delimiter spoilers expose a block prop to React", ()
 // the rendering side is a plain React component covered by app-level use.
 
 import remarkMessageLinks from "../../features/messages/lib/remarkMessageLinks.ts";
+import remarkAgentConversationLinks from "../../features/agents/remarkAgentConversationLinks.ts";
 
 function runPlugin(tree) {
   remarkMessageLinks()(tree);
+  return tree;
+}
+
+function runTaskPlugin(tree) {
+  remarkAgentConversationLinks()(tree);
   return tree;
 }
 
@@ -664,4 +670,34 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
   assert.equal(kids.length, 1);
   assert.equal(kids[0].type, "inlineCode");
   assert.equal(kids[0].value, "buzz://message?channel=c&id=m");
+});
+
+test("remarkAgentConversationLinks: bare buzz://task URL is replaced", () => {
+  const tree = runTaskPlugin(paragraph(text("buzz://task?channel=c&reply=r")));
+  const para = tree.children[0];
+  assert.equal(para.children.length, 1);
+  assert.equal(para.children[0].type, "agent-conversation-link");
+  assert.equal(para.children[0].value, "buzz://task?channel=c&reply=r");
+  assert.equal(para.children[0].data.hName, "agent-conversation-link");
+});
+
+test("remarkAgentConversationLinks: trailing punctuation stays outside URL", () => {
+  const tree = runTaskPlugin(
+    paragraph(text("see buzz://task?channel=c&reply=r.")),
+  );
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 3);
+  assert.equal(kids[0].value, "see ");
+  assert.equal(kids[1].type, "agent-conversation-link");
+  assert.equal(kids[1].value, "buzz://task?channel=c&reply=r");
+  assert.equal(kids[2].value, ".");
+});
+
+test("remarkAgentConversationLinks: non-task buzz:// URLs are not matched", () => {
+  const original = "buzz://message?channel=c&id=m";
+  const tree = runTaskPlugin(paragraph(text(original)));
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "text");
+  assert.equal(kids[0].value, original);
 });

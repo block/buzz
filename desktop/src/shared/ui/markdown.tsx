@@ -25,6 +25,7 @@ import {
   parseAgentConversationLink,
   type ParsedAgentConversationLink,
 } from "@/features/agents/agentConversationLink";
+import remarkAgentConversationLinks from "@/features/agents/remarkAgentConversationLinks";
 import {
   isMessageLink,
   parseMessageLink,
@@ -2198,6 +2199,37 @@ function createMarkdownComponents(
         />
       );
     },
+    "agent-conversation-link": ({
+      children,
+    }: {
+      children?: React.ReactNode;
+    }) => {
+      const { onOpenAgentConversationLink } = runtimeRef.current;
+      const href = String(children ?? "");
+      const parsed = parseAgentConversationLink(href);
+      if (!parsed.ok) {
+        return <span>{href}</span>;
+      }
+
+      if (!interactive) {
+        return <span className="font-medium text-current">Open task</span>;
+      }
+
+      return (
+        <button
+          type="button"
+          data-agent-conversation-link=""
+          aria-label="Open task"
+          title={href}
+          className="cursor-pointer font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80"
+          onClick={() => {
+            onOpenAgentConversationLink(parsed.value);
+          }}
+        >
+          Open task
+        </button>
+      );
+    },
   } as Components;
 }
 
@@ -2269,6 +2301,7 @@ function MarkdownInner({
       remarkBreaks,
       remarkSpoilers,
       remarkMessageLinks,
+      remarkAgentConversationLinks,
       [remarkMentions, { mentionNames }],
       [remarkChannelLinks, { channelNames }],
       [remarkCustomEmoji, { customEmoji }],
