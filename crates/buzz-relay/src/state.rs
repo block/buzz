@@ -13,13 +13,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
-use buzz_auth::AuthService;
+use buzz_auth::{AuthService, Nip98ReplayGuard};
 use buzz_core::tenant::TenantContext;
 use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
-use buzz_pubsub::PubSubManager;
+use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
@@ -258,9 +258,13 @@ pub struct AppState {
     pub shutting_down: Arc<AtomicBool>,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
-    /// NIP-98 replay prevention: recently-seen event IDs.
-    /// 2× the ±60s tolerance window so entries outlive the acceptance window.
-    pub nip98_seen: Arc<moka::sync::Cache<[u8; 32], ()>>,
+    /// Shared, community-scoped NIP-98 replay prevention.
+    ///
+    /// Correctness boundary for stateless workers: every pod must consult the
+    /// same Redis `SET NX EX` seen-set, keyed by resolved community. Do not
+    /// replace this with process-local caching; replay freshness must survive
+    /// cross-pod routing.
+    pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
     /// Key: agent pubkey bytes (32). Value: (count, window_start).
@@ -353,6 +357,8 @@ impl AppState {
             &config.media.s3_bucket,
         )
         .expect("media storage was already constructed with this S3 config");
+        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
+            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let state = Self {
             config: Arc::new(config),
             db,
@@ -399,12 +405,7 @@ impl AppState {
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
-            nip98_seen: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(120))
-                    .build(),
-            ),
+            nip98_replay,
             observer_rate_limiter: Arc::new(DashMap::new()),
             mesh_connect_rate_limiter: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(

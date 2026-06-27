@@ -13,6 +13,9 @@ use axum::{
 use base64::Engine;
 use serde_json::Value;
 
+use buzz_auth::{Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
+use buzz_core::TenantContext;
+
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::state::AppState;
 
@@ -69,27 +72,50 @@ fn verify_bridge_auth(
 
 /// Check NIP-98 replay and record the event ID atomically.
 ///
-/// Uses moka's `entry` API for atomic insert-if-absent — no race window
-/// between "check if seen" and "mark as seen".
-fn check_nip98_replay(
+/// The correctness boundary is the shared, community-scoped Redis seen-set on
+/// `AppState`, not process-local memory. Any Redis/guard error fails closed:
+/// without the shared `SET NX EX` proof, a stateless worker cannot admit the
+/// NIP-98 request safely.
+async fn check_nip98_replay(
     state: &AppState,
+    tenant: &TenantContext,
+    event_id_bytes: [u8; 32],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    check_nip98_replay_with_guard(state.nip98_replay.as_ref(), tenant, event_id_bytes).await
+}
+
+async fn check_nip98_replay_with_guard(
+    replay_guard: &dyn Nip98ReplayGuard,
+    tenant: &TenantContext,
     event_id_bytes: [u8; 32],
 ) -> Result<(), (StatusCode, Json<Value>)> {
     // Skip replay detection for dev-mode X-Pubkey auth (zero hash).
     if event_id_bytes == [0u8; 32] {
         return Ok(());
     }
-    // Atomic: get_with inserts the value if absent and returns it.
-    // If the entry already existed, this is a replay.
-    let entry = state.nip98_seen.entry(event_id_bytes);
-    let result = entry.or_insert(());
-    if !result.is_fresh() {
-        return Err(api_error(
+
+    let event_id = nostr::EventId::from_byte_array(event_id_bytes);
+    match replay_guard
+        .try_mark(tenant, &event_id, DEFAULT_REPLAY_TTL_SECS)
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(api_error(
             StatusCode::UNAUTHORIZED,
             "NIP-98: replay detected",
-        ));
+        )),
+        Err(e) => {
+            tracing::warn!(
+                community = %tenant.community(),
+                error = %e,
+                "NIP-98 replay guard failed; rejecting request fail-closed"
+            );
+            Err(api_error(
+                StatusCode::UNAUTHORIZED,
+                "NIP-98: replay check unavailable",
+            ))
+        }
     }
-    Ok(())
 }
 
 /// Reconstruct the canonical URL for NIP-98 verification from the relay config.
@@ -188,7 +214,7 @@ pub async fn submit_event(
         Some(&body),
         state.config.require_auth_token,
     )?;
-    check_nip98_replay(&state, event_id_bytes)?;
+    check_nip98_replay(&state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
@@ -277,7 +303,7 @@ pub async fn query_events(
         Some(&body),
         state.config.require_auth_token,
     )?;
-    check_nip98_replay(&state, event_id_bytes)?;
+    check_nip98_replay(&state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
@@ -527,20 +553,6 @@ pub async fn count_events(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let url = canonical_url(&state.config.relay_url, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
-        &headers,
-        "POST",
-        &url,
-        Some(&body),
-        state.config.require_auth_token,
-    )?;
-    check_nip98_replay(&state, event_id_bytes)?;
-    let pubkey_bytes = pubkey.to_bytes().to_vec();
-
-    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    super::relay_members::enforce_relay_membership(&state, &pubkey_bytes, auth_tag).await?;
-
     // Row zero: bind this HTTP request to its community from the request host
     // before any tenant-scoped read, identical to the WS door in `router.rs`
     // and `query_events`/`submit_event` above. Fail-closed; never a default
@@ -557,6 +569,20 @@ pub async fn count_events(
                 "relay: no community is configured for this host",
             )
         })?;
+
+    let url = canonical_url(&state.config.relay_url, "/count");
+    let (pubkey, event_id_bytes) = verify_bridge_auth(
+        &headers,
+        "POST",
+        &url,
+        Some(&body),
+        state.config.require_auth_token,
+    )?;
+    check_nip98_replay(&state, &tenant, event_id_bytes).await?;
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+
+    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    super::relay_members::enforce_relay_membership(&state, &pubkey_bytes, auth_tag).await?;
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
@@ -1087,6 +1113,57 @@ async fn synthesize_presence(
 mod tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
+
+    fn redis_pool() -> deadpool_redis::Pool {
+        let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        deadpool_redis::Config::from_url(url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("create redis pool")
+    }
+
+    fn fresh_tenant(host: &str) -> TenantContext {
+        TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            host,
+        )
+    }
+
+    fn fresh_nip98_event_id_bytes() -> [u8; 32] {
+        EventBuilder::new(Kind::HttpAuth, "")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth event")
+            .id
+            .to_bytes()
+    }
+
+    /// Attack 3 proof: two stateless relay pods sharing Redis must share one
+    /// community-scoped NIP-98 seen-set. Pod A's first claim succeeds; pod B's
+    /// replay of the same event id in the same community is rejected. The same
+    /// id in a different community still succeeds, proving the key is scoped by
+    /// server-resolved tenant rather than global process memory.
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
+        let pool = redis_pool();
+        let pod_a = buzz_pubsub::RedisNip98ReplayGuard::new(pool.clone());
+        let pod_b = buzz_pubsub::RedisNip98ReplayGuard::new(pool);
+        let tenant_a = fresh_tenant("relay-a.example");
+        let tenant_b = fresh_tenant("relay-b.example");
+        let event_id_bytes = fresh_nip98_event_id_bytes();
+
+        check_nip98_replay_with_guard(&pod_a, &tenant_a, event_id_bytes)
+            .await
+            .expect("first pod should claim fresh NIP-98 event id");
+
+        let (status, _) = check_nip98_replay_with_guard(&pod_b, &tenant_a, event_id_bytes)
+            .await
+            .expect_err("second pod must reject same-community replay");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        check_nip98_replay_with_guard(&pod_b, &tenant_b, event_id_bytes)
+            .await
+            .expect("same event id in a different community uses a distinct seen-set");
+    }
 
     /// Build a kind:30174 engram envelope authored by `agent`, tagged with `owner`.
     fn engram_envelope(agent: &Keys, owner_hex: &str) -> buzz_core::StoredEvent {

@@ -33,66 +33,69 @@ impl RedisNip98ReplayGuard {
 }
 
 impl Nip98ReplayGuard for RedisNip98ReplayGuard {
-    async fn try_mark(
-        &self,
-        ctx: &TenantContext,
-        event_id: &EventId,
+    fn try_mark<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        event_id: &'a EventId,
         ttl_secs: u64,
-    ) -> Result<bool, AuthError> {
-        // §5 gate floor + safety ceiling. Sub-floor values are lifted to the
-        // floor (contract permits clamping); above-ceiling values are pushed
-        // down to MAX_REPLAY_TTL_SECS (contract REQUIRES clamping) so a buggy
-        // caller cannot send a Redis-incompatible `EX` arg or pin a slot for
-        // implausibly long.
-        let ttl = ttl_secs.clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS);
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, AuthError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            // §5 gate floor + safety ceiling. Sub-floor values are lifted to the
+            // floor (contract permits clamping); above-ceiling values are pushed
+            // down to MAX_REPLAY_TTL_SECS (contract REQUIRES clamping) so a buggy
+            // caller cannot send a Redis-incompatible `EX` arg or pin a slot for
+            // implausibly long.
+            let ttl = ttl_secs.clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS);
 
-        let mut conn = self.pool.get().await.map_err(|e| {
-            // Structured field for ops; the user-facing AuthError stays a
-            // bounded category string.
-            tracing::warn!(
-                community = %ctx.community(),
-                error = %e,
-                "nip98 replay: redis pool acquire failed — caller MUST fail closed"
-            );
-            AuthError::Internal(format!("Redis pool: {e}"))
-        })?;
-
-        let key = nip98_replay_key(ctx, event_id);
-
-        // SET key 1 NX EX <ttl>. redis-rs typed return: Some("OK") on first
-        // claim, None on existing key. Any other value would be a Redis-side
-        // bug; treat it as internal error.
-        let result: Option<String> = redis::cmd("SET")
-            .arg(&key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| {
+            let mut conn = self.pool.get().await.map_err(|e| {
+                // Structured field for ops; the user-facing AuthError stays a
+                // bounded category string.
                 tracing::warn!(
                     community = %ctx.community(),
                     error = %e,
-                    "nip98 replay: redis SET NX EX failed — caller MUST fail closed"
+                    "nip98 replay: redis pool acquire failed — caller MUST fail closed"
                 );
-                AuthError::Internal(format!("Redis SET NX EX: {e}"))
+                AuthError::Internal(format!("Redis pool: {e}"))
             })?;
 
-        match result.as_deref() {
-            Some("OK") => Ok(true),
-            None => Ok(false),
-            Some(other) => {
-                tracing::error!(
-                    community = %ctx.community(),
-                    reply = %other,
-                    "nip98 replay: redis SET NX EX returned an unexpected reply — investigate"
-                );
-                Err(AuthError::Internal(format!(
-                    "unexpected SET NX EX reply: {other}"
-                )))
+            let key = nip98_replay_key(ctx, event_id);
+
+            // SET key 1 NX EX <ttl>. redis-rs typed return: Some("OK") on first
+            // claim, None on existing key. Any other value would be a Redis-side
+            // bug; treat it as internal error.
+            let result: Option<String> = redis::cmd("SET")
+                .arg(&key)
+                .arg("1")
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl)
+                .query_async(&mut *conn)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(
+                        community = %ctx.community(),
+                        error = %e,
+                        "nip98 replay: redis SET NX EX failed — caller MUST fail closed"
+                    );
+                    AuthError::Internal(format!("Redis SET NX EX: {e}"))
+                })?;
+
+            match result.as_deref() {
+                Some("OK") => Ok(true),
+                None => Ok(false),
+                Some(other) => {
+                    tracing::error!(
+                        community = %ctx.community(),
+                        reply = %other,
+                        "nip98 replay: redis SET NX EX returned an unexpected reply — investigate"
+                    );
+                    Err(AuthError::Internal(format!(
+                        "unexpected SET NX EX reply: {other}"
+                    )))
+                }
             }
-        }
+        })
     }
 }
 

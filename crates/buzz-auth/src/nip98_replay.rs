@@ -20,7 +20,7 @@
 //!
 //! ```ignore
 //! let pubkey = buzz_auth::verify_nip98_event(json, url, method, body)?;
-//! if !replay.try_mark(&ctx, &event_id).await? {
+//! if !replay.try_mark(&ctx, &event_id, buzz_auth::DEFAULT_REPLAY_TTL_SECS).await? {
 //!     return Err(AuthError::Nip98Replay);
 //! }
 //! // safe to honor the request as `pubkey`
@@ -29,6 +29,8 @@
 //! The TTL must cover the verifier's clock-skew tolerance (currently ±60s, so
 //! the window over which a duplicate event id is even plausible is 2×60 = 120s).
 //! [`DEFAULT_REPLAY_TTL_SECS`] is the floor; deployments may raise it.
+
+use std::{future::Future, pin::Pin};
 
 use buzz_core::TenantContext;
 use nostr::EventId;
@@ -82,12 +84,12 @@ pub trait Nip98ReplayGuard: Send + Sync {
     /// The replay window's natural maximum is the verifier's ±60s tolerance;
     /// values past an hour are implausible and risk Redis `EX` parse failures
     /// (Redis interprets `EX` as a signed 64-bit integer).
-    fn try_mark(
-        &self,
-        ctx: &TenantContext,
-        event_id: &EventId,
+    fn try_mark<'a>(
+        &'a self,
+        ctx: &'a TenantContext,
+        event_id: &'a EventId,
         ttl_secs: u64,
-    ) -> impl std::future::Future<Output = Result<bool, AuthError>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>>;
 }
 
 /// Redis key for a NIP-98 replay marker:
@@ -110,13 +112,13 @@ pub struct AlwaysFreshReplayGuard;
 
 #[cfg(any(test, feature = "test-utils"))]
 impl Nip98ReplayGuard for AlwaysFreshReplayGuard {
-    async fn try_mark(
-        &self,
-        _ctx: &TenantContext,
-        _event_id: &EventId,
+    fn try_mark<'a>(
+        &'a self,
+        _ctx: &'a TenantContext,
+        _event_id: &'a EventId,
         _ttl_secs: u64,
-    ) -> Result<bool, AuthError> {
-        Ok(true)
+    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
+        Box::pin(async { Ok(true) })
     }
 }
 
