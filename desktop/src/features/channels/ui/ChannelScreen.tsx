@@ -163,14 +163,10 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the surface when the channel or route targets change.
   React.useEffect(() => {
-    if (activeChannelId === null) {
-      setActiveSurfaceTab("messages");
-      return;
-    }
-
     setActiveSurfaceTab("messages");
-  }, [activeChannelId]);
+  }, [activeChannelId, openThreadHeadId, targetMessageId]);
   const effectiveOpenThreadHeadId =
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
