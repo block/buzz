@@ -38,7 +38,10 @@ import {
   ProfileRuntimeTabContent,
   ProfileTabBar,
 } from "@/features/profile/ui/UserProfilePanelTabs";
-import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
+import {
+  MaskedAvatarBadgeFrame,
+  STATUS_DOT_MASK_CURVE,
+} from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -480,7 +483,9 @@ function ProfileHero({
   profile: ProfileSummaryViewProps["profile"];
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
-  const presenceDotClassName = isBot ? "h-4 w-4" : "h-3.5 w-3.5";
+  const presenceDotClassName = isBot
+    ? "h-[1.125rem] w-[1.125rem]"
+    : "h-3.5 w-3.5";
 
   return (
     <div className="flex flex-col items-center gap-3 text-center">
@@ -502,6 +507,7 @@ function ProfileHero({
         }
         badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
         className="h-20 w-20"
+        curve={STATUS_DOT_MASK_CURVE}
         cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
         size={80}
       >

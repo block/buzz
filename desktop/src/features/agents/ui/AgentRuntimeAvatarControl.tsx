@@ -5,6 +5,7 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
   type AvatarBadgeCurve,
   MaskedAvatarBadgeFrame,
+  STATUS_DOT_MASK_CURVE,
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
@@ -38,7 +39,7 @@ const ACTION_BADGE_SIZE = TAILWIND_SPACING["11"];
 const ACTIVE_BADGE_SIZE = TAILWIND_SPACING["6"];
 const ACTION_BADGE_OFFSET = TAILWIND_SPACING["2.5"];
 const ACTIVE_BADGE_INSET = TAILWIND_SPACING["1"];
-const ACTIVE_DOT_CLASS_NAME = "h-4 w-4";
+const ACTIVE_DOT_CLASS_NAME = "h-[1.125rem] w-[1.125rem]";
 const PROFILE_STATUS_CUTOUT_RATIO = 1.25;
 
 function getBadgeCenter(badgeSize: number, outwardOffset: number) {
@@ -168,7 +169,7 @@ export function AgentRuntimeAvatarControl({
       }
       badgeBox={badge.shell}
       className="h-24 w-24"
-      curve={isActive ? undefined : ACTION_MASK_CURVE}
+      curve={isActive ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
       cutout={badge.cutout}
       maskTransition={transition}
       size={AGENT_AVATAR_SIZE}

@@ -4,7 +4,10 @@ import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { useSelfProfileCache } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
+import {
+  MaskedAvatarBadgeFrame,
+  STATUS_DOT_MASK_CURVE,
+} from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Workspace } from "@/features/workspaces/types";
@@ -116,6 +119,7 @@ export function SidebarProfileCard({
             }
             badgeBox={{ bottom: -2, height: 14, right: -2, width: 14 }}
             className="h-8 w-8"
+            curve={STATUS_DOT_MASK_CURVE}
             cutout={{ cx: 28, cy: 28, r: 7.5 }}
             size={32}
           >

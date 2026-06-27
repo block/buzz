@@ -69,6 +69,15 @@ const DEFAULT_AVATAR_BADGE_CURVE = {
   handleLengthRatio: 0.14,
 } as const;
 
+export const STATUS_DOT_MASK_CURVE = {
+  avatarRoundingAngle: 0.11,
+  cutoutRoundingLength: 6.5,
+  cutoutRoundingMinAngle: 0.28,
+  cutoutRoundingMaxAngle: 0.44,
+  handleDistanceRatio: 0.5,
+  handleLengthRatio: 0.2,
+} satisfies AvatarBadgeCurve;
+
 function getCircleIntersections(
   avatar: AvatarBadgeCircle,
   cutout: AvatarBadgeCircle,
