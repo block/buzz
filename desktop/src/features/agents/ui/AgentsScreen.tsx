@@ -14,7 +14,10 @@ import {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { AgentPersona } from "@/shared/api/types";
-import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import {
+  type ProfilePanelOpenOptions,
+  ProfilePanelProvider,
+} from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -64,11 +67,11 @@ export function AgentsScreen() {
   const { goChannel } = useAppNavigation();
 
   const handleOpenProfilePanel = React.useCallback(
-    (pubkey: string) => {
+    (pubkey: string, options?: ProfilePanelOpenOptions) => {
       applyPatch({
         profile: pubkey,
         profilePersona: null,
-        profileTab: null,
+        profileTab: options?.tab === "info" ? null : (options?.tab ?? null),
         profileView: null,
       });
     },

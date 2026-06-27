@@ -44,6 +44,7 @@ type MockManagedAgentSeed = {
   channelNames?: string[];
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
+  lastError?: string | null;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -448,6 +449,10 @@ type RawPersona = {
   display_name: string;
   avatar_url: string | null;
   system_prompt: string;
+  runtime?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
   env_vars?: Record<string, string>;
@@ -1027,7 +1032,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_started_at: status === "running" ? now : null,
     last_stopped_at: status === "stopped" ? now : null,
     last_exit_code: null,
-    last_error: null,
+    last_error: seed.lastError ?? null,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     backend: seed.backend ?? { type: "local" },
@@ -1112,6 +1117,8 @@ function resetMockPersonas(config?: E2eConfig) {
       display_name: "Fizz",
       avatar_url: null,
       system_prompt: "You are Fizz.",
+      runtime: "goose",
+      model: null,
       is_builtin: true,
       is_active: activePersonaIds.has("builtin:fizz"),
       created_at: now,

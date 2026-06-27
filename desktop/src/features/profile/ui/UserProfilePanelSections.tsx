@@ -38,6 +38,7 @@ import {
   ProfileRuntimeTabContent,
   ProfileTabBar,
 } from "@/features/profile/ui/UserProfilePanelTabs";
+import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -107,6 +108,21 @@ export type ProfileSummaryViewProps = {
 };
 
 type RuntimeTabStatus = "running" | "stopped" | "error";
+
+const PROFILE_HERO_SPACING = {
+  "0": 0,
+  "6": 24,
+} as const;
+
+const PROFILE_HERO_PRESENCE_BADGE = {
+  cutout: { cx: 68, cy: 68, r: 15 },
+  shell: {
+    bottom: PROFILE_HERO_SPACING["0"],
+    height: PROFILE_HERO_SPACING["6"],
+    right: PROFILE_HERO_SPACING["0"],
+    width: PROFILE_HERO_SPACING["6"],
+  },
+} as const;
 
 function resolveRuntimeTabStatus({
   diagnosticsError,
@@ -464,28 +480,40 @@ function ProfileHero({
   profile: ProfileSummaryViewProps["profile"];
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
+  const presenceDotClassName = isBot ? "h-4 w-4" : "h-3.5 w-3.5";
+
   return (
     <div className="flex flex-col items-center gap-3 text-center">
-      <div className="relative">
+      <MaskedAvatarBadgeFrame
+        badge={
+          presenceStatus ? (
+            <span
+              aria-label={getPresenceLabel(presenceStatus)}
+              className="flex h-6 w-6 items-center justify-center rounded-full"
+              data-testid="user-profile-presence-badge"
+              role="img"
+            >
+              <PresenceDot
+                className={presenceDotClassName}
+                status={presenceStatus}
+              />
+            </span>
+          ) : null
+        }
+        badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
+        className="h-20 w-20"
+        cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
+        size={80}
+      >
         <ProfileAvatar
           avatarUrl={profile?.avatarUrl ?? null}
-          className="h-20 w-20 text-xl"
+          className="h-full w-full text-xl"
           iconClassName="h-8 w-8"
           label={displayName}
           plain
           testId="user-profile-avatar"
         />
-        {presenceStatus ? (
-          <span
-            aria-label={getPresenceLabel(presenceStatus)}
-            className="absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-full bg-background"
-            data-testid="user-profile-presence-badge"
-            role="img"
-          >
-            <PresenceDot className="h-3.5 w-3.5" status={presenceStatus} />
-          </span>
-        ) : null}
-      </div>
+      </MaskedAvatarBadgeFrame>
 
       <div className="flex flex-col items-center gap-1">
         <div className="flex items-center justify-center gap-2">

@@ -4,6 +4,7 @@ import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { useSelfProfileCache } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Workspace } from "@/features/workspaces/types";
@@ -102,22 +103,31 @@ export function SidebarProfileCard({
           }}
           type="button"
         >
-          <ProfileAvatar
-            avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
-            avatarUrl={profile?.avatarUrl ?? null}
-            className="h-8 w-8 text-xs"
-            iconClassName="h-4 w-4"
-            label={resolvedDisplayName}
-            testId="sidebar-profile-avatar"
-          />
-          <span
-            aria-label={getPresenceLabel(selfPresenceStatus)}
-            className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-sidebar"
-            data-testid="self-presence-badge"
-            role="img"
+          <MaskedAvatarBadgeFrame
+            badge={
+              <span
+                aria-label={getPresenceLabel(selfPresenceStatus)}
+                className="flex h-3.5 w-3.5 items-center justify-center rounded-full"
+                data-testid="self-presence-badge"
+                role="img"
+              >
+                <PresenceDot className="h-2 w-2" status={selfPresenceStatus} />
+              </span>
+            }
+            badgeBox={{ bottom: -2, height: 14, right: -2, width: 14 }}
+            className="h-8 w-8"
+            cutout={{ cx: 28, cy: 28, r: 7.5 }}
+            size={32}
           >
-            <PresenceDot className="h-2 w-2" status={selfPresenceStatus} />
-          </span>
+            <ProfileAvatar
+              avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
+              avatarUrl={profile?.avatarUrl ?? null}
+              className="h-full w-full text-xs"
+              iconClassName="h-4 w-4"
+              label={resolvedDisplayName}
+              testId="sidebar-profile-avatar"
+            />
+          </MaskedAvatarBadgeFrame>
         </button>
 
         <div className="min-w-0 flex-1">
