@@ -1891,6 +1891,15 @@
     contain-intrinsic-size: auto 200px;
   }
 
+  .content-visibility-auto-interactive {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 200px;
+  }
+
+  .content-visibility-auto-interactive:is(:hover, :focus-within) {
+    content-visibility: visible;
+  }
+
   /* Compact variant for short single-line rows (sidebar channels, etc). */
   .content-visibility-auto-row {
     content-visibility: auto;

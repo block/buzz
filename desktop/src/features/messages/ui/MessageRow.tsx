@@ -197,7 +197,10 @@ export const MessageRow = React.memo(
     const depthGuideItems = React.useMemo(() => {
       const depths =
         depthGuideDepths ??
-        Array.from({ length: message.depth }, (_, depth) => depth);
+        Array.from(
+          { length: Math.max(0, message.depth - 1) },
+          (_, index) => index + 1,
+        );
 
       return depths.map((depth) => ({
         depth,

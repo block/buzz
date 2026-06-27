@@ -149,6 +149,10 @@ function getActiveContinuationDepths({
   const depths: number[] = [];
 
   for (const ancestor of ancestors) {
+    if (ancestor.message.depth === 0) {
+      continue;
+    }
+
     const childDepth = ancestor.message.depth + 1;
     const pathChild =
       message.depth === childDepth
@@ -626,27 +630,10 @@ export function MessageThreadPanel({
               actionBarPlacement="inside"
               agentPubkeys={agentPubkeys}
               channelId={channelId}
-              collapseDescendantsLabel="Collapse thread"
-              connectDescendants={
-                shouldShowThreadBranchGuides &&
-                !isThreadHeadRepliesCollapsed &&
-                deferredThreadReplies.length > 0
-              }
-              highlightDescendantRail={
-                shouldShowThreadBranchGuides &&
-                !isThreadHeadRepliesCollapsed &&
-                highlightedBranch?.id === threadHead.id
-              }
               isFollowingThread={isFollowingThread}
               isUnread={isMessageUnreadById?.(threadHead.id)}
               layoutVariant="thread-reply"
               message={threadHead}
-              onCollapseDescendants={
-                isThreadHeadRepliesCollapsed
-                  ? undefined
-                  : collapseThreadHeadReplies
-              }
-              onCollapseDescendantsHoverChange={handleCollapseBranchHoverChange}
               onDelete={
                 onDelete && canManageMessage(threadHead, currentPubkey)
                   ? onDelete
@@ -730,7 +717,7 @@ export function MessageThreadPanel({
                   return (
                     <div
                       className={cn(
-                        "content-visibility-auto flex flex-col gap-0",
+                        "content-visibility-auto-interactive flex flex-col gap-0",
                         entry.summary &&
                           "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}

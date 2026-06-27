@@ -35,7 +35,7 @@ type UserProfilePopoverProps = {
   botIdenticonValue?: string;
 };
 
-const HOVER_OPEN_DELAY_MS = 300;
+const HOVER_OPEN_DELAY_MS = 500;
 const HOVER_CLOSE_DELAY_MS = 200;
 
 const RUNTIME_LABELS: Record<string, string> = {
