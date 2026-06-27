@@ -33,6 +33,7 @@ use super::hydrate::{
 };
 use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
+use buzz_core::TenantContext;
 
 /// Timeout for `info/refs` — ref advertisement is fast (essentially `git show-ref`).
 const INFO_REFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -50,6 +51,8 @@ const PACK_OPS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300
 pub struct GitAuth {
     /// The authenticated user's public key, extracted from the NIP-98 event.
     pub pubkey: nostr::PublicKey,
+    /// Server-resolved tenant bound from the request Host before auth checks.
+    pub tenant: TenantContext,
 }
 
 impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
@@ -94,17 +97,29 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         let event_json = String::from_utf8(event_bytes)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid utf-8").into_response())?;
 
-        // Use configured relay_url as canonical base (don't trust forwarded headers).
-        let relay_url = &state.config.relay_url;
-        let base_url = relay_url
-            .replace("ws://", "http://")
-            .replace("wss://", "https://");
-        let base_url = base_url.trim_end_matches('/');
-        let path_and_query = parts
-            .uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or(parts.uri.path());
+        // Row zero for Git HTTP: bind the request Host to a server-resolved
+        // tenant before URL verification. We still do not trust forwarded
+        // headers; the signed `u` tag is checked against the host that resolved
+        // through the authoritative communities table, not a deployment-global
+        // `config.relay_url` and not any client-supplied community value.
+        let raw_host = parts
+            .headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+            .await
+            .map_err(|_| (StatusCode::NOT_FOUND, "repository not found").into_response())?;
+        let expected_url = git_expected_url(
+            &state.config.relay_url,
+            &tenant,
+            parts
+                .uri
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or(parts.uri.path()),
+        )
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "unrecognized git endpoint").into_response())?;
 
         // Repo-root URL verification.
         //
@@ -120,16 +135,6 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
         // - HTTPS in production (prevents token theft)
         // - Pre-receive hook for push authorization (role + protection rules)
         // - Endpoint routing (clone/push are different HTTP paths)
-        let repo_path = if let Some((prefix, _query)) = path_and_query.split_once("/info/refs") {
-            prefix
-        } else if let Some(prefix) = path_and_query.strip_suffix("/git-upload-pack") {
-            prefix
-        } else if let Some(prefix) = path_and_query.strip_suffix("/git-receive-pack") {
-            prefix
-        } else {
-            return Err((StatusCode::BAD_REQUEST, "unrecognized git endpoint").into_response());
-        };
-        let expected_url = format!("{base_url}{repo_path}");
 
         // Skip HTTP method check for git routes.
         //
@@ -185,8 +190,35 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
-        Ok(GitAuth { pubkey })
+        Ok(GitAuth { pubkey, tenant })
     }
+}
+
+/// Construct the repo-root NIP-98 `u` URL expected for a git HTTP request.
+///
+/// The host is always the server-resolved tenant host. `config_relay_url` only
+/// contributes the deployment scheme (`wss://` => `https://`, otherwise
+/// `http://`) so a request to community B cannot authenticate with a token
+/// signed for community A's URL just because the deployment has one global
+/// `relay_url`.
+fn git_expected_url(
+    config_relay_url: &str,
+    tenant: &TenantContext,
+    path_and_query: &str,
+) -> Option<String> {
+    let scheme = if config_relay_url.trim_start().starts_with("wss://") {
+        "https"
+    } else {
+        "http"
+    };
+    let repo_path = if let Some((prefix, _query)) = path_and_query.split_once("/info/refs") {
+        prefix
+    } else if let Some(prefix) = path_and_query.strip_suffix("/git-upload-pack") {
+        prefix
+    } else {
+        path_and_query.strip_suffix("/git-receive-pack")?
+    };
+    Some(format!("{scheme}://{}{repo_path}", tenant.host()))
 }
 
 /// Validate URL `(owner, repo)` parameters and return the canonical repo
@@ -461,7 +493,7 @@ fn build_upload_pack_advertisement(manifest: &super::manifest::Manifest) -> Vec<
 /// error" behavior is gone — A1 detectability holds on the read side too.
 pub async fn info_refs(
     State(state): State<Arc<AppState>>,
-    _auth: GitAuth,
+    auth: GitAuth,
     AxumPath(params): AxumPath<GitRepoParams>,
     Query(query): Query<InfoRefsQuery>,
 ) -> Result<Response, Response> {
@@ -479,7 +511,9 @@ pub async fn info_refs(
     if service == "git-upload-pack" {
         // Load just the verified manifest — no object materialization, no
         // permit. `Ok(None)` = pointer absent = repo never existed → 404.
-        match load_manifest_for_read(&state.git_store, &params.owner, &params.repo).await {
+        match load_manifest_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo)
+            .await
+        {
             Ok(Some(manifest)) if fast_path_eligible(&manifest) => {
                 let body = build_upload_pack_advertisement(&manifest);
                 return Ok(Response::builder()
@@ -504,7 +538,7 @@ pub async fn info_refs(
 
     // Subprocess path: receive-pack advertisement, or upload-pack for a
     // tagged repo. Acquires a permit and hydrates — today's behavior.
-    info_refs_subprocess(&state, service, &params).await
+    info_refs_subprocess(&state, &auth.tenant, service, &params).await
 }
 
 /// Subprocess-backed `info/refs` advertisement: hydrate the published state
@@ -516,12 +550,13 @@ pub async fn info_refs(
 /// lose the clean timeout/error mapping that buffering gives us.
 async fn info_refs_subprocess(
     state: &Arc<AppState>,
+    tenant: &TenantContext,
     service: &str,
     params: &GitRepoParams,
 ) -> Result<Response, Response> {
     let _permit = acquire_git_permit(state)?;
 
-    let repo = match hydrate_for_read(&state.git_store, &params.owner, &params.repo).await {
+    let repo = match hydrate_for_read(&state.git_store, tenant, &params.owner, &params.repo).await {
         Ok(Some(repo)) => repo,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
         Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
@@ -597,18 +632,19 @@ async fn info_refs_subprocess(
 /// the tempdir lives only for the duration of this request.
 pub async fn upload_pack(
     State(state): State<Arc<AppState>>,
-    _auth: GitAuth,
+    auth: GitAuth,
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
     let _ = validate_repo_id(&params.owner, &params.repo)?;
     let _permit = acquire_git_permit(&state)?;
 
-    let repo = match hydrate_for_read(&state.git_store, &params.owner, &params.repo).await {
-        Ok(Some(repo)) => repo,
-        Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
-        Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
-    };
+    let repo =
+        match hydrate_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo).await {
+            Ok(Some(repo)) => repo,
+            Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
+            Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
+        };
 
     // Track A: stream the subprocess stdout straight into the response body
     // instead of buffering the whole pack into RAM. `repo` (the hydrated
@@ -682,9 +718,10 @@ pub async fn receive_pack(
     // Hydrate parent state + workspace in one round-trip. ParentState
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
-    let (repo, parent_state) = hydrate_for_write(&state.git_store, &params.owner, &params.repo)
-        .await
-        .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
+    let (repo, parent_state) =
+        hydrate_for_write(&state.git_store, &auth.tenant, &params.owner, &params.repo)
+            .await
+            .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
 
     // Install the pre-receive hook into the ephemeral workspace. The
     // hook script is fixed per-deployment; per-push state (callback URL,
@@ -708,6 +745,10 @@ pub async fn receive_pack(
         ),
         ("BUZZ_REPO_ID", repo_name.to_string()),
         ("BUZZ_REPO_OWNER", params.owner.clone()),
+        (
+            "BUZZ_COMMUNITY_ID",
+            auth.tenant.community().as_uuid().to_string(),
+        ),
         ("BUZZ_PUSHER_PUBKEY", pusher_hex.clone()),
         // Override any repo-local core.hooksPath setting; defense in
         // depth even though the hydrated workspace has no inherited
@@ -729,6 +770,7 @@ pub async fn receive_pack(
         repo: params.repo.clone(),
         repo_id: repo_name.to_string(),
         pusher: auth.pubkey,
+        tenant: auth.tenant,
         repo_handle: repo,
     };
     Ok(finalize_push(&state, ctx).await)
@@ -986,6 +1028,9 @@ pub(crate) struct PushContext {
     /// `d` exactly.
     pub repo_id: String,
     pub pusher: nostr::PublicKey,
+    /// Server-resolved tenant that selected the pointer namespace and owns
+    /// any derived kind:30618 event from this push.
+    pub tenant: TenantContext,
     /// The hydrated workspace handle. Held until response construction
     /// (which happens *after* `cas_publish` returns) so the tempdir
     /// outlives the receive-pack subprocess and the CAS publish.
@@ -1007,6 +1052,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
     // between hydrate and CAS.
     let success = match cas_publish(
         &state.git_store,
+        &ctx.tenant,
         ctx.repo_handle.path(),
         &ctx.owner,
         &ctx.repo,
@@ -1096,64 +1142,44 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         };
         match build_ref_state_event(&inputs, &state.relay_keypair) {
             Ok(event) => {
-                // Relay-signed kind:30618 belongs to the deployment's own
-                // community, resolved fail-closed from the configured relay
-                // host (the git transport has no inbound `Host` to bind).
-                let tenant = match crate::tenant::bind_deployment_community(
-                    &state.db,
-                    &state.config.relay_url,
-                )
-                .await
+                // Relay-signed kind:30618 belongs to the same server-resolved
+                // tenant as the git request that committed the pointer.
+                match state
+                    .db
+                    .insert_event(ctx.tenant.community(), &event, None)
+                    .await
                 {
-                    Ok(ctx) => Some(ctx),
-                    Err(e) => {
-                        warn!(
-                            error = ?e,
+                    Ok((stored, true)) => {
+                        // Routed through the guarded send path for uniformity;
+                        // the access gate no-ops for this globally-scoped
+                        // (channel_id = None) ref-state event.
+                        crate::handlers::event::fan_out_event_to_local_subscribers(
+                            state,
+                            ctx.tenant.community(),
+                            &stored,
+                        )
+                        .await;
+                        info!(
                             owner = %ctx.owner,
                             repo = %ctx.repo_id,
-                            "kind:30618 publish skipped: relay host not mapped to a community"
+                            manifest = %success.manifest_key,
+                            "kind:30618 published (derived after CAS)"
                         );
-                        None
                     }
-                };
-                if let Some(tenant) = tenant {
-                    match state
-                        .db
-                        .insert_event(tenant.community(), &event, None)
-                        .await
-                    {
-                        Ok((stored, true)) => {
-                            // Routed through the guarded send path for uniformity;
-                            // the access gate no-ops for this globally-scoped
-                            // (channel_id = None) ref-state event.
-                            crate::handlers::event::fan_out_event_to_local_subscribers(
-                                state,
-                                tenant.community(),
-                                &stored,
-                            )
-                            .await;
-                            info!(
-                                owner = %ctx.owner,
-                                repo = %ctx.repo_id,
-                                manifest = %success.manifest_key,
-                                "kind:30618 published (derived after CAS)"
-                            );
-                        }
-                        Ok((_, false)) => {
-                            info!(
-                                owner = %ctx.owner,
-                                repo = %ctx.repo_id,
-                                "kind:30618 deduplicated by relay db"
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                owner = %ctx.owner,
-                                repo = %ctx.repo_id,
-                                error = %e,
-                                "kind:30618 insert failed; push remains durable in object store"
-                            );
-                        }
+                    Ok((_, false)) => {
+                        info!(
+                            owner = %ctx.owner,
+                            repo = %ctx.repo_id,
+                            "kind:30618 deduplicated by relay db"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            owner = %ctx.owner,
+                            repo = %ctx.repo_id,
+                            error = %e,
+                            "kind:30618 insert failed; push remains durable in object store"
+                        );
                     }
                 }
             }
@@ -1195,6 +1221,8 @@ pub fn git_router(state: Arc<AppState>) -> Router {
 mod track_c_tests {
     use super::*;
     use crate::api::git::manifest::Manifest;
+    use buzz_core::CommunityId;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
 
     fn oid_sha1() -> String {
@@ -1212,6 +1240,97 @@ mod track_c_tests {
             packs: vec!["packs/deadbeef".to_string()],
             parent: None,
         }
+    }
+
+    fn tenant(host: &str, n: u128) -> TenantContext {
+        TenantContext::resolved(CommunityId::from_uuid(uuid::Uuid::from_u128(n)), host)
+    }
+
+    fn git_nip98_event_json(keys: &Keys, url: &str, method: &str) -> String {
+        let tags = vec![
+            Tag::parse(["u", url]).expect("u tag"),
+            Tag::parse(["method", method]).expect("method tag"),
+        ];
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign NIP-98 event");
+        serde_json::to_string(&event).expect("serialize")
+    }
+
+    #[test]
+    fn git_expected_url_uses_tenant_host_not_config_host() {
+        let tenant_a = tenant("host-a.example", 1);
+        let tenant_b = tenant("host-b.example", 2);
+
+        let url_a = git_expected_url(
+            "wss://config-host.example",
+            &tenant_a,
+            "/git/owner/repo/info/refs?service=git-upload-pack",
+        )
+        .expect("recognized info/refs path");
+        let url_b = git_expected_url(
+            "wss://config-host.example",
+            &tenant_b,
+            "/git/owner/repo/info/refs?service=git-upload-pack",
+        )
+        .expect("recognized info/refs path");
+
+        assert_eq!(url_a, "https://host-a.example/git/owner/repo");
+        assert_eq!(url_b, "https://host-b.example/git/owner/repo");
+        assert_ne!(url_a, url_b);
+
+        let url_a_alt_config = git_expected_url(
+            "wss://different-config.example",
+            &tenant_a,
+            "/git/owner/repo/git-upload-pack",
+        )
+        .expect("recognized upload-pack path");
+        assert_eq!(url_a_alt_config, "https://host-a.example/git/owner/repo");
+    }
+
+    /// GitAuth host-bind bite: a token signed for community A's repo URL must
+    /// fail when the request Host resolved to community B. If `git_expected_url`
+    /// is changed back to `config.relay_url`'s host, the expected URL below
+    /// becomes A's URL and this wrongly verifies.
+    #[test]
+    fn git_nip98_rejects_token_signed_for_wrong_community_host() {
+        let keys = Keys::generate();
+        let signed_for_a = "https://host-a.example/git/alice/repo";
+        let event_json = git_nip98_event_json(&keys, signed_for_a, "GET");
+        let tenant_b = tenant("host-b.example", 2);
+        let expected_for_b = git_expected_url(
+            "wss://host-a.example",
+            &tenant_b,
+            "/git/alice/repo/info/refs?service=git-upload-pack",
+        )
+        .expect("recognized info/refs path");
+
+        let err = buzz_auth::nip98::verify_nip98_event(&event_json, &expected_for_b, "GET", None)
+            .expect_err("cross-host git NIP-98 token must be rejected");
+        assert!(
+            err.to_string().contains("URL mismatch"),
+            "expected URL-mismatch rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn git_nip98_accepts_token_signed_for_matching_community_host() {
+        let keys = Keys::generate();
+        let signed_for_a = "https://host-a.example/git/alice/repo";
+        let event_json = git_nip98_event_json(&keys, signed_for_a, "GET");
+        let tenant_a = tenant("host-a.example", 1);
+        let expected_for_a = git_expected_url(
+            "wss://different-config.example",
+            &tenant_a,
+            "/git/alice/repo/git-upload-pack",
+        )
+        .expect("recognized upload-pack path");
+
+        let pubkey =
+            buzz_auth::nip98::verify_nip98_event(&event_json, &expected_for_a, "GET", None)
+                .expect("matching-host git NIP-98 token must verify");
+        assert_eq!(pubkey, keys.public_key());
     }
 
     /// Split a pkt-line stream into `(len_prefix, payload)` frames, validating

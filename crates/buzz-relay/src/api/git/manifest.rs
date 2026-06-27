@@ -27,6 +27,7 @@
 
 use std::collections::BTreeMap;
 
+use buzz_core::tenant::CommunityId;
 use serde::{Deserialize, Serialize};
 
 /// Current manifest schema version. Bump on incompatible change.
@@ -133,15 +134,16 @@ fn is_manifest_digest(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// The canonical pointer key for a repo: `repos/<owner>/<repo>/pointer`.
+/// The canonical pointer key for a repo: `repos/<community>/<owner>/<repo>/pointer`.
 ///
 /// Single source of truth shared by `cas_publish` (write side) and `hydrate`
 /// (read side). Strips a trailing `.git` if the caller passed it. The
-/// `repos/<owner>/<repo>/` namespace leaves room for future sibling keys
-/// (archive flag, gc state, etc.) co-located under each repo.
-pub fn pointer_key(owner: &str, repo: &str) -> String {
+/// `repos/<community>/<owner>/<repo>/` namespace keeps the existing repo-local
+/// subtree intact under the server-resolved community boundary, while shared
+/// pack/manifest CAS objects remain outside that scoped pointer namespace.
+pub fn pointer_key(community: CommunityId, owner: &str, repo: &str) -> String {
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
-    format!("repos/{owner}/{repo}/pointer")
+    format!("repos/{community}/{owner}/{repo}/pointer")
 }
 
 impl Manifest {
@@ -392,11 +394,50 @@ mod tests {
 
     #[test]
     fn pointer_key_strips_dot_git() {
-        assert_eq!(pointer_key("alice", "myrepo"), "repos/alice/myrepo/pointer");
+        let c = CommunityId::from_uuid(uuid::Uuid::from_u128(1));
         assert_eq!(
-            pointer_key("alice", "myrepo.git"),
-            "repos/alice/myrepo/pointer"
+            pointer_key(c, "alice", "myrepo"),
+            format!("repos/{c}/alice/myrepo/pointer")
         );
+        assert_eq!(
+            pointer_key(c, "alice", "myrepo.git"),
+            format!("repos/{c}/alice/myrepo/pointer")
+        );
+    }
+
+    #[test]
+    fn pointer_key_is_community_scoped() {
+        let a = CommunityId::from_uuid(uuid::Uuid::from_u128(1));
+        let b = CommunityId::from_uuid(uuid::Uuid::from_u128(2));
+
+        assert_ne!(
+            pointer_key(a, "alice", "repo"),
+            pointer_key(b, "alice", "repo")
+        );
+        assert_eq!(
+            pointer_key(a, "alice", "repo"),
+            format!("repos/{a}/alice/repo/pointer")
+        );
+        assert_ne!(pointer_key(a, "alice", "repo"), "repos/alice/repo/pointer");
+    }
+
+    /// Mutate-bite shape for git hosting: same owner/repo string in two
+    /// communities must resolve to different pointer cells. If the community
+    /// segment is dropped from `pointer_key`, B overwrites A and A observes B's
+    /// manifest pointer (wrong answer, not absence).
+    #[test]
+    fn same_owner_repo_pointers_do_not_bleed_between_communities() {
+        use std::collections::HashMap;
+
+        let a = CommunityId::from_uuid(uuid::Uuid::from_u128(1));
+        let b = CommunityId::from_uuid(uuid::Uuid::from_u128(2));
+        let mut pointers = HashMap::new();
+
+        pointers.insert(pointer_key(a, "alice", "repo"), "manifest-a");
+        pointers.insert(pointer_key(b, "alice", "repo"), "manifest-b");
+
+        assert_eq!(pointers[&pointer_key(a, "alice", "repo")], "manifest-a");
+        assert_eq!(pointers[&pointer_key(b, "alice", "repo")], "manifest-b");
     }
 
     #[test]

@@ -166,6 +166,7 @@ pub async fn upload_blob(
         buzz_media::process_video_upload(
             &state.media_storage,
             &state.config.media,
+            &auth.tenant,
             &auth.auth_event,
             body.into_data_stream(),
             content_length,
@@ -195,6 +196,7 @@ pub async fn upload_blob(
             buzz_media::process_upload(
                 &state.media_storage,
                 &state.config.media,
+                &auth.tenant,
                 &auth.auth_event,
                 bytes,
             )
@@ -203,6 +205,7 @@ pub async fn upload_blob(
             buzz_media::process_file_upload(
                 &state.media_storage,
                 &state.config.media,
+                &auth.tenant,
                 &auth.auth_event,
                 bytes,
             )
@@ -241,6 +244,19 @@ pub async fn upload_blob(
     }
 
     Ok(Json(descriptor))
+}
+
+async fn bind_media_read_tenant(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<TenantContext, MediaError> {
+    let raw_host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| MediaError::NotFound)
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -328,13 +344,14 @@ pub async fn get_blob(
     req_headers: HeaderMap,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
+    let tenant = bind_media_read_tenant(&state, &req_headers).await?;
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
         let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
         let _ = state
             .media_storage
-            .read_sidecar_mime(parent_hash)
+            .read_sidecar_mime(&tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
         "image/jpeg".to_string()
@@ -343,14 +360,14 @@ pub async fn get_blob(
         // the sidecar's canonical extension — sidecar is authoritative.
         let sidecar_mime = state
             .media_storage
-            .read_sidecar_mime(&sha256_ext)
+            .read_sidecar_mime(&tenant, &sha256_ext)
             .await
             .ok_or(MediaError::NotFound)?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
             let sidecar = state
                 .media_storage
-                .get_sidecar(sha256_ext.split('.').next().unwrap_or(&sha256_ext))
+                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
@@ -370,7 +387,7 @@ pub async fn get_blob(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, &sha256_ext).await?;
+    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -506,30 +523,32 @@ fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
 /// is missing, we return 404 rather than fall back to untrusted metadata.
 pub async fn head_blob(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
+    let tenant = bind_media_read_tenant(&state, &headers).await?;
 
     // Sidecar gate FIRST — reject before any blob I/O.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
         let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
         let _ = state
             .media_storage
-            .read_sidecar_mime(parent_hash)
+            .read_sidecar_mime(&tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
         "image/jpeg".to_string()
     } else {
         let sidecar_mime = state
             .media_storage
-            .read_sidecar_mime(&sha256_ext)
+            .read_sidecar_mime(&tenant, &sha256_ext)
             .await
             .ok_or(MediaError::NotFound)?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
             let sidecar = state
                 .media_storage
-                .get_sidecar(sha256_ext.split('.').next().unwrap_or(&sha256_ext))
+                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
@@ -539,7 +558,7 @@ pub async fn head_blob(
         sidecar_mime
     };
 
-    let key = resolve_s3_key(&state.media_storage, &sha256_ext).await?;
+    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
     match state.media_storage.head_with_metadata(&key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -567,13 +586,14 @@ pub async fn head_blob(
 /// object-key confusion if sidecar data is ever tampered with.
 async fn resolve_s3_key(
     storage: &buzz_media::MediaStorage,
+    tenant: &TenantContext,
     sha256_ext: &str,
 ) -> Result<String, MediaError> {
     if sha256_ext.contains('.') {
         Ok(sha256_ext.to_string())
     } else {
         let sidecar = storage
-            .get_sidecar(sha256_ext)
+            .get_sidecar(tenant, sha256_ext)
             .await
             .map_err(|_| MediaError::NotFound)?;
         // Validate sidecar ext — never trust storage as authoritative for path construction

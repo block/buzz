@@ -146,13 +146,30 @@ pub struct Config {
     pub web_dir: Option<std::path::PathBuf>,
 }
 
+fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
+    raw.parse::<SocketAddr>()
+        .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn ensure_git_repo_path(
+    raw: impl Into<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ConfigError> {
+    let git_repo_path = raw.into();
+    if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
+        return Err(ConfigError::InvalidValue(format!(
+            "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
+            git_repo_path.display()
+        )));
+    }
+    Ok(git_repo_path)
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let bind_addr = std::env::var("BUZZ_BIND_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:3000".to_string())
-            .parse::<SocketAddr>()
-            .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))?;
+        let bind_addr_raw =
+            std::env::var("BUZZ_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+        let bind_addr = parse_bind_addr(&bind_addr_raw)?;
 
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
@@ -331,22 +348,9 @@ impl Config {
         }
 
         // Git server config
-        let git_repo_path: std::path::PathBuf = std::env::var("BUZZ_GIT_REPO_PATH")
-            .unwrap_or_else(|_| "./repos".to_string())
-            .into();
-        // Ensure the git repo root exists. The smart-HTTP transport and the
-        // kind:30617 side-effect handler both canonicalize this path; if it's
-        // missing, all git operations 500 with "git service misconfigured" and
-        // repo announcements silently fail to create their bare repo on disk.
-        // Bootstrapping here makes the relay self-provision its own data dir
-        // (matches how we treat other relay-owned paths) rather than requiring
-        // ops to mkdir it out of band.
-        if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
-            return Err(ConfigError::InvalidValue(format!(
-                "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
-                git_repo_path.display()
-            )));
-        }
+        let git_repo_path = ensure_git_repo_path(
+            std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
+        )?;
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -484,11 +488,10 @@ mod tests {
 
     #[test]
     fn invalid_bind_addr_returns_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        std::env::set_var("BUZZ_BIND_ADDR", "not-an-addr");
-        let result = Config::from_env();
-        std::env::remove_var("BUZZ_BIND_ADDR");
-        assert!(matches!(result, Err(ConfigError::InvalidBindAddr(_))));
+        assert!(matches!(
+            parse_bind_addr("not-an-addr"),
+            Err(ConfigError::InvalidBindAddr(_))
+        ));
     }
 
     #[test]
@@ -560,13 +563,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn git_repo_path_unwritable_returns_error() {
-        let _guard = ENV_MUTEX.lock().unwrap();
         // Try to create a path under a regular file — must fail.
         // Using /dev/null as the parent guarantees create_dir_all fails on unix.
         let bogus = std::path::PathBuf::from("/dev/null/cannot-create-here");
-        std::env::set_var("BUZZ_GIT_REPO_PATH", &bogus);
-        let result = Config::from_env();
-        std::env::remove_var("BUZZ_GIT_REPO_PATH");
+        let result = ensure_git_repo_path(&bogus);
         assert!(
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"

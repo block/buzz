@@ -56,6 +56,9 @@ pub struct HookCallbackRequest {
     pub repo_id: String,
     /// Hex-encoded repo owner pubkey (from URL path, verified against kind:30617).
     pub repo_owner: String,
+    /// Server-resolved community id from the git HTTP request that spawned the hook.
+    /// Internal-only: set by relay env and HMAC-bound by the hook callback.
+    pub community_id: String,
     /// Hex-encoded pusher pubkey.
     pub pusher_pubkey: String,
     /// Ref updates from git stdin (old_oid, new_oid, ref_name, is_ancestor).
@@ -112,7 +115,7 @@ impl From<Denial> for DenialResponse {
 ///
 /// Format (length-prefixed, `|`-separated, structurally unambiguous):
 /// ```text
-/// len(repo_id):repo_id | repo_owner(64) | pusher(64) | sorted_refs | timestamp
+/// len(repo_id):repo_id | repo_owner(64) | community_id(36) | pusher(64) | sorted_refs | timestamp
 /// ```
 /// where each ref is: `old_oid(40) + new_oid(40) + len(ref_name):ref_name + is_ancestor("1"/"0")`
 ///
@@ -128,6 +131,8 @@ fn compute_hmac(secret: &[u8], req: &HookCallbackRequest) -> Vec<u8> {
     mac.update(req.repo_id.as_bytes());
     mac.update(b"|");
     mac.update(req.repo_owner.as_bytes()); // Fixed 64 chars, no ambiguity.
+    mac.update(b"|");
+    mac.update(req.community_id.as_bytes()); // Fixed UUID string from server-resolved tenant.
     mac.update(b"|");
     mac.update(req.pusher_pubkey.as_bytes()); // Fixed 64 chars, no ambiguity.
     mac.update(b"|");
@@ -189,6 +194,11 @@ pub async fn hook_policy_check(
     {
         return (StatusCode::FORBIDDEN, "invalid pusher_pubkey").into_response();
     }
+    let community_uuid = match Uuid::parse_str(&req.community_id) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::FORBIDDEN, "invalid community_id").into_response(),
+    };
+    let community = buzz_core::CommunityId::from_uuid(community_uuid);
     if req.ref_updates.is_empty() || req.ref_updates.len() > 500 {
         return (StatusCode::FORBIDDEN, "invalid ref_updates count").into_response();
     }
@@ -231,23 +241,13 @@ pub async fn hook_policy_check(
     }
 
     // 4. Validate and resolve kind:30617 for this repo.
-    // Query by (kind=30617, pubkey=owner, d_tag=repo_id) to prevent spoofing.
+    // Query by (community_id, kind=30617, pubkey=owner, d_tag=repo_id) to
+    // prevent spoofing and keep the localhost hook callback on the same
+    // server-resolved tenant as the git HTTP request that spawned it.
     let owner_bytes = match hex::decode(&req.repo_owner) {
         Ok(b) if b.len() == 32 => b,
         _ => {
             return (StatusCode::FORBIDDEN, "invalid repo owner").into_response();
-        }
-    };
-    // Resolve the deployment's own community from the configured relay host —
-    // the localhost hook callback has no inbound `Host` to bind. Fail closed if
-    // the host isn't mapped (never a default tenant).
-    let tenant = match crate::tenant::bind_deployment_community(&state.db, &state.config.relay_url)
-        .await
-    {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            error!(repo = %req.repo_id, error = ?e, "hook callback: relay host not mapped to a community");
-            return (StatusCode::FORBIDDEN, "internal error").into_response();
         }
     };
     let query = EventQuery {
@@ -256,7 +256,7 @@ pub async fn hook_policy_check(
         d_tag: Some(req.repo_id.clone()),
         global_only: true,
         limit: Some(1),
-        ..EventQuery::for_community(tenant.community())
+        ..EventQuery::for_community(community)
     };
     let repo_event = match state.db.query_events(&query).await {
         Ok(mut events) => {
@@ -304,7 +304,7 @@ pub async fn hook_policy_check(
         .and_then(|id| Uuid::parse_str(id).ok());
 
     if let Some(ch_id) = channel_id {
-        match state.db.get_channel(tenant.community(), ch_id).await {
+        match state.db.get_channel(community, ch_id).await {
             Ok(ch) if ch.archived_at.is_some() => {
                 return (StatusCode::FORBIDDEN, "channel is archived (read-only)").into_response();
             }
@@ -335,7 +335,7 @@ pub async fn hook_policy_check(
                 };
                 match state
                     .db
-                    .get_member_role(tenant.community(), ch_id, &pusher_bytes)
+                    .get_member_role(community, ch_id, &pusher_bytes)
                     .await
                 {
                     Ok(Some(role_str)) => match role_str.parse::<MemberRole>() {
@@ -400,6 +400,7 @@ pub fn generate_hook_hmac(
     secret: &[u8],
     repo_id: &str,
     repo_owner: &str,
+    community_id: &str,
     pusher_pubkey: &str,
     ref_updates: &[HookRefUpdate],
     timestamp: u64,
@@ -407,6 +408,7 @@ pub fn generate_hook_hmac(
     let req = HookCallbackRequest {
         repo_id: repo_id.to_string(),
         repo_owner: repo_owner.to_string(),
+        community_id: community_id.to_string(),
         pusher_pubkey: pusher_pubkey.to_string(),
         ref_updates: ref_updates.to_vec(),
         timestamp,
@@ -424,6 +426,7 @@ mod tests {
         HookCallbackRequest {
             repo_id: "test-repo".to_string(),
             repo_owner: "a".repeat(64),
+            community_id: uuid::Uuid::from_u128(1).to_string(),
             pusher_pubkey: "b".repeat(64),
             ref_updates: vec![HookRefUpdate {
                 old_oid: "1".repeat(40),
@@ -521,6 +524,18 @@ mod tests {
         assert!(!verify_hmac(secret, &req));
     }
 
+    /// Tampering the server-resolved community changes the HMAC input, so a
+    /// hook callback cannot be replayed across communities even though the
+    /// localhost policy endpoint itself has no inbound Host header.
+    #[test]
+    fn hmac_tampered_community_rejected() {
+        let secret = b"test-secret";
+        let mut req = make_request();
+        sign_request(&mut req, secret);
+        req.community_id = uuid::Uuid::from_u128(2).to_string();
+        assert!(!verify_hmac(secret, &req));
+    }
+
     #[test]
     fn hmac_deterministic_across_ref_order() {
         let secret = b"test-secret";
@@ -547,6 +562,7 @@ mod tests {
             secret,
             &req.repo_id,
             &req.repo_owner,
+            &req.community_id,
             &req.pusher_pubkey,
             &req.ref_updates,
             req.timestamp,
@@ -567,6 +583,7 @@ mod tests {
         let repo_id = "my-project";
         let repo_owner = "ab".repeat(32); // 64 hex chars
         let pusher = "cd".repeat(32); // 64 hex chars
+        let community_id = uuid::Uuid::from_u128(1).to_string();
         let timestamp: u64 = 1700000000;
 
         // Two refs, intentionally out of sorted order to test sorting.
@@ -590,6 +607,7 @@ mod tests {
             secret.as_bytes(),
             repo_id,
             &repo_owner,
+            &community_id,
             &pusher,
             &ref_updates,
             timestamp,
@@ -603,6 +621,7 @@ mod tests {
 export LC_ALL=C
 BUZZ_REPO_ID="{repo_id}"
 BUZZ_REPO_OWNER="{repo_owner}"
+BUZZ_COMMUNITY_ID="{community_id}"
 BUZZ_PUSHER_PUBKEY="{pusher}"
 BUZZ_HOOK_SECRET="{secret}"
 TIMESTAMP="{timestamp}"
@@ -618,7 +637,7 @@ echo "refs/heads/feature {old2} {new2} 0" >> "$HMAC_FILE"
 
 # Build HMAC input — exact logic from hook script
 REPO_ID_LEN=${{#BUZZ_REPO_ID}}
-HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|${{BUZZ_REPO_OWNER}}|${{BUZZ_PUSHER_PUBKEY}}|"
+HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|${{BUZZ_REPO_OWNER}}|${{BUZZ_COMMUNITY_ID}}|${{BUZZ_PUSHER_PUBKEY}}|"
 sort "$HMAC_FILE" | while IFS=' ' read -r ref_name old_oid new_oid is_anc; do
     REF_LEN=${{#ref_name}}
     printf '%s%s%s:%s%s' "$old_oid" "$new_oid" "$REF_LEN" "$ref_name" "$is_anc"
@@ -630,6 +649,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "$BUZZ_HOOK_SECRET" -hex 
 "#,
             repo_id = repo_id,
             repo_owner = repo_owner,
+            community_id = community_id,
             pusher = pusher,
             secret = secret,
             timestamp = timestamp,
@@ -667,6 +687,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "$BUZZ_HOOK_SECRET" -hex 
         let repo_id = "test-repo";
         let repo_owner = "a".repeat(64);
         let pusher = "b".repeat(64);
+        let community_id = uuid::Uuid::from_u128(1).to_string();
         let timestamp: u64 = 1700000001;
 
         let ref_updates = vec![HookRefUpdate {
@@ -680,6 +701,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "$BUZZ_HOOK_SECRET" -hex 
             secret.as_bytes(),
             repo_id,
             &repo_owner,
+            &community_id,
             &pusher,
             &ref_updates,
             timestamp,
@@ -694,7 +716,7 @@ HMAC_FILE="$WORK_DIR/hmac"
 echo "refs/heads/main {old} {new} 1" >> "$HMAC_FILE"
 BUZZ_REPO_ID="{repo_id}"
 REPO_ID_LEN=${{#BUZZ_REPO_ID}}
-HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|{owner}|{pusher}|"
+HMAC_INPUT="${{REPO_ID_LEN}}:${{BUZZ_REPO_ID}}|{owner}|{community_id}|{pusher}|"
 sort "$HMAC_FILE" | while IFS=' ' read -r ref_name old_oid new_oid is_anc; do
     REF_LEN=${{#ref_name}}
     printf '%s%s%s:%s%s' "$old_oid" "$new_oid" "$REF_LEN" "$ref_name" "$is_anc"
@@ -706,6 +728,7 @@ printf '%s' "$HMAC_INPUT" | openssl dgst -sha256 -hmac "{secret}" -hex 2>/dev/nu
             new = "2".repeat(40),
             repo_id = repo_id,
             owner = repo_owner,
+            community_id = community_id,
             pusher = pusher,
             timestamp = timestamp,
             secret = secret,

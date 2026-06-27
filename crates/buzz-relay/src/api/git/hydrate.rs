@@ -37,6 +37,7 @@ use tokio::process::Command;
 use super::cas_publish::ParentState;
 use super::manifest::{is_hex_oid, is_safe_refname, pointer_key, Manifest, ManifestError};
 use super::store::{ETag, GitStore, StoreError};
+use buzz_core::TenantContext;
 
 /// A bare repo hydrated to a temporary directory.
 ///
@@ -87,10 +88,11 @@ pub enum HydrateError {
 /// failure is a backend/data error.
 pub async fn hydrate_for_read(
     store: &GitStore,
+    ctx: &TenantContext,
     owner: &str,
     repo: &str,
 ) -> Result<Option<HydratedRepo>, HydrateError> {
-    let Some((_etag, _digest, manifest)) = load_pointer(store, owner, repo).await? else {
+    let Some((_etag, _digest, manifest)) = load_pointer(store, ctx, owner, repo).await? else {
         return Ok(None);
     };
     Ok(Some(materialize_manifest(store, &manifest).await?))
@@ -103,10 +105,11 @@ pub async fn hydrate_for_read(
 /// pointer-named manifest digest before returning it.
 pub async fn load_manifest_for_read(
     store: &GitStore,
+    ctx: &TenantContext,
     owner: &str,
     repo: &str,
 ) -> Result<Option<Manifest>, HydrateError> {
-    Ok(load_pointer(store, owner, repo)
+    Ok(load_pointer(store, ctx, owner, repo)
         .await?
         .map(|(_etag, _digest, manifest)| manifest))
 }
@@ -134,10 +137,11 @@ pub async fn load_manifest_for_read(
 /// install a brand-new history alongside the broken one.
 pub async fn hydrate_for_write(
     store: &GitStore,
+    ctx: &TenantContext,
     owner: &str,
     repo: &str,
 ) -> Result<(HydratedRepo, ParentState), HydrateError> {
-    match load_pointer(store, owner, repo).await? {
+    match load_pointer(store, ctx, owner, repo).await? {
         Some((etag, digest, manifest)) => {
             let repo = materialize_manifest(store, &manifest).await?;
             let parent = ParentState::from_loaded(etag, digest, manifest);
@@ -168,10 +172,11 @@ pub async fn hydrate_for_write(
 /// per call site). `Err(_)` on any below-pointer failure.
 async fn load_pointer(
     store: &GitStore,
+    ctx: &TenantContext,
     owner: &str,
     repo: &str,
 ) -> Result<Option<(ETag, String, Manifest)>, HydrateError> {
-    let pkey = pointer_key(owner, repo);
+    let pkey = pointer_key(ctx.community(), owner, repo);
     let (etag, pointer_bytes) = match store.get_pointer(&pkey).await? {
         Some(p) => p,
         None => return Ok(None),
@@ -371,6 +376,13 @@ mod tests {
 
     // `pointer_key` is tested in `super::manifest::tests` — single source.
 
+    fn tenant() -> TenantContext {
+        TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+            "git.example",
+        )
+    }
+
     // -------- Live MinIO + real git roundtrip ----------------------------------
     //
     // Run manually:
@@ -468,7 +480,8 @@ mod tests {
 
         let owner = format!("probe-{}", uuid::Uuid::new_v4());
         let repo = "hello";
-        let pkey = pointer_key(&owner, repo);
+        let ctx = tenant();
+        let pkey = pointer_key(ctx.community(), &owner, repo);
         match st
             .put_pointer(
                 &pkey,
@@ -483,7 +496,7 @@ mod tests {
         }
 
         // Hydrate.
-        let hydrated = hydrate_for_read(&st, &owner, repo)
+        let hydrated = hydrate_for_read(&st, &ctx, &owner, repo)
             .await
             .expect("hydrate")
             .expect("hydrate Some");
@@ -555,7 +568,10 @@ mod tests {
         }
         let st = store();
         let owner = format!("nope-{}", uuid::Uuid::new_v4());
-        let result = hydrate_for_read(&st, &owner, "ghost").await.expect("ok");
+        let ctx = tenant();
+        let result = hydrate_for_read(&st, &ctx, &owner, "ghost")
+            .await
+            .expect("ok");
         assert!(result.is_none(), "missing pointer must surface as None");
     }
 
@@ -585,7 +601,8 @@ mod tests {
         let manifest_digest = manifest_key.strip_prefix("manifests/").unwrap();
 
         let owner = format!("empty-{}", uuid::Uuid::new_v4());
-        let pkey = pointer_key(&owner, "void");
+        let ctx = tenant();
+        let pkey = pointer_key(ctx.community(), &owner, "void");
         match st
             .put_pointer(
                 &pkey,
@@ -599,7 +616,7 @@ mod tests {
             super::super::store::CasOutcome::LostRace => panic!("first INM* must win"),
         }
 
-        let hydrated = hydrate_for_read(&st, &owner, "void")
+        let hydrated = hydrate_for_read(&st, &ctx, &owner, "void")
             .await
             .expect("hydrate")
             .expect("hydrate Some");

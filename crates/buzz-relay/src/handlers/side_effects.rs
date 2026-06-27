@@ -2167,7 +2167,7 @@ async fn handle_git_repo_announcement(
     // on pointer-absent meaning never-announced (not just no-pushes-yet),
     // keeping `info_refs`'s fail-closed `Ok(None) → 404` unambiguous.
     // First push CASes the seeded pointer normally — no special-case branch.
-    seed_manifest_pointer(state, &owner_hex, &repo_id)
+    seed_manifest_pointer(state, tenant, &owner_hex, &repo_id)
         .await
         .map_err(|e| {
             // A reserved name without a clone-able pointer is exactly the
@@ -2221,6 +2221,7 @@ const DEFAULT_HEAD: &str = "refs/heads/main";
 /// succeeding — that would mask a real misconfiguration.
 async fn seed_manifest_pointer(
     state: &Arc<AppState>,
+    tenant: &TenantContext,
     owner_hex: &str,
     repo_id: &str,
 ) -> anyhow::Result<()> {
@@ -2253,7 +2254,7 @@ async fn seed_manifest_pointer(
         .strip_prefix("manifests/")
         .ok_or_else(|| anyhow::anyhow!("put_manifest returned non-standard key: {manifest_key}"))?;
 
-    let pkey = pointer_key(owner_hex, repo_id);
+    let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
     let outcome = state
         .git_store
         .put_pointer(&pkey, digest.as_bytes(), Precond::IfNoneMatchStar)
