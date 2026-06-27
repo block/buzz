@@ -95,6 +95,14 @@ pub async fn handle_req(
 
     let channel_id = extract_channel_id_from_filters(&filters);
 
+    // Build the conformance `AbstractState` once at request entry. The
+    // `Option` only goes `None` on malformed pubkey bytes (already a
+    // separate failure path elsewhere); on the hot read path this is
+    // always `Some` and shared by every emit below.
+    let trace_state = buzz_core::PublicKey::from_slice(&pubkey_bytes)
+        .ok()
+        .map(|pk| crate::conformance::state_for_request(&conn.tenant, &pk));
+
     // Confirm channel access up front so the repaired `accessible_channels`
     // vector reaches every downstream consumer: the NIP-50 search branch
     // below, subscription registration, historical delivery, and COUNT. A
@@ -117,7 +125,17 @@ pub async fn handle_req(
                 .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
                 .await
             {
-                Ok(member) => Some(member),
+                Ok(member) => {
+                    if let Some(state_snap) = trace_state.as_ref() {
+                        crate::conformance::record_req_authcheck(
+                            &state.tracer,
+                            state_snap,
+                            ch_id,
+                            member,
+                        );
+                    }
+                    Some(member)
+                }
                 Err(e) => {
                     warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
                     conn.send(RelayMessage::closed(&sub_id, "error: database error"));

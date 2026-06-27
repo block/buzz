@@ -128,6 +128,43 @@ pub fn emit(tracer: &Arc<dyn Tracer>, action: TraceAction, state: AbstractState)
     tracer.record(TraceStep::new(action, state));
 }
 
+/// Record an [`TraceAction::AuthCheck`] step for a REQ-path membership
+/// decision. Callers pass the already-computed [`AbstractState`] for the
+/// request (built once at entry, see [`state_for_request`]) so the
+/// emit stays cheap on the hot path.
+///
+/// `claimed_community` is unconditionally `None` on the read path: the
+/// REQ wire has NO client-asserted community. The `h` filter carries
+/// a channel-id, not a community-id; tenant is host-resolved via
+/// `TenantContext`. Encoding `None` here (rather than copying the
+/// resolved community) is load-bearing — if a future regression ever
+/// starts reading a wire-community on REQ, the field would need a real
+/// value and that surfaces at code-review time instead of silently
+/// projecting away the M2 (claim ≠ resolved) bite.
+///
+/// The verdict mapping is `member → Allow`, `!member → Deny`, matching
+/// the relay's actual access decision at the membership-cache call
+/// site.
+pub fn record_req_authcheck(
+    tracer: &Arc<dyn Tracer>,
+    state: &AbstractState,
+    channel_id: Uuid,
+    member: bool,
+) {
+    tracer.record(TraceStep::new(
+        TraceAction::AuthCheck {
+            channel: channel_label(channel_id),
+            claimed_community: None,
+            verdict: if member {
+                Verdict::Allow
+            } else {
+                Verdict::Deny
+            },
+        },
+        state.clone(),
+    ));
+}
+
 /// RAII coverage-breach guard. Constructed at the top of any critical
 /// seam (currently: `ingest_event`); the guard observes a [`Tracer`]
 /// wrapper that counts emits. If the seam exits without any emit
@@ -317,6 +354,75 @@ mod tests {
                 );
             }
             other => panic!("expected ImplBug action, got {other:?}"),
+        }
+    }
+
+    /// Verify `record_req_authcheck` lands exactly one `AuthCheck` step
+    /// on the tracer with the expected channel label and `Allow` verdict
+    /// when the membership check returned true, and that
+    /// `claimed_community` is `None` (load-bearing on the read path —
+    /// see the helper's doc comment).
+    #[test]
+    fn record_req_authcheck_emits_allow_with_none_claim_when_member() {
+        let typed = Arc::new(VecTracer::default());
+        let inner: Arc<dyn Tracer> = typed.clone();
+        let state = dummy_state();
+        let ch_id = Uuid::from_u128(0xCAFE_F00D);
+
+        record_req_authcheck(&inner, &state, ch_id, true);
+
+        let steps = typed.steps.lock().expect("vec tracer mutex");
+        assert_eq!(steps.len(), 1, "exactly one AuthCheck step");
+        match &steps[0].action {
+            TraceAction::AuthCheck {
+                channel,
+                claimed_community,
+                verdict,
+            } => {
+                assert_eq!(
+                    channel,
+                    &channel_label(ch_id),
+                    "channel must come from the helper's `channel_id` arg"
+                );
+                assert!(
+                    claimed_community.is_none(),
+                    "REQ path has no wire-community claim — must be None"
+                );
+                assert!(
+                    matches!(verdict, Verdict::Allow),
+                    "member=true must map to Allow"
+                );
+            }
+            other => panic!("expected AuthCheck action, got {other:?}"),
+        }
+        assert_eq!(
+            steps[0].state_after, state,
+            "state must be the snapshot built at request entry"
+        );
+    }
+
+    /// Companion to the Allow test: confirms `member=false → Deny`. The
+    /// two together pin the full verdict-mapping table — a mutation that
+    /// inverts the boolean reds exactly one of them.
+    #[test]
+    fn record_req_authcheck_emits_deny_when_not_member() {
+        let typed = Arc::new(VecTracer::default());
+        let inner: Arc<dyn Tracer> = typed.clone();
+        let state = dummy_state();
+        let ch_id = Uuid::from_u128(0xBADD_BEEF);
+
+        record_req_authcheck(&inner, &state, ch_id, false);
+
+        let steps = typed.steps.lock().expect("vec tracer mutex");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].action {
+            TraceAction::AuthCheck { verdict, .. } => {
+                assert!(
+                    matches!(verdict, Verdict::Deny),
+                    "member=false must map to Deny"
+                );
+            }
+            other => panic!("expected AuthCheck action, got {other:?}"),
         }
     }
 }
