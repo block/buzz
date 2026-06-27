@@ -154,7 +154,7 @@ const overrides = new Map([
   ["src/features/messages/ui/MessageComposer.tsx", 1010],
   // continued-agent-conversations: channel sidebar children and active
   // conversation unread suppression. Queued to split with sidebar sections.
-  ["src/features/sidebar/ui/AppSidebar.tsx", 1081],
+  ["src/features/sidebar/ui/AppSidebar.tsx", 1087],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at

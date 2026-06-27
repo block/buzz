@@ -69,6 +69,7 @@ import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate"
 import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
+import { CHANNEL_TASKS_FEATURE_ID, useFeatureEnabled } from "@/shared/features";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
 import type { SearchHit } from "@/shared/api/types";
@@ -89,6 +90,7 @@ const LazySettingsScreen = React.lazy(async () => {
 export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
+  const isChannelTasksEnabled = useFeatureEnabled(CHANNEL_TASKS_FEATURE_ID);
 
   const workspacesHook = useWorkspaces();
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
@@ -212,6 +214,7 @@ export function AppShell() {
   } = useAgentConversationShellState({
     channels,
     currentPubkey,
+    enabled: isChannelTasksEnabled,
     goAgents,
     goChannel,
     selectedView,
@@ -715,7 +718,11 @@ export function AppShell() {
                           }}
                           onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
                           onNewDmOpenChange={setIsNewDmOpen}
-                          onHideAgentConversation={handleHideAgentConversation}
+                          onHideAgentConversation={
+                            isChannelTasksEnabled
+                              ? handleHideAgentConversation
+                              : undefined
+                          }
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                           onUpdateWorkspace={workspacesHook.updateWorkspace}
@@ -790,7 +797,9 @@ export function AppShell() {
                             await goChannel(directMessage.id);
                           }}
                           onSelectAgentConversation={
-                            handleSelectAgentConversation
+                            isChannelTasksEnabled
+                              ? handleSelectAgentConversation
+                              : undefined
                           }
                           onSelectAgents={() => {
                             clearSelectedAgentConversation();
@@ -839,7 +848,9 @@ export function AppShell() {
                           }
                           selectedChannelId={selectedChannelId}
                           selectedAgentConversationId={
-                            selectedAgentConversationId
+                            isChannelTasksEnabled
+                              ? selectedAgentConversationId
+                              : null
                           }
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}

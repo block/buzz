@@ -63,6 +63,8 @@ export type RichTextEditorOptions = {
   customEmoji?: CustomEmoji[];
   /** Resolve task-link titles for composer task cards. */
   agentConversationTitleForHref?: (href: string) => string | undefined;
+  /** Enables task-link cards and task-link markdown parsing in the composer. */
+  enableAgentConversationLinks?: boolean;
   /** Called on plain Enter (submit). Handled inside Tiptap's extension system
    *  so it fires *before* ProseMirror's default splitBlock behaviour. */
   onSubmit?: () => void;
@@ -172,6 +174,7 @@ export function useRichTextEditor({
   channelNames,
   customEmoji,
   agentConversationTitleForHref,
+  enableAgentConversationLinks = true,
   onSubmit,
   onEditLastOwnMessage,
   isAutocompleteOpen,
@@ -206,10 +209,11 @@ export function useRichTextEditor({
   const agentConversationLinkExtension = React.useMemo(
     () =>
       AgentConversationLinkNode.configure({
+        enabled: enableAgentConversationLinks,
         titleForHref: (href) =>
           agentConversationTitleForHrefRef.current?.(href),
       }),
-    [],
+    [enableAgentConversationLinks],
   );
 
   const editor = useEditor(

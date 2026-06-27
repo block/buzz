@@ -30,6 +30,7 @@ export type ChannelPaneProps = {
     id: string;
     imetaMedia?: ImetaMedia[];
   } | null;
+  enableAgentConversations?: boolean;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
   hasOlderMessages?: boolean;

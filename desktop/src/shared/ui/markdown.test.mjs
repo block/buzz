@@ -433,21 +433,24 @@ import { isAgentConversationLink } from "../../features/agents/agentConversation
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
-function messageLinkUrlTransform(value, key) {
-  if (
-    key === "href" &&
-    (isMessageLink(value) || isAgentConversationLink(value))
-  ) {
+function messageLinkUrlTransform(value, key, taskLinksEnabled = true) {
+  if (key === "href" && isMessageLink(value)) {
+    return value;
+  }
+  if (key === "href" && taskLinksEnabled && isAgentConversationLink(value)) {
     return value;
   }
   return defaultUrlTransform(value);
 }
 
-function renderMarkdown(content) {
+function renderMarkdown(content, taskLinksEnabled = true) {
   return renderToStaticMarkup(
     React.createElement(
       ReactMarkdown,
-      { urlTransform: messageLinkUrlTransform },
+      {
+        urlTransform: (value, key) =>
+          messageLinkUrlTransform(value, key, taskLinksEnabled),
+      },
       content,
     ),
   );
@@ -476,6 +479,11 @@ test("messageLinkUrlTransform: preserves buzz://message href with thread", () =>
 test("messageLinkUrlTransform: preserves buzz://task href", () => {
   const html = renderMarkdown("[task](buzz://task?channel=c1&reply=m1)");
   assert.match(html, /href="buzz:\/\/task\?channel=c1&(?:amp;)?reply=m1"/);
+});
+
+test("messageLinkUrlTransform: strips buzz://task href when disabled", () => {
+  const html = renderMarkdown("[task](buzz://task?channel=c1&reply=r1)", false);
+  assert.doesNotMatch(html, /href="buzz:\/\/task/);
 });
 
 test("messageLinkUrlTransform: still strips javascript: scheme", () => {

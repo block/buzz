@@ -20,6 +20,7 @@ import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
   CHANNEL_TIMELINE_STATE_KINDS,
 } from "@/shared/constants/kinds";
+import { CHANNEL_TASKS_FEATURE_ID, useFeatureEnabled } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
@@ -150,6 +151,7 @@ export function ChannelRouteScreen({
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
   const queryClient = useQueryClient();
+  const isChannelTasksEnabled = useFeatureEnabled(CHANNEL_TASKS_FEATURE_ID);
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
@@ -163,6 +165,9 @@ export function ChannelRouteScreen({
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     return cachedTarget ? [cachedTarget] : [];
   });
+  const effectiveAgentConversationReplyId = isChannelTasksEnabled
+    ? targetAgentConversationReplyId
+    : null;
 
   // Reset spliced target events when the channel context changes (channel
   // switch or entering/leaving a forum post). Tied to channel identity rather
@@ -191,7 +196,7 @@ export function ChannelRouteScreen({
     // param-clear blanks the timeline. Resetting on channel / forum-post change
     // is handled by the effect below; here we only fetch when there's a target.
     if (
-      (!targetAgentConversationReplyId &&
+      (!effectiveAgentConversationReplyId &&
         !targetMessageId &&
         !targetThreadRootId) ||
       selectedPostId
@@ -215,7 +220,7 @@ export function ChannelRouteScreen({
     }
 
     const eventIds = [
-      targetAgentConversationReplyId,
+      effectiveAgentConversationReplyId,
       targetMessageId,
       targetThreadRootId && targetThreadRootId !== targetMessageId
         ? targetThreadRootId
@@ -225,8 +230,8 @@ export function ChannelRouteScreen({
     void fetchRouteTargetEvents(
       channelId,
       eventIds,
-      targetAgentConversationReplyId ?? targetMessageId,
-      targetAgentConversationReplyId,
+      effectiveAgentConversationReplyId ?? targetMessageId,
+      effectiveAgentConversationReplyId,
       targetThreadRootId,
     ).then((events) => {
       if (!isCancelled) {
@@ -251,7 +256,7 @@ export function ChannelRouteScreen({
     selectedPostId,
     channelId,
     queryClient,
-    targetAgentConversationReplyId,
+    effectiveAgentConversationReplyId,
     targetMessageId,
     targetThreadRootId,
   ]);
@@ -277,7 +282,7 @@ export function ChannelRouteScreen({
         void goForumPost(channelId, postId);
       }}
       selectedForumPostId={selectedPostId}
-      targetAgentConversationReplyId={targetAgentConversationReplyId}
+      targetAgentConversationReplyId={effectiveAgentConversationReplyId}
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
