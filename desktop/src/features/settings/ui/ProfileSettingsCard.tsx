@@ -559,13 +559,11 @@ export function ProfileSettingsCard({
                           width: 54,
                         }}
                         className="h-48 w-48"
+                        clipTestId="profile-avatar-preview-clip"
                         cutout={{ cx: 165, cy: 165, r: 30 }}
                         size={192}
                       >
-                        <div
-                          className="relative h-full w-full"
-                          data-testid="profile-avatar-preview-clip"
-                        >
+                        <div className="relative h-full w-full">
                           <div
                             className="pointer-events-none absolute inset-0 z-10"
                             data-testid="profile-avatar-animated-preview-slot"

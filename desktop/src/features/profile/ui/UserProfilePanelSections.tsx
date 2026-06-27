@@ -483,9 +483,7 @@ function ProfileHero({
   profile: ProfileSummaryViewProps["profile"];
   userStatus: ProfileSummaryViewProps["userStatus"];
 }) {
-  const presenceDotClassName = isBot
-    ? "h-[1.125rem] w-[1.125rem]"
-    : "h-3.5 w-3.5";
+  const presenceDotClassName = isBot ? "h-4.5 w-4.5" : "h-3.5 w-3.5";
 
   return (
     <div className="flex flex-col items-center gap-3 text-center">

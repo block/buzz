@@ -182,7 +182,7 @@ export function useManagedAgentActions() {
     try {
       const runtimes = await getAvailableRuntimesForStart();
       const defaultRuntime = runtimes[0] ?? null;
-      const { runtime, warnings } = resolvePersonaRuntime(
+      const { runtime, warnings, isOverridden } = resolvePersonaRuntime(
         persona.runtime,
         runtimes,
         defaultRuntime,
@@ -206,9 +206,11 @@ export function useManagedAgentActions() {
         spawnAfterCreate: true,
         startOnAppLaunch: true,
         backend: { type: "local" },
+        harnessOverride: isOverridden,
       };
 
       const created = await createAgentMutation.mutateAsync(input);
+      setCreatedAgent(created);
       const notices = [...warnings];
 
       if (created.spawnError) {

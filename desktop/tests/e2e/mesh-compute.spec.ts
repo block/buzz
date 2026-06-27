@@ -331,7 +331,9 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
 
   const row = page.getByTestId(`managed-agent-${pubkey}`);
   await expect(row).toContainText("Saved relay mesh agent");
-  await expect(row).toContainText("running");
+  await expect(
+    page.getByTestId(`agent-runtime-active-${pubkey}`),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("dialog", { name: "Agent created" })).toHaveCount(
     0,
@@ -341,7 +343,7 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
   await expect
     .poll(async () => await commands(page))
     .toContain("stop_managed_agent");
-  await expect(row).toContainText("stopped");
+  await expect(page.getByTestId(`agent-runtime-start-${pubkey}`)).toBeVisible();
 
   // With a live serve target for the model, manual restart goes through:
   // the backend preflight re-resolves the target and the agent starts.
@@ -349,10 +351,12 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
   await expect
     .poll(async () => await commands(page))
     .toContain("start_managed_agent");
-  await expect(row).toContainText("running");
+  await expect(
+    page.getByTestId(`agent-runtime-active-${pubkey}`),
+  ).toBeVisible();
 
   await triggerManagedAgentPrimaryAction(page, pubkey);
-  await expect(row).toContainText("stopped");
+  await expect(page.getByTestId(`agent-runtime-start-${pubkey}`)).toBeVisible();
 
   // Without a live serve target, the backend preflight rejects the start
   // with an actionable error, surfaced as a toast; the agent stays stopped.
@@ -364,7 +368,7 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
       .locator("[data-sonner-toast]")
       .filter({ hasText: "no live serve target is available" }),
   ).toBeVisible();
-  await expect(row).toContainText("stopped");
+  await expect(page.getByTestId(`agent-runtime-start-${pubkey}`)).toBeVisible();
 
   await expect(
     page.evaluate(async (agentPubkey) => {
@@ -383,5 +387,5 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
       }
     }, pubkey),
   ).resolves.toContain("no live serve target is available");
-  await expect(row).toContainText("stopped");
+  await expect(page.getByTestId(`agent-runtime-start-${pubkey}`)).toBeVisible();
 });

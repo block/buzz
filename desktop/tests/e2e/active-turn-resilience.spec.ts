@@ -107,10 +107,14 @@ test.describe("active turn badge resilience", () => {
       },
     ]);
 
-    const paulRow = page.getByTestId(`managed-agent-${AGENT_PAUL}`);
-    const duncanRow = page.getByTestId(`managed-agent-${AGENT_DUNCAN}`);
-    await expect(paulRow).toContainText("Working", { timeout: 5_000 });
-    await expect(duncanRow).toContainText("Working", { timeout: 5_000 });
+    const paulRuntimeBadge = page.getByTestId(
+      `agent-runtime-active-${AGENT_PAUL}`,
+    );
+    const duncanRuntimeBadge = page.getByTestId(
+      `agent-runtime-active-${AGENT_DUNCAN}`,
+    );
+    await expect(paulRuntimeBadge).toBeVisible({ timeout: 5_000 });
+    await expect(duncanRuntimeBadge).toBeVisible({ timeout: 5_000 });
 
     // Simulate the all-at-once relay drop: no further frames, advance the clock
     // past both thresholds. This fires several real prune ticks; shouldPausePrune
@@ -119,7 +123,7 @@ test.describe("active turn badge resilience", () => {
     // gone after the first tick past 25s.
     await page.clock.fastForward(FRAME_GAP_MS);
 
-    await expect(paulRow).toContainText("Working");
-    await expect(duncanRow).toContainText("Working");
+    await expect(paulRuntimeBadge).toBeVisible();
+    await expect(duncanRuntimeBadge).toBeVisible();
   });
 });

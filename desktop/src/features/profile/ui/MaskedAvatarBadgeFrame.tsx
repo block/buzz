@@ -45,6 +45,7 @@ type MaskedAvatarBadgeFrameProps = {
   badgeBox?: AvatarBadgeBox;
   children: React.ReactNode;
   className?: string;
+  clipTestId?: string;
   curve?: AvatarBadgeCurve;
   cutout?: AvatarBadgeCircle;
   maskTransition?: React.ComponentProps<typeof motion.path>["transition"];
@@ -386,6 +387,7 @@ export function MaskedAvatarBadgeFrame({
   badgeBox,
   children,
   className,
+  clipTestId,
   curve,
   cutout,
   maskTransition,
@@ -417,6 +419,7 @@ export function MaskedAvatarBadgeFrame({
       <motion.div
         animate={maskTransition ? { clipPath: maskPolygon } : undefined}
         className="h-full w-full"
+        data-testid={clipTestId}
         initial={false}
         style={{
           WebkitClipPath: maskPolygon,
