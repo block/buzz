@@ -81,6 +81,7 @@ type TimelineMessageListProps = {
   searchMatchingMessageIds?: Set<string>;
   /** The current find-in-channel query string. */
   searchQuery?: string;
+  showInitialDayDivider?: boolean;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
   /** Caller-owned scroll container the virtualizer measures and scrolls. */
@@ -120,6 +121,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
+  showInitialDayDivider = true,
   threadUnreadCounts,
   unfollowThreadById,
   scrollContainerRef,
@@ -182,8 +184,11 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   // diverging deps would let the map go stale and scroll deep-links to the wrong
   // row — the exact failure virtualization risks.
   const itemsResult = React.useMemo(
-    () => buildTimelineItems(entries, firstUnreadMessageId),
-    [entries, firstUnreadMessageId],
+    () =>
+      buildTimelineItems(entries, firstUnreadMessageId, {
+        showInitialDayDivider,
+      }),
+    [entries, firstUnreadMessageId, showInitialDayDivider],
   );
   const agentConversationMarkerByMessageId = React.useMemo(
     () =>

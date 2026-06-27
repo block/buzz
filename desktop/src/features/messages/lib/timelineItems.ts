@@ -36,6 +36,10 @@ export type TimelineItemsResult = {
   indexByMessageId: Map<string, number>;
 };
 
+type BuildTimelineItemsOptions = {
+  showInitialDayDivider?: boolean;
+};
+
 /** Stable per-item key, unique across the flattened stream. */
 export function getTimelineItemKey(item: TimelineItem): string {
   return item.key;
@@ -79,6 +83,7 @@ function entryRenderKey(entry: MainTimelineEntry): string {
 export function buildTimelineItems(
   entries: MainTimelineEntry[],
   firstUnreadMessageId: string | null,
+  { showInitialDayDivider = true }: BuildTimelineItemsOptions = {},
 ): TimelineItemsResult {
   const items: TimelineItem[] = [];
   const indexByMessageId = new Map<string, number>();
@@ -99,7 +104,7 @@ export function buildTimelineItems(
     const renderKey = entryRenderKey(entry);
 
     const dayBoundary = dayBoundariesByStartIndex.get(i);
-    if (dayBoundary) {
+    if (dayBoundary && (showInitialDayDivider || i !== 0)) {
       items.push({
         kind: "day-divider",
         key: dayBoundary.key,

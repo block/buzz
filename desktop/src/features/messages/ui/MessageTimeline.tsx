@@ -96,6 +96,7 @@ type MessageTimelineProps = {
   searchMatchingMessageIds?: Set<string>;
   /** The current find-in-channel query string. */
   searchQuery?: string;
+  showInitialDayDivider?: boolean;
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
   /** Event id of the oldest unread top-level message at channel open, or null. */
@@ -189,6 +190,7 @@ const MessageTimelineBase = React.forwardRef<
     searchActiveMessageId = null,
     searchMatchingMessageIds,
     searchQuery,
+    showInitialDayDivider = true,
     targetMessageId = null,
     onTargetReached,
     firstUnreadMessageId = null,
@@ -275,8 +277,11 @@ const MessageTimelineBase = React.forwardRef<
     [mainEntries, deferredMessages, messages],
   );
   const timelineItems = React.useMemo(
-    () => buildTimelineItems(deferredEntries, firstUnreadMessageId),
-    [deferredEntries, firstUnreadMessageId],
+    () =>
+      buildTimelineItems(deferredEntries, firstUnreadMessageId, {
+        showInitialDayDivider,
+      }),
+    [deferredEntries, firstUnreadMessageId, showInitialDayDivider],
   );
   const virtualizerOption = React.useMemo(
     () =>
@@ -303,7 +308,7 @@ const MessageTimelineBase = React.forwardRef<
   // scrollTop into the current scroll element during navigation; reusing the
   // same node across channel routes can leave the newly-loaded message list
   // painted at a stale offset until the user's next scroll event forces layout.
-  const scrollContainerDomKey = channelId ?? "none";
+  const scrollContainerDomKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
@@ -751,6 +756,7 @@ const MessageTimelineBase = React.forwardRef<
                     searchActiveMessageId={searchActiveMessageId}
                     searchMatchingMessageIds={searchMatchingMessageIds}
                     searchQuery={searchQuery}
+                    showInitialDayDivider={showInitialDayDivider}
                     threadUnreadCounts={threadUnreadCounts}
                     unfollowThreadById={unfollowThreadById}
                     scrollContainerRef={scrollContainerRef}

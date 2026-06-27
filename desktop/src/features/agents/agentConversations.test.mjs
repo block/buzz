@@ -407,3 +407,81 @@ test("continued conversation marker hides same-second messages after the anchor"
 
   assert.deepEqual([...hiddenIds], ["after"]);
 });
+
+test("continued conversation marker with a missing anchor does not hide thread messages", () => {
+  const root = message({
+    body: "Can you look into the data model?",
+    createdAt: 1,
+    id: "root",
+  });
+  const reply = message({
+    body: "One note before opening.",
+    createdAt: 3,
+    id: "reply",
+  });
+  const marker = parseAgentConversationMarker(
+    markerEvent({ content: { agentReplyId: "missing-reply" }, createdAt: 4 }),
+  );
+
+  const hiddenIds = getHiddenAgentConversationMessageIds(
+    [root, reply],
+    marker ? [marker] : [],
+  );
+
+  assert.deepEqual([...hiddenIds], []);
+});
+
+test("continued conversation markers keep later task anchors visible", () => {
+  const root = message({
+    body: "Can you look into the data model?",
+    createdAt: 1,
+    id: "root",
+  });
+  const firstAnchor = message({
+    body: "I'll look into it.",
+    createdAt: 2,
+    id: "agent-reply",
+    pubkey: "agent",
+  });
+  const hiddenReply = message({
+    body: "This should live in the first task.",
+    createdAt: 3,
+    id: "hidden",
+  });
+  const secondAnchor = message({
+    body: "Let's split this into another task.",
+    createdAt: 4,
+    id: "second-anchor",
+    pubkey: "agent",
+  });
+  const laterReply = message({
+    body: "This should also be hidden.",
+    createdAt: 5,
+    id: "later",
+  });
+
+  const firstMarker = parseAgentConversationMarker(
+    markerEvent({ content: { startedAt: 2 }, createdAt: 2 }),
+  );
+  const secondMarker = parseAgentConversationMarker({
+    ...markerEvent({
+      content: { agentReplyId: "second-anchor", startedAt: 4 },
+      createdAt: 4,
+      id: "second-marker",
+    }),
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "root"],
+      ["e", "second-anchor", "", "agent-reply"],
+      ["p", "agent"],
+      ["title", "Second task"],
+    ],
+  });
+
+  const hiddenIds = getHiddenAgentConversationMessageIds(
+    [root, firstAnchor, hiddenReply, secondAnchor, laterReply],
+    [firstMarker, secondMarker].filter(Boolean),
+  );
+
+  assert.deepEqual([...hiddenIds], ["hidden", "later"]);
+});

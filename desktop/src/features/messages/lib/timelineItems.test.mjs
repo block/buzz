@@ -90,6 +90,27 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
+test("buildTimelineItems: can omit only the initial day divider", () => {
+  const entries = [
+    entry({ id: "d1a", createdAt: dayAt(2026, 6, 13) }),
+    entry({ id: "d1b", createdAt: dayAt(2026, 6, 13, 13) }),
+    entry({ id: "d2a", createdAt: dayAt(2026, 6, 14) }),
+  ];
+  const { items, indexByMessageId } = buildTimelineItems(entries, null, {
+    showInitialDayDivider: false,
+  });
+
+  assert.deepEqual(kinds(items), [
+    "message",
+    "message",
+    "day-divider",
+    "message",
+  ]);
+  assert.equal(indexByMessageId.get("d1a"), 0);
+  assert.equal(indexByMessageId.get("d1b"), 1);
+  assert.equal(indexByMessageId.get("d2a"), 3);
+});
+
 test("buildTimelineItems: empty entries produce no items and an empty map", () => {
   const { items, indexByMessageId } = buildTimelineItems([], null);
   assert.equal(items.length, 0);

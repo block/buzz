@@ -493,45 +493,8 @@ export function AppSidebar({
     return byChannelId;
   }, [agentConversations]);
   const isAgentConversationActive = selectedView === "agents";
-  const activeAgentConversationChannelId = React.useMemo(() => {
-    if (!isAgentConversationActive || !selectedAgentConversationId) {
-      return null;
-    }
-
-    return (
-      agentConversations.find(
-        (conversation) => conversation.id === selectedAgentConversationId,
-      )?.channelId ?? null
-    );
-  }, [
-    agentConversations,
-    isAgentConversationActive,
-    selectedAgentConversationId,
-  ]);
-  const displayUnreadChannelIds = React.useMemo(() => {
-    if (
-      !activeAgentConversationChannelId ||
-      !unreadChannelIds.has(activeAgentConversationChannelId)
-    ) {
-      return unreadChannelIds;
-    }
-
-    const next = new Set(unreadChannelIds);
-    next.delete(activeAgentConversationChannelId);
-    return next;
-  }, [activeAgentConversationChannelId, unreadChannelIds]);
-  const displayUnreadChannelCounts = React.useMemo(() => {
-    if (
-      !activeAgentConversationChannelId ||
-      !unreadChannelCounts.has(activeAgentConversationChannelId)
-    ) {
-      return unreadChannelCounts;
-    }
-
-    const next = new Map(unreadChannelCounts);
-    next.delete(activeAgentConversationChannelId);
-    return next;
-  }, [activeAgentConversationChannelId, unreadChannelCounts]);
+  const displayUnreadChannelIds = unreadChannelIds;
+  const displayUnreadChannelCounts = unreadChannelCounts;
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeWorkspaceId: activeWorkspace?.id,
     currentPubkey,

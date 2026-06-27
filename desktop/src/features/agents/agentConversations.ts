@@ -626,26 +626,42 @@ export function getHiddenAgentConversationMessageIds(
   const messageIndexById = new Map(
     orderedMessages.map(({ message }, index) => [message.id, index]),
   );
+  const messageById = new Map(
+    orderedMessages.map(({ message }) => [message.id, message]),
+  );
+  const anchorMessageIdsByThreadRootId = new Map<string, Set<string>>();
   const cutoffByThreadRootId = new Map<
     string,
     {
-      anchorIndex: number | null;
-      anchorMessageId: string;
+      anchorIndex: number;
       startedAt: number;
     }
   >();
   for (const marker of markers) {
+    const anchorMessage = messageById.get(marker.agentReplyId);
+    const anchorIndex = messageIndexById.get(marker.agentReplyId);
+    if (!anchorMessage || anchorIndex === undefined) {
+      continue;
+    }
+
+    const anchorThreadRootId =
+      anchorMessage.rootId ?? anchorMessage.parentId ?? anchorMessage.id;
+    if (anchorThreadRootId !== marker.threadRootId) {
+      continue;
+    }
+
+    const anchorMessageIds =
+      anchorMessageIdsByThreadRootId.get(marker.threadRootId) ?? new Set();
+    anchorMessageIds.add(marker.agentReplyId);
+    anchorMessageIdsByThreadRootId.set(marker.threadRootId, anchorMessageIds);
+
     const current = cutoffByThreadRootId.get(marker.threadRootId);
     const candidate = {
-      anchorIndex: messageIndexById.get(marker.agentReplyId) ?? null,
-      anchorMessageId: marker.agentReplyId,
+      anchorIndex,
       startedAt: marker.startedAt,
     };
     const isEarlier =
-      current === undefined ||
-      (candidate.anchorIndex !== null && current.anchorIndex !== null
-        ? candidate.anchorIndex < current.anchorIndex
-        : candidate.startedAt < current.startedAt);
+      current === undefined || candidate.anchorIndex < current.anchorIndex;
     if (isEarlier) {
       cutoffByThreadRootId.set(marker.threadRootId, candidate);
     }
@@ -659,12 +675,15 @@ export function getHiddenAgentConversationMessageIds(
     }
 
     const cutoff = cutoffByThreadRootId.get(threadRootId);
-    if (cutoff === undefined || message.id === cutoff.anchorMessageId) {
+    if (
+      cutoff === undefined ||
+      anchorMessageIdsByThreadRootId.get(threadRootId)?.has(message.id)
+    ) {
       continue;
     }
 
     const messageIndex = messageIndexById.get(message.id);
-    if (cutoff.anchorIndex !== null && messageIndex !== undefined) {
+    if (messageIndex !== undefined) {
       if (messageIndex > cutoff.anchorIndex) {
         hiddenIds.add(message.id);
       }

@@ -361,17 +361,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     return true;
   }, [findLastOwnEditable, messages, onEdit]);
 
-  const handleEditLastOwnThreadMessage = React.useCallback((): boolean => {
-    if (!onEdit) return false;
-    const scope: TimelineMessage[] = [];
-    if (threadHeadMessage) scope.push(threadHeadMessage);
-    for (const entry of threadMessages) scope.push(entry.message);
-    const target = findLastOwnEditable(scope);
-    if (!target) return false;
-    onEdit(target);
-    return true;
-  }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
-
   const isComposerDisabled =
     !activeChannel?.isMember ||
     activeChannel.archivedAt !== null ||
