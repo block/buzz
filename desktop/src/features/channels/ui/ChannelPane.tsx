@@ -734,7 +734,13 @@ export const ChannelPane = React.memo(function ChannelPane({
       threadMessage: TimelineMessage,
     ) => {
       onSurfaceTabChange?.("messages");
-      if (marker.parentMessageId) {
+      const isThreadedTask =
+        Boolean(marker.parentMessageId) ||
+        Boolean(message.parentId) ||
+        Boolean(message.rootId && message.rootId !== message.id) ||
+        threadMessage.id !== message.id;
+
+      if (isThreadedTask) {
         onOpenThread(threadMessage);
         onSelectThreadReplyTarget(message);
         onThreadScrollTargetChange(message.id);
