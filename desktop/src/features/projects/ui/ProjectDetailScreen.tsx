@@ -43,6 +43,7 @@ import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isSafeUrl } from "@/shared/lib/url";
+import type { ProjectRepoCommit } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import {
@@ -221,6 +222,27 @@ function contributorForProfile(
   );
 }
 
+function profileForCommitAuthor(
+  commit: ProjectRepoCommit,
+  profiles: UserProfileLookup | undefined,
+) {
+  if (!profiles) return null;
+  const contributor = {
+    name: commit.authorName,
+    email: commit.authorEmail,
+    commitCount: 0,
+    lastCommitAt: commit.timestamp,
+  };
+
+  for (const [pubkey, profile] of Object.entries(profiles)) {
+    if (profileMatchesContributor(contributor, profile, pubkey)) {
+      return { pubkey, profile };
+    }
+  }
+
+  return null;
+}
+
 function ContributorsPanel({
   peoplePubkeys,
   project,
@@ -330,10 +352,14 @@ function ActivityPanel({
   snapshot,
   isLoading,
   error,
+  profiles,
+  repoContributors,
 }: {
   snapshot: ProjectRepoSnapshot | null | undefined;
   isLoading: boolean;
   error: unknown;
+  profiles?: UserProfileLookup;
+  repoContributors: ProjectRepoContributor[];
 }) {
   const commits = snapshot?.commits ?? [];
 
@@ -354,29 +380,72 @@ function ActivityPanel({
   }
 
   return (
-    <div className="divide-y divide-border/50">
-      {commits.map((commit) => (
-        <article
-          className="flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/30"
-          key={commit.hash}
-        >
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium text-muted-foreground">
-            {(commit.authorName || commit.authorEmail || "?").slice(0, 1)}
-          </div>
-          <div className="min-w-0 flex-1 space-y-1">
-            <p className="truncate text-sm font-medium text-foreground">
-              {commit.subject}
-            </p>
-            <p className="truncate text-xs text-muted-foreground">
-              {commit.authorName || commit.authorEmail || "Unknown author"} ·{" "}
-              {compactDate(commit.timestamp)}
-            </p>
-          </div>
-          <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-            {commit.shortHash}
-          </code>
-        </article>
-      ))}
+    <div className="space-y-1 p-2">
+      {commits.map((commit, index) => {
+        const matchedProfile = profileForCommitAuthor(commit, profiles);
+        const authorLabel = matchedProfile
+          ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
+          : commit.authorName || commit.authorEmail || "Unknown author";
+        const authorSubtitle =
+          matchedProfile?.profile.nip05Handle ||
+          commit.authorEmail ||
+          "Git contributor";
+        const matchingContributor = repoContributors.find(
+          (contributor) =>
+            contributor.name.trim().toLowerCase() ===
+              commit.authorName.trim().toLowerCase() ||
+            contributor.email.trim().toLowerCase() ===
+              commit.authorEmail.trim().toLowerCase(),
+        );
+
+        return (
+          <article
+            className="group/feed-item relative flex min-w-0 gap-3 rounded-lg p-3 transition-colors hover:bg-muted/35"
+            data-testid="project-activity-feed-item"
+            key={commit.hash}
+          >
+            {index < commits.length - 1 ? (
+              <div
+                aria-hidden="true"
+                className="absolute bottom-0 left-7 top-12 w-px bg-border/45"
+              />
+            ) : null}
+            <UserAvatar
+              accent={matchedProfile?.profile.isAgent === true}
+              avatarUrl={matchedProfile?.profile.avatarUrl ?? null}
+              className="relative z-10 mt-0.5 shrink-0 ring-2 ring-card"
+              displayName={authorLabel}
+              size="md"
+            />
+            <div className="min-w-0 flex-1 space-y-2">
+              <div className="flex min-w-0 items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="min-w-0 text-sm leading-5 text-muted-foreground">
+                    <span className="font-semibold text-foreground">
+                      {authorLabel}
+                    </span>{" "}
+                    pushed a commit
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground/80">
+                    {authorSubtitle} · {compactDate(commit.timestamp)}
+                    {matchingContributor?.commitCount
+                      ? ` · ${pluralize(matchingContributor.commitCount, "commit")}`
+                      : ""}
+                  </p>
+                </div>
+                <code className="shrink-0 rounded-md border border-border/50 bg-background/55 px-2 py-1 text-xs text-muted-foreground transition-colors group-hover/feed-item:text-foreground">
+                  {commit.shortHash}
+                </code>
+              </div>
+              <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-2">
+                <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
+                  {commit.subject}
+                </p>
+              </div>
+            </div>
+          </article>
+        );
+      })}
     </div>
   );
 }
@@ -523,6 +592,8 @@ function WorkspaceTabs({
         <ActivityPanel
           error={snapshotError}
           isLoading={snapshotLoading}
+          profiles={profiles}
+          repoContributors={repoContributors}
           snapshot={snapshot}
         />
       </TabsContent>

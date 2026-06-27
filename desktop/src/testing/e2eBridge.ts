@@ -6605,6 +6605,60 @@ export function maybeInstallE2eTauriMocks() {
             timestamp: Math.floor(Date.now() / 1000) - 600,
             subject: "Add Trello board workflow details",
           },
+          commits: [
+            {
+              hash: "0123456789abcdef0123456789abcdef01234567",
+              short_hash: "0123456",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 600,
+              subject: "Add Trello board workflow details",
+            },
+            {
+              hash: "123456789abcdef0123456789abcdef012345678",
+              short_hash: "1234567",
+              author_name: "Thomas P",
+              author_email: "thomasp@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 1_800,
+              subject: "Point project repository details at active branch",
+            },
+            {
+              hash: "23456789abcdef0123456789abcdef0123456789",
+              short_hash: "2345678",
+              author_name: "Brain",
+              author_email: "brain@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 3_600,
+              subject: "Make project repository-first",
+            },
+            {
+              hash: "3456789abcdef0123456789abcdef0123456789a",
+              short_hash: "3456789",
+              author_name: "Git Importer",
+              author_email: "git-importer@example.com",
+              timestamp: Math.floor(Date.now() / 1000) - 7_200,
+              subject: "Merge remote project history into local workspace",
+            },
+          ],
+          contributors: [
+            {
+              name: "Brain",
+              email: "brain@example.com",
+              commit_count: 8,
+              last_commit_at: Math.floor(Date.now() / 1000) - 600,
+            },
+            {
+              name: "Thomas P",
+              email: "thomasp@example.com",
+              commit_count: 3,
+              last_commit_at: Math.floor(Date.now() / 1000) - 1_800,
+            },
+            {
+              name: "Git Importer",
+              email: "git-importer@example.com",
+              commit_count: 1,
+              last_commit_at: Math.floor(Date.now() / 1000) - 7_200,
+            },
+          ],
           files: [
             {
               path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
