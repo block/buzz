@@ -142,16 +142,18 @@ normalized away the violation. The checker assumes you *did not*.
 |------|--------------|
 | `crates/buzz-conformance/src/lib.rs` | schema + `Tracer` trait |
 | `crates/buzz-conformance/src/transitions.rs` | spec `Next` re-implementation |
-| `crates/buzz-conformance/src/checker.rs` | replay engine: `IllegalTransition` / `StateMismatch` / `CoverageBreach` |
+| `crates/buzz-conformance/src/checker.rs` | replay engine: `IllegalTransition` / `StateMismatch` / `NonInterference` / `CoverageBreach` |
 
 ## Failure modes — what makes the gate bite
 
 `check_trace` returns `Err(CheckError)` on any of:
 
 - **`IllegalTransition`** — the action is not permitted from the
-  current model state (e.g. `WriteInsert` to a channel whose community
-  isn't `resolved_community`).
-- **`StateMismatch`** — `row_communities` includes a label other than
+  current model state (e.g. `AuthCheck { verdict: Allow, claimed != resolved }`
+  — M2/M8 territory).
+- **`StateMismatch`** — `state_after` disagrees with the bootstrapped
+  model (resolved community / bound host / actor reassigned mid-request).
+- **`NonInterference`** — `row_communities` includes a label other than
   `resolved_community` (`Inv_NonInterference` / `Inv_ReadConfinement`).
 - **`CoverageBreach`** — an `ImplBug` step was recorded, or a
   scenario-required action never appeared, or the trace was empty.

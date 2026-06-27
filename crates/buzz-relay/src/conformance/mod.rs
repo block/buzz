@@ -226,3 +226,97 @@ pub fn sanitized_reason_for(err: &crate::handlers::ingest::IngestError) -> Sanit
         E::Internal(_) => SanitizedReason::ServerError,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coverage-breach self-test for the [`EmitGuard`].
+    //!
+    //! The skill's "coverage breach" mode is the one that makes the
+    //! whole gate non-decorative: a critical seam exiting without
+    //! recording any trace step MUST surface as a failure. This test
+    //! proves the mechanism — drop a guard without recording on the
+    //! returned counting tracer, observe the synthetic `ImplBug` step
+    //! land on the inner tracer.
+
+    use super::*;
+    use std::sync::Mutex;
+
+    /// In-memory tracer that collects every step it sees. Used to
+    /// observe the `ImplBug` step the `EmitGuard` Drop emits.
+    #[derive(Debug, Default)]
+    struct VecTracer {
+        steps: Mutex<Vec<TraceStep>>,
+    }
+
+    impl Tracer for VecTracer {
+        fn record(&self, step: TraceStep) {
+            self.steps.lock().expect("vec tracer mutex").push(step);
+        }
+    }
+
+    fn dummy_state() -> AbstractState {
+        AbstractState {
+            resolved_community: CommunityLabel::from_uuid(Uuid::from_u128(0xA)),
+            bound_host: HostLabel("test.local".to_string()),
+            actor: ActorLabel("0123456789abcdef".to_string()),
+        }
+    }
+
+    #[test]
+    fn emit_guard_drop_is_silent_when_an_emit_reached_the_tracer() {
+        // Hold a typed handle to the VecTracer alongside the trait-
+        // object Arc so we can inspect what was recorded.
+        let typed = Arc::new(VecTracer::default());
+        let inner: Arc<dyn Tracer> = typed.clone();
+
+        {
+            let (guard, counting) = EmitGuard::arm(inner, dummy_state(), "should_not_fire");
+            // Record one normal step through the counting wrapper.
+            counting.record(TraceStep::new(
+                TraceAction::SanitizedError {
+                    reason: SanitizedReason::Invalid,
+                },
+                dummy_state(),
+            ));
+            drop(guard);
+        }
+
+        let steps = typed.steps.lock().expect("vec tracer mutex");
+        assert_eq!(
+            steps.len(),
+            1,
+            "exactly one step should be recorded — the SanitizedError, no ImplBug from Drop"
+        );
+        assert!(
+            !matches!(steps[0].action, TraceAction::ImplBug { .. }),
+            "Drop must NOT emit ImplBug when an emit reached the tracer"
+        );
+    }
+
+    #[test]
+    fn emit_guard_drop_records_exactly_one_impl_bug_when_no_emit() {
+        // Same shape as the first test but using a typed handle that
+        // actually lets us inspect the recorded steps.
+        let typed = Arc::new(VecTracer::default());
+        let inner: Arc<dyn Tracer> = typed.clone();
+
+        {
+            let (guard, _counting) =
+                EmitGuard::arm(inner, dummy_state(), "ingest_exited_without_trace");
+            // No emit on `counting` — guard Drop fires the breach.
+            drop(guard);
+        }
+
+        let steps = typed.steps.lock().expect("vec tracer mutex");
+        assert_eq!(steps.len(), 1, "Drop must record exactly one ImplBug step");
+        match &steps[0].action {
+            TraceAction::ImplBug { kind } => {
+                assert_eq!(
+                    kind, "ingest_exited_without_trace",
+                    "ImplBug kind must carry the seam name passed to `EmitGuard::arm`"
+                );
+            }
+            other => panic!("expected ImplBug action, got {other:?}"),
+        }
+    }
+}

@@ -84,22 +84,42 @@ run with `NoopTracer`, you get no signal.
 
 ## CI command
 
-```sh
-# Run the relay against the conformance gate.
-# The harness:
-#   1. Boots the relay with a `JsonlTracer` writing to a temp file.
-#   2. Drives the integration test suite that exercises the ingest/read seam.
-#   3. Replays each captured trace through `buzz_conformance::check_trace`.
-#   4. Fails CI on the first `IllegalTransition`, `StateMismatch`, or
-#      `CoverageBreach`.
+The gate's bite is enforced by three test surfaces that MUST stay green
+on every PR:
 
-cargo test -p buzz-conformance         # unit tests on the schema + checker (9/9)
-cargo test -p buzz-relay conformance   # emitter wiring tests (currently in-suite)
-# Integration replay harness:
-#   (to land with the fixture commit — see thread)
+```sh
+# 1. Schema + checker unit tests (9 tests). Cover the transition rules
+#    directly — every `TraceAction` variant has a passing case and at
+#    least one mutation-class bite case.
+cargo test -p buzz-conformance --lib
+
+# 2. Replay fixtures (5 tests). Three JSONL traces in
+#    crates/buzz-conformance/tests/fixtures/ are committed for reviewer
+#    visibility. The test reconstructs each from typed Rust, asserts
+#    the committed file matches byte-for-byte (so a schema-change PR
+#    must update the fixtures), then replays through `check_trace`:
+#
+#    - good.jsonl                       → Ok(())
+#    - bad_host_channel_mismatch.jsonl  → IllegalTransition
+#    - bad_coverage_breach.jsonl        → CoverageBreach
+#
+#    To intentionally refresh fixtures after a schema bump:
+#    BUZZ_CONFORMANCE_UPDATE=1 cargo test -p buzz-conformance --test replay_fixtures
+cargo test -p buzz-conformance --test replay_fixtures
+
+# 3. EmitGuard coverage-breach self-test (2 tests in
+#    crates/buzz-relay/src/conformance/mod.rs). Proves the Drop guard
+#    records `ImplBug` when no emit reaches the tracer, and stays
+#    silent when an emit did. The seam-name string flows through.
+cargo test -p buzz-relay --lib conformance::
+
+# Together: 9 + 5 + 2 = 16 tests; mutate-bite proven for the NI,
+# IllegalTransition, and CoverageBreach gates. The integration replay
+# (live relay → JsonlTracer → check_trace) lands with the read-seam
+# patch onto Max's req.rs work.
 ```
 
-The unit-test gate (`-p buzz-conformance`) is the minimum bar; the
-integration replay (driven by the to-be-landed fixture set) is the
-ratchet that makes the gate bite in CI for real production-shaped
-traces.
+The integration replay is the **next** ratchet — once the read-seam
+emitter lands on Eva's integration branch the harness will drive the
+existing e2e suite with a `JsonlTracer` per request and assert
+`check_trace` for every captured trace.
