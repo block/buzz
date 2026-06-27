@@ -342,12 +342,14 @@ function ChannelTasksView({
       .filter((marker) => !channelId || marker.channelId === channelId)
       .map((marker) => {
         const message = messageById.get(marker.agentReplyId) ?? null;
-        const threadMessage =
+        const resolvedThreadMessage =
           messageById.get(marker.threadRootMessageId ?? "") ??
           messageById.get(marker.threadRootId) ??
           messageById.get(marker.parentMessageId ?? "") ??
-          message ??
           null;
+        const threadMessage =
+          resolvedThreadMessage ??
+          (marker.threadRootId === marker.agentReplyId ? message : null);
         return {
           marker,
           message,
