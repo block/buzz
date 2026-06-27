@@ -76,25 +76,343 @@ mod row_zero_host_binding {
 
     /// Obligation: an unknown/unmapped host fails closed with a *generic*
     /// rejection and never falls through to a default tenant.
+    ///
+    /// This is the wire complement promised by [`super::nip11_relay_info`]:
+    /// NIP-11 is deliberately host-agnostic and serves the *identical* static
+    /// document to every host (mapped or not) so a 404-vs-200 status difference
+    /// cannot become an enumeration oracle on the `nostr+json` path. The
+    /// fail-closed binding instead lives on the **WebSocket-upgrade / non-
+    /// `nostr+json`** door (`router.rs::nip11_or_ws_handler` →
+    /// `tenant::bind_community`), and *that* is what this row asserts.
+    ///
+    /// Three properties, all wire-observable:
+    ///   1. **Fails closed** — an unmapped host does not fall through to a
+    ///      default tenant. A non-`nostr+json` request to the unknown host is
+    ///      rejected `404`, where a mapped host is *not* 404 (it serves the SPA
+    ///      / NIP-11 fallback, or upgrades to WS). The status *difference*
+    ///      between mapped and unmapped on this door is the proof the unmapped
+    ///      host got no tenant. NOTE: this mapped-200/unmapped-404 status
+    ///      *difference* is an intentional, door-scoped distinguisher — it
+    ///      exists on the non-`nostr+json` (SPA/WS) door only, where a 404 is
+    ///      how an unbound host is signalled. The `nostr+json` door
+    ///      deliberately does *not* expose it (see `nip11_relay_info`), which is
+    ///      why an unauthenticated NIP-11 probe cannot enumerate communities. A
+    ///      future reader must not "fix" this into a 404-everywhere: that would
+    ///      break the SPA fallback that legitimately serves mapped hosts here.
+    ///   2. **Generic** — the rejection body is the fixed string the relay uses
+    ///      for *both* "unmapped" and "lookup error" (`router.rs:181`); it must
+    ///      not echo the host or otherwise distinguish the failure mode, so an
+    ///      unauthenticated caller cannot probe which communities exist.
+    ///   3. **The WS door fails too** — a raw WebSocket handshake to the unknown
+    ///      host is rejected at the upgrade (before any frame is read), not
+    ///      accepted-then-bound-to-a-default.
+    ///
+    /// Mutate-bite (would-it-fail-without-the-fix): make `bind_community` fall
+    /// through to a default tenant on the unmapped host (e.g. `Err(_) =>` returns
+    /// a real `TenantContext` instead of the 404) → the unmapped host stops
+    /// 404'ing and the status-difference / WS-rejected assertions go red.
     #[tokio::test]
     #[ignore]
     async fn unmapped_host_fails_closed_generically() {
-        pending_lane(
-            "relay-wiring",
-            "unmapped host → generic rejection, no default tenant, no host echo",
+        // (2) Generic body + (1) fails-closed status, both on the non-
+        // `nostr+json` HTTP door where the body is fully observable.
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("build reqwest client");
+
+        // Default Accept (NOT `application/nostr+json`): a mapped host serves
+        // the SPA / NIP-11 fallback (non-404); an unmapped host fails closed.
+        let unknown_resp = client
+            .get(url_unknown())
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET {} failed: {e}", url_unknown()));
+        let unknown_status = unknown_resp.status();
+        let unknown_body = unknown_resp.text().await.expect("read unmapped body");
+
+        let mapped_resp = client
+            .get(url_a())
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET {} failed: {e}", url_a()));
+        let mapped_status = mapped_resp.status();
+
+        // (1) Fails closed: unmapped is 404, mapped is not. The *difference* is
+        // the proof — the unmapped host bound to no tenant, while the mapped one
+        // proceeded past the bind. If an unmapped host silently fell through to a
+        // default tenant, it would return the same non-404 as the mapped host.
+        assert_eq!(
+            unknown_status,
+            reqwest::StatusCode::NOT_FOUND,
+            "unmapped host must fail closed with 404, not fall through to a \
+             default tenant (got {unknown_status})"
+        );
+        assert_ne!(
+            mapped_status,
+            reqwest::StatusCode::NOT_FOUND,
+            "a mapped host must NOT 404 on this door — otherwise the 404 above \
+             is not evidence the unmapped host was singled out as unbound"
+        );
+
+        // (2) Generic: the body must not echo the host or any tenant-
+        // distinguishing fragment. The host authority `unknown.localhost[:port]`
+        // (and the bare label) must be absent, so the rejection cannot be used
+        // to confirm a host the relay does not serve.
+        let unknown_url = url_unknown();
+        let unknown_authority = unknown_url
+            .strip_prefix("http://")
+            .or_else(|| unknown_url.strip_prefix("https://"))
+            .unwrap_or(&unknown_url);
+        assert!(
+            !unknown_body.contains(unknown_authority),
+            "unmapped-host rejection echoed the host authority \
+             {unknown_authority:?} in its body: {unknown_body:?} — the \
+             rejection must be generic and reveal nothing host-specific"
+        );
+        assert!(
+            !unknown_body.contains("unknown.localhost"),
+            "unmapped-host rejection echoed the host label in its body: \
+             {unknown_body:?} — the rejection must be generic"
+        );
+
+        // (3) The WS-upgrade door fails closed too: a raw WebSocket handshake to
+        // the unknown host is rejected AT the upgrade, never accepted and then
+        // bound to a default tenant. `bind_community` runs before
+        // `WebSocketUpgrade::from_request`, so the 404 is returned in place of
+        // the `101 Switching Protocols` and the handshake errors out.
+        let ws_url = url_unknown().replacen("http://", "ws://", 1);
+        let ws_result = tokio_tungstenite::connect_async(&ws_url).await;
+        assert!(
+            ws_result.is_err(),
+            "WebSocket upgrade to an unmapped host must be rejected at the \
+             handshake (fail-closed before any frame), but it succeeded — the \
+             connection bound to a tenant it should not have"
         );
     }
 
     /// Obligation: a client-supplied `h` tag / token community stamp can never
     /// override the host-derived community; a disagreeing stamp is rejected.
+    ///
+    /// # What this row asserts, and how it is *distinct* from its siblings
+    ///
+    /// Per `NOSTR.md`: "The Nostr wire format does not grow a tenant tag.
+    /// Client-supplied `#h` tags still name channels/groups and are checked
+    /// against the host-derived community." So the only client-supplied
+    /// community-ish signal on the EVENT wire is the `#h` channel tag, and the
+    /// row-zero contract is that it is resolved *within* the host-derived
+    /// community (`tenant.community()`), never honored as a cross-community
+    /// override.
+    ///
+    /// This is the **override-attempt** scenario, deliberately partitioned from
+    /// two siblings that share the same scope branch but assert different
+    /// properties of it (see channel: `buzz-relay-rewrite`, 2026-06-27):
+    ///
+    ///   * [`super::channels_membership::same_channel_uuid_in_two_communities_is_isolated`]
+    ///     (Mari, `buzz-db`) asserts **coexistence**: a channel UUID that exists
+    ///     in *both* A and B; a post in A's instance never touches B's. Two
+    ///     legitimate channels, non-interference.
+    ///   * [`super::api_tokens_nip98_replay`] / Sami's
+    ///     `verify_nip42_rejects_event_signed_for_wrong_communitys_host`
+    ///     (`nip42_host_binding_live.rs`) assert the **AUTH `relay` tag** and
+    ///     **token / NIP-98 `u`-host** override signals on their own paths.
+    ///
+    /// row_zero (b) asserts the **`#h` override-attempt**: a channel that exists
+    /// *only in B*; an A connection `#h`-tagging it is **rejected** — the host
+    /// binding wins over the claim. Sibling-not-replacement: this shares the
+    /// `ingest::check_channel_membership` → `is_member_cached(tenant.community(),
+    /// ch_id)` scope branch with Mari's row, but bites the *override* property,
+    /// not coexistence.
+    ///
+    /// # Why the channel is `visibility=open` (isolating override from membership)
+    ///
+    /// The B channel is created **open**, so in B itself a non-member can post to
+    /// it. That is load-bearing: it means the A-connection post can fail for
+    /// **exactly one** reason — the channel does not exist in A's community
+    /// (`get_channel(A, b_ch_id)` is `None` → not open → not member). If the
+    /// channel were restricted, the rejection would be the ordinary
+    /// "not a member" gate and would *not* prove the override property. The
+    /// positive control (the same post succeeds against B) confirms the channel
+    /// is genuinely postable, so the A-side rejection is the override-rejection
+    /// and nothing else — the red comes from the override assertion, not a setup
+    /// or shared-membership failure.
+    ///
+    /// Mutate-bite (would-it-fail-without-the-fix): make
+    /// `ingest::check_channel_membership` resolve the channel against the
+    /// *claimed* `#h` community instead of `tenant.community()` (honor the
+    /// override) → the A-connection post of B's open channel is accepted and
+    /// this row's "A must reject" assertion goes red.
+    ///
+    /// # Bite-specificity: the rejection is pinned to the override branch
+    ///
+    /// "A rejected" alone is not enough — `bind_community` (404), bridge-auth
+    /// (403), NIP-98 replay, relay-membership (403), and JSON parse (400) all
+    /// run *before* the channel-scope branch, so any of them could red this row
+    /// while the override path was never reached. To rule that out, the
+    /// override assertion below also pins the reason string
+    /// `"restricted: not a channel member"` — the exact
+    /// `IngestError::Rejected` the override path emits. That makes the red mean
+    /// "A rejected *because* the host-derived community refused the `#h` claim,"
+    /// not merely "A rejected." (Dawn + Mari converged on this independently
+    /// from the sanitization and channels-membership sides, 2026-06-27.)
     #[tokio::test]
     #[ignore]
     async fn client_supplied_community_cannot_override_host() {
-        pending_lane(
-            "relay-wiring",
-            "token/h-tag community disagreeing with resolve_host(host) → reject",
+        use nostr::Keys;
+
+        let keys = Keys::generate();
+
+        // Create an OPEN channel that lives ONLY in community B (host B).
+        let channel = create_open_channel(&url_b(), &keys).await;
+
+        // Positive control: the channel is genuinely postable in B — a kind:9
+        // message to B's host succeeds. This proves the A-side rejection below
+        // is the cross-community override-rejection, not a broken/unpostable
+        // channel or a membership gate.
+        let (status_b, body_b) =
+            post_kind9(&url_b(), &keys, &channel, "row-zero-b: legit post in B").await;
+        assert!(
+            status_b.is_success() && accepted(&body_b),
+            "control failed: kind:9 to B's own open channel must be accepted \
+             (status {status_b}, body {body_b}) — without this the A-side \
+             rejection does not isolate the override property"
+        );
+
+        // The override attempt: on an A connection (host A → community A), post a
+        // kind:9 `#h`-tagging the channel UUID that exists only in B. The
+        // client-supplied `#h` community signal disagrees with
+        // `resolve_host(A)`; row zero requires the host to win, so A must reject.
+        let (status_a, body_a) = post_kind9(
+            &url_a(),
+            &keys,
+            &channel,
+            "row-zero-b: override attempt from A",
+        )
+        .await;
+
+        // The override assertion itself: A rejects. `get_channel(A, b_ch_id)`
+        // finds nothing in A's community, so the open-channel bypass cannot
+        // apply and the host-resolved community refuses the claim. (A 2xx +
+        // accepted:true here would mean A honored the B `#h` claim — the exact
+        // override this row forbids.)
+        assert!(
+            !status_a.is_success() || !accepted(&body_a),
+            "row zero violated: an A connection posting to a channel that exists \
+             only in community B was ACCEPTED (status {status_a}, body {body_a}) \
+             — the client-supplied `#h` community overrode the host-derived \
+             community"
+        );
+
+        // Bite-specificity: the rejection above must come from the
+        // channel-scope/override branch, not an incidental earlier gate
+        // (`bind_community` 404, bridge-auth 403, NIP-98 replay, relay
+        // membership 403, JSON parse 400) that would red this row while the
+        // override path was never reached. The override path emits exactly
+        // `IngestError::Rejected("restricted: not a channel member")`:
+        // `get_channel(A, b_ch_id)` returns None against A's community, the
+        // open-channel bypass cannot apply, and the host-resolved community
+        // refuses the claim. Pinning the reason string converts "A rejected
+        // for *some* reason" into "A rejected *because the host-derived
+        // community refused the `#h` claim*" — the property this row exists to
+        // prove. (Two cold reviewers, Dawn + Mari, converged on this
+        // independently from the sanitization and channels-membership sides.)
+        assert!(
+            body_a.contains("restricted: not a channel member"),
+            "row zero violated: A rejected, but not via the channel-scope \
+             override branch — body {body_a:?} does not carry the \
+             \"restricted: not a channel member\" reason, so the red could be \
+             an incidental earlier gate (auth/parse/relay-membership) rather \
+             than the host-binding refusing the client-supplied `#h` claim"
+        );
+
+        // And the rejection must not leak B's existence: the generic
+        // channel-scope rejection ("restricted: not a channel member") reveals
+        // nothing about whether the channel exists elsewhere. The B channel UUID
+        // appearing in A's rejection body would itself be a cross-community
+        // existence oracle.
+        assert!(
+            !body_a.contains(&channel),
+            "A's rejection echoed the B-only channel UUID {channel:?} in its \
+             body: {body_a:?} — the rejection must not confirm cross-community \
+             existence"
         );
     }
+}
+
+/// Create an `open`-visibility channel (kind:9007) in the community bound to
+/// `base_url`'s host, via the NIP-98 HTTP bridge (`POST /events`). Returns the
+/// channel UUID. The `Host` header is implied by `base_url`, so the relay
+/// derives the community from the host — the channel lands in exactly that
+/// community and no other.
+async fn create_open_channel(base_url: &str, keys: &nostr::Keys) -> String {
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let channel_uuid = uuid::Uuid::new_v4().to_string();
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid]).expect("h tag"),
+            Tag::parse(["name", &format!("row-zero-{channel_uuid}")]).expect("name tag"),
+            Tag::parse(["channel_type", "stream"]).expect("channel_type tag"),
+            Tag::parse(["visibility", "open"]).expect("visibility tag"),
+        ])
+        .sign_with_keys(keys)
+        .expect("sign create-channel event");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/events"))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).expect("serialize event"))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("create-channel POST to {base_url} failed: {e}"));
+    let status = resp.status();
+    let body = resp.text().await.expect("read create-channel body");
+    assert!(
+        status.is_success() && body.contains("\"accepted\":true"),
+        "create-channel in {base_url} must succeed (status {status}, body {body})"
+    );
+
+    channel_uuid
+}
+
+/// Post a kind:9 group message `#h`-tagging `channel` to the community bound to
+/// `base_url`'s host. Returns `(status, body)` so callers can assert on the
+/// wire-observable accept/reject. The relay derives the community from the
+/// `Host` (implied by `base_url`); `channel` is the client-supplied `#h` claim.
+async fn post_kind9(
+    base_url: &str,
+    keys: &nostr::Keys,
+    channel: &str,
+    content: &str,
+) -> (reqwest::StatusCode, String) {
+    use nostr::{EventBuilder, Kind, Tag};
+
+    let event = EventBuilder::new(Kind::Custom(9), content)
+        .tags(vec![Tag::parse(["h", channel]).expect("h tag")])
+        .sign_with_keys(keys)
+        .expect("sign kind:9 event");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/events"))
+        .header("X-Pubkey", keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).expect("serialize event"))
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("kind:9 POST to {base_url} failed: {e}"));
+    let status = resp.status();
+    let body = resp.text().await.expect("read kind:9 body");
+    (status, body)
+}
+
+/// Whether a `POST /events` JSON body reports the event as accepted.
+fn accepted(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("accepted").and_then(|a| a.as_bool()))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +521,8 @@ mod nip11_relay_info {
              a 404 — a status difference between mapped and unmapped hosts would \
              itself be a community-enumeration oracle"
         );
-        let json_unknown: serde_json::Value = serde_json::from_str(&body_unknown)
-            .expect("unmapped-host NIP-11 is valid JSON");
+        let json_unknown: serde_json::Value =
+            serde_json::from_str(&body_unknown).expect("unmapped-host NIP-11 is valid JSON");
         assert_eq!(
             json_a, json_unknown,
             "NIP-11 served to an unmapped host must be byte-identical to a mapped \
