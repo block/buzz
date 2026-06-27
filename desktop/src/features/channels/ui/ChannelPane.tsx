@@ -162,6 +162,7 @@ type ChannelPaneProps = {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  onThreadScrollTargetChange: (messageId: string | null) => void;
   onThreadScrollTargetResolved: () => void;
   onThreadPanelResizeStart: (
     event: React.PointerEvent<HTMLButtonElement>,
@@ -468,6 +469,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onSendMessage,
   onSendVideoReviewComment,
   onSendThreadReply,
+  onThreadScrollTargetChange,
   onThreadScrollTargetResolved,
   onThreadPanelResizeStart,
   onTargetReached,
@@ -732,13 +734,21 @@ export const ChannelPane = React.memo(function ChannelPane({
       onSurfaceTabChange?.("messages");
       if (marker.parentMessageId) {
         onOpenThread(threadMessage);
+        onSelectThreadReplyTarget(message);
+        onThreadScrollTargetChange(message.id);
         return;
       }
 
       onCloseThread();
       setTaskFocusMessageId(message.id);
     },
-    [onCloseThread, onOpenThread, onSurfaceTabChange],
+    [
+      onCloseThread,
+      onOpenThread,
+      onSelectThreadReplyTarget,
+      onSurfaceTabChange,
+      onThreadScrollTargetChange,
+    ],
   );
   const handleTimelineTargetReached = React.useCallback(
     (messageId: string) => {

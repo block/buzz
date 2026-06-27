@@ -20,7 +20,11 @@ import {
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { isAgentConversationLink } from "@/features/agents/agentConversationLink";
+import {
+  isAgentConversationLink,
+  parseAgentConversationLink,
+  type ParsedAgentConversationLink,
+} from "@/features/agents/agentConversationLink";
 import {
   isMessageLink,
   parseMessageLink,
@@ -205,6 +209,7 @@ type MarkdownRuntime = {
   imetaByUrl?: ImetaLookup;
   mentionPubkeysByName?: Record<string, string>;
   onOpenChannel: (channelId: string) => void;
+  onOpenAgentConversationLink: (link: ParsedAgentConversationLink) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
 };
 
@@ -1809,7 +1814,8 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
-      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
+      const { imetaByUrl, onOpenAgentConversationLink, onOpenMessageLink } =
+        runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -1873,6 +1879,25 @@ function createMarkdownComponents(
               {children}
             </a>
           );
+        }
+
+        if (isAgentConversationLink(href)) {
+          const parsed = parseAgentConversationLink(href);
+          if (parsed.ok) {
+            return (
+              <a
+                {...props}
+                className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
+                href={href}
+                onClick={(event) => {
+                  event.preventDefault();
+                  onOpenAgentConversationLink(parsed.value);
+                }}
+              >
+                {children}
+              </a>
+            );
+          }
         }
         // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
@@ -2214,12 +2239,21 @@ function MarkdownInner({
     },
     [goChannel],
   );
+  const onOpenAgentConversationLink = React.useCallback(
+    (link: ParsedAgentConversationLink) => {
+      void goChannel(link.channelId, {
+        taskReplyId: link.agentReplyId,
+      });
+    },
+    [goChannel],
+  );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
     imetaByUrl,
     mentionPubkeysByName,
     onOpenChannel,
+    onOpenAgentConversationLink,
     onOpenMessageLink,
   });
 
