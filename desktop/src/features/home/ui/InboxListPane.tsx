@@ -324,7 +324,7 @@ export function InboxListPane({
         showRightDivider && INBOX_PANE_RIGHT_DIVIDER_CLASS,
       )}
     >
-      <TopChromeInsetHeader flush>
+      <TopChromeInsetHeader flush transparent>
         <div className="px-5 py-2">
           <div className="flex min-h-9 w-full min-w-0 items-center justify-between gap-3">
             <Popover>
@@ -435,7 +435,7 @@ export function InboxListPane({
 
       {isReminders ? (
         <div
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className="-mt-13 flex min-h-0 flex-1 flex-col overflow-hidden pt-13"
           data-testid="home-inbox-reminders"
         >
           {reminderPubkey ? (
@@ -444,7 +444,7 @@ export function InboxListPane({
         </div>
       ) : (
         <div
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pt-13"
           data-testid="home-inbox-list"
           ref={scrollRef}
         >
