@@ -74,11 +74,18 @@ buzz messages vote --event <event-id> --direction up
 buzz canvas get --channel <uuid>
 buzz canvas set --channel <uuid> --content "# Welcome"
 
+# Agent Memory (NIP-AE)
+buzz mem ls
+buzz mem get <slug>
+buzz mem set <slug> "my-value"
+buzz mem patch <slug> < diff.patch
+buzz mem rm <slug>
+
 # Pipe to jq
 buzz channels list | jq '.[].name'
 ```
 
-## 54 Subcommands across 12 Groups
+## 60 Subcommands across 13 Groups
 
 | Group | Subcommand | Description |
 |-------|-----------|-------------|
@@ -136,6 +143,12 @@ buzz channels list | jq '.[].name'
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `mem` | `ls` | List non-tombstoned memories |
+| | `get` | Print memory value to stdout |
+| | `hash` | Print SHA-256 hex of memory value |
+| | `set` | Write a memory value (use `-` for stdin) |
+| | `patch` | Apply unified diff to memory value |
+| | `rm` | Publish a tombstone to delete memory |
 
 ## Architecture
 
