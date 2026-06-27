@@ -9,6 +9,7 @@ import type { TimelineMessage } from "@/features/messages/types";
  * rounding from the layout engine.
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
+const BOTTOM_SETTLE_FRAME_LIMIT = 8;
 
 type AnchorState =
   | { kind: "at-bottom" }
@@ -92,6 +93,13 @@ function isAtBottomNow(container: HTMLDivElement) {
   return (
     container.scrollHeight - container.clientHeight - container.scrollTop <=
     AT_BOTTOM_THRESHOLD_PX
+  );
+}
+
+function scrollElementToBottom(container: HTMLDivElement) {
+  container.scrollTop = Math.max(
+    0,
+    container.scrollHeight - container.clientHeight,
   );
 }
 
@@ -302,6 +310,8 @@ export function useAnchoredScroll({
   // on channel switch (the channelId reset effect clears it).
   const mountPinRafIdRef = React.useRef<number | null>(null);
   const settleClearRafIdRef = React.useRef<number | null>(null);
+  const bottomSettleRafIdRef = React.useRef<number | null>(null);
+  const bottomSettleFramesRef = React.useRef(0);
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
   // appends, we snap to bottom even if they had scrolled up to read history.
@@ -344,7 +354,48 @@ export function useAnchoredScroll({
       cancelAnimationFrame(settleClearRafIdRef.current);
       settleClearRafIdRef.current = null;
     }
+    if (bottomSettleRafIdRef.current !== null) {
+      cancelAnimationFrame(bottomSettleRafIdRef.current);
+      bottomSettleRafIdRef.current = null;
+    }
   }, [channelId]);
+
+  const scheduleBottomSettle = React.useCallback(
+    (frameLimit = BOTTOM_SETTLE_FRAME_LIMIT) => {
+      if (bottomSettleRafIdRef.current !== null) {
+        cancelAnimationFrame(bottomSettleRafIdRef.current);
+        bottomSettleRafIdRef.current = null;
+      }
+      bottomSettleFramesRef.current = frameLimit;
+
+      const tick = () => {
+        bottomSettleRafIdRef.current = requestAnimationFrame(() => {
+          bottomSettleRafIdRef.current = null;
+          const container = scrollContainerRef.current;
+          if (!container) return;
+          if (anchorRef.current.kind !== "at-bottom") {
+            settlingRef.current = false;
+            return;
+          }
+
+          scrollElementToBottom(container);
+          setIsAtBottom((prev) => (prev ? prev : true));
+          setNewMessageCount(0);
+
+          if (bottomSettleFramesRef.current <= 0) {
+            settlingRef.current = false;
+            return;
+          }
+
+          bottomSettleFramesRef.current -= 1;
+          tick();
+        });
+      };
+
+      tick();
+    },
+    [scrollContainerRef],
+  );
 
   const scrollToBottomImperative = React.useCallback(
     (behavior: ScrollBehavior = "auto") => {
@@ -362,11 +413,16 @@ export function useAnchoredScroll({
       // measurement grows `scrollHeight`. (An instant "auto" scroll completes
       // before any scroll event, so it needs no guard.)
       if (behavior === "smooth") settlingRef.current = true;
-      container.scrollTo({ top: container.scrollHeight, behavior });
+      if (behavior === "auto") {
+        scrollElementToBottom(container);
+        scheduleBottomSettle();
+      } else {
+        container.scrollTo({ top: container.scrollHeight, behavior });
+      }
       setIsAtBottom(true);
       setNewMessageCount(0);
     },
-    [scrollContainerRef],
+    [scheduleBottomSettle, scrollContainerRef],
   );
 
   // Arm a one-shot: the next append snaps to bottom regardless of where the
@@ -516,10 +572,8 @@ export function useAnchoredScroll({
               settlingRef.current = false;
               return;
             }
-            latestContainer.scrollTo({
-              top: latestContainer.scrollHeight,
-              behavior: "auto",
-            });
+            scrollElementToBottom(latestContainer);
+            scheduleBottomSettle();
           });
         }
       } else {
@@ -527,7 +581,8 @@ export function useAnchoredScroll({
           cancelAnimationFrame(settleClearRafIdRef.current);
           settleClearRafIdRef.current = null;
         }
-        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        scrollElementToBottom(container);
+        scheduleBottomSettle();
       }
       return;
     }
@@ -537,7 +592,7 @@ export function useAnchoredScroll({
     if (atBottom) {
       setNewMessageCount(0);
     }
-  }, [scrollContainerRef]);
+  }, [scheduleBottomSettle, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Anchor restoration: after every render, if the anchor was a message,
@@ -582,7 +637,9 @@ export function useAnchoredScroll({
         // rAF lets the current paint commit complete first.
         mountPinRafIdRef.current = requestAnimationFrame(() => {
           mountPinRafIdRef.current = null;
-          if (!pinToBottomByIndexRef.current?.()) {
+          if (pinToBottomByIndexRef.current?.()) {
+            scheduleBottomSettle();
+          } else {
             scrollToBottomImperative("auto");
           }
         });
@@ -668,7 +725,9 @@ export function useAnchoredScroll({
     // message pulls the view down.
     if (newLatestArrived && forceBottomOnNextAppendRef.current) {
       forceBottomOnNextAppendRef.current = false;
-      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+      scrollElementToBottom(container);
+      settlingRef.current = true;
+      scheduleBottomSettle();
       anchorRef.current = { kind: "at-bottom" };
       setIsAtBottom(true);
       setNewMessageCount(0);
@@ -679,8 +738,9 @@ export function useAnchoredScroll({
     }
 
     if (anchor.kind === "at-bottom") {
-      // Stick to bottom. Use scrollTo to avoid relying on scroll anchoring.
-      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+      // Stick to bottom without relying on browser scroll anchoring.
+      scrollElementToBottom(container);
+      scheduleBottomSettle();
       if (newLatestArrived) setNewMessageCount(0);
     } else {
       // Anchored to a specific message. The shared helper finds it (with a
@@ -705,6 +765,7 @@ export function useAnchoredScroll({
     isLoading,
     messages,
     onTargetReached,
+    scheduleBottomSettle,
     scrollContainerRef,
     scrollToBottomImperative,
     scrollToMessageImperative,
@@ -752,7 +813,7 @@ export function useAnchoredScroll({
         // measure a frame or two late) without any `messages` change to drive
         // the layout effect, so this observer is the only thing that keeps the
         // view glued to the bottom as content settles.
-        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        scrollElementToBottom(container);
         return;
       }
       // Use the same restore primitive as the layout effect so the
@@ -831,6 +892,9 @@ export function useAnchoredScroll({
     return () => {
       if (highlightTimeoutRef.current !== null) {
         window.clearTimeout(highlightTimeoutRef.current);
+      }
+      if (bottomSettleRafIdRef.current !== null) {
+        cancelAnimationFrame(bottomSettleRafIdRef.current);
       }
     };
   }, []);
