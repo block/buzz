@@ -176,6 +176,7 @@ test("continued conversation marker parses summary metadata", () => {
 
 test("continued conversations persist across app restarts", () => {
   withMockLocalStorage(() => {
+    const workspaceScope = "wss://relay.example.com";
     const root = message({
       body: "Can you look at the Buzz data model?",
       createdAt: 1,
@@ -197,13 +198,18 @@ test("continued conversations persist across app restarts", () => {
       threadRootMessage: root,
     });
 
-    writePersistedAgentConversations("human", [conversation]);
-    const persisted = readPersistedAgentConversations("human");
+    writePersistedAgentConversations("human", workspaceScope, [conversation]);
+    const persisted = readPersistedAgentConversations("human", workspaceScope);
+    const otherWorkspace = readPersistedAgentConversations(
+      "human",
+      "wss://other.example.com",
+    );
 
     assert.equal(persisted.length, 1);
     assert.equal(persisted[0].id, conversation.id);
     assert.equal(persisted[0].channelId, "channel");
     assert.equal(persisted[0].agentReply.id, "agent-reply");
+    assert.equal(otherWorkspace.length, 0);
   });
 });
 

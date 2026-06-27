@@ -300,15 +300,16 @@ const MessageTimelineBase = React.forwardRef<
     liveSnapshot,
   });
   const isRenderPending = deferredSnapshot !== liveSnapshot;
+  const scrollRouteKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
   const scrollRestorationId = targetMessageId
-    ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
-    : `message-timeline:${channelId ?? "none"}`;
+    ? `message-timeline:${scrollRouteKey}:target:${targetMessageId}`
+    : `message-timeline:${scrollRouteKey}`;
   // Keep the scroll node's DOM lifetime scoped to a channel. TanStack Router's
   // scroll-restoration listener runs outside React and may write a saved
   // scrollTop into the current scroll element during navigation; reusing the
   // same node across channel routes can leave the newly-loaded message list
   // painted at a stale offset until the user's next scroll event forces layout.
-  const scrollContainerDomKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
+  const scrollContainerDomKey = scrollRouteKey;
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,

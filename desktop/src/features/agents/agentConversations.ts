@@ -85,12 +85,25 @@ export type AgentConversationRouteableParticipant = {
   pubkey: string;
 };
 
-export function hiddenAgentConversationsStorageKey(pubkey: string): string {
-  return `${HIDDEN_AGENT_CONVERSATIONS_STORAGE_PREFIX}:${pubkey}`;
+function normalizeAgentConversationStorageScope(
+  workspaceScope: string | null | undefined,
+): string {
+  const normalizedScope = workspaceScope?.trim().replace(/\/+$/, "");
+  return normalizedScope || "unknown-workspace";
 }
 
-export function agentConversationsStorageKey(pubkey: string): string {
-  return `${AGENT_CONVERSATIONS_STORAGE_PREFIX}:${pubkey}`;
+export function hiddenAgentConversationsStorageKey(
+  pubkey: string,
+  workspaceScope: string | null | undefined,
+): string {
+  return `${HIDDEN_AGENT_CONVERSATIONS_STORAGE_PREFIX}:${normalizeAgentConversationStorageScope(workspaceScope)}:${pubkey}`;
+}
+
+export function agentConversationsStorageKey(
+  pubkey: string,
+  workspaceScope: string | null | undefined,
+): string {
+  return `${AGENT_CONVERSATIONS_STORAGE_PREFIX}:${normalizeAgentConversationStorageScope(workspaceScope)}:${pubkey}`;
 }
 
 export function getAutoRoutedAgentConversationPubkeys(
@@ -133,10 +146,13 @@ export function buildAgentConversationMentionPubkeys({
   return merged;
 }
 
-export function readHiddenAgentConversationIds(pubkey: string): Set<string> {
+export function readHiddenAgentConversationIds(
+  pubkey: string,
+  workspaceScope: string | null | undefined,
+): Set<string> {
   try {
     const raw = window.localStorage.getItem(
-      hiddenAgentConversationsStorageKey(pubkey),
+      hiddenAgentConversationsStorageKey(pubkey, workspaceScope),
     );
     if (!raw) {
       return new Set();
@@ -157,11 +173,12 @@ export function readHiddenAgentConversationIds(pubkey: string): Set<string> {
 
 export function writeHiddenAgentConversationIds(
   pubkey: string,
+  workspaceScope: string | null | undefined,
   ids: ReadonlySet<string>,
 ): void {
   try {
     window.localStorage.setItem(
-      hiddenAgentConversationsStorageKey(pubkey),
+      hiddenAgentConversationsStorageKey(pubkey, workspaceScope),
       JSON.stringify([...ids]),
     );
   } catch {
@@ -291,10 +308,11 @@ function parseStoredAgentConversation(
 
 export function readPersistedAgentConversations(
   pubkey: string,
+  workspaceScope: string | null | undefined,
 ): AgentConversation[] {
   try {
     const raw = window.localStorage.getItem(
-      agentConversationsStorageKey(pubkey),
+      agentConversationsStorageKey(pubkey, workspaceScope),
     );
     if (!raw) {
       return [];
@@ -323,6 +341,7 @@ export function readPersistedAgentConversations(
 
 export function writePersistedAgentConversations(
   pubkey: string,
+  workspaceScope: string | null | undefined,
   conversations: readonly AgentConversation[],
 ): void {
   try {
@@ -335,7 +354,7 @@ export function writePersistedAgentConversations(
       .sort((left, right) => right.createdAt - left.createdAt)
       .slice(0, MAX_PERSISTED_AGENT_CONVERSATIONS);
     window.localStorage.setItem(
-      agentConversationsStorageKey(pubkey),
+      agentConversationsStorageKey(pubkey, workspaceScope),
       JSON.stringify(persisted),
     );
   } catch {
