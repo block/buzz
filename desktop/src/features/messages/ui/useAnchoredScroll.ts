@@ -301,6 +301,7 @@ export function useAnchoredScroll({
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
   const mountPinRafIdRef = React.useRef<number | null>(null);
+  const settleClearRafIdRef = React.useRef<number | null>(null);
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
   // appends, we snap to bottom even if they had scrolled up to read history.
@@ -338,6 +339,10 @@ export function useAnchoredScroll({
     if (mountPinRafIdRef.current !== null) {
       cancelAnimationFrame(mountPinRafIdRef.current);
       mountPinRafIdRef.current = null;
+    }
+    if (settleClearRafIdRef.current !== null) {
+      cancelAnimationFrame(settleClearRafIdRef.current);
+      settleClearRafIdRef.current = null;
     }
   }, [channelId]);
 
@@ -494,14 +499,37 @@ export function useAnchoredScroll({
     // bottom (the non-virtualized list had full height at pin time, so it never
     // produced this gap). While settling, keep the anchor at-bottom so the
     // resize observer's re-pin can finish chasing the floor; clear the window
-    // once a scroll event reads a genuine at-bottom. Scoped to the initial
-    // settle so post-settle user scroll-up re-evaluates the anchor normally.
+    // only after a stable frame reads a genuine at-bottom. Scoped to the
+    // initial settle so post-settle user scroll-up re-evaluates the anchor
+    // normally.
     if (settlingRef.current) {
+      anchorRef.current = { kind: "at-bottom" };
+      setIsAtBottom((prev) => (prev ? prev : true));
+      setNewMessageCount(0);
       if (isAtBottomNow(container)) {
-        settlingRef.current = false;
+        if (settleClearRafIdRef.current === null) {
+          settleClearRafIdRef.current = requestAnimationFrame(() => {
+            settleClearRafIdRef.current = null;
+            const latestContainer = scrollContainerRef.current;
+            if (!latestContainer) return;
+            if (isAtBottomNow(latestContainer)) {
+              settlingRef.current = false;
+              return;
+            }
+            latestContainer.scrollTo({
+              top: latestContainer.scrollHeight,
+              behavior: "auto",
+            });
+          });
+        }
       } else {
-        return;
+        if (settleClearRafIdRef.current !== null) {
+          cancelAnimationFrame(settleClearRafIdRef.current);
+          settleClearRafIdRef.current = null;
+        }
+        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       }
+      return;
     }
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
