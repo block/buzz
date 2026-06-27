@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   canOpenAgentConversationInChannel,
   getDmAutoRouteAgentPubkeys,
+  getThreadAutoRouteAgentPubkeys,
   mergeAutoRouteMentionPubkeys,
 } from "./ChannelPane.helpers.ts";
 
@@ -113,5 +114,51 @@ test("auto-routed mentions merge with explicit mentions without duplicates", () 
       mentionPubkeys: ["agent-one", "agent-two"],
     }),
     ["AGENT-ONE", "agent-two"],
+  );
+});
+
+test("thread composer auto-routes exactly one current human and one known agent", () => {
+  const knownAgentPubkeys = new Set(["agent-one", "agent-two"]);
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        { id: "root", pubkey: "human", tags: [["p", "agent-one"]] },
+        { id: "reply", pubkey: "agent-one", tags: [] },
+      ],
+    }),
+    ["agent-one"],
+  );
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        { id: "root", pubkey: "human", tags: [["p", "agent-one"]] },
+        { id: "reply", pubkey: "other-human", tags: [] },
+      ],
+    }),
+    [],
+  );
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        {
+          id: "root",
+          pubkey: "human",
+          tags: [
+            ["p", "agent-one"],
+            ["p", "agent-two"],
+          ],
+        },
+      ],
+    }),
+    [],
   );
 });

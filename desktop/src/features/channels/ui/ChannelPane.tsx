@@ -51,7 +51,9 @@ import {
   canOpenAgentConversationInChannel,
   getChannelIntroDescription,
   getChannelIntroKind,
+  getThreadAutoRouteAgentPubkeys,
   isWelcomeSetupSystemMessage,
+  mergeAutoRouteMentionPubkeys,
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
@@ -700,6 +702,25 @@ export const ChannelPane = React.memo(function ChannelPane({
       ...threadMessages.map((entry) => entry.message),
     ];
   }, [threadHeadMessage, threadMessages]);
+  const threadAutoRouteAgentPubkeys = React.useMemo(
+    () =>
+      getThreadAutoRouteAgentPubkeys({
+        currentPubkey,
+        knownAgentPubkeys,
+        messages: threadSourceMessages,
+      }),
+    [currentPubkey, knownAgentPubkeys, threadSourceMessages],
+  );
+  const handleSendThreadReply = React.useCallback(
+    (content: string, mentionPubkeys: string[], mediaTags?: string[][]) => {
+      const sendMentionPubkeys = mergeAutoRouteMentionPubkeys({
+        autoRouteAgentPubkeys: threadAutoRouteAgentPubkeys,
+        mentionPubkeys,
+      });
+      return onSendThreadReply(content, sendMentionPubkeys, mediaTags);
+    },
+    [onSendThreadReply, threadAutoRouteAgentPubkeys],
+  );
   const hiddenAgentConversationMessageIds = React.useMemo(() => {
     const hiddenIds = getHiddenAgentConversationMessageIds(
       baseVisibleMessages,
@@ -1076,7 +1097,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               onExpandReplies={onExpandThreadReplies}
               onOpenAgentConversation={handleOpenAgentConversation}
               onSelectReplyTarget={onSelectThreadReplyTarget}
-              onSend={onSendThreadReply}
+              onSend={handleSendThreadReply}
               onScrollTargetResolved={onThreadScrollTargetResolved}
               onToggleReaction={onToggleReaction}
               onUnfollowThread={onUnfollowThread}

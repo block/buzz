@@ -1,4 +1,5 @@
 import { isEphemeralChannel } from "@/features/channels/lib/ephemeralChannel";
+import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
@@ -118,6 +119,53 @@ export function getDmAutoRouteAgentPubkeys({
     ),
     knownAgentPubkeys,
   );
+}
+
+export function getThreadAutoRouteAgentPubkeys({
+  currentPubkey,
+  knownAgentPubkeys,
+  messages,
+}: {
+  currentPubkey?: string;
+  knownAgentPubkeys: ReadonlySet<string>;
+  messages: readonly TimelineMessage[];
+}) {
+  const agentPubkeys = new Map<string, string>();
+  const humanPubkeys = new Set<string>();
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+
+  const addAuthor = (pubkey?: string | null) => {
+    if (!pubkey) return;
+    const normalized = normalizePubkey(pubkey);
+    if (!normalized) return;
+    if (knownAgentPubkeys.has(normalized)) {
+      agentPubkeys.set(normalized, pubkey);
+      return;
+    }
+    humanPubkeys.add(normalized);
+  };
+
+  for (const message of messages) {
+    addAuthor(message.pubkey);
+  }
+
+  for (const pubkey of collectMessageMentionPubkeys([...messages])) {
+    const normalized = normalizePubkey(pubkey);
+    if (knownAgentPubkeys.has(normalized)) {
+      agentPubkeys.set(normalized, pubkey);
+    }
+  }
+
+  if (agentPubkeys.size !== 1 || humanPubkeys.size !== 1) {
+    return [];
+  }
+  if (normalizedCurrentPubkey && !humanPubkeys.has(normalizedCurrentPubkey)) {
+    return [];
+  }
+
+  return [...agentPubkeys.values()];
 }
 
 export function mergeAutoRouteMentionPubkeys({

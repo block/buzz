@@ -765,6 +765,7 @@ export function AgentConversationScreen({
       />
 
       <MessageTimeline
+        agentConversationMarkers={agentConversationMarkers}
         agentPubkeys={agentPubkeys}
         channelId={channel?.id ?? conversation.channelId}
         channelIntro={{
