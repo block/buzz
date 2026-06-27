@@ -10,6 +10,7 @@ import type { TimelineMessage } from "@/features/messages/types";
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
 const BOTTOM_SETTLE_FRAME_LIMIT = 8;
+const USER_SCROLL_SETTLE_CANCEL_WINDOW_MS = 250;
 
 type AnchorState =
   | { kind: "at-bottom" }
@@ -312,6 +313,7 @@ export function useAnchoredScroll({
   const settleClearRafIdRef = React.useRef<number | null>(null);
   const bottomSettleRafIdRef = React.useRef<number | null>(null);
   const bottomSettleFramesRef = React.useRef(0);
+  const userScrollIntentUntilRef = React.useRef(0);
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
   // appends, we snap to bottom even if they had scrolled up to read history.
@@ -323,6 +325,18 @@ export function useAnchoredScroll({
   // not state — the guard runs on a native scroll event, outside React's render
   // cycle.
   const settlingRef = React.useRef(false);
+
+  const cancelBottomSettle = React.useCallback(() => {
+    if (settleClearRafIdRef.current !== null) {
+      cancelAnimationFrame(settleClearRafIdRef.current);
+      settleClearRafIdRef.current = null;
+    }
+    if (bottomSettleRafIdRef.current !== null) {
+      cancelAnimationFrame(bottomSettleRafIdRef.current);
+      bottomSettleRafIdRef.current = null;
+    }
+    bottomSettleFramesRef.current = 0;
+  }, []);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -342,6 +356,7 @@ export function useAnchoredScroll({
     loadOlderRestoreInFlightRef.current = false;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
+    userScrollIntentUntilRef.current = 0;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
@@ -350,15 +365,15 @@ export function useAnchoredScroll({
       cancelAnimationFrame(mountPinRafIdRef.current);
       mountPinRafIdRef.current = null;
     }
-    if (settleClearRafIdRef.current !== null) {
-      cancelAnimationFrame(settleClearRafIdRef.current);
-      settleClearRafIdRef.current = null;
-    }
-    if (bottomSettleRafIdRef.current !== null) {
-      cancelAnimationFrame(bottomSettleRafIdRef.current);
-      bottomSettleRafIdRef.current = null;
-    }
+    cancelBottomSettle();
   }, [channelId]);
+
+  const pinToBottomNow = React.useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    if (pinToBottomByIndexRef.current?.()) return;
+    scrollElementToBottom(container);
+  }, [scrollContainerRef]);
 
   const scheduleBottomSettle = React.useCallback(
     (frameLimit = BOTTOM_SETTLE_FRAME_LIMIT) => {
@@ -378,7 +393,7 @@ export function useAnchoredScroll({
             return;
           }
 
-          scrollElementToBottom(container);
+          pinToBottomNow();
           setIsAtBottom((prev) => (prev ? prev : true));
           setNewMessageCount(0);
 
@@ -394,13 +409,14 @@ export function useAnchoredScroll({
 
       tick();
     },
-    [scrollContainerRef],
+    [pinToBottomNow, scrollContainerRef],
   );
 
   const scrollToBottomImperative = React.useCallback(
     (behavior: ScrollBehavior = "auto") => {
       const container = scrollContainerRef.current;
       if (!container) return;
+      userScrollIntentUntilRef.current = 0;
       anchorRef.current = { kind: "at-bottom" };
       // A smooth (animated) jump-to-latest is not atomic: the browser scrolls
       // over several frames, and each intermediate `scroll` event would drive
@@ -414,7 +430,7 @@ export function useAnchoredScroll({
       // before any scroll event, so it needs no guard.)
       if (behavior === "smooth") settlingRef.current = true;
       if (behavior === "auto") {
-        scrollElementToBottom(container);
+        pinToBottomNow();
         scheduleBottomSettle();
       } else {
         container.scrollTo({ top: container.scrollHeight, behavior });
@@ -422,7 +438,7 @@ export function useAnchoredScroll({
       setIsAtBottom(true);
       setNewMessageCount(0);
     },
-    [scheduleBottomSettle, scrollContainerRef],
+    [pinToBottomNow, scheduleBottomSettle, scrollContainerRef],
   );
 
   // Arm a one-shot: the next append snaps to bottom regardless of where the
@@ -537,7 +553,7 @@ export function useAnchoredScroll({
   // chases the last rows to the true floor. The loop reads this each frame to
   // detect the abandon and re-aim to the bottom instead.
   const getAnchorIsAtBottom = React.useCallback(
-    () => anchorRef.current.kind === "at-bottom",
+    () => anchorRef.current.kind === "at-bottom" || settlingRef.current,
     [],
   );
 
@@ -560,6 +576,20 @@ export function useAnchoredScroll({
     // initial settle so post-settle user scroll-up re-evaluates the anchor
     // normally.
     if (settlingRef.current) {
+      if (
+        !isAtBottomNow(container) &&
+        performance.now() <= userScrollIntentUntilRef.current
+      ) {
+        settlingRef.current = false;
+        cancelBottomSettle();
+        anchorRef.current = computeAnchor(container);
+        const atBottom = anchorRef.current.kind === "at-bottom";
+        setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+        if (atBottom) {
+          setNewMessageCount(0);
+        }
+        return;
+      }
       anchorRef.current = { kind: "at-bottom" };
       setIsAtBottom((prev) => (prev ? prev : true));
       setNewMessageCount(0);
@@ -573,7 +603,7 @@ export function useAnchoredScroll({
               settlingRef.current = false;
               return;
             }
-            scrollElementToBottom(latestContainer);
+            pinToBottomNow();
             scheduleBottomSettle();
           });
         }
@@ -582,7 +612,7 @@ export function useAnchoredScroll({
           cancelAnimationFrame(settleClearRafIdRef.current);
           settleClearRafIdRef.current = null;
         }
-        scrollElementToBottom(container);
+        pinToBottomNow();
         scheduleBottomSettle();
       }
       return;
@@ -593,7 +623,12 @@ export function useAnchoredScroll({
     if (atBottom) {
       setNewMessageCount(0);
     }
-  }, [scheduleBottomSettle, scrollContainerRef]);
+  }, [
+    cancelBottomSettle,
+    pinToBottomNow,
+    scheduleBottomSettle,
+    scrollContainerRef,
+  ]);
 
   // ---------------------------------------------------------------------------
   // Anchor restoration: after every render, if the anchor was a message,
@@ -702,18 +737,17 @@ export function useAnchoredScroll({
       return;
     }
     // A load-older prepend grows the list at the FRONT while the tail is
-    // unchanged. `useLoadOlderOnScroll` owns the prepend restore via its index
-    // anchor (the single `scrollTop` writer). If this restore effect also ran
-    // its anchored `scrollBy` on the same commit, two writers would fight over
-    // `scrollTop`. So cede the prepend to the index path: refresh the tracked
-    // refs and bail before the anchored branch. (Append and in-window reflow
-    // leave the front id unchanged, so they fall through as before.)
+    // unchanged. When the reader is anchored in history, `useLoadOlderOnScroll`
+    // owns the prepend restore via its index anchor (the single `scrollTop`
+    // writer). If the reader abandoned the fetch and is already back at bottom,
+    // fall through to the normal bottom-stick path so the prepend commit is
+    // pinned immediately instead of waiting for the restore loop to notice.
     const isPrepend =
       firstMessage !== undefined &&
       prevFirstId !== undefined &&
       firstMessage.id !== prevFirstId &&
       !newLatestArrived;
-    if (isPrepend) {
+    if (isPrepend && anchor.kind !== "at-bottom") {
       prevLastMessageIdRef.current = lastMessage?.id;
       prevFirstMessageIdRef.current = firstMessage.id;
       prevMessageCountRef.current = messages.length;
@@ -726,7 +760,7 @@ export function useAnchoredScroll({
     // message pulls the view down.
     if (newLatestArrived && forceBottomOnNextAppendRef.current) {
       forceBottomOnNextAppendRef.current = false;
-      scrollElementToBottom(container);
+      pinToBottomNow();
       settlingRef.current = true;
       scheduleBottomSettle();
       anchorRef.current = { kind: "at-bottom" };
@@ -740,7 +774,7 @@ export function useAnchoredScroll({
 
     if (anchor.kind === "at-bottom") {
       // Stick to bottom without relying on browser scroll anchoring.
-      scrollElementToBottom(container);
+      pinToBottomNow();
       scheduleBottomSettle();
       if (newLatestArrived) setNewMessageCount(0);
     } else {
@@ -766,6 +800,7 @@ export function useAnchoredScroll({
     isLoading,
     messages,
     onTargetReached,
+    pinToBottomNow,
     scheduleBottomSettle,
     scrollContainerRef,
     scrollToBottomImperative,
@@ -814,7 +849,7 @@ export function useAnchoredScroll({
         // measure a frame or two late) without any `messages` change to drive
         // the layout effect, so this observer is the only thing that keeps the
         // view glued to the bottom as content settles.
-        scrollElementToBottom(container);
+        pinToBottomNow();
         return;
       }
       // Use the same restore primitive as the layout effect so the
@@ -832,6 +867,28 @@ export function useAnchoredScroll({
     observer.observe(content);
     return () => observer.disconnect();
   }, [channelId, contentRef, scrollContainerRef]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId deliberately re-subscribes because the keyed scroll container remounts on channel switch.
+  React.useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    const markUserScrollIntent = () => {
+      userScrollIntentUntilRef.current =
+        performance.now() + USER_SCROLL_SETTLE_CANCEL_WINDOW_MS;
+    };
+
+    container.addEventListener("wheel", markUserScrollIntent, {
+      passive: true,
+    });
+    container.addEventListener("touchmove", markUserScrollIntent, {
+      passive: true,
+    });
+    return () => {
+      container.removeEventListener("wheel", markUserScrollIntent);
+      container.removeEventListener("touchmove", markUserScrollIntent);
+    };
+  }, [channelId, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from
