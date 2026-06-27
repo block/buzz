@@ -191,6 +191,12 @@ export function useManagedAgentActions() {
       if (!runtime) {
         throw new Error("No available runtime found for this agent.");
       }
+      if (isOverridden) {
+        throw new Error(
+          warnings[0] ??
+            "This agent's configured runtime is not available. Install the runtime or edit the agent before starting it.",
+        );
+      }
 
       const input: CreateManagedAgentInput = {
         name: persona.displayName,
@@ -206,7 +212,6 @@ export function useManagedAgentActions() {
         spawnAfterCreate: true,
         startOnAppLaunch: true,
         backend: { type: "local" },
-        harnessOverride: isOverridden,
       };
 
       const created = await createAgentMutation.mutateAsync(input);
