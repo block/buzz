@@ -675,3 +675,125 @@ async fn channel_less_only_excludes_per_channel_events() {
 
     teardown(pool, &schema).await;
 }
+
+/// Privacy regression gate: the storage layer MUST NOT make these kinds
+/// searchable. The migration's `search_tsv` generated column emits NULL
+/// for excluded kinds, so a `search_tsv @@ query` probe never matches.
+///
+/// Set kept in sync with the pre-rewrite skip in `handlers/event.rs:287-290`
+/// on `main`:
+///   - 1059  = `KIND_GIFT_WRAP`      (NIP-17 ciphertext)
+///   - 30300 = `KIND_EVENT_REMINDER` (in `AUTHOR_ONLY_KINDS`)
+///   - 30622 = `KIND_DM_VISIBILITY`  (per-viewer private hide state)
+///
+/// All four events are inserted with the same unique token in their content
+/// so a single search query exercises every kind in one round-trip. Only
+/// the kind:9 control must surface — the three excluded kinds must not.
+///
+/// Mutate-bite: drop the `CASE WHEN kind IN (…)` from the generated column
+/// (revert to `to_tsvector('simple', content)`) → all four events surface →
+/// restore.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn excluded_kinds_are_storage_level_unsearchable() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "privacy.example").await;
+    let token = "privacykinds_unique_marker_xyzzy";
+
+    // kind:9 control — MUST be searchable.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        9,
+        &format!("public chat — {token}"),
+        None,
+        1_700_000_000,
+    )
+    .await;
+
+    // kind:1059 gift wrap (NIP-17 ciphertext) — MUST NOT be searchable.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        1059,
+        &format!("gift wrap — {token}"),
+        None,
+        1_700_000_001,
+    )
+    .await;
+
+    // kind:30300 event reminder (AUTHOR_ONLY_KINDS) — MUST NOT be searchable.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        30300,
+        &format!("reminder — {token}"),
+        None,
+        1_700_000_002,
+    )
+    .await;
+
+    // kind:30622 DM visibility snapshot — MUST NOT be searchable.
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        rand_bytes32(),
+        30622,
+        &format!("dm visibility — {token}"),
+        None,
+        1_700_000_003,
+    )
+    .await;
+
+    let svc = SearchService::new(pool.clone());
+    let result = svc
+        .search(&SearchQuery {
+            community: c,
+            q: token.into(),
+            channel_scope: ChannelScope::Any,
+            kinds: None,
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+        })
+        .await
+        .expect("search ok");
+
+    let kinds: Vec<i32> = result.hits.iter().map(|h| h.kind).collect();
+
+    // Positive: kind:9 surfaces (control — proves the search index works at all).
+    assert!(
+        kinds.contains(&9),
+        "kind:9 control row MUST be searchable, got kinds={kinds:?}",
+    );
+
+    // Negative (load-bearing): each excluded kind MUST NOT surface.
+    for forbidden in [1059, 30300, 30622] {
+        assert!(
+            !kinds.contains(&forbidden),
+            "kind:{forbidden} MUST NOT be searchable — \
+             privacy regression in `search_tsv` generated column. kinds={kinds:?}",
+        );
+    }
+
+    // Tight bound: exactly one hit (the control). Catches any future
+    // weakening where some-but-not-all excluded kinds surface.
+    assert_eq!(
+        result.hits.len(),
+        1,
+        "expected exactly 1 hit (the kind:9 control), got {} (kinds={kinds:?})",
+        result.hits.len(),
+    );
+
+    teardown(pool, &schema).await;
+}

@@ -203,7 +203,23 @@ CREATE TABLE events (
     -- community-leading btree filters BitmapAnd-ed with the GIN probe, so the
     -- GIN index itself stays the minimal `GIN (search_tsv)` (Max's caveat:
     -- avoid btree_gin unless EXPLAIN proves it buys something).
-    search_tsv  TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
+    --
+    -- Privacy kind exclusions (parity with the pre-rewrite Typesense feed —
+    -- old relay's `handlers/event.rs:287-290` skip set):
+    --   1059   = KIND_GIFT_WRAP        (NIP-17 ciphertext)
+    --   30300  = KIND_EVENT_REMINDER   (AUTHOR_ONLY_KINDS — defense in depth)
+    --   30622  = KIND_DM_VISIBILITY    (per-viewer private hide state)
+    -- NULL tsvector never matches `@@`, so excluded rows are storage-level
+    -- unsearchable. Constants kept in `buzz_core::kind` (KIND_GIFT_WRAP,
+    -- KIND_EVENT_REMINDER, KIND_DM_VISIBILITY); inlined here because a sqlx
+    -- migration is frozen SQL and cannot import the Rust constant. If a new
+    -- privacy-sensitive kind is added there, update this list and add a
+    -- regression test in `buzz-search/tests/fts_integration.rs`.
+    search_tsv  TSVECTOR GENERATED ALWAYS AS (
+        CASE WHEN kind IN (1059, 30300, 30622) THEN NULL::tsvector
+             ELSE to_tsvector('simple', content)
+        END
+    ) STORED,
     sig         BYTEA NOT NULL,
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     channel_id  UUID,

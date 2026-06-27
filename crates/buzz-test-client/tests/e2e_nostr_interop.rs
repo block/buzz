@@ -971,6 +971,19 @@ async fn test_nip10_thread_reply_not_in_top_level() {
 #[tokio::test]
 #[ignore]
 async fn test_nip17_gift_wrap_not_searchable() {
+    // Privacy regression gate at the relay's actual NIP-50 search seam.
+    //
+    // Storage-level exclusion lives in the `events.search_tsv` generated
+    // column (migrations/0001_initial_schema.sql): a row whose `kind` is
+    // in the privacy skip-set yields a NULL tsvector and never matches
+    // `@@`. This test proves the property from the wire: REQ with a
+    // NIP-50 `search` filter returns the kind:9 control and does NOT
+    // return the kind:1059 gift wrap.
+    //
+    // The mutate-bite for the underlying property lives in
+    // `crates/buzz-search/tests/fts_integration.rs::
+    //  excluded_kinds_are_storage_level_unsearchable`
+    // (drops the CASE → all excluded kinds surface).
     let url = relay_url();
     let keys_a = Keys::generate();
     let keys_b = Keys::generate();
@@ -992,65 +1005,49 @@ async fn test_nip17_gift_wrap_not_searchable() {
     let ok = client.send_event(gift_wrap).await.expect("send gift wrap");
     assert!(ok.accepted, "relay rejected gift wrap: {}", ok.message);
 
-    // 2. Send kind:9 control message with the same content.
+    // 2. Send kind:9 control message containing the same unique token.
     let ok2 = client
         .send_text_message(&keys_a, &channel, &unique_token, 9)
         .await
         .expect("send kind:9");
     assert!(ok2.accepted, "relay rejected kind:9: {}", ok2.message);
 
-    client.disconnect().await.expect("disconnect");
+    // Small delay so the FTS column (generated, in-row) is visible to readers.
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Wait for async Typesense indexing.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // 3. NIP-50 search via the relay (no kind filter — we want to see what
+    //    surfaces). `h` tag scopes to our channel to keep the result set tight.
+    let sid = sub_id("nip17-not-searchable");
+    let filter = Filter::new()
+        .search(&unique_token)
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
 
-    // 3. Query Typesense DIRECTLY — bypasses all relay-level filtering.
-    let ts_url =
-        std::env::var("TYPESENSE_URL").unwrap_or_else(|_| "http://localhost:8108".to_string());
-    let ts_key = std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "buzz_dev_key".to_string());
-
-    let http = reqwest::Client::new();
-    let resp = http
-        .post(format!("{ts_url}/multi_search"))
-        .header("X-TYPESENSE-API-KEY", &ts_key)
-        .json(&serde_json::json!({
-            "searches": [{
-                "collection": "events",
-                "q": unique_token,
-                "query_by": "content",
-                "per_page": 10
-            }]
-        }))
-        .send()
+    client
+        .subscribe(&sid, vec![filter])
         .await
-        .expect("Typesense multi_search request");
+        .expect("subscribe");
 
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+
+    let kinds: Vec<u16> = events.iter().map(|e| e.kind.as_u16()).collect();
+
+    // Control: kind:9 IS searchable — proves the search path works at all.
     assert!(
-        resp.status().is_success(),
-        "Typesense returned {}",
-        resp.status()
-    );
-    let body: serde_json::Value = resp.json().await.expect("parse Typesense response");
-
-    let hits = body["results"][0]["hits"].as_array().expect("hits array");
-
-    // Control: kind:9 IS indexed.
-    let has_kind9 = hits
-        .iter()
-        .any(|h| h["document"]["kind"].as_i64() == Some(9));
-    assert!(
-        has_kind9,
-        "kind:9 control message not found in Typesense — indexing broken"
+        kinds.contains(&9),
+        "kind:9 control not returned by NIP-50 search — indexing broken. kinds={kinds:?}",
     );
 
-    // Assertion: kind:1059 is NOT indexed.
-    let has_kind1059 = hits
-        .iter()
-        .any(|h| h["document"]["kind"].as_i64() == Some(1059));
+    // Load-bearing: kind:1059 MUST NOT surface.
     assert!(
-        !has_kind1059,
-        "kind:1059 found in Typesense — gift wraps must NOT be indexed. hits: {hits:?}"
+        !kinds.contains(&1059),
+        "kind:1059 gift wrap surfaced via NIP-50 search — privacy regression in \
+         the `search_tsv` generated column. kinds={kinds:?}",
     );
+
+    client.disconnect().await.expect("disconnect");
 }
 
 /// Send 3 messages with varying relevance to a query, wait for indexing, then search.
