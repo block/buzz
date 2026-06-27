@@ -79,7 +79,7 @@ anyhow    = "1"
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
 
-# HTTP client (webhook delivery, Typesense indexing)
+# HTTP client (webhook delivery)
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # Cryptography

@@ -31,10 +31,6 @@ pub struct Config {
     pub database_url: String,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
-    /// Typesense search server URL.
-    pub typesense_url: String,
-    /// Typesense API key.
-    pub typesense_key: String,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Maximum number of concurrent WebSocket connections.
@@ -176,12 +172,6 @@ impl Config {
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
-
-        let typesense_url =
-            std::env::var("TYPESENSE_URL").unwrap_or_else(|_| "http://localhost:8108".to_string());
-
-        let typesense_key =
-            std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "buzz_dev_key".to_string());
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -400,8 +390,6 @@ impl Config {
             bind_addr,
             database_url,
             redis_url,
-            typesense_url,
-            typesense_key,
             relay_url,
             max_connections,
             max_concurrent_handlers,

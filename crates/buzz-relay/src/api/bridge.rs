@@ -773,7 +773,7 @@ pub async fn count_events(
 /// Decide whether a search hit should be returned to the caller.
 ///
 /// Mirrors the WS NIP-50 path's post-filter step in `handlers/req.rs`:
-/// Typesense receives only the kind/authors/time pushdown, so any other filter
+/// the FTS backend receives only the kind/authors/time pushdown, so any other filter
 /// constraint (`#p`, `#h`, `#e`, `#d`, `ids`, …) must be enforced here against
 /// the full stored event. Without this, an authorized engram search such as
 /// `{"kinds":[30174],"#p":[self]}` would leak text-matching envelopes whose
@@ -1571,7 +1571,7 @@ mod tests {
     /// Setup: two engram envelopes by different agents for different owners.
     /// An authorized search for `{kinds:[30174], #p:[owner_a]}` would be
     /// approved by the engram gate (owner_a is querying engrams addressed to
-    /// them). Typesense's pushdown only carries `kind:=[30174]`, so the
+    /// them). The FTS pushdown only carries `kind:=[30174]`, so the
     /// envelope for owner_b can come back as a text-match hit. The post-filter
     /// in `search_hit_accepted` must reject it.
     #[test]
@@ -1602,7 +1602,7 @@ mod tests {
     }
 
     /// `authors=[agent_a]` search must not return an envelope authored by agent_b,
-    /// even if Typesense's text match would otherwise surface it. (Typesense does
+    /// even if the FTS text match would otherwise surface it. (The FTS query does
     /// carry an `authors` pushdown today, so this is defence-in-depth; mirroring
     /// the WS contract.)
     #[test]

@@ -190,7 +190,7 @@ pub async fn handle_req(
         }
     }
 
-    // Search filters hit Typesense and return historical hits, then EOSE.
+    // Search filters hit Postgres FTS and return historical hits, then EOSE.
     // They are not registered for fan-out. The sensitive-kind gates above
     // already ran, so an authed member cannot use search to bypass author/#p
     // rules for kind:30174 or other globally-stored gated kinds.
@@ -374,9 +374,9 @@ pub async fn handle_req(
     );
 }
 
-/// Handle a NIP-50 search REQ: query Typesense, fetch full events, deliver results, EOSE.
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
 /// Search subscriptions are one-shot — no persistent subscription is registered.
-/// Maximum Typesense pages to fetch per filter (prevents unbounded loops).
+/// Maximum FTS pages to fetch per filter (prevents unbounded loops).
 const MAX_SEARCH_PAGES: u32 = 10;
 
 /// Resolve request-local channel access, repairing a stale cache-negative.
