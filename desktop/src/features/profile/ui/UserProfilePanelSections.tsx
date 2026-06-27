@@ -256,9 +256,7 @@ export function ProfileSummaryView({
                     Configuration
                   </span>
                 </div>
-                <AgentConfigPanel
-                  pubkey={managedAgent.pubkey}
-                />
+                <AgentConfigPanel pubkey={managedAgent.pubkey} />
               </div>
             ) : null
           }

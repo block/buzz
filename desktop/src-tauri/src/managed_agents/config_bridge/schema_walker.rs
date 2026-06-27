@@ -218,9 +218,7 @@ mod tests {
         });
         let result = extract_config_fields(&config, &[]);
         assert_eq!(
-            result
-                .get("tui.status_line")
-                .map(|s| s.as_str()),
+            result.get("tui.status_line").map(|s| s.as_str()),
             Some("model-with-reasoning, git-branch")
         );
         assert_eq!(

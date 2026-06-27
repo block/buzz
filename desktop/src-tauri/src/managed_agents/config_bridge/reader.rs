@@ -470,16 +470,19 @@ fn build_thinking_field(
 /// when no tier has a value.
 fn resolve_with_override(
     tiers: &[(Option<&str>, ConfigOrigin)],
-) -> Option<(Option<String>, ConfigOrigin, Option<String>, Option<ConfigOrigin>)> {
+) -> Option<(
+    Option<String>,
+    ConfigOrigin,
+    Option<String>,
+    Option<ConfigOrigin>,
+)> {
     let winner_idx = tiers.iter().position(|(v, _)| v.is_some())?;
     let (value, origin) = &tiers[winner_idx];
     let value = value.map(str::to_string);
     let origin = origin.clone();
 
     // Overridden = the next Some after the winner.
-    let overridden = tiers[winner_idx + 1..]
-        .iter()
-        .find(|(v, _)| v.is_some());
+    let overridden = tiers[winner_idx + 1..].iter().find(|(v, _)| v.is_some());
     let (overridden_value, overridden_origin) = match overridden {
         Some((v, o)) => (v.map(str::to_string), Some(o.clone())),
         None => (None, None),

@@ -5,19 +5,16 @@ import { Spinner } from "@/shared/ui/spinner";
 import React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import type {
-  AgentModelsResponse,
-  ManagedAgent,
-} from "@/shared/api/types";
-import {
-  getAgentModels,
-  updateManagedAgent,
-} from "@/shared/api/tauri";
+import type { AgentModelsResponse, ManagedAgent } from "@/shared/api/types";
+import { getAgentModels, updateManagedAgent } from "@/shared/api/tauri";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
 import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
 import { subscribeControlResults } from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { useAgentConfigSurface, managedAgentsQueryKey } from "@/features/agents/hooks";
+import {
+  useAgentConfigSurface,
+  managedAgentsQueryKey,
+} from "@/features/agents/hooks";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
