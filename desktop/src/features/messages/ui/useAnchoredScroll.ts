@@ -547,6 +547,7 @@ export function useAnchoredScroll({
   const onScroll = React.useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    if (convergingTargetIdRef.current !== null) return;
     // A virtualizer settle grows `scrollHeight` (rows below the fold measure a
     // frame or two after the initial bottom pin) and emits scroll events while
     // `scrollTop` holds at the old floor — opening a transient gap above the
