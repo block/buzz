@@ -174,7 +174,7 @@ const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "databricks", label: "Databricks (Pro)" },
+  { id: "databricks", label: "Databricks" },
 ];
 
 const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
@@ -288,10 +288,8 @@ export function providerRequiresExplicitModel(
   );
 }
 
-export function getDefaultLlmProviderLabel(runtimeId: string) {
-  return runtimeDefaultsToDatabricks(runtimeId)
-    ? "Databricks (Pro)"
-    : "Default";
+export function getDefaultLlmProviderLabel() {
+  return "Default";
 }
 
 export function getPersonaProviderOptions(
@@ -307,7 +305,7 @@ export function getPersonaProviderOptions(
   const defaultProviderOptions =
     runtimeDefaultsToDatabricks(runtimeId) && trimmedProvider === "databricks"
       ? []
-      : [{ id: "", label: getDefaultLlmProviderLabel(runtimeId) }];
+      : [{ id: "", label: getDefaultLlmProviderLabel() }];
   const options = [...defaultProviderOptions, ...providerOptions];
   if (
     trimmedProvider.length === 0 ||

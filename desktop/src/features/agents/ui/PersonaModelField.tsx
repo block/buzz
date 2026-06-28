@@ -57,7 +57,6 @@ export function PersonaModelField({
           ) : null}
         </label>
         <PersonaDropdownField
-          contentClassName="max-h-64 overflow-y-auto"
           disabled={disabled}
           id="persona-model"
           onValueChange={onModelValueChange}

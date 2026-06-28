@@ -62,7 +62,7 @@ export function PersonaDropdownField({
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="start"
-          className={contentClassName}
+          className={cn("overflow-hidden", contentClassName)}
           onCloseAutoFocus={(event) => event.preventDefault()}
           sideOffset={5}
           style={{
@@ -70,23 +70,29 @@ export function PersonaDropdownField({
             width: "var(--radix-dropdown-menu-trigger-width)",
           }}
         >
-          <DropdownMenuRadioGroup
-            onValueChange={(nextValue) => {
-              onValueChange(nextValue);
-              setOpen(false);
-            }}
-            value={value}
+          <div
+            className="max-h-[min(16rem,var(--radix-dropdown-menu-content-available-height))] overflow-y-auto overscroll-contain"
+            onTouchMoveCapture={(event) => event.stopPropagation()}
+            onWheelCapture={(event) => event.stopPropagation()}
           >
-            {options.map((option) => (
-              <DropdownMenuRadioItem
-                disabled={option.disabled}
-                key={option.value}
-                value={option.value}
-              >
-                <span className="truncate">{option.label}</span>
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
+            <DropdownMenuRadioGroup
+              onValueChange={(nextValue) => {
+                onValueChange(nextValue);
+                setOpen(false);
+              }}
+              value={value}
+            >
+              {options.map((option) => (
+                <DropdownMenuRadioItem
+                  disabled={option.disabled}
+                  key={option.value}
+                  value={option.value}
+                >
+                  <span className="truncate">{option.label}</span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </div>
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
