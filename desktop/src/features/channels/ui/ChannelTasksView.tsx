@@ -29,6 +29,7 @@ type ChannelTasksViewProps = {
   fetchOlder?: () => Promise<void>;
   hasOlderMessages?: boolean;
   isFetchingOlder?: boolean;
+  isTimelineLoading?: boolean;
   messages: readonly TimelineMessage[];
   onOpenAgentConversation?: (
     message: TimelineMessage,
@@ -146,6 +147,7 @@ export function ChannelTasksView({
   fetchOlder,
   hasOlderMessages,
   isFetchingOlder,
+  isTimelineLoading,
   onOpenAgentConversation,
   onGoToTaskMessage,
   profiles,
@@ -156,7 +158,9 @@ export function ChannelTasksView({
     () => new Map(messages.map((message) => [message.id, message])),
     [messages],
   );
-  const canLoadOlderTasks = Boolean(fetchOlder && hasOlderMessages);
+  const canLoadOlderTasks = Boolean(
+    fetchOlder && hasOlderMessages && !isTimelineLoading && messages.length > 0,
+  );
   const handleLoadOlderTasks = React.useCallback(() => {
     if (!fetchOlder || isFetchingOlder) {
       return;

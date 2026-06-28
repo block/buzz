@@ -861,6 +861,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               fetchOlder={fetchOlder}
               hasOlderMessages={hasOlderMessages}
               isFetchingOlder={isFetchingOlder}
+              isTimelineLoading={isTimelineLoading}
               messages={messages}
               onOpenAgentConversation={handleOpenAgentConversation}
               onGoToTaskMessage={handleGoToTaskMessage}

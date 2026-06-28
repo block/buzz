@@ -388,6 +388,25 @@ export function useAnchoredScroll({
           bottomSettleRafIdRef.current = null;
           const container = scrollContainerRef.current;
           if (!container) return;
+          if (convergingTargetIdRef.current !== null) {
+            bottomSettleFramesRef.current = 0;
+            settlingRef.current = false;
+            return;
+          }
+          if (
+            !isAtBottomNow(container) &&
+            performance.now() <= userScrollIntentUntilRef.current
+          ) {
+            bottomSettleFramesRef.current = 0;
+            settlingRef.current = false;
+            anchorRef.current = computeAnchor(container);
+            const atBottom = anchorRef.current.kind === "at-bottom";
+            setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+            if (atBottom) {
+              setNewMessageCount(0);
+            }
+            return;
+          }
           if (anchorRef.current.kind !== "at-bottom") {
             settlingRef.current = false;
             return;
