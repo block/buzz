@@ -6,6 +6,11 @@ import type {
   AgentModelsResponse,
 } from "@/shared/api/types";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import {
+  formatModelDiscoveryErrorStatus,
+  formatModelDiscoveryFallbackStatus,
+  type PersonaModelDiscoveryStatus,
+} from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./personaDialogPickers";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
@@ -51,6 +56,8 @@ export function usePersonaModelDiscovery({
 }) {
   const [modelDiscoveryData, setModelDiscoveryData] =
     React.useState<AgentModelsResponse | null>(null);
+  const [modelDiscoveryStatus, setModelDiscoveryStatus] =
+    React.useState<PersonaModelDiscoveryStatus | null>(null);
   const [modelDiscoveryLoading, setModelDiscoveryLoading] =
     React.useState(false);
   const modelDiscoveryCacheRef = React.useRef(
@@ -98,6 +105,7 @@ export function usePersonaModelDiscovery({
     if (modelDiscoveryKey === null || discoveryAgentCommand === null) {
       modelDiscoveryRequestRef.current += 1;
       setModelDiscoveryData(null);
+      setModelDiscoveryStatus(null);
       setModelDiscoveryLoading(false);
       return;
     }
@@ -107,11 +115,13 @@ export function usePersonaModelDiscovery({
     const cached = modelDiscoveryCacheRef.current.get(modelDiscoveryKey);
     if (cached) {
       setModelDiscoveryData(cached);
+      setModelDiscoveryStatus(null);
       setModelDiscoveryLoading(false);
       return;
     }
 
     setModelDiscoveryData(null);
+    setModelDiscoveryStatus(null);
     setModelDiscoveryLoading(true);
     void discoverAgentModels({
       agentCommand: discoveryAgentCommand,
@@ -125,12 +135,16 @@ export function usePersonaModelDiscovery({
         }
         modelDiscoveryCacheRef.current.set(modelDiscoveryKey, response);
         setModelDiscoveryData(response);
+        setModelDiscoveryStatus(null);
       })
-      .catch(() => {
+      .catch((error) => {
         if (modelDiscoveryRequestRef.current !== requestId) {
           return;
         }
         setModelDiscoveryData(null);
+        setModelDiscoveryStatus(
+          formatModelDiscoveryErrorStatus(error, trimmedProvider),
+        );
       })
       .finally(() => {
         if (modelDiscoveryRequestRef.current === requestId) {
@@ -149,9 +163,23 @@ export function usePersonaModelDiscovery({
     () => getDiscoveredPersonaModelOptions(modelDiscoveryData),
     [modelDiscoveryData],
   );
+  const modelDiscoveryFallbackStatus = React.useMemo(
+    () =>
+      discoveredModelOptions === null
+        ? formatModelDiscoveryFallbackStatus({
+            provider: trimmedProvider,
+            response: modelDiscoveryData,
+          })
+        : null,
+    [discoveredModelOptions, modelDiscoveryData, trimmedProvider],
+  );
 
   return {
     discoveredModelOptions,
     modelDiscoveryLoading,
+    modelDiscoveryStatus:
+      modelDiscoveryLoading || discoveredModelOptions !== null
+        ? null
+        : (modelDiscoveryStatus ?? modelDiscoveryFallbackStatus),
   };
 }

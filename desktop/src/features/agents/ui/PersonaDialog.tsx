@@ -398,15 +398,18 @@ export function PersonaDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     !isAvatarUploadPending;
-  const { discoveredModelOptions, modelDiscoveryLoading } =
-    usePersonaModelDiscovery({
-      envVars,
-      isCustomProviderEditing,
-      modelFieldVisible,
-      open,
-      provider,
-      selectedRuntime,
-    });
+  const {
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    modelDiscoveryStatus,
+  } = usePersonaModelDiscovery({
+    envVars,
+    isCustomProviderEditing,
+    modelFieldVisible,
+    open,
+    provider,
+    selectedRuntime,
+  });
   const staticModelOptions = getPersonaModelOptions(runtime, provider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const modelOptions = discoveredModelOptions ?? staticModelOptions;
@@ -832,6 +835,20 @@ export function PersonaDialog({
                           value={model}
                         />
                       </div>
+                    ) : null}
+                    {modelDiscoveryStatus ? (
+                      <p
+                        aria-live="polite"
+                        className={cn(
+                          "text-xs",
+                          modelDiscoveryStatus.tone === "warning"
+                            ? "text-warning"
+                            : "text-muted-foreground",
+                        )}
+                        data-testid="persona-model-discovery-status"
+                      >
+                        {modelDiscoveryStatus.message}
+                      </p>
                     ) : null}
                   </div>
                 </motion.div>
