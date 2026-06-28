@@ -54,6 +54,8 @@ export default defineConfig({
         "**/reminders.spec.ts",
         "**/virtualization.spec.ts",
         "**/scroll-history.spec.ts",
+        "**/cold-switch-longtask.perf.ts",
+        "**/timeline-no-shift.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

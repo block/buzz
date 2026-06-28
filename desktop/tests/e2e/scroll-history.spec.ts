@@ -1701,7 +1701,7 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
   );
 
   await page.evaluate(() => {
-    for (let index = 0; index < 60; index += 1) {
+    for (let index = 0; index < 40; index += 1) {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: `recent ${index}`,

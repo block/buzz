@@ -210,13 +210,12 @@ export function useAnchoredScroll({
       const targetTopOffset =
         currentTopOffset - (targetScrollTop - container.scrollTop);
 
-      el.scrollIntoView({
-        block: "center",
+      container.scrollTo({
+        top: targetScrollTop,
         behavior: options.behavior ?? "auto",
       });
 
-      // `scrollIntoView({ behavior: "smooth" })` starts an async animation, so
-      // measuring after the call can still return the pre-animation position.
+      // Smooth scrolling starts an async animation, so measuring after the call can still return the pre-animation position.
       // Save the clamped destination offset instead; otherwise a concurrent
       // render/ResizeObserver restore can fight the smooth scroll back toward
       // where it started.

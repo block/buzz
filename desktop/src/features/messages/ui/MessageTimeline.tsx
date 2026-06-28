@@ -281,7 +281,7 @@ const MessageTimelineBase = React.forwardRef<
   // `scrollToMessage` always finds the target row. No virtualizer convergence.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
-      scrollToMessage(messageId, { highlight: true, ...options });
+      return scrollToMessage(messageId, { highlight: true, ...options });
     },
     [scrollToMessage],
   );
@@ -324,6 +324,7 @@ const MessageTimelineBase = React.forwardRef<
   // the match) and, when virtualized, converges on the target through the index
   // model — the row may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
+  const pendingSearchTargetRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (showTimelineSkeleton) return;
     if (
@@ -334,8 +335,19 @@ const MessageTimelineBase = React.forwardRef<
       return;
     }
     prevSearchActiveRef.current = searchActiveMessageId;
-    jumpToMessage(searchActiveMessageId, { behavior: "smooth" });
+    if (!jumpToMessage(searchActiveMessageId, { behavior: "smooth" })) {
+      pendingSearchTargetRef.current = searchActiveMessageId;
+    }
   }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages is the intentional retry trigger — a search hit outside the initial window is spliced into messages asynchronously, and the DOM scroll should retry when that row commits.
+  React.useEffect(() => {
+    const target = pendingSearchTargetRef.current;
+    if (!target || showTimelineSkeleton) return;
+    if (jumpToMessage(target, { behavior: "auto" })) {
+      pendingSearchTargetRef.current = null;
+    }
+  }, [deferredMessages, jumpToMessage, showTimelineSkeleton]);
 
   useLoadOlderOnScroll({
     fetchOlder,
