@@ -29,8 +29,7 @@ export async function resolveManagedAgentAvatarUrl(
     const bytes = Array.from(atob(b64), (char) => char.charCodeAt(0));
     const blob = await upload(bytes);
     return blob.url;
-  } catch (err) {
-    console.warn("Avatar upload failed, proceeding without avatar:", err);
+  } catch {
     return safeFallbackAvatarUrl(fallbackAvatarUrl);
   }
 }
