@@ -470,7 +470,7 @@ export function PersonaDialog({
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
   const providerOptions = getPersonaProviderOptions(provider, runtime);
-  const defaultLlmProviderLabel = getDefaultLlmProviderLabel();
+  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;

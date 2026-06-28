@@ -288,8 +288,10 @@ export function providerRequiresExplicitModel(
   );
 }
 
-export function getDefaultLlmProviderLabel() {
-  return "Default";
+export function getDefaultLlmProviderLabel(runtimeId: string) {
+  return runtimeDefaultsToDatabricks(runtimeId)
+    ? "Databricks (default)"
+    : "Default";
 }
 
 export function getPersonaProviderOptions(
@@ -305,7 +307,7 @@ export function getPersonaProviderOptions(
   const defaultProviderOptions =
     runtimeDefaultsToDatabricks(runtimeId) && trimmedProvider === "databricks"
       ? []
-      : [{ id: "", label: getDefaultLlmProviderLabel() }];
+      : [{ id: "", label: getDefaultLlmProviderLabel(runtimeId) }];
   const options = [...defaultProviderOptions, ...providerOptions];
   if (
     trimmedProvider.length === 0 ||
