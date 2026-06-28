@@ -155,11 +155,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     reviewCommentsByRootId,
   ]);
 
-  // The flattened item stream and its messageId -> itemIndex map are produced
-  // together from ONE memo, keyed on the entries and the unread boundary (the
-  // unread divider is its own item, so it shifts indices). A separate memo with
-  // diverging deps would let the map go stale and scroll deep-links to the wrong
-  // row — the exact failure virtualization risks.
+  // The flattened item stream, memoized on the entries and the unread boundary
+  // (the unread divider is its own item, so it shifts subsequent rows).
   const itemsResult = React.useMemo(
     () => buildTimelineItems(entries, firstUnreadMessageId),
     [entries, firstUnreadMessageId],
