@@ -203,10 +203,21 @@ function runtimeDefaultsToDatabricks(runtimeId: string) {
   return runtimeId === "buzz-agent" || runtimeId === "goose";
 }
 
+export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
+  return runtimeDefaultsToDatabricks(runtimeId);
+}
+
 function effectiveModelProviderForOptions(
   runtimeId: string,
   providerId: string | null | undefined,
 ) {
+  if (
+    runtimeId.trim().length > 0 &&
+    !runtimeSupportsLlmProviderSelection(runtimeId)
+  ) {
+    return "";
+  }
+
   const trimmedProvider = providerId?.trim() ?? "";
   if (trimmedProvider.length === 0 && runtimeDefaultsToDatabricks(runtimeId)) {
     return "databricks";

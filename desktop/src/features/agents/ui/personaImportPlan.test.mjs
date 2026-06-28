@@ -122,6 +122,23 @@ test("buildPersonaImportPlan ignores raw relative avatar refs", () => {
   );
 });
 
+test("buildPersonaImportPlan ignores nonpersistent imported avatar refs", () => {
+  for (const avatarRef of [
+    "blob:https://buzz.example/temporary-avatar",
+    "ipfs://bafybeigdyrzt",
+  ]) {
+    const plan = buildPersonaImportPlan({
+      persona: createPersona({ avatarUrl: "https://old.example/avatar.png" }),
+      preview: createPreview({ avatarRef }),
+    });
+
+    assert.equal(
+      plan.fields.some((field) => field.field === "avatarUrl"),
+      false,
+    );
+  }
+});
+
 test("buildPersonaImportPlan detects runtime change", () => {
   const plan = buildPersonaImportPlan({
     persona: createPersona({ runtime: "goose" }),

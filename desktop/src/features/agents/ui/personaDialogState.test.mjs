@@ -233,6 +233,27 @@ test("importPersonaDialogState filters unresolved Goose app-avatar refs", () => 
   assert.equal(state.initialValues.avatarUrl, "");
 });
 
+test("importPersonaDialogState filters nonpersistent imported avatar refs", () => {
+  for (const avatarRef of [
+    "blob:https://buzz.example/temporary-avatar",
+    "ipfs://bafybeigdyrzt",
+  ]) {
+    const state = importPersonaDialogState({
+      displayName: "Packed avatar",
+      avatarDataUrl: null,
+      avatarRef,
+      systemPrompt: "Imported prompt",
+      runtime: null,
+      model: null,
+      provider: null,
+      namePool: [],
+      sourceFile: "pack.persona.zip",
+    });
+
+    assert.equal(state.initialValues.avatarUrl, "");
+  }
+});
+
 test("importPersonaDialogState preserves URL-like avatar refs", () => {
   const state = importPersonaDialogState({
     displayName: "Hosted avatar",
@@ -267,6 +288,7 @@ test("importPersonaDialogState filters relative avatar refs from packs", () => {
 
   assert.equal(state.initialValues.avatarUrl, "");
 });
+
 test("editPersonaDialogState preserves provider=databricks", () => {
   const state = editPersonaDialogState({
     id: "persona-provider",

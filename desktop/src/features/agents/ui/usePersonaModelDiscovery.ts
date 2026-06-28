@@ -15,6 +15,8 @@ import { providerRequiresExplicitModel } from "./personaDialogPickers";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
+const MODEL_DISCOVERY_CREDENTIAL_DEBOUNCE_MS = 250;
+
 function stableModelDiscoveryEnvKey(envVars: EnvVarsValue): string {
   return JSON.stringify(
     Object.entries(envVars).sort(([left], [right]) =>
@@ -78,6 +80,8 @@ export function usePersonaModelDiscovery({
   const modelDiscoveryRequestRef = React.useRef(0);
 
   const trimmedProvider = provider.trim();
+  const shouldDebounceModelDiscovery =
+    providerRequiresExplicitModel(trimmedProvider);
   const discoveryAgentCommand = selectedRuntime?.command?.trim()
     ? selectedRuntime.command
     : null;
@@ -124,7 +128,9 @@ export function usePersonaModelDiscovery({
 
     const requestId = modelDiscoveryRequestRef.current + 1;
     modelDiscoveryRequestRef.current = requestId;
-    const cached = modelDiscoveryCacheRef.current.get(modelDiscoveryKey);
+    const activeAgentCommand = discoveryAgentCommand;
+    const activeModelDiscoveryKey = modelDiscoveryKey;
+    const cached = modelDiscoveryCacheRef.current.get(activeModelDiscoveryKey);
     if (cached) {
       setModelDiscoveryData(cached);
       setModelDiscoveryStatus(null);
@@ -135,39 +141,60 @@ export function usePersonaModelDiscovery({
     setModelDiscoveryData(null);
     setModelDiscoveryStatus(null);
     setModelDiscoveryLoading(true);
-    void discoverAgentModels({
-      agentCommand: discoveryAgentCommand,
-      agentArgs: selectedRuntime?.defaultArgs ?? [],
-      provider: trimmedProvider || undefined,
-      envVars,
-    })
-      .then((response) => {
-        if (modelDiscoveryRequestRef.current !== requestId) {
-          return;
-        }
-        modelDiscoveryCacheRef.current.set(modelDiscoveryKey, response);
-        setModelDiscoveryData(response);
-        setModelDiscoveryStatus(null);
+    function runModelDiscovery() {
+      void discoverAgentModels({
+        agentCommand: activeAgentCommand,
+        agentArgs: selectedRuntime?.defaultArgs ?? [],
+        provider: trimmedProvider || undefined,
+        envVars,
       })
-      .catch((error) => {
-        if (modelDiscoveryRequestRef.current !== requestId) {
-          return;
-        }
-        setModelDiscoveryData(null);
-        setModelDiscoveryStatus(
-          formatModelDiscoveryErrorStatus(error, trimmedProvider),
-        );
-      })
-      .finally(() => {
-        if (modelDiscoveryRequestRef.current === requestId) {
-          setModelDiscoveryLoading(false);
-        }
-      });
+        .then((response) => {
+          if (modelDiscoveryRequestRef.current !== requestId) {
+            return;
+          }
+          modelDiscoveryCacheRef.current.set(activeModelDiscoveryKey, response);
+          setModelDiscoveryData(response);
+          setModelDiscoveryStatus(null);
+        })
+        .catch((error) => {
+          if (modelDiscoveryRequestRef.current !== requestId) {
+            return;
+          }
+          setModelDiscoveryData(null);
+          setModelDiscoveryStatus(
+            formatModelDiscoveryErrorStatus(error, trimmedProvider),
+          );
+        })
+        .finally(() => {
+          if (modelDiscoveryRequestRef.current === requestId) {
+            setModelDiscoveryLoading(false);
+          }
+        });
+    }
+
+    if (!shouldDebounceModelDiscovery) {
+      runModelDiscovery();
+      return;
+    }
+
+    const timeout = window.setTimeout(
+      runModelDiscovery,
+      MODEL_DISCOVERY_CREDENTIAL_DEBOUNCE_MS,
+    );
+
+    return () => {
+      window.clearTimeout(timeout);
+      if (modelDiscoveryRequestRef.current === requestId) {
+        modelDiscoveryRequestRef.current += 1;
+        setModelDiscoveryLoading(false);
+      }
+    };
   }, [
     discoveryAgentCommand,
     envVars,
     modelDiscoveryKey,
     selectedRuntime?.defaultArgs,
+    shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);
 

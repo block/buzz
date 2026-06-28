@@ -42,8 +42,6 @@ function isSafeImportedAvatarRef(
     return (
       parsed.protocol === "http:" ||
       parsed.protocol === "https:" ||
-      parsed.protocol === "blob:" ||
-      parsed.protocol === "ipfs:" ||
       (parsed.protocol === "data:" && trimmed.startsWith("data:image/"))
     );
   } catch {

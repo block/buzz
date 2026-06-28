@@ -32,6 +32,11 @@ import {
   parsePersonaNamePoolText,
 } from "./personaDialogState";
 import {
+  getAdvancedEnvVars,
+  hasAdvancedEnvVars,
+  hasText,
+} from "./personaDialogEnvVars";
+import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
@@ -48,6 +53,7 @@ import {
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
+  runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -85,30 +91,6 @@ const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
-function hasText(value: string | null | undefined): boolean {
-  return (value?.trim().length ?? 0) > 0;
-}
-
-function hasAdvancedEnvVars(
-  value: EnvVarsValue,
-  managedKey: string | null,
-): boolean {
-  return Object.keys(value).some((key) => key !== managedKey);
-}
-
-function getAdvancedEnvVars(
-  value: EnvVarsValue,
-  managedKey: string | null,
-): EnvVarsValue {
-  if (!managedKey || !(managedKey in value)) {
-    return value;
-  }
-
-  const next = { ...value };
-  delete next[managedKey];
-  return next;
-}
 
 export function PersonaDialog({
   open,
@@ -354,6 +336,10 @@ export function PersonaDialog({
     const previousRuntime = initialValues.runtime?.trim() ?? "";
     const modelProviderEditableWithoutRuntime =
       initialModelProviderEditableWithoutRuntime && trimmedRuntime.length === 0;
+    const llmProviderVisibleForSubmit =
+      (trimmedRuntime.length > 0 &&
+        runtimeSupportsLlmProviderSelection(trimmedRuntime)) ||
+      modelProviderEditableWithoutRuntime;
     const shouldPreserveHiddenModelProvider =
       "id" in initialValues &&
       previousRuntime.length === 0 &&
@@ -377,12 +363,11 @@ export function PersonaDialog({
           : shouldPreserveHiddenModelProvider
             ? initialValues.model
             : undefined,
-      provider:
-        trimmedRuntime || modelProviderEditableWithoutRuntime
-          ? provider.trim() || undefined
-          : shouldPreserveHiddenModelProvider
-            ? initialValues.provider
-            : undefined,
+      provider: llmProviderVisibleForSubmit
+        ? provider.trim() || undefined
+        : shouldPreserveHiddenModelProvider
+          ? initialValues.provider
+          : undefined,
       namePool: namePoolInput,
       envVars,
     };
@@ -417,22 +402,28 @@ export function PersonaDialog({
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
+  const runtimeCanChooseLlmProvider =
+    runtimeSupportsLlmProviderSelection(runtime) ||
+    blankRuntimeModelProviderEditable;
   const llmProviderFieldVisible =
-    runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
+    (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
+    blankRuntimeModelProviderEditable;
+  const providerForModelScope = llmProviderFieldVisible ? provider : "";
   const trimmedProvider = provider.trim();
-  const providerApiKeyConfig = isCustomProviderEditing
-    ? null
-    : getProviderApiKeyConfig(trimmedProvider);
+  const providerApiKeyConfig =
+    llmProviderFieldVisible && !isCustomProviderEditing
+      ? getProviderApiKeyConfig(trimmedProvider)
+      : null;
   const providerApiKeyValue = providerApiKeyConfig
     ? (envVars[providerApiKeyConfig.envVar] ?? "")
     : "";
   const providerApiKeyFieldVisible =
     llmProviderFieldVisible && providerApiKeyConfig !== null;
   const modelFieldVisible =
-    llmProviderFieldVisible &&
+    (runtime.trim().length > 0 || blankRuntimeModelProviderEditable) &&
     (!providerApiKeyFieldVisible || providerApiKeyValue.trim().length > 0);
   const isExplicitModelRequired =
-    modelFieldVisible && providerRequiresExplicitModel(trimmedProvider);
+    modelFieldVisible && providerRequiresExplicitModel(providerForModelScope);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
@@ -452,10 +443,13 @@ export function PersonaDialog({
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    provider,
+    provider: providerForModelScope,
     selectedRuntime,
   });
-  const staticModelOptions = getPersonaModelOptions(runtime, provider);
+  const staticModelOptions = getPersonaModelOptions(
+    runtime,
+    providerForModelScope,
+  );
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
   const modelOptions = discoveredModelOptions ?? staticModelOptions;
   const isModelCustom = !hasPersonaModelOption(
@@ -469,7 +463,10 @@ export function PersonaDialog({
   });
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
-  const providerOptions = getPersonaProviderOptions(provider, runtime);
+  const providerOptions = getPersonaProviderOptions(
+    providerForModelScope,
+    runtime,
+  );
   const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -561,14 +558,25 @@ export function PersonaDialog({
       !open ||
       !modelFieldVisible ||
       isCustomModelEditing ||
-      !shouldClearKnownModelForSelectionScope({ model, provider, runtime })
+      !shouldClearKnownModelForSelectionScope({
+        model,
+        provider: providerForModelScope,
+        runtime,
+      })
     ) {
       return;
     }
 
     setModel("");
     setIsCustomModelEditing(false);
-  }, [isCustomModelEditing, model, modelFieldVisible, open, provider, runtime]);
+  }, [
+    isCustomModelEditing,
+    model,
+    modelFieldVisible,
+    open,
+    providerForModelScope,
+    runtime,
+  ]);
 
   function updateProviderApiKey(envKey: string, value: string) {
     setEnvVars((current) => {
@@ -584,6 +592,29 @@ export function PersonaDialog({
       }
       return next;
     });
+  }
+
+  function removeEnvVar(envKey: string) {
+    setEnvVars((current) => {
+      if (!(envKey in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[envKey];
+      return next;
+    });
+  }
+
+  function clearManagedProviderApiKeyWhenLeaving(
+    previousProvider: string,
+    nextProvider: string,
+  ) {
+    const previousEnvVar = getProviderApiKeyEnvVar(previousProvider);
+    const nextEnvVar = getProviderApiKeyEnvVar(nextProvider);
+    if (previousEnvVar && previousEnvVar !== nextEnvVar) {
+      removeEnvVar(previousEnvVar);
+    }
   }
 
   function handleProviderApiKeyChange(value: string) {
@@ -612,6 +643,9 @@ export function PersonaDialog({
     const nextRuntime =
       nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
     const previousRuntime = runtime;
+    const nextRuntimeCanChooseLlmProvider =
+      nextRuntime.trim().length > 0 &&
+      runtimeSupportsLlmProviderSelection(nextRuntime);
     setRuntime(nextRuntime);
     if (
       shouldClearModelForRuntimeChange(previousRuntime, nextRuntime) ||
@@ -624,7 +658,8 @@ export function PersonaDialog({
       setModel("");
       setIsCustomModelEditing(false);
     }
-    if (nextRuntime.trim().length === 0) {
+    if (!nextRuntimeCanChooseLlmProvider) {
+      clearManagedProviderApiKeyWhenLeaving(provider, "");
       setIsCustomModelEditing(false);
       setIsCustomProviderEditing(false);
       setProvider("");
@@ -633,6 +668,7 @@ export function PersonaDialog({
 
   function handleProviderDropdownChange(nextValue: string) {
     if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      clearManagedProviderApiKeyWhenLeaving(provider, "");
       setIsCustomProviderEditing(true);
       setProvider("");
       return;
@@ -640,6 +676,7 @@ export function PersonaDialog({
 
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+    clearManagedProviderApiKeyWhenLeaving(provider, nextProvider);
     setIsCustomProviderEditing(false);
     setProvider(nextProvider);
     const requiredEnvVar = getProviderApiKeyEnvVar(nextProvider);

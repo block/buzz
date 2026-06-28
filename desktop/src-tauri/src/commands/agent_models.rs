@@ -235,14 +235,46 @@ fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
     )
 }
 
+#[cfg(test)]
 fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
-    let base_url = env
-        .get("OPENAI_COMPAT_BASE_URL")
+    let base_url = env_value(env, "OPENAI_COMPAT_BASE_URL")
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_or_process_value(env, "OPENAI_COMPAT_BASE_URL")
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn env_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env.get(key)
         .map(String::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("https://api.openai.com/v1");
-    format!("{}/models", base_url.trim_end_matches('/'))
+        .map(str::to_string)
+}
+
+fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env_value(env, key).or_else(|| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn redaction_env_with_value(
+    env: &BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) -> BTreeMap<String, String> {
+    let mut redaction_env = env.clone();
+    redaction_env
+        .entry(key.to_string())
+        .or_insert_with(|| value.to_string());
+    redaction_env
 }
 
 fn is_agent_text_model_id(id: &str) -> bool {
@@ -363,23 +395,20 @@ async fn discover_openai_compatible_models(
         return Ok(None);
     }
 
-    let api_key = env
-        .get("OPENAI_COMPAT_API_KEY")
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let api_key = env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
         .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?;
-    let url = openai_compatible_models_url(env);
+    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
+    let url = openai_compatible_models_url_for_discovery(env);
     let response = client
         .get(&url)
-        .bearer_auth(api_key)
+        .bearer_auth(&api_key)
         .send()
         .await
         .map_err(|error| format!("OpenAI model discovery request failed: {error}"))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        let body = crate::managed_agents::redact_env_values_in(&body, env);
+        let body = crate::managed_agents::redact_env_values_in(&body, &redaction_env);
         return Err(format!("OpenAI model discovery HTTP {status}: {body}"));
     }
 
@@ -428,13 +457,20 @@ fn is_anthropic_provider(provider: Option<&str>) -> bool {
     )
 }
 
+#[cfg(test)]
 fn anthropic_models_url(env: &BTreeMap<String, String>) -> String {
-    let base_url = env
-        .get("ANTHROPIC_BASE_URL")
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("https://api.anthropic.com");
+    let base_url = env_value(env, "ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+    anthropic_models_url_from_base(&base_url)
+}
+
+fn anthropic_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_or_process_value(env, "ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+    anthropic_models_url_from_base(&base_url)
+}
+
+fn anthropic_models_url_from_base(base_url: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with("/v1") {
         format!("{base_url}/models")
@@ -499,18 +535,16 @@ async fn discover_anthropic_models(
         return Ok(None);
     }
 
-    let api_key = env
-        .get("ANTHROPIC_API_KEY")
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let api_key = env_or_process_value(env, "ANTHROPIC_API_KEY")
         .ok_or_else(|| "config: ANTHROPIC_API_KEY required".to_string())?;
-    let url = anthropic_models_url(env);
+    let redaction_env = redaction_env_with_value(env, "ANTHROPIC_API_KEY", &api_key);
+    let url = anthropic_models_url_for_discovery(env);
     let mut models = Vec::new();
     let mut after_id: Option<String> = None;
     for _ in 0..20 {
         let response =
-            fetch_anthropic_model_page(client, &url, api_key, after_id.as_deref(), env).await?;
+            fetch_anthropic_model_page(client, &url, &api_key, after_id.as_deref(), &redaction_env)
+                .await?;
         let has_more = response.has_more;
         after_id = response.last_id.clone();
         models.extend(normalize_anthropic_models(response));
@@ -881,109 +915,5 @@ fn normalize_agent_models(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn openai_model_normalization_keeps_agent_text_models() {
-        let models = normalize_openai_compatible_models(OpenAiModelListResponse {
-            data: vec![
-                OpenAiModelListItem {
-                    id: "text-embedding-3-large".to_string(),
-                    created: Some(4),
-                },
-                OpenAiModelListItem {
-                    id: "gpt-image-2".to_string(),
-                    created: Some(5),
-                },
-                OpenAiModelListItem {
-                    id: "chatgpt-5.5-pro-2026-04-23".to_string(),
-                    created: Some(7),
-                },
-                OpenAiModelListItem {
-                    id: "chatgpt-5.5-pro".to_string(),
-                    created: Some(6),
-                },
-                OpenAiModelListItem {
-                    id: "gpt-5.4-mini".to_string(),
-                    created: Some(2),
-                },
-                OpenAiModelListItem {
-                    id: "o4-mini".to_string(),
-                    created: Some(3),
-                },
-                OpenAiModelListItem {
-                    id: "gpt-5.4-mini".to_string(),
-                    created: Some(1),
-                },
-            ],
-        });
-
-        let ids_and_names = models
-            .into_iter()
-            .map(|model| (model.id, model.name))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            ids_and_names,
-            vec![
-                (
-                    "chatgpt-5.5-pro".to_string(),
-                    Some("ChatGPT 5.5 Pro".to_string()),
-                ),
-                ("o4-mini".to_string(), Some("o4-mini".to_string())),
-                ("gpt-5.4-mini".to_string(), Some("GPT-5.4 mini".to_string()),),
-            ]
-        );
-    }
-
-    #[test]
-    fn openai_models_url_uses_openai_default_base_url() {
-        assert_eq!(
-            openai_compatible_models_url(&BTreeMap::new()),
-            "https://api.openai.com/v1/models"
-        );
-    }
-
-    #[test]
-    fn anthropic_models_url_uses_anthropic_default_base_url() {
-        assert_eq!(
-            anthropic_models_url(&BTreeMap::new()),
-            "https://api.anthropic.com/v1/models"
-        );
-    }
-
-    #[test]
-    fn anthropic_models_url_accepts_versioned_base_url() {
-        let env = BTreeMap::from([(
-            "ANTHROPIC_BASE_URL".to_string(),
-            "https://proxy.example/v1/".to_string(),
-        )]);
-
-        assert_eq!(
-            anthropic_models_url(&env),
-            "https://proxy.example/v1/models"
-        );
-    }
-
-    #[test]
-    fn anthropic_model_normalization_uses_display_names() {
-        let models = normalize_anthropic_models(AnthropicModelListResponse {
-            data: vec![
-                AnthropicModelListItem {
-                    id: "claude-opus-4-6".to_string(),
-                    display_name: Some("Claude Opus 4.6".to_string()),
-                },
-                AnthropicModelListItem {
-                    id: "claude-opus-4-6".to_string(),
-                    display_name: Some("Duplicate".to_string()),
-                },
-            ],
-            has_more: false,
-            last_id: None,
-        });
-
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "claude-opus-4-6");
-        assert_eq!(models[0].name.as_deref(), Some("Claude Opus 4.6"));
-    }
-}
+#[path = "agent_models_tests.rs"]
+mod tests;
