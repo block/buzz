@@ -237,12 +237,9 @@ const MessageTimelineBase = React.forwardRef<
     isAtBottom,
     newMessageCount,
     onScroll,
-    restoreScrollPosition,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
     scrollToMessage,
-    setLoadOlderRestoreInFlight,
-    getAnchorIsAtBottom,
   } = useAnchoredScroll({
     channelId,
     contentRef,
@@ -344,9 +341,6 @@ const MessageTimelineBase = React.forwardRef<
     fetchOlder,
     hasOlderMessages,
     isLoading: showTimelineSkeleton,
-    restoreScrollPosition,
-    setLoadOlderRestoreInFlight,
-    getAnchorIsAtBottom,
     scrollContainerRef,
     sentinelRef: topSentinelRef,
   });
