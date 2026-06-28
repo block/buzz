@@ -1872,7 +1872,7 @@ fn child_rust_log_filter() -> String {
 
 /// Databricks host/model baked in at compile time for internal builds. Empty
 /// in OSS builds, where the `BUZZ_BUILD_DATABRICKS_*` env is unset.
-fn build_databricks_defaults() -> Vec<(&'static str, &'static str)> {
+pub(crate) fn build_databricks_defaults() -> Vec<(&'static str, &'static str)> {
     let mut defaults = Vec::new();
     if let Some(host) = option_env!("BUZZ_DESKTOP_BUILD_DATABRICKS_HOST") {
         if !host.is_empty() {

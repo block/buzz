@@ -194,6 +194,11 @@ async fn run_agent_models_command(
                 }
             }
         }
+        // Mirror runtime spawn: internal builds may bake Databricks host/model
+        // defaults. User-provided env below still wins.
+        for (key, value) in crate::managed_agents::build_databricks_defaults() {
+            cmd.env(key, value);
+        }
         // User env layering — written LAST so it overrides any Buzz-set env above.
         for (k, v) in &merged_env {
             cmd.env(k, v);
