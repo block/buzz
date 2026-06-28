@@ -108,6 +108,17 @@ pub async fn get_agent_models(
         return Ok(models);
     }
 
+    if let Some(models) = discover_anthropic_models(
+        &state.http_client,
+        effective_provider.as_deref(),
+        &merged_env,
+        persisted_model.clone(),
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
     run_agent_models_command(
         resolved_acp,
         agent_command,
@@ -178,6 +189,17 @@ pub async fn discover_agent_models(
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
 
     if let Some(models) = discover_openai_compatible_models(
+        &state.http_client,
+        input.provider.as_deref(),
+        &merged_env,
+        None,
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
+    if let Some(models) = discover_anthropic_models(
         &state.http_client,
         input.provider.as_deref(),
         &merged_env,
@@ -372,6 +394,141 @@ async fn discover_openai_compatible_models(
 
     Ok(Some(AgentModelsResponse {
         agent_name: provider.unwrap_or("openai").trim().to_string(),
+        agent_version: "models-api".to_string(),
+        models,
+        agent_default_model: None,
+        selected_model,
+        supports_switching: true,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelListResponse {
+    data: Vec<AnthropicModelListItem>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    last_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelListItem {
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+fn is_anthropic_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("anthropic")
+    )
+}
+
+fn anthropic_models_url(env: &BTreeMap<String, String>) -> String {
+    let base_url = env
+        .get("ANTHROPIC_BASE_URL")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://api.anthropic.com");
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        format!("{base_url}/models")
+    } else {
+        format!("{base_url}/v1/models")
+    }
+}
+
+fn normalize_anthropic_models(response: AnthropicModelListResponse) -> Vec<AgentModelInfo> {
+    let mut seen = HashSet::new();
+    response
+        .data
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .map(|item| AgentModelInfo {
+            id: item.id,
+            name: item.display_name,
+            description: None,
+        })
+        .collect()
+}
+
+async fn fetch_anthropic_model_page(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    after_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<AnthropicModelListResponse, String> {
+    let mut request = client
+        .get(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01");
+    if let Some(after_id) = after_id {
+        request = request.query(&[("after_id", after_id)]);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Anthropic model discovery request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body = crate::managed_agents::redact_env_values_in(&body, env);
+        return Err(format!("Anthropic model discovery HTTP {status}: {body}"));
+    }
+
+    response
+        .json::<AnthropicModelListResponse>()
+        .await
+        .map_err(|error| format!("Anthropic model discovery response parse failed: {error}"))
+}
+
+async fn discover_anthropic_models(
+    client: &reqwest::Client,
+    provider: Option<&str>,
+    env: &BTreeMap<String, String>,
+    selected_model: Option<String>,
+) -> Result<Option<AgentModelsResponse>, String> {
+    if !is_anthropic_provider(provider) {
+        return Ok(None);
+    }
+
+    let api_key = env
+        .get("ANTHROPIC_API_KEY")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "config: ANTHROPIC_API_KEY required".to_string())?;
+    let url = anthropic_models_url(env);
+    let mut models = Vec::new();
+    let mut after_id: Option<String> = None;
+    for _ in 0..20 {
+        let response =
+            fetch_anthropic_model_page(client, &url, api_key, after_id.as_deref(), env).await?;
+        let has_more = response.has_more;
+        after_id = response.last_id.clone();
+        models.extend(normalize_anthropic_models(response));
+        if !has_more {
+            break;
+        }
+        if after_id.as_deref().unwrap_or_default().is_empty() {
+            return Err("Anthropic model discovery pagination did not return last_id".to_string());
+        }
+    }
+    let mut seen = HashSet::new();
+    models.retain(|model| seen.insert(model.id.clone()));
+    if models.is_empty() {
+        return Err("Anthropic model discovery returned no models".to_string());
+    }
+
+    Ok(Some(AgentModelsResponse {
+        agent_name: provider.unwrap_or("anthropic").trim().to_string(),
         agent_version: "models-api".to_string(),
         models,
         agent_default_model: None,
@@ -785,5 +942,48 @@ mod tests {
             openai_compatible_models_url(&BTreeMap::new()),
             "https://api.openai.com/v1/models"
         );
+    }
+
+    #[test]
+    fn anthropic_models_url_uses_anthropic_default_base_url() {
+        assert_eq!(
+            anthropic_models_url(&BTreeMap::new()),
+            "https://api.anthropic.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn anthropic_models_url_accepts_versioned_base_url() {
+        let env = BTreeMap::from([(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://proxy.example/v1/".to_string(),
+        )]);
+
+        assert_eq!(
+            anthropic_models_url(&env),
+            "https://proxy.example/v1/models"
+        );
+    }
+
+    #[test]
+    fn anthropic_model_normalization_uses_display_names() {
+        let models = normalize_anthropic_models(AnthropicModelListResponse {
+            data: vec![
+                AnthropicModelListItem {
+                    id: "claude-opus-4-6".to_string(),
+                    display_name: Some("Claude Opus 4.6".to_string()),
+                },
+                AnthropicModelListItem {
+                    id: "claude-opus-4-6".to_string(),
+                    display_name: Some("Duplicate".to_string()),
+                },
+            ],
+            has_more: false,
+            last_id: None,
+        });
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-opus-4-6");
+        assert_eq!(models[0].name.as_deref(), Some("Claude Opus 4.6"));
     }
 }
