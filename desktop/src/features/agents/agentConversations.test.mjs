@@ -564,3 +564,96 @@ test("dedicated conversation view stops at the next task anchor", () => {
 
   assert.deepEqual(visibleIds, ["root", "agent-reply", "first-task-reply"]);
 });
+
+test("dedicated conversation view keeps older task descendant replies", () => {
+  const root = message({
+    body: "Can you look into the data model?",
+    createdAt: 1,
+    id: "root",
+  });
+  const firstAnchor = message({
+    body: "I'll look into it.",
+    createdAt: 2,
+    id: "agent-reply",
+    pubkey: "agent",
+  });
+  const firstTaskReply = message({
+    body: "This belongs in the first task.",
+    createdAt: 3,
+    id: "first-task-reply",
+  });
+  const secondAnchor = message({
+    body: "Let's split this into another task.",
+    createdAt: 4,
+    id: "second-anchor",
+    pubkey: "agent",
+  });
+  const secondTaskReply = message({
+    body: "This belongs in the second task.",
+    createdAt: 5,
+    id: "second-task-reply",
+  });
+  const firstTaskFollowup = {
+    ...message({
+      body: "Continuing the first task after task two started.",
+      createdAt: 6,
+      id: "first-task-followup",
+    }),
+    parentId: "first-task-reply",
+    rootId: "root",
+  };
+  const plainRootReply = message({
+    body: "A plain root reply after task two should not join task one.",
+    createdAt: 7,
+    id: "plain-root-reply",
+  });
+  const messages = [
+    root,
+    firstAnchor,
+    firstTaskReply,
+    secondAnchor,
+    secondTaskReply,
+    firstTaskFollowup,
+    plainRootReply,
+  ];
+  const conversation = buildAgentConversation({
+    agentName: "Fizz",
+    agentPubkey: "agent",
+    agentReply: firstAnchor,
+    channel: { id: "channel", name: "general" },
+    contextMessages: messages,
+    parentMessage: root,
+    threadRootMessage: root,
+  });
+  const firstMarker = parseAgentConversationMarker(
+    markerEvent({ content: { startedAt: 2 }, createdAt: 2 }),
+  );
+  const secondMarker = parseAgentConversationMarker({
+    ...markerEvent({
+      content: { agentReplyId: "second-anchor", startedAt: 4 },
+      createdAt: 4,
+      id: "second-marker",
+    }),
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "root"],
+      ["e", "second-anchor", "", "agent-reply"],
+      ["p", "agent"],
+      ["title", "Second task"],
+    ],
+  });
+  const markers = [firstMarker, secondMarker].filter(Boolean);
+
+  const visibleIds = messages
+    .filter((entry) =>
+      isConversationMessage(entry, conversation, markers, messages),
+    )
+    .map((entry) => entry.id);
+
+  assert.deepEqual(visibleIds, [
+    "root",
+    "agent-reply",
+    "first-task-reply",
+    "first-task-followup",
+  ]);
+});

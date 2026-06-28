@@ -93,6 +93,16 @@ export function isConversationMessage(
     return false;
   }
 
+  const markerAnchorIds = new Set(
+    markers
+      .filter(
+        (marker) =>
+          marker.channelId === conversation.channelId &&
+          marker.threadRootId === conversation.threadRootId &&
+          marker.agentReplyId !== conversation.agentReply.id,
+      )
+      .map((marker) => marker.agentReplyId),
+  );
   const orderedThreadMessages =
     messages.length > 0
       ? messages.filter(
@@ -133,7 +143,44 @@ export function isConversationMessage(
       }
     }
 
-    return messageIndex < nextAnchorIndex;
+    if (messageIndex < nextAnchorIndex) {
+      return true;
+    }
+
+    const selectedTaskMessageIds = new Set<string>();
+    for (const candidate of orderedThreadMessages) {
+      const candidateIndex = messageIndexById.get(candidate.id);
+      if (
+        candidateIndex !== undefined &&
+        candidateIndex >= anchorIndex &&
+        candidateIndex < nextAnchorIndex
+      ) {
+        selectedTaskMessageIds.add(candidate.id);
+      }
+    }
+    selectedTaskMessageIds.delete(conversation.threadRootId);
+
+    const messageById = new Map(
+      orderedThreadMessages.map((candidate) => [candidate.id, candidate]),
+    );
+    let parentId = message.parentId;
+    const visited = new Set<string>([message.id]);
+    while (parentId && !visited.has(parentId)) {
+      if (selectedTaskMessageIds.has(parentId)) {
+        return true;
+      }
+      if (
+        parentId === conversation.threadRootId ||
+        markerAnchorIds.has(parentId)
+      ) {
+        return false;
+      }
+
+      visited.add(parentId);
+      parentId = messageById.get(parentId)?.parentId ?? null;
+    }
+
+    return false;
   }
 
   const currentMarker =

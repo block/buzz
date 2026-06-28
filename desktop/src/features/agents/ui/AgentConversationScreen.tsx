@@ -135,7 +135,6 @@ export function AgentConversationScreen({
   const {
     getMessageReadAt,
     isThreadMuted,
-    markThreadRead,
     markMessageRead,
     updateAgentConversationTitle,
   } = useAppShell();
@@ -420,11 +419,6 @@ export function AgentConversationScreen({
     });
   }, [conversation, conversationSourceMessages, updateAgentConversationTitle]);
   React.useEffect(() => {
-    const latestMessage = timelineMessages[timelineMessages.length - 1] ?? null;
-    if (latestMessage) {
-      markThreadRead(conversation.threadRootId, latestMessage.createdAt);
-    }
-
     if (isThreadMuted(conversation.threadRootId)) {
       return;
     }
@@ -440,9 +434,19 @@ export function AgentConversationScreen({
     getMessageReadAt,
     isThreadMuted,
     markMessageRead,
-    markThreadRead,
     timelineMessages,
   ]);
+  const replyParentEventId = React.useMemo(() => {
+    const latestTaskMessage = [...timelineMessages]
+      .reverse()
+      .find((message) => message.id !== conversation.threadRootId);
+
+    return (
+      latestTaskMessage?.id ??
+      conversation.agentReply.id ??
+      conversation.threadRootId
+    );
+  }, [conversation.agentReply.id, conversation.threadRootId, timelineMessages]);
   const routeableAgentPubkeys = React.useMemo(
     () =>
       agentParticipants
@@ -539,10 +543,10 @@ export function AgentConversationScreen({
           autoRouteAgentPubkeys: autoRoutedAgentPubkeys,
           mentionPubkeys,
         }),
-        parentEventId: conversation.threadRootId,
+        parentEventId: replyParentEventId,
       });
     },
-    [autoRoutedAgentPubkeys, conversation.threadRootId, sendMessageMutation],
+    [autoRoutedAgentPubkeys, replyParentEventId, sendMessageMutation],
   );
 
   const isComposerDisabled =
@@ -734,6 +738,7 @@ export function AgentConversationScreen({
         emptyTitle="No conversation messages yet"
         hasComposerOverlay
         isLoading={messagesQuery.isLoading && timelineMessages.length === 0}
+        layoutShiftKey={conversation.id}
         messageListPlacement="top"
         messages={timelineMessages}
         profiles={profiles}
