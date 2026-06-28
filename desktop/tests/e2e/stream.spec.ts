@@ -28,6 +28,13 @@ async function getTimelineMetrics(page: Page) {
   });
 }
 
+async function isScrollToLatestVisible(page: Page) {
+  return page
+    .getByTestId("message-scroll-to-latest")
+    .isVisible()
+    .catch(() => false);
+}
+
 async function ensureTimelineScrollable(
   senderPage: Page,
   receiverPage: Page,
@@ -143,10 +150,12 @@ async function scrollTimelineAwayFromBottom(page: Page, minDistance = 160) {
   const timeline = page.getByTestId("message-timeline");
   await timeline.hover();
 
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     await page.mouse.wheel(0, -800);
+    await page.waitForTimeout(100);
     const metrics = await getTimelineMetrics(page);
-    if (metrics.distanceFromBottom > minDistance) {
+    const scrollToLatestVisible = await isScrollToLatestVisible(page);
+    if (metrics.distanceFromBottom > minDistance && scrollToLatestVisible) {
       // The DOM scroll position is now off the bottom, but the timeline's
       // `onScroll` handler updates the React "away from bottom" anchor state
       // asynchronously. If a new message lands before that commit, the stale
@@ -154,7 +163,6 @@ async function scrollTimelineAwayFromBottom(page: Page, minDistance = 160) {
       // The scroll-to-latest pill only mounts once that state has committed,
       // so waiting for it guarantees the anchor is in the away-from-bottom
       // branch before callers send the message they expect to be counted.
-      await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
       return;
     }
   }
