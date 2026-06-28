@@ -519,7 +519,6 @@ export const ChannelPane = React.memo(function ChannelPane({
 
       if (isThreadedTask) {
         onOpenThread(threadMessage);
-        onSelectThreadReplyTarget(message);
         onThreadScrollTargetChange(message.id);
         return;
       }
@@ -530,7 +529,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     [
       onCloseThread,
       onOpenThread,
-      onSelectThreadReplyTarget,
       onSurfaceTabChange,
       onThreadScrollTargetChange,
     ],

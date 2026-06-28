@@ -9,9 +9,14 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  CHANNEL_TIMELINE_CONTENT_KINDS,
+  CHANNEL_TIMELINE_STATE_KINDS,
+} from "@/shared/constants/kinds";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
@@ -24,6 +29,7 @@ type ChannelRouteScreenProps = {
 };
 
 const MAX_ROUTE_ANCESTOR_HOPS = 50;
+const MAX_ROUTE_TASK_EVENTS = 1000;
 
 async function fetchRouteEvent(eventId: string): Promise<RelayEvent | null> {
   try {
@@ -43,8 +49,10 @@ function getReplyParentId(event: RelayEvent): string | null {
 }
 
 async function fetchRouteTargetEvents(
+  channelId: string,
   eventIds: string[],
   targetMessageId: string | null,
+  targetAgentConversationReplyId: string | null,
   targetThreadRootId: string | null,
 ): Promise<RelayEvent[]> {
   const eventsById = new Map<string, RelayEvent>();
@@ -71,6 +79,29 @@ async function fetchRouteTargetEvents(
   const threadRootId = targetThreadRootId ?? targetThreadRef.rootId ?? null;
   if (threadRootId && !eventsById.has(threadRootId)) {
     addEvent(await fetchRouteEvent(threadRootId));
+  }
+
+  if (targetAgentConversationReplyId && threadRootId) {
+    try {
+      const taskEvents = await relayClient.fetchEvents({
+        "#e": [threadRootId],
+        "#h": [channelId],
+        kinds: [
+          ...CHANNEL_TIMELINE_CONTENT_KINDS,
+          ...CHANNEL_TIMELINE_STATE_KINDS,
+        ],
+        limit: MAX_ROUTE_TASK_EVENTS,
+      });
+      for (const event of taskEvents) {
+        addEvent(event);
+      }
+    } catch (error) {
+      console.error(
+        "Failed to load route task conversation",
+        targetAgentConversationReplyId,
+        error,
+      );
+    }
   }
 
   let parentId = getReplyParentId(targetEvent);
@@ -171,8 +202,10 @@ export function ChannelRouteScreen({
     ].filter((eventId): eventId is string => eventId !== null);
 
     void fetchRouteTargetEvents(
+      channelId,
       eventIds,
       targetAgentConversationReplyId ?? targetMessageId,
+      targetAgentConversationReplyId,
       targetThreadRootId,
     ).then((events) => {
       if (!isCancelled) {
@@ -191,6 +224,7 @@ export function ChannelRouteScreen({
     };
   }, [
     selectedPostId,
+    channelId,
     targetAgentConversationReplyId,
     targetMessageId,
     targetThreadRootId,

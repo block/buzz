@@ -264,7 +264,29 @@ const MessageTimelineBase = React.forwardRef<
     liveSnapshot,
     EMPTY_TIMELINE_SNAPSHOT,
   );
-  const deferredMessages = deferredSnapshot.messages;
+  const isDeferredSnapshotCurrent = deferredSnapshot === liveSnapshot;
+  const holdLiveSnapshotForTargetRef = React.useRef(false);
+  if (targetMessageId) {
+    holdLiveSnapshotForTargetRef.current = true;
+  }
+  const shouldRenderLiveSnapshot =
+    targetMessageId != null ||
+    (holdLiveSnapshotForTargetRef.current && !isDeferredSnapshotCurrent);
+  if (!targetMessageId && isDeferredSnapshotCurrent) {
+    holdLiveSnapshotForTargetRef.current = false;
+  }
+  // Route targets are short-lived and correctness-critical: the scroll manager
+  // needs the target row in the same item index the list is rendering. If we
+  // leave the heavy list behind `useDeferredValue` while a cold deep-link target
+  // is being spliced in, convergence can hit its frame cap against a stale
+  // snapshot and clear the URL before the target is reachable. Once the route
+  // target clears, keep rendering live just long enough for the deferred
+  // snapshot to catch up, otherwise the row can disappear immediately after the
+  // scroll settles.
+  const renderedSnapshot = shouldRenderLiveSnapshot
+    ? liveSnapshot
+    : deferredSnapshot;
+  const deferredMessages = renderedSnapshot.messages;
   // The flattened item stream mirrors what TimelineMessageList renders: use the
   // hoisted mainEntries when the deferred snapshot is current (same identity as
   // the live messages), fall back to building entries from deferredMessages when
@@ -299,17 +321,17 @@ const MessageTimelineBase = React.forwardRef<
     deferredSnapshot,
     liveSnapshot,
   });
-  const isRenderPending = deferredSnapshot !== liveSnapshot;
+  const isRenderPending =
+    !shouldRenderLiveSnapshot && !isDeferredSnapshotCurrent;
   const scrollRouteKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
   const scrollRestorationId = targetMessageId
     ? `message-timeline:${scrollRouteKey}:target:${targetMessageId}`
     : `message-timeline:${scrollRouteKey}`;
-  // Keep the scroll node's DOM lifetime scoped to a channel. TanStack Router's
-  // scroll-restoration listener runs outside React and may write a saved
-  // scrollTop into the current scroll element during navigation; reusing the
-  // same node across channel routes can leave the newly-loaded message list
-  // painted at a stale offset until the user's next scroll event forces layout.
-  const scrollContainerDomKey = scrollRouteKey;
+  // Keep the scroll node's DOM lifetime scoped to a channel. Layout changes
+  // inside the same channel (for example opening the thread panel) should
+  // preserve the node so in-flight route-target jumps are not remounted and
+  // re-pinned to bottom.
+  const scrollContainerDomKey = channelId ?? "none";
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
@@ -359,6 +381,27 @@ const MessageTimelineBase = React.forwardRef<
   const showIntro = showDirectMessageIntro || showChannelIntro;
   const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
   const showMessageList = timelineBodySurface === "list";
+  const finishConvergedTarget = React.useCallback(
+    (messageId: string) => {
+      let framesUsed = 0;
+      const retryFrameLimit = 60;
+
+      const finish = () => {
+        if (scrollToMessage(messageId, { highlight: true })) {
+          onTargetReached?.(messageId);
+          return;
+        }
+
+        if (framesUsed >= retryFrameLimit) return;
+
+        framesUsed += 1;
+        requestAnimationFrame(finish);
+      };
+
+      finish();
+    },
+    [onTargetReached, scrollToMessage],
+  );
 
   React.useImperativeHandle(
     ref,
@@ -380,11 +423,13 @@ const MessageTimelineBase = React.forwardRef<
     useConvergentScrollToMessage(getVirtualizer, {
       indexByMessageId: timelineItems.indexByMessageId,
       align: "center",
-      onConverged: (messageId) => {
-        scrollToMessage(messageId, { highlight: true });
-        onTargetReached?.(messageId);
-      },
-      onAbandoned: (messageId) => onTargetReached?.(messageId),
+      isTargetMounted: (messageId) =>
+        Boolean(
+          scrollContainerRef.current?.querySelector(
+            `[data-message-id="${messageId}"]`,
+          ),
+        ),
+      onConverged: finishConvergedTarget,
     });
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {

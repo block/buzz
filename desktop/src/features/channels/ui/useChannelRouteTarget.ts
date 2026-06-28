@@ -45,7 +45,11 @@ function getRouteMainTimelineTargetId(
     return null;
   }
 
-  if (!targetMessage?.parentId || isBroadcastReply(targetMessage.tags ?? [])) {
+  if (!targetMessage) {
+    return null;
+  }
+
+  if (!targetMessage.parentId || isBroadcastReply(targetMessage.tags ?? [])) {
     return targetMessageId;
   }
 
@@ -88,6 +92,10 @@ export function useChannelRouteTarget({
     targetMessageId,
     targetTimelineMessage,
   );
+  const rootThreadHeadTargetId =
+    targetTimelineMessage && !targetTimelineMessage.parentId
+      ? targetTimelineMessage.id
+      : null;
   const handledThreadRouteTargetRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
@@ -115,18 +123,9 @@ export function useChannelRouteTarget({
     }
 
     if (!targetMessage.parentId) {
-      closeAgentSession();
-      // Root message links should open the reply panel for that root. The
-      // timeline scroll/highlight target alone is not enough: root links have
-      // no parent/thread metadata, so the reply-only branch below cannot infer
-      // a thread head.
-      setProfilePanelPubkey(null, { replace: true });
-      setEditTargetId(null);
-      setOpenThreadHeadId(targetMessage.id, { replace: true });
-      setThreadReplyTargetId(targetMessage.id);
-      setThreadScrollTargetId(null);
-      setExpandedThreadReplyIds(new Set());
-      handledThreadRouteTargetRef.current = targetKey;
+      // Root links still need to open the reply panel, but not until the main
+      // timeline has centered the row. Opening the panel first changes the main
+      // column layout mid-jump and can make the virtualized target abandon early.
       return;
     }
 
@@ -166,5 +165,5 @@ export function useChannelRouteTarget({
     timelineMessageById,
   ]);
 
-  return mainTimelineTargetMessageId;
+  return { mainTimelineTargetMessageId, rootThreadHeadTargetId };
 }

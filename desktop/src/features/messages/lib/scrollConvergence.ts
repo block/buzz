@@ -85,10 +85,10 @@ export type ConvergenceDecision = {
 
 /**
  * Hard cap on frames so a perpetually re-measuring row, or a target whose index
- * keeps shifting, can't spin the loop forever. The library has its own 5s valve;
- * this is the adapter-side bound expressed in frames for deterministic testing.
+ * keeps shifting, can't spin the loop forever. This adapter-side bound is long
+ * enough for cold deep-link targets to be fetched, indexed, and measured.
  */
-export const CONVERGENCE_FRAME_CAP = 32;
+export const CONVERGENCE_FRAME_CAP = 300;
 
 /**
  * One frame of the convergence loop. Pure: given the live map and the library's

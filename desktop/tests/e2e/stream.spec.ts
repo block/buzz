@@ -167,7 +167,30 @@ async function scrollTimelineAwayFromBottom(page: Page, minDistance = 160) {
     }
   }
 
-  throw new Error("Failed to scroll the timeline away from the bottom.");
+  await timeline.evaluate((element, distance) => {
+    const timeline = element as HTMLDivElement;
+    timeline.dispatchEvent(
+      new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -800,
+      }),
+    );
+    const maxScrollTop = Math.max(
+      0,
+      timeline.scrollHeight - timeline.clientHeight,
+    );
+    timeline.scrollTop = Math.max(0, maxScrollTop - distance - 80);
+    timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+  }, minDistance);
+
+  await expect
+    .poll(async () => {
+      const metrics = await getTimelineMetrics(page);
+      const scrollToLatestVisible = await isScrollToLatestVisible(page);
+      return metrics.distanceFromBottom > minDistance && scrollToLatestVisible;
+    })
+    .toBe(true);
 }
 
 test.beforeAll(async () => {

@@ -335,6 +335,10 @@ export function useAnchoredScroll({
       cancelAnimationFrame(bottomSettleRafIdRef.current);
       bottomSettleRafIdRef.current = null;
     }
+    if (mountPinRafIdRef.current !== null) {
+      cancelAnimationFrame(mountPinRafIdRef.current);
+      mountPinRafIdRef.current = null;
+    }
     bottomSettleFramesRef.current = 0;
   }, []);
 
@@ -361,12 +365,8 @@ export function useAnchoredScroll({
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
     }
-    if (mountPinRafIdRef.current !== null) {
-      cancelAnimationFrame(mountPinRafIdRef.current);
-      mountPinRafIdRef.current = null;
-    }
     cancelBottomSettle();
-  }, [channelId]);
+  }, [cancelBottomSettle, channelId]);
 
   const pinToBottomNow = React.useCallback(() => {
     const container = scrollContainerRef.current;
@@ -494,6 +494,9 @@ export function useAnchoredScroll({
       const targetTopOffset =
         currentTopOffset - (targetScrollTop - container.scrollTop);
 
+      settlingRef.current = false;
+      cancelBottomSettle();
+
       el.scrollIntoView({
         block: "center",
         behavior: options.behavior ?? "auto",
@@ -525,7 +528,7 @@ export function useAnchoredScroll({
       }
       return true;
     },
-    [scrollContainerRef],
+    [cancelBottomSettle, scrollContainerRef],
   );
 
   // Re-seat the anchor + at-bottom bookkeeping after a programmatic scrollTop
@@ -948,6 +951,8 @@ export function useAnchoredScroll({
       // (thread panel), leave the target for a later `messages` commit.
       const converge = convergeToTargetRef.current;
       if (converge?.(targetMessageId)) {
+        settlingRef.current = false;
+        cancelBottomSettle();
         handledTargetIdRef.current = targetMessageId;
         convergingTargetIdRef.current = targetMessageId;
       }
@@ -959,6 +964,7 @@ export function useAnchoredScroll({
   }, [
     isLoading,
     messages,
+    cancelBottomSettle,
     onTargetReached,
     scrollContainerRef,
     scrollToMessageImperative,

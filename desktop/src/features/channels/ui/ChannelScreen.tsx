@@ -662,9 +662,10 @@ export function ChannelScreen({
   const handleThreadScrollTargetResolved = React.useCallback(() => {
     setThreadScrollTargetId(null);
   }, []);
-  const handleTargetReached = React.useCallback(() => {
-    clearMessageRouteTarget({ replace: true });
-  }, [clearMessageRouteTarget]);
+  const [
+    pendingMainTimelineRouteTargetId,
+    setPendingMainTimelineRouteTargetId,
+  ] = React.useState<string | null>(null);
   React.useEffect(() => {
     resetComposerTargets(activeChannelId);
   }, [activeChannelId, resetComposerTargets]);
@@ -702,19 +703,55 @@ export function ChannelScreen({
     targetAgentConversationReplyId,
     timelineMessages,
   });
-  const mainTimelineTargetMessageId = useChannelRouteTarget({
-    activeChannel,
-    activeChannelId,
-    closeAgentSession: handleCloseAgentSession,
-    setEditTargetId,
-    setExpandedThreadReplyIds,
-    setOpenThreadHeadId,
-    setProfilePanelPubkey,
-    setThreadReplyTargetId,
-    setThreadScrollTargetId,
-    targetMessageId,
-    timelineMessages,
-  });
+  const { mainTimelineTargetMessageId, rootThreadHeadTargetId } =
+    useChannelRouteTarget({
+      activeChannel,
+      activeChannelId,
+      closeAgentSession: handleCloseAgentSession,
+      setEditTargetId,
+      setExpandedThreadReplyIds,
+      setOpenThreadHeadId,
+      setProfilePanelPubkey,
+      setThreadReplyTargetId,
+      setThreadScrollTargetId,
+      targetMessageId,
+      timelineMessages,
+    });
+  const handleTargetReached = React.useCallback(
+    (messageId: string) => {
+      setPendingMainTimelineRouteTargetId((current) =>
+        current === messageId ? null : current,
+      );
+      if (rootThreadHeadTargetId === messageId) {
+        handleCloseAgentSession();
+        setProfilePanelPubkey(null, { replace: true });
+        setEditTargetId(null);
+        setOpenThreadHeadId(messageId, { replace: true });
+        setThreadReplyTargetId(messageId);
+        setThreadScrollTargetId(null);
+        setExpandedThreadReplyIds(new Set());
+      }
+      clearMessageRouteTarget({ replace: true });
+    },
+    [
+      clearMessageRouteTarget,
+      handleCloseAgentSession,
+      rootThreadHeadTargetId,
+      setOpenThreadHeadId,
+      setProfilePanelPubkey,
+    ],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: activeChannelId is the reset trigger; the effect intentionally clears target state when the channel changes.
+  React.useEffect(() => {
+    setPendingMainTimelineRouteTargetId(null);
+  }, [activeChannelId]);
+  React.useEffect(() => {
+    if (mainTimelineTargetMessageId) {
+      setPendingMainTimelineRouteTargetId(mainTimelineTargetMessageId);
+    }
+  }, [mainTimelineTargetMessageId]);
+  const effectiveMainTimelineTargetMessageId =
+    pendingMainTimelineRouteTargetId ?? mainTimelineTargetMessageId;
   React.useEffect(() => {
     if (openThreadHeadId && !openThreadHeadMessage) {
       // While the timeline is still loading (e.g. a reload restoring the
@@ -964,7 +1001,7 @@ export function ChannelScreen({
                   onSurfaceTabChange={handleSurfaceTabChange}
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
-                  targetMessageId={mainTimelineTargetMessageId}
+                  targetMessageId={effectiveMainTimelineTargetMessageId}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
                   threadPanelWidthPx={threadPanelWidthPx}

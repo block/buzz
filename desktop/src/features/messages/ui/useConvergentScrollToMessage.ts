@@ -15,6 +15,8 @@ type ConvergentScrollOptions = {
   indexByMessageId: Map<string, number>;
   /** Where the target should land in the viewport. */
   align: ConvergenceAlign;
+  /** Optional DOM check; when present, the loop only settles once the target row mounted. */
+  isTargetMounted?: (messageId: string) => boolean;
   /** Fired on the settled frame once the target row has converged. */
   onConverged?: (messageId: string) => void;
   /** Fired when the loop stops without converging (target deleted, or frame cap). */
@@ -58,6 +60,7 @@ export function useConvergentScrollToMessage(
   {
     indexByMessageId,
     align,
+    isTargetMounted,
     onConverged,
     onAbandoned,
   }: ConvergentScrollOptions,
@@ -68,6 +71,8 @@ export function useConvergentScrollToMessage(
   mapRef.current = indexByMessageId;
   const alignRef = React.useRef(align);
   alignRef.current = align;
+  const isTargetMountedRef = React.useRef(isTargetMounted);
+  isTargetMountedRef.current = isTargetMounted;
   const onConvergedRef = React.useRef(onConverged);
   onConvergedRef.current = onConverged;
   const onAbandonedRef = React.useRef(onAbandoned);
@@ -130,14 +135,20 @@ export function useConvergentScrollToMessage(
             currentIndex,
             alignRef.current,
           );
+          const hasMountedCheck = Boolean(isTargetMountedRef.current);
+          const targetMounted = isTargetMountedRef.current?.(messageId) ?? true;
           const reachedTarget =
             target !== undefined &&
             Math.abs(offset - target[0]) <= SETTLE_TOLERANCE_PX;
           const offsetStable =
             previousOffset !== null &&
             Math.abs(offset - previousOffset) <= SETTLE_TOLERANCE_PX;
-          librarySettled = reachedTarget && offsetStable;
-          stalledOffTarget = offsetStable && !reachedTarget;
+          // Once a route target's DOM row is mounted and the virtualizer offset
+          // is no longer moving, the DOM centering path can finish the jump more
+          // reliably than continuing to chase an estimated index offset.
+          librarySettled =
+            offsetStable && targetMounted && (reachedTarget || hasMountedCheck);
+          stalledOffTarget = offsetStable && !librarySettled;
           previousOffset = offset;
         } else {
           previousOffset = virtualizer.scrollOffset ?? 0;
