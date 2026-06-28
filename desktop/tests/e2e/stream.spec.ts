@@ -42,10 +42,14 @@ async function ensureTimelineScrollable(
 ) {
   const input = senderPage.getByTestId("message-input");
   const sendButton = senderPage.getByTestId("send-message");
+  const minimumSeedMessages = 8;
 
   for (let index = 0; index < 24; index += 1) {
     const metrics = await getTimelineMetrics(receiverPage);
-    if (metrics.scrollHeight > metrics.clientHeight + 160) {
+    if (
+      index >= minimumSeedMessages &&
+      metrics.scrollHeight > metrics.clientHeight + 160
+    ) {
       return;
     }
 

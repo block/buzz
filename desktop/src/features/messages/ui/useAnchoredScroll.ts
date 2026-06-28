@@ -22,8 +22,10 @@ type UseAnchoredScrollOptions = {
   /** Inner content element — must wrap every renderable row, including the
    *  sentinel and bottom anchor. Used to schedule layout work on resize. */
   contentRef: React.RefObject<HTMLDivElement | null>;
-  /** Resets when changed; lets us drop anchor + scroll state across channels. */
+  /** Scopes channel-level side effects and observer subscriptions. */
   channelId?: string | null;
+  /** Resets anchor + scroll state when the rendered conversation changes. */
+  resetKey?: string | number | null;
   /** Suppresses initial scroll-to-bottom while a skeleton is showing. */
   isLoading: boolean;
   /** Source of truth for the rendered list. Used to detect new-at-bottom
@@ -249,6 +251,7 @@ export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
   channelId,
+  resetKey = null,
   isLoading,
   messages,
 
@@ -314,6 +317,7 @@ export function useAnchoredScroll({
   const bottomSettleRafIdRef = React.useRef<number | null>(null);
   const bottomSettleFramesRef = React.useRef(0);
   const userScrollIntentUntilRef = React.useRef(0);
+  const scrollScopeKey = `${channelId ?? "none"}:${resetKey ?? "none"}`;
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
   // appends, we snap to bottom even if they had scrolled up to read history.
@@ -342,11 +346,9 @@ export function useAnchoredScroll({
     bottomSettleFramesRef.current = 0;
   }, []);
 
-  // Reset everything when the channel changes — the layout effect that runs
-  // immediately after this reset is responsible for either jumping to bottom
-  // or to the target message for the new channel.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is intentionally the sole trigger — we want this effect to fire exactly when the channel changes (and on mount).
+  // Reset everything when the rendered conversation changes.
   React.useLayoutEffect(() => {
+    void scrollScopeKey;
     anchorRef.current = { kind: "at-bottom" };
     setIsAtBottom(true);
     setNewMessageCount(0);
@@ -366,7 +368,7 @@ export function useAnchoredScroll({
       highlightTimeoutRef.current = null;
     }
     cancelBottomSettle();
-  }, [cancelBottomSettle, channelId]);
+  }, [cancelBottomSettle, scrollScopeKey]);
 
   const pinToBottomNow = React.useCallback(() => {
     const container = scrollContainerRef.current;
@@ -842,8 +844,8 @@ export function useAnchoredScroll({
   // async embed expand, late font load, markdown that expands) silently
   // pushes the reading row around.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on a channel switch the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous channel's detached node and re-observe the live one.
   React.useEffect(() => {
+    void scrollScopeKey;
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
@@ -888,10 +890,10 @@ export function useAnchoredScroll({
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [channelId, contentRef, scrollContainerRef]);
+  }, [contentRef, pinToBottomNow, scrollContainerRef, scrollScopeKey]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId deliberately re-subscribes because the keyed scroll container remounts on channel switch.
   React.useEffect(() => {
+    void scrollScopeKey;
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -910,7 +912,7 @@ export function useAnchoredScroll({
       container.removeEventListener("wheel", markUserScrollIntent);
       container.removeEventListener("touchmove", markUserScrollIntent);
     };
-  }, [channelId, scrollContainerRef]);
+  }, [scrollContainerRef, scrollScopeKey]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from

@@ -772,10 +772,10 @@ export function AgentConversationScreen({
         emptyTitle="No conversation messages yet"
         hasComposerOverlay
         isLoading={messagesQuery.isLoading && timelineMessages.length === 0}
-        layoutShiftKey={conversation.id}
         messageListPlacement="top"
         messages={timelineMessages}
         profiles={profiles}
+        scrollResetKey={conversation.id}
         scrollContainerRef={timelineScrollRef}
         showInitialDayDivider={false}
         trailingContent={

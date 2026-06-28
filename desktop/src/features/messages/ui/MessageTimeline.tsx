@@ -58,7 +58,7 @@ type MessageTimelineProps = {
   hasComposerOverlay?: boolean;
   contentTopPadding?: "chrome" | "compact";
   isFetchingOlder?: boolean;
-  layoutShiftKey?: string | number | null;
+  scrollResetKey?: string | number | null;
   messageListPlacement?: "bottom" | "top";
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -166,7 +166,7 @@ const MessageTimelineBase = React.forwardRef<
     contentTopPadding = "chrome",
     hasOlderMessages = true,
     isFetchingOlder = false,
-    layoutShiftKey = null,
+    scrollResetKey = null,
     messageListPlacement = "bottom",
     followThreadById,
     isFollowingThreadById,
@@ -323,15 +323,15 @@ const MessageTimelineBase = React.forwardRef<
   });
   const isRenderPending =
     !shouldRenderLiveSnapshot && !isDeferredSnapshotCurrent;
-  const scrollRouteKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
+  const scrollIdentityKey = `${channelId ?? "none"}:${scrollResetKey ?? "none"}`;
   const scrollRestorationId = targetMessageId
-    ? `message-timeline:${scrollRouteKey}:target:${targetMessageId}`
-    : `message-timeline:${scrollRouteKey}`;
-  // Keep the scroll node's DOM lifetime scoped to a channel. Layout changes
-  // inside the same channel (for example opening the thread panel) should
-  // preserve the node so in-flight route-target jumps are not remounted and
-  // re-pinned to bottom.
-  const scrollContainerDomKey = channelId ?? "none";
+    ? `message-timeline:${scrollIdentityKey}:target:${targetMessageId}`
+    : `message-timeline:${scrollIdentityKey}`;
+  // Keep the scroll node's DOM lifetime scoped to the rendered conversation.
+  // Channel layout changes (for example opening the thread panel) should keep
+  // this stable, while switching task conversations should start from a fresh
+  // scroll state.
+  const scrollContainerDomKey = scrollIdentityKey;
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
@@ -359,6 +359,7 @@ const MessageTimelineBase = React.forwardRef<
     messages: deferredMessages,
     onTargetReached,
     pinToBottomByIndex,
+    resetKey: scrollResetKey,
     scrollContainerRef,
     targetMessageId,
   });
