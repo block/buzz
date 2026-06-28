@@ -37,6 +37,103 @@ const AUTO_MODEL_OPTION: PersonaModelOption = {
   label: "Auto (default)",
 };
 
+// Databricks IDs are sourced from squareup/goose-releases goose_models.json.
+// `goose-claude-4-8-opus` is also the current Buzz internal build default in
+// squareup/buzz-releases, though it is ahead of that registry today.
+const BUZZ_AGENT_MODEL_OPTIONS: readonly PersonaModelOption[] = [
+  AUTO_MODEL_OPTION,
+  {
+    id: "goose-claude-4-8-opus",
+    label: "Claude Opus 4.8",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-claude-4-7-opus",
+    label: "Claude Opus 4.7",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-claude-4-6-opus",
+    label: "Claude Opus 4.6",
+    providers: ["anthropic", "databricks"],
+  },
+  {
+    id: "goose-claude-4-6-sonnet",
+    label: "Claude Sonnet 4.6",
+    providers: ["anthropic", "databricks"],
+  },
+  {
+    id: "goose-claude-4-5-opus",
+    label: "Claude Opus 4.5",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-claude-4-5-sonnet",
+    label: "Claude Sonnet 4.5",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-claude-4-5-haiku",
+    label: "Claude Haiku 4.5",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-gpt-5-2",
+    label: "GPT-5.2",
+    providers: ["databricks"],
+  },
+  {
+    id: "databricks-gpt-5-5-pro",
+    label: "GPT-5.5 Pro",
+    providers: ["databricks"],
+  },
+  {
+    id: "databricks-gpt-5-5",
+    label: "GPT-5.5",
+    providers: ["databricks"],
+  },
+  {
+    id: "gpt-5",
+    label: "GPT-5",
+    providers: ["openai", "openai-compat"],
+  },
+  {
+    id: "gpt-5-mini",
+    label: "GPT-5 mini",
+    providers: ["openai", "openai-compat"],
+  },
+  {
+    id: "goose-gemini-3-5-flash",
+    label: "Gemini 3.5 Flash",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-gemini-3-1-pro",
+    label: "Gemini 3.1 Pro",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-gemini-3-1-flash-lite",
+    label: "Gemini 3.1 Flash Lite",
+    providers: ["databricks"],
+  },
+  {
+    id: "goose-gemini-2-5-pro",
+    label: "Gemini 2.5 Pro",
+    providers: ["databricks"],
+  },
+  {
+    id: "gemini-2.5-pro",
+    label: "Gemini 2.5 Pro",
+    providers: ["openai-compat"],
+  },
+  {
+    id: "gemini-2.5-flash",
+    label: "Gemini 2.5 Flash",
+    providers: ["openai-compat"],
+  },
+];
+
 const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "", label: "Auto (default)" },
   { id: "anthropic", label: "Anthropic" },
@@ -49,72 +146,8 @@ const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
   string,
   readonly PersonaModelOption[]
 > = {
-  goose: [
-    AUTO_MODEL_OPTION,
-    {
-      id: "goose-claude-4-6-opus",
-      label: "Claude Opus 4.6",
-      providers: ["anthropic", "databricks"],
-    },
-    {
-      id: "goose-claude-4-6-sonnet",
-      label: "Claude Sonnet 4.6",
-      providers: ["anthropic", "databricks"],
-    },
-    {
-      id: "gpt-5",
-      label: "GPT-5",
-      providers: ["databricks", "openai", "openai-compat"],
-    },
-    {
-      id: "gpt-5-mini",
-      label: "GPT-5 mini",
-      providers: ["databricks", "openai", "openai-compat"],
-    },
-    {
-      id: "gemini-2.5-pro",
-      label: "Gemini 2.5 Pro",
-      providers: ["databricks", "openai-compat"],
-    },
-    {
-      id: "gemini-2.5-flash",
-      label: "Gemini 2.5 Flash",
-      providers: ["databricks", "openai-compat"],
-    },
-  ],
-  "buzz-agent": [
-    AUTO_MODEL_OPTION,
-    {
-      id: "goose-claude-4-6-opus",
-      label: "Claude Opus 4.6",
-      providers: ["anthropic", "databricks"],
-    },
-    {
-      id: "goose-claude-4-6-sonnet",
-      label: "Claude Sonnet 4.6",
-      providers: ["anthropic", "databricks"],
-    },
-    {
-      id: "gpt-5",
-      label: "GPT-5",
-      providers: ["databricks", "openai", "openai-compat"],
-    },
-    {
-      id: "gpt-5-mini",
-      label: "GPT-5 mini",
-      providers: ["databricks", "openai", "openai-compat"],
-    },
-    {
-      id: "gemini-2.5-pro",
-      label: "Gemini 2.5 Pro",
-      providers: ["databricks", "openai-compat"],
-    },
-    {
-      id: "gemini-2.5-flash",
-      label: "Gemini 2.5 Flash",
-      providers: ["databricks", "openai-compat"],
-    },
-  ],
+  goose: BUZZ_AGENT_MODEL_OPTIONS,
+  "buzz-agent": BUZZ_AGENT_MODEL_OPTIONS,
   claude: [AUTO_MODEL_OPTION],
   codex: [AUTO_MODEL_OPTION],
 };
