@@ -282,19 +282,11 @@ export function useLoadOlderOnScroll({
             return;
           }
 
-          const previousHeight = container.scrollHeight;
-          const previousScrollTop = container.scrollTop;
+          // Native scroll anchoring (overflow-anchor) holds the reading
+          // position across the prepend now that all rows stay in the DOM, so
+          // the sentinel's only job is to trigger the fetch and re-arm.
           void fetchOlder().then(() => {
-            requestAnimationFrame(() => {
-              requestAnimationFrame(() => {
-                const newHeight = container.scrollHeight;
-                const delta = newHeight - previousHeight;
-                if (delta > 0) {
-                  restoreScrollPositionRef.current(previousScrollTop + delta);
-                }
-                observe();
-              });
-            });
+            observe();
           });
         },
         { root: container, rootMargin: "200px 0px 0px 0px" },
