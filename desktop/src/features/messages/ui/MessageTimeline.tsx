@@ -327,6 +327,9 @@ const MessageTimelineBase = React.forwardRef<
   const pendingSearchTargetRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (showTimelineSkeleton) return;
+    if (!searchActiveMessageId) {
+      pendingSearchTargetRef.current = null;
+    }
     if (
       !searchActiveMessageId ||
       searchActiveMessageId === prevSearchActiveRef.current
@@ -334,6 +337,7 @@ const MessageTimelineBase = React.forwardRef<
       prevSearchActiveRef.current = searchActiveMessageId;
       return;
     }
+    pendingSearchTargetRef.current = null;
     prevSearchActiveRef.current = searchActiveMessageId;
     if (!jumpToMessage(searchActiveMessageId, { behavior: "smooth" })) {
       pendingSearchTargetRef.current = searchActiveMessageId;

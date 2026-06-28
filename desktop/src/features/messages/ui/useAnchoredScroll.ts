@@ -128,6 +128,7 @@ export function useAnchoredScroll({
 
   const hasInitializedRef = React.useRef(false);
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
+  const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
@@ -151,6 +152,7 @@ export function useAnchoredScroll({
     setHighlightedMessageId(null);
     hasInitializedRef.current = false;
     prevLastMessageIdRef.current = undefined;
+    prevFirstMessageIdRef.current = undefined;
     prevMessageCountRef.current = 0;
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
@@ -298,13 +300,16 @@ export function useAnchoredScroll({
       }
       hasInitializedRef.current = true;
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
+      prevFirstMessageIdRef.current = messages[0]?.id;
       prevMessageCountRef.current = messages.length;
       return;
     }
 
     const anchor = anchorRef.current;
     const lastMessage = messages[messages.length - 1];
+    const firstMessage = messages[0];
     const prevLastId = prevLastMessageIdRef.current;
+    const prevFirstId = prevFirstMessageIdRef.current;
     const prevCount = prevMessageCountRef.current;
     const newLatestArrived =
       lastMessage !== undefined && lastMessage.id !== prevLastId;
@@ -313,6 +318,11 @@ export function useAnchoredScroll({
     // same-second row, so the list grows without the *last* id changing —
     // `newLatestArrived` misses that case and the unread counter never bumps.
     const messagesArrived = messages.length - prevCount;
+    const frontChanged =
+      firstMessage !== undefined &&
+      prevFirstId !== undefined &&
+      firstMessage.id !== prevFirstId;
+    const isPrepend = frontChanged && !newLatestArrived;
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -325,6 +335,7 @@ export function useAnchoredScroll({
       setIsAtBottom(true);
       setNewMessageCount(0);
       prevLastMessageIdRef.current = lastMessage?.id;
+      prevFirstMessageIdRef.current = firstMessage?.id;
       prevMessageCountRef.current = messages.length;
       return;
     }
@@ -355,10 +366,13 @@ export function useAnchoredScroll({
           container.scrollBy(0, drift);
         }
       }
-      setNewMessageCount((current) => current + messagesArrived);
+      if (!isPrepend) {
+        setNewMessageCount((current) => current + messagesArrived);
+      }
     }
 
     prevLastMessageIdRef.current = lastMessage?.id;
+    prevFirstMessageIdRef.current = firstMessage?.id;
     prevMessageCountRef.current = messages.length;
   }, [
     isLoading,

@@ -1797,4 +1797,8 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
       { timeout: 4_000 },
     )
     .toBeLessThanOrEqual(2);
+
+  await expect(page.getByTestId("message-scroll-to-latest")).toContainText(
+    "Jump to latest",
+  );
 });
