@@ -1,4 +1,7 @@
-import type { AgentConversation } from "@/features/agents/agentConversations";
+import type {
+  AgentConversation,
+  AgentConversationMarker,
+} from "@/features/agents/agentConversations";
 import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import type {
   TimelineMessage,
@@ -74,12 +77,90 @@ export function formatAgentParticipantNames(
 export function isConversationMessage(
   message: TimelineMessage,
   conversation: AgentConversation,
+  markers: readonly AgentConversationMarker[] = [],
+  messages: readonly TimelineMessage[] = [],
 ) {
-  return (
+  if (
     message.id === conversation.threadRootId ||
-    message.id === conversation.agentReply.id ||
-    message.rootId === conversation.threadRootId ||
-    message.parentId === conversation.threadRootId
+    message.id === conversation.parentMessage?.id ||
+    message.id === conversation.agentReply.id
+  ) {
+    return true;
+  }
+
+  const messageThreadRootId = message.rootId ?? message.parentId ?? null;
+  if (messageThreadRootId !== conversation.threadRootId) {
+    return false;
+  }
+
+  const orderedThreadMessages =
+    messages.length > 0
+      ? messages.filter(
+          (candidate) =>
+            candidate.id === conversation.threadRootId ||
+            candidate.rootId === conversation.threadRootId ||
+            candidate.parentId === conversation.threadRootId,
+        )
+      : [];
+  const messageIndexById = new Map(
+    orderedThreadMessages.map((candidate, index) => [candidate.id, index]),
+  );
+  const anchorIndex = messageIndexById.get(conversation.agentReply.id);
+  const messageIndex = messageIndexById.get(message.id);
+
+  if (anchorIndex !== undefined && messageIndex !== undefined) {
+    if (messageIndex < anchorIndex) {
+      return false;
+    }
+
+    let nextAnchorIndex = Number.POSITIVE_INFINITY;
+    for (const marker of markers) {
+      if (
+        marker.channelId !== conversation.channelId ||
+        marker.threadRootId !== conversation.threadRootId ||
+        marker.agentReplyId === conversation.agentReply.id
+      ) {
+        continue;
+      }
+
+      const markerAnchorIndex = messageIndexById.get(marker.agentReplyId);
+      if (
+        markerAnchorIndex !== undefined &&
+        markerAnchorIndex > anchorIndex &&
+        markerAnchorIndex < nextAnchorIndex
+      ) {
+        nextAnchorIndex = markerAnchorIndex;
+      }
+    }
+
+    return messageIndex < nextAnchorIndex;
+  }
+
+  const currentMarker =
+    markers.find(
+      (marker) =>
+        marker.channelId === conversation.channelId &&
+        marker.threadRootId === conversation.threadRootId &&
+        marker.agentReplyId === conversation.agentReply.id,
+    ) ?? null;
+  const selectedStartedAt =
+    currentMarker?.startedAt ?? conversation.agentReply.createdAt;
+  if (message.createdAt < selectedStartedAt) {
+    return false;
+  }
+
+  const nextMarkerStartedAt = markers
+    .filter(
+      (marker) =>
+        marker.channelId === conversation.channelId &&
+        marker.threadRootId === conversation.threadRootId &&
+        marker.agentReplyId !== conversation.agentReply.id &&
+        marker.startedAt > selectedStartedAt,
+    )
+    .sort((left, right) => left.startedAt - right.startedAt)[0]?.startedAt;
+
+  return (
+    nextMarkerStartedAt === undefined || message.createdAt < nextMarkerStartedAt
   );
 }
 

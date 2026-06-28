@@ -951,8 +951,7 @@ pub async fn start_managed_agent(
     }
 
     // Collect backend info under lock; async preflight/spawn happens below.
-    // Also snapshot profile reconciliation data for the background task.
-    let (target, reconcile_data) = {
+    let (target, mut reconcile_data) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -1049,9 +1048,10 @@ pub async fn start_managed_agent(
     // ── Profile reconciliation (fire-and-forget) ────────────────────────────
     // On successful start, spawn a background task to ensure the agent's kind:0
     // profile is published on the relay. This self-heals cases where the initial
-    // profile sync at creation time failed silently. For legacy records (pre-PR-921)
-    // with no persisted avatar, this also backfills the avatar from the relay.
+    // profile sync at creation time failed silently.
     if result.is_ok() {
+        use super::agent_profile_reconcile as reconcile;
+        reconcile::refresh_auth_tag(&app, &state, &pubkey, &mut reconcile_data);
         let reconcile_pubkey = pubkey.clone();
         let reconcile_app = app.clone();
         tauri::async_runtime::spawn(async move {

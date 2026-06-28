@@ -128,6 +128,10 @@ export function AgentConversationScreen({
   const sendMessageMutation = useSendMessageMutation(channel, currentIdentity);
 
   const relayMessages = messagesQuery.data ?? [];
+  const agentConversationMarkers = React.useMemo(
+    () => buildAgentConversationMarkers(relayMessages),
+    [relayMessages],
+  );
   const {
     getMessageReadAt,
     isThreadMuted,
@@ -211,7 +215,12 @@ export function AgentConversationScreen({
       profiles,
     );
     const scoped = formatted.filter((message) =>
-      isConversationMessage(message, conversation),
+      isConversationMessage(
+        message,
+        conversation,
+        agentConversationMarkers,
+        formatted,
+      ),
     );
     const sourceMessages =
       scoped.length > 0
@@ -231,6 +240,7 @@ export function AgentConversationScreen({
     );
   }, [
     channel,
+    agentConversationMarkers,
     conversation,
     currentIdentity?.pubkey,
     currentProfile?.avatarUrl,
@@ -477,10 +487,6 @@ export function AgentConversationScreen({
   React.useEffect(() => {
     lastPublishedThreadRecapRef.current = null;
   }, [conversation.id]);
-  const agentConversationMarkers = React.useMemo(
-    () => buildAgentConversationMarkers(relayMessages),
-    [relayMessages],
-  );
   const currentConversationMarker = React.useMemo(
     () =>
       agentConversationMarkers.find(
