@@ -153,9 +153,16 @@ export function getThreadAutoRouteAgentPubkeys({
 
   for (const pubkey of collectMessageMentionPubkeys([...messages])) {
     const normalized = normalizePubkey(pubkey);
+    if (!normalized) {
+      continue;
+    }
+
     if (knownAgentPubkeys.has(normalized)) {
       agentPubkeys.set(normalized, pubkey);
+      continue;
     }
+
+    humanPubkeys.add(normalized);
   }
 
   if (agentPubkeys.size !== 1 || humanPubkeys.size !== 1) {

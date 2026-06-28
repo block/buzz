@@ -146,6 +146,25 @@ test("thread composer auto-routes exactly one current human and one known agent"
 
   assert.deepEqual(
     getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human-one",
+      knownAgentPubkeys,
+      messages: [
+        {
+          id: "root",
+          pubkey: "human-one",
+          tags: [
+            ["p", "human-two"],
+            ["p", "agent-one"],
+          ],
+        },
+        { id: "reply", pubkey: "agent-one", tags: [] },
+      ],
+    }),
+    [],
+  );
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
       currentPubkey: "human",
       knownAgentPubkeys,
       messages: [
