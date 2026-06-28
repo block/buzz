@@ -10,8 +10,9 @@
  * sidebar row, so `top-0` inside the sidebar starts below the traffic-light
  * strip.
  *
- * This spec injects a synthetic pill into the live sidebar's relative
- * container and asserts the pill clears the chrome strip.
+ * This spec injects a synthetic pill into the live sidebar channel-content
+ * container (the same relative wrapper that owns the real top unread pill) and
+ * asserts the pill clears the pinned header.
  */
 import { expect, test } from "@playwright/test";
 
@@ -39,9 +40,9 @@ async function injectSyntheticPill(
   await page.evaluate(
     ({ topClass, base, html, testId }) => {
       const container = document.querySelector(
-        '[data-testid="app-sidebar-scroll-anchor"]',
+        '[data-testid="sidebar-channel-content"]',
       ) as HTMLElement | null;
-      if (!container) throw new Error("sidebar scroll anchor not found");
+      if (!container) throw new Error("sidebar channel content not found");
 
       // Remove any prior injection so retries start from a clean sidebar.
       container
@@ -68,16 +69,22 @@ test.describe("sidebar MoreUnreadButton top chrome overlap", () => {
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
   });
 
-  test("top pill clears the in-flow traffic-light strip", async ({ page }) => {
+  test("top pill clears the pinned header", async ({ page }) => {
     await injectSyntheticPill(page, TOP_CLASS, "synthetic-top");
     const pill = page.getByTestId("synthetic-top");
+    const pinnedHeader = page.getByTestId("sidebar-pinned-header");
     await expect(pill).toBeVisible();
+    await expect(pinnedHeader).toBeVisible();
 
-    const box = await pill.boundingBox();
-    expect(box).not.toBeNull();
-    // The pill is anchored at the top of the sidebar row, below the 40px
-    // in-flow chrome strip.
-    expect(box?.y ?? Number.NaN).toBeGreaterThanOrEqual(40);
+    const pillBox = await pill.boundingBox();
+    const pinnedHeaderBox = await pinnedHeader.boundingBox();
+    expect(pillBox).not.toBeNull();
+    expect(pinnedHeaderBox).not.toBeNull();
+    expect(pillBox?.y ?? Number.NaN).toBeGreaterThanOrEqual(
+      pinnedHeaderBox?.y == null || pinnedHeaderBox.height == null
+        ? Number.NaN
+        : pinnedHeaderBox.y + pinnedHeaderBox.height,
+    );
 
     await waitForAnimations(page);
   });

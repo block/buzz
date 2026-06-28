@@ -544,7 +544,10 @@ export function AppSidebar({
           suggestionChannels={channels}
         />
 
-        <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          className="relative flex min-h-0 flex-1 flex-col"
+          data-testid="sidebar-channel-content"
+        >
           {unreadAboveCount > 0 ? (
             <MoreUnreadButton
               count={unreadAboveCount}
