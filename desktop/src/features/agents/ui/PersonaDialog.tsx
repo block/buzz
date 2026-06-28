@@ -420,8 +420,7 @@ export function PersonaDialog({
   const providerApiKeyFieldVisible =
     llmProviderFieldVisible && providerApiKeyConfig !== null;
   const modelFieldVisible =
-    (runtime.trim().length > 0 || blankRuntimeModelProviderEditable) &&
-    (!providerApiKeyFieldVisible || providerApiKeyValue.trim().length > 0);
+    runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired =
     modelFieldVisible && providerRequiresExplicitModel(providerForModelScope);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));

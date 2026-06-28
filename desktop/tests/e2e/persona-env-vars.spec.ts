@@ -58,6 +58,24 @@ async function invokeTauri<T>(
   );
 }
 
+async function openModelMenu(
+  page: import("@playwright/test").Page,
+  model: import("@playwright/test").Locator,
+) {
+  await model.click();
+  const menu = page
+    .getByRole("menu")
+    .filter({
+      has: page.getByRole("menuitemradio", {
+        name: "Custom model...",
+        exact: true,
+      }),
+    })
+    .last();
+  await expect(menu).toBeVisible();
+  return menu;
+}
+
 test("persona env_vars round-trip through create_persona + update_persona", async ({
   page,
 }) => {
@@ -278,7 +296,7 @@ test("persona model options follow the selected LLM provider", async ({
   await expect(provider).toContainText("Buzz Agent (default)");
   await expect(llmProvider).toBeVisible();
   await expect(model).toBeVisible();
-  await expect(model).toContainText("Auto (default)");
+  await expect(model).toContainText("Default model");
 
   await llmProvider.click();
   await page
@@ -288,19 +306,26 @@ test("persona model options follow the selected LLM provider", async ({
   await expect(page.getByText("OpenAI API key")).toBeVisible();
   await expect(providerApiKey).toBeVisible();
   await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
-  await expect(model).toHaveCount(0);
+  await expect(model).toBeVisible();
 
   await providerApiKey.fill("sk-openai-test");
-  await expect(model).toBeVisible();
-  await model.click();
+  const openAiModelMenu = await openModelMenu(page, model);
   await expect(
-    page.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+    openAiModelMenu.getByRole("menuitemradio", {
+      name: "GPT-5.5",
+      exact: true,
+    }),
   ).toBeVisible();
-  await expect(page.getByRole("menuitemradio", { name: /Claude/ })).toHaveCount(
-    0,
-  );
-  await page.getByRole("menuitemradio", { name: "GPT-5", exact: true }).click();
-  await expect(model).toContainText("GPT-5");
+  await expect(
+    openAiModelMenu.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    openAiModelMenu.getByRole("menuitemradio", { name: /Claude/ }),
+  ).toHaveCount(0);
+  await openAiModelMenu
+    .getByRole("menuitemradio", { name: "GPT-5.5", exact: true })
+    .click();
+  await expect(model).toContainText("GPT-5.5");
 
   await llmProvider.click();
   await page
@@ -308,20 +333,25 @@ test("persona model options follow the selected LLM provider", async ({
     .click();
   await expect(page.getByText("Anthropic API key")).toBeVisible();
   await expect(providerApiKey).toHaveValue("");
-  await expect(model).toHaveCount(0);
+  await expect(model).toBeVisible();
 
   await providerApiKey.fill("sk-ant-test");
-  await expect(model).toBeVisible();
-  await expect(model).toContainText("Auto (default)");
 
-  await model.click();
+  const anthropicModelMenu = await openModelMenu(page, model);
   await expect(
-    page.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }),
+    anthropicModelMenu.getByRole("menuitemradio", {
+      name: "Claude Sonnet 4.6",
+    }),
   ).toBeVisible();
   await expect(
-    page.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+    anthropicModelMenu.getByRole("menuitemradio", {
+      name: "GPT-5.5",
+      exact: true,
+    }),
   ).toHaveCount(0);
-  await page.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }).click();
+  await anthropicModelMenu
+    .getByRole("menuitemradio", { name: "Claude Sonnet 4.6" })
+    .click();
   await expect(model).toContainText("Claude Sonnet 4.6");
 
   await llmProvider.click();
@@ -330,16 +360,19 @@ test("persona model options follow the selected LLM provider", async ({
   });
   await llmProviderMenu
     .last()
-    .getByRole("menuitemradio", { name: "Auto (default)", exact: true })
+    .getByRole("menuitemradio", { name: "Databricks (default)", exact: true })
     .click();
   await expect(model).toBeVisible();
   await expect(model).toContainText("Claude Sonnet 4.6");
 
-  await model.click();
+  const defaultModelMenu = await openModelMenu(page, model);
   await expect(
-    page.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }),
+    defaultModelMenu.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+    defaultModelMenu.getByRole("menuitemradio", {
+      name: "GPT-5.5",
+      exact: true,
+    }),
   ).toBeVisible();
 });
