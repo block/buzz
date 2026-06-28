@@ -6837,8 +6837,10 @@ export function maybeInstallE2eTauriMocks() {
           ?.input;
         const provider = input?.provider?.trim() ?? "";
         const openAiModels = [
-          { id: "gpt-5", name: "GPT-5", description: null },
-          { id: "gpt-5-mini", name: "GPT-5 mini", description: null },
+          { id: "gpt-5.5", name: "GPT-5.5", description: null },
+          { id: "gpt-5.4", name: "GPT-5.4", description: null },
+          { id: "gpt-5.4-mini", name: "GPT-5.4 mini", description: null },
+          { id: "gpt-5.4-nano", name: "GPT-5.4 nano", description: null },
         ];
         const anthropicModels = [
           {

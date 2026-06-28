@@ -31,7 +31,7 @@ pub async fn get_agent_models(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
-    let (resolved_acp, agent_command, agent_args, persisted_model, merged_env) = {
+    let (resolved_acp, agent_command, agent_args, persisted_model, effective_provider, merged_env) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -79,15 +79,34 @@ pub async fn get_agent_models(
 
         // Resolve the effective model from the linked persona so the ModelPicker
         // dropdown shows the current persona model as selected.
-        let (_prompt, effective_model, _provider) = resolve_effective_prompt_model_provider(
-            record.persona_id.as_deref(),
-            &personas,
-            record.system_prompt.clone(),
-            record.model.clone(),
-        );
+        let (_prompt, effective_model, effective_provider) =
+            resolve_effective_prompt_model_provider(
+                record.persona_id.as_deref(),
+                &personas,
+                record.system_prompt.clone(),
+                record.model.clone(),
+            );
 
-        (resolved, resolved_agent, args, effective_model, env)
+        (
+            resolved,
+            resolved_agent,
+            args,
+            effective_model,
+            effective_provider,
+            env,
+        )
     }; // store lock released — subprocess runs without holding the lock
+
+    if let Some(models) = discover_openai_compatible_models(
+        &state.http_client,
+        effective_provider.as_deref(),
+        &merged_env,
+        persisted_model.clone(),
+    )
+    .await?
+    {
+        return Ok(models);
+    }
 
     run_agent_models_command(
         resolved_acp,
@@ -121,6 +140,7 @@ pub struct DiscoverAgentModelsInput {
 #[tauri::command]
 pub async fn discover_agent_models(
     input: DiscoverAgentModelsInput,
+    state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
 
@@ -157,7 +177,144 @@ pub async fn discover_agent_models(
     }
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
 
+    if let Some(models) = discover_openai_compatible_models(
+        &state.http_client,
+        input.provider.as_deref(),
+        &merged_env,
+        None,
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
     run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelListResponse {
+    data: Vec<OpenAiModelListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelListItem {
+    id: String,
+    #[serde(default)]
+    created: Option<i64>,
+}
+
+fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("openai" | "openai-compat")
+    )
+}
+
+fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
+    let base_url = env
+        .get("OPENAI_COMPAT_BASE_URL")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://api.openai.com/v1");
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn is_agent_text_model_id(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    if [
+        "audio",
+        "dall-e",
+        "embedding",
+        "image",
+        "moderation",
+        "realtime",
+        "speech",
+        "transcribe",
+        "tts",
+        "whisper",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return false;
+    }
+
+    lower.starts_with("gpt-") || lower.starts_with('o') || lower.starts_with("chatgpt-")
+}
+
+fn normalize_openai_compatible_models(response: OpenAiModelListResponse) -> Vec<AgentModelInfo> {
+    let mut seen = HashSet::new();
+    let mut items = response.data;
+    items.sort_by(|left, right| {
+        right
+            .created
+            .cmp(&left.created)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    items
+        .into_iter()
+        .filter(|item| is_agent_text_model_id(&item.id))
+        .filter(|item| seen.insert(item.id.clone()))
+        .map(|item| AgentModelInfo {
+            id: item.id,
+            name: None,
+            description: None,
+        })
+        .collect()
+}
+
+async fn discover_openai_compatible_models(
+    client: &reqwest::Client,
+    provider: Option<&str>,
+    env: &BTreeMap<String, String>,
+    selected_model: Option<String>,
+) -> Result<Option<AgentModelsResponse>, String> {
+    if !is_openai_compatible_provider(provider) {
+        return Ok(None);
+    }
+
+    let api_key = env
+        .get("OPENAI_COMPAT_API_KEY")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?;
+    let url = openai_compatible_models_url(env);
+    let response = client
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|error| format!("OpenAI model discovery request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body = crate::managed_agents::redact_env_values_in(&body, env);
+        return Err(format!("OpenAI model discovery HTTP {status}: {body}"));
+    }
+
+    let response = response
+        .json::<OpenAiModelListResponse>()
+        .await
+        .map_err(|error| format!("OpenAI model discovery response parse failed: {error}"))?;
+    let models = normalize_openai_compatible_models(response);
+    if models.is_empty() {
+        return Err("OpenAI model discovery returned no compatible text models".to_string());
+    }
+
+    Ok(Some(AgentModelsResponse {
+        agent_name: provider.unwrap_or("openai").trim().to_string(),
+        agent_version: "models-api".to_string(),
+        models,
+        agent_default_model: None,
+        selected_model,
+        supports_switching: true,
+    }))
 }
 
 async fn run_agent_models_command(
@@ -500,5 +657,49 @@ fn normalize_agent_models(
         agent_default_model,
         selected_model: persisted_model,
         supports_switching,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openai_model_normalization_keeps_agent_text_models() {
+        let models = normalize_openai_compatible_models(OpenAiModelListResponse {
+            data: vec![
+                OpenAiModelListItem {
+                    id: "text-embedding-3-large".to_string(),
+                    created: Some(4),
+                },
+                OpenAiModelListItem {
+                    id: "gpt-image-2".to_string(),
+                    created: Some(5),
+                },
+                OpenAiModelListItem {
+                    id: "gpt-5.4-mini".to_string(),
+                    created: Some(2),
+                },
+                OpenAiModelListItem {
+                    id: "o4-mini".to_string(),
+                    created: Some(3),
+                },
+                OpenAiModelListItem {
+                    id: "gpt-5.4-mini".to_string(),
+                    created: Some(1),
+                },
+            ],
+        });
+
+        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["o4-mini", "gpt-5.4-mini"]);
+    }
+
+    #[test]
+    fn openai_models_url_uses_openai_default_base_url() {
+        assert_eq!(
+            openai_compatible_models_url(&BTreeMap::new()),
+            "https://api.openai.com/v1/models"
+        );
     }
 }

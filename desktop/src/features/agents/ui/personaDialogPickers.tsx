@@ -4,6 +4,8 @@ export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
 export const PERSONA_FIELD_CONTROL_CLASS =
   "border-0 bg-transparent text-muted-foreground shadow-none outline-none ring-0 transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-muted-foreground focus:outline-hidden focus-visible:ring-0";
+export const PERSONA_LABEL_OPTIONAL_CLASS =
+  "ml-1 text-xs font-normal text-muted-foreground/50";
 
 export const AUTO_MODEL_DROPDOWN_VALUE = "__auto_model__";
 export const CUSTOM_MODEL_DROPDOWN_VALUE = "__custom_model__";
@@ -38,16 +40,21 @@ export type ProviderApiKeyConfig = {
   placeholder: string;
 };
 
-const AUTO_MODEL_OPTION: PersonaModelOption = {
+const DEFAULT_MODEL_OPTION: PersonaModelOption = {
   id: "",
-  label: "Auto (default)",
+  label: "Default model",
+};
+
+const DATABRICKS_DEFAULT_MODEL_OPTION: PersonaModelOption = {
+  id: "",
+  label: "Databricks default model",
 };
 
 // Databricks IDs are sourced from squareup/goose-releases goose_models.json.
 // `goose-claude-4-8-opus` is also the current Buzz internal build default in
 // squareup/buzz-releases, though it is ahead of that registry today.
 const BUZZ_AGENT_MODEL_OPTIONS: readonly PersonaModelOption[] = [
-  AUTO_MODEL_OPTION,
+  DATABRICKS_DEFAULT_MODEL_OPTION,
   {
     id: "goose-claude-4-8-opus",
     label: "Claude Opus 4.8",
@@ -99,6 +106,26 @@ const BUZZ_AGENT_MODEL_OPTIONS: readonly PersonaModelOption[] = [
     providers: ["databricks"],
   },
   {
+    id: "gpt-5.5",
+    label: "GPT-5.5",
+    providers: ["openai", "openai-compat"],
+  },
+  {
+    id: "gpt-5.4",
+    label: "GPT-5.4",
+    providers: ["openai", "openai-compat"],
+  },
+  {
+    id: "gpt-5.4-mini",
+    label: "GPT-5.4 mini",
+    providers: ["openai", "openai-compat"],
+  },
+  {
+    id: "gpt-5.4-nano",
+    label: "GPT-5.4 nano",
+    providers: ["openai", "openai-compat"],
+  },
+  {
     id: "gpt-5",
     label: "GPT-5",
     providers: ["openai", "openai-compat"],
@@ -141,7 +168,6 @@ const BUZZ_AGENT_MODEL_OPTIONS: readonly PersonaModelOption[] = [
 ];
 
 const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
-  { id: "", label: "Auto (default)" },
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
@@ -154,14 +180,14 @@ const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
 > = {
   goose: BUZZ_AGENT_MODEL_OPTIONS,
   "buzz-agent": BUZZ_AGENT_MODEL_OPTIONS,
-  claude: [AUTO_MODEL_OPTION],
-  codex: [AUTO_MODEL_OPTION],
+  claude: [DEFAULT_MODEL_OPTION],
+  codex: [DEFAULT_MODEL_OPTION],
 };
 
 export function getRuntimePersonaModelOptions(
   runtimeId: string,
 ): readonly PersonaModelOption[] {
-  return PERSONA_MODEL_OPTIONS_BY_RUNTIME[runtimeId] ?? [AUTO_MODEL_OPTION];
+  return PERSONA_MODEL_OPTIONS_BY_RUNTIME[runtimeId] ?? [DEFAULT_MODEL_OPTION];
 }
 
 function isKnownLlmProvider(
@@ -176,13 +202,18 @@ export function getPersonaModelOptions(
 ): readonly PersonaModelOption[] {
   const options = getRuntimePersonaModelOptions(runtimeId);
   const trimmedProvider = providerId?.trim() ?? "";
+  if (trimmedProvider.length === 0) {
+    return options.filter((option) => option.id.length === 0);
+  }
   if (!isKnownLlmProvider(trimmedProvider)) {
     return options;
   }
 
   return options.filter(
     (option) =>
-      option.id.length === 0 || option.providers?.includes(trimmedProvider),
+      (option.id.length === 0 &&
+        !providerRequiresExplicitModel(trimmedProvider)) ||
+      option.providers?.includes(trimmedProvider),
   );
 }
 
@@ -224,19 +255,41 @@ export function getModelSelectValue({
   return model.trim() || AUTO_MODEL_DROPDOWN_VALUE;
 }
 
+export function providerRequiresExplicitModel(
+  providerId: string | null | undefined,
+) {
+  const trimmedProvider = providerId?.trim() ?? "";
+  return (
+    trimmedProvider === "anthropic" ||
+    trimmedProvider === "openai" ||
+    trimmedProvider === "openai-compat"
+  );
+}
+
+export function getDefaultLlmProviderLabel(runtimeId: string) {
+  return runtimeId === "buzz-agent" || runtimeId === "goose"
+    ? "Databricks default"
+    : "Default";
+}
+
 export function getPersonaProviderOptions(
   currentProvider: string,
+  runtimeId: string,
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
+  const options = [
+    { id: "", label: getDefaultLlmProviderLabel(runtimeId) },
+    ...PERSONA_LLM_PROVIDER_OPTIONS,
+  ];
   if (
     trimmedProvider.length === 0 ||
-    PERSONA_LLM_PROVIDER_OPTIONS.some((option) => option.id === trimmedProvider)
+    options.some((option) => option.id === trimmedProvider)
   ) {
-    return PERSONA_LLM_PROVIDER_OPTIONS;
+    return options;
   }
 
   return [
-    ...PERSONA_LLM_PROVIDER_OPTIONS,
+    ...options,
     { id: trimmedProvider, label: `${trimmedProvider} (current)` },
   ];
 }

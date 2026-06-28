@@ -11,6 +11,7 @@ import {
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./personaDialogPickers";
+import { providerRequiresExplicitModel } from "./personaDialogPickers";
 
 export const MODEL_DISCOVERY_LOADING_VALUE = "__model_discovery_loading__";
 
@@ -24,13 +25,25 @@ function stableModelDiscoveryEnvKey(envVars: EnvVarsValue): string {
 
 function getDiscoveredPersonaModelOptions(
   response: AgentModelsResponse | null,
+  provider: string,
 ): readonly PersonaModelOption[] | null {
   if (!response?.supportsSwitching || response.models.length === 0) {
     return null;
   }
 
+  const defaultModelOption = providerRequiresExplicitModel(provider)
+    ? []
+    : [
+        {
+          id: "",
+          label: response.agentDefaultModel?.trim()
+            ? `Default model (${response.agentDefaultModel})`
+            : "Default model",
+        },
+      ];
+
   return [
-    { id: "", label: "Auto (default)" },
+    ...defaultModelOption,
     ...response.models.map((model) => ({
       id: model.id,
       label: model.name?.trim() || model.id,
@@ -159,8 +172,8 @@ export function usePersonaModelDiscovery({
   ]);
 
   const discoveredModelOptions = React.useMemo(
-    () => getDiscoveredPersonaModelOptions(modelDiscoveryData),
-    [modelDiscoveryData],
+    () => getDiscoveredPersonaModelOptions(modelDiscoveryData, trimmedProvider),
+    [modelDiscoveryData, trimmedProvider],
   );
 
   return {

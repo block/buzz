@@ -18,6 +18,7 @@ import { AgentCreationPreview } from "./AgentCreationPreview";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
+import { PersonaModelField } from "./PersonaModelField";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getImportButtonLabel,
@@ -36,6 +37,7 @@ import {
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
+  getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
   getModelSelectValue,
   getPersonaModelOptions,
@@ -45,9 +47,11 @@ import {
   getRuntimePersonaModelOptions,
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
+  providerRequiresExplicitModel,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
+  PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
 } from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
@@ -76,8 +80,6 @@ type PersonaDialogProps = {
   ) => Promise<void>;
 };
 
-const PERSONA_LABEL_OPTIONAL_CLASS =
-  "ml-1 text-xs font-normal text-muted-foreground/50";
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
@@ -428,6 +430,8 @@ export function PersonaDialog({
   const modelFieldVisible =
     llmProviderFieldVisible &&
     (!providerApiKeyFieldVisible || providerApiKeyValue.trim().length > 0);
+  const isExplicitModelRequired =
+    modelFieldVisible && providerRequiresExplicitModel(trimmedProvider);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
@@ -436,6 +440,7 @@ export function PersonaDialog({
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
+    (!isExplicitModelRequired || model.trim().length > 0) &&
     !isAvatarUploadPending;
   const {
     discoveredModelOptions,
@@ -463,7 +468,8 @@ export function PersonaDialog({
   });
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
-  const providerOptions = getPersonaProviderOptions(provider);
+  const providerOptions = getPersonaProviderOptions(provider, runtime);
+  const defaultLlmProviderLabel = getDefaultLlmProviderLabel(runtime);
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
@@ -843,7 +849,7 @@ export function PersonaDialog({
                   id="persona-llm-provider"
                   onValueChange={handleProviderDropdownChange}
                   options={providerDropdownOptions}
-                  placeholder="Auto (default)"
+                  placeholder={defaultLlmProviderLabel}
                   value={providerSelectValue}
                 />
                 {showCustomProviderInput ? (
@@ -881,70 +887,18 @@ export function PersonaDialog({
 
             <AnimatePresence initial={false}>
               {modelFieldVisible ? (
-                <motion.div
-                  animate={{ height: "auto", opacity: 1, scale: 1 }}
-                  className="origin-top overflow-hidden"
-                  exit={{ height: 0, opacity: 0, scale: 0.98 }}
-                  initial={{ height: 0, opacity: 0, scale: 0.98 }}
-                  key="persona-model-field"
+                <PersonaModelField
+                  disabled={isPending}
+                  isExplicitModelRequired={isExplicitModelRequired}
+                  model={model}
+                  modelDiscoveryStatus={modelDiscoveryStatus}
+                  modelDropdownOptions={modelDropdownOptions}
+                  modelSelectValue={modelSelectValue}
+                  onCustomModelChange={setModel}
+                  onModelValueChange={handleModelDropdownChange}
+                  showCustomModelInput={showCustomModelInput}
                   transition={advancedFieldsTransition}
-                >
-                  <div className="space-y-1.5">
-                    <label
-                      className="text-sm font-medium text-foreground"
-                      htmlFor="persona-model"
-                    >
-                      Model
-                      <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                        Optional
-                      </span>
-                    </label>
-                    <PersonaDropdownField
-                      disabled={isPending}
-                      id="persona-model"
-                      onValueChange={handleModelDropdownChange}
-                      options={modelDropdownOptions}
-                      placeholder="Auto (default)"
-                      value={modelSelectValue}
-                    />
-                    {showCustomModelInput ? (
-                      <div
-                        className={cn(
-                          "mt-2 flex min-h-11 items-center px-3",
-                          PERSONA_FIELD_SHELL_CLASS,
-                        )}
-                      >
-                        <Input
-                          aria-label="Custom model ID"
-                          autoCorrect="off"
-                          className={cn(
-                            "h-8 px-0 py-0 leading-6",
-                            PERSONA_FIELD_CONTROL_CLASS,
-                          )}
-                          disabled={isPending}
-                          id="persona-custom-model"
-                          onChange={(event) => setModel(event.target.value)}
-                          placeholder="Custom model ID"
-                          value={model}
-                        />
-                      </div>
-                    ) : null}
-                    {modelDiscoveryStatus ? (
-                      <p
-                        aria-live="polite"
-                        className={cn(
-                          "text-xs",
-                          modelDiscoveryStatus.tone === "warning"
-                            ? "text-warning"
-                            : "text-muted-foreground",
-                        )}
-                        data-testid="persona-model-discovery-status"
-                      >
-                        {modelDiscoveryStatus.message}
-                      </p>
-                    ) : null}
-                  </div>
-                </motion.div>
+                />
               ) : null}
             </AnimatePresence>
 
