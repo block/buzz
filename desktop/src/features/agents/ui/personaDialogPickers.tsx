@@ -20,7 +20,7 @@ const KNOWN_LLM_PROVIDER_IDS = [
 
 type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 
-type PersonaModelOption = {
+export type PersonaModelOption = {
   id: string;
   label: string;
   providers?: readonly PersonaLlmProviderId[];
@@ -236,8 +236,8 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
     (runtime) => runtime.availability === "available",
   );
   return (
-    available.find((runtime) => runtime.id === "goose") ??
     available.find((runtime) => runtime.id === "buzz-agent") ??
+    available.find((runtime) => runtime.id === "goose") ??
     available[0] ??
     null
   );

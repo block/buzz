@@ -508,6 +508,7 @@ pub fn run() {
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,
+            discover_agent_models,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,

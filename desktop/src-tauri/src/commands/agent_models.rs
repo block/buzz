@@ -1,6 +1,10 @@
-use std::collections::HashSet;
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 use nostr::Keys;
+use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -11,7 +15,7 @@ use crate::{
         managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
-        UpdateManagedAgentResponse,
+        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -85,6 +89,84 @@ pub async fn get_agent_models(
         (resolved, resolved_agent, args, effective_model, env)
     }; // store lock released — subprocess runs without holding the lock
 
+    run_agent_models_command(
+        resolved_acp,
+        agent_command,
+        agent_args,
+        persisted_model,
+        merged_env,
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverAgentModelsInput {
+    #[serde(default)]
+    pub acp_command: Option<String>,
+    pub agent_command: String,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
+}
+
+/// Query available models from an unsaved agent configuration.
+///
+/// This powers the new-agent dialog before a persona/agent record exists. It
+/// mirrors the saved-agent discovery command, but derives runtime/provider/env
+/// from the current form state instead of loading a persisted record.
+#[tauri::command]
+pub async fn discover_agent_models(
+    input: DiscoverAgentModelsInput,
+) -> Result<AgentModelsResponse, String> {
+    crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+
+    let acp_command = input
+        .acp_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ACP_COMMAND);
+    let resolved_acp = resolve_command(acp_command)
+        .ok_or_else(|| missing_command_message(acp_command, "ACP harness command"))?;
+
+    let agent_command = input.agent_command.trim();
+    if agent_command.is_empty() {
+        return Err("agent command is required for model discovery".to_string());
+    }
+    let agent_args = normalize_agent_args(agent_command, input.agent_args);
+    let resolved_agent = resolve_command(agent_command)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| agent_command.to_string());
+
+    let mut derived_env = BTreeMap::new();
+    if let Some(meta) = known_acp_runtime(agent_command) {
+        let provider = input
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if !meta.provider_locked {
+            if let (Some(env_key), Some(provider)) = (meta.provider_env_var, provider) {
+                derived_env.insert(env_key.to_string(), provider.to_string());
+            }
+        }
+    }
+    let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
+
+    run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+}
+
+async fn run_agent_models_command(
+    resolved_acp: PathBuf,
+    agent_command: String,
+    agent_args: Vec<String>,
+    persisted_model: Option<String>,
+    merged_env: BTreeMap<String, String>,
+) -> Result<AgentModelsResponse, String> {
     // Clone the env map for redaction below — `merged_env` is moved
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.

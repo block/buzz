@@ -6832,6 +6832,41 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      case "discover_agent_models": {
+        const input = (payload as { input?: { provider?: string } } | null)
+          ?.input;
+        const provider = input?.provider?.trim() ?? "";
+        const openAiModels = [
+          { id: "gpt-5", name: "GPT-5", description: null },
+          { id: "gpt-5-mini", name: "GPT-5 mini", description: null },
+        ];
+        const anthropicModels = [
+          {
+            id: "goose-claude-4-6-opus",
+            name: "Claude Opus 4.6",
+            description: null,
+          },
+          {
+            id: "goose-claude-4-6-sonnet",
+            name: "Claude Sonnet 4.6",
+            description: null,
+          },
+        ];
+        const models =
+          provider === "openai"
+            ? openAiModels
+            : provider === "anthropic"
+              ? anthropicModels
+              : [...anthropicModels, ...openAiModels];
+        return {
+          agentName: "mock-agent",
+          agentVersion: "0.0.0",
+          models,
+          agentDefaultModel: null,
+          selectedModel: null,
+          supportsSwitching: true,
+        };
+      }
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

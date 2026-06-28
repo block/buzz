@@ -47,6 +47,10 @@ import {
   shouldClearKnownModelForSelectionScope,
 } from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import {
+  MODEL_DISCOVERY_LOADING_VALUE,
+  usePersonaModelDiscovery,
+} from "./usePersonaModelDiscovery";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -394,9 +398,22 @@ export function PersonaDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     !isAvatarUploadPending;
-  const modelOptions = getPersonaModelOptions(runtime, provider);
+  const { discoveredModelOptions, modelDiscoveryLoading } =
+    usePersonaModelDiscovery({
+      envVars,
+      isCustomProviderEditing,
+      modelFieldVisible,
+      open,
+      provider,
+      selectedRuntime,
+    });
+  const staticModelOptions = getPersonaModelOptions(runtime, provider);
   const runtimeModelOptions = getRuntimePersonaModelOptions(runtime);
-  const isModelCustom = !hasPersonaModelOption(runtimeModelOptions, model);
+  const modelOptions = discoveredModelOptions ?? staticModelOptions;
+  const isModelCustom = !hasPersonaModelOption(
+    discoveredModelOptions ?? runtimeModelOptions,
+    model,
+  );
   const modelSelectValue = getModelSelectValue({
     isCustomModelEditing,
     isModelCustom,
@@ -405,9 +422,10 @@ export function PersonaDialog({
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
   const providerOptions = getPersonaProviderOptions(provider);
+  const trimmedProvider = provider.trim();
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
-    : provider.trim() || AUTO_PROVIDER_DROPDOWN_VALUE;
+    : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
@@ -454,6 +472,15 @@ export function PersonaDialog({
       label: option.label,
       value: option.id || AUTO_MODEL_DROPDOWN_VALUE,
     })),
+    ...(modelDiscoveryLoading && discoveredModelOptions === null
+      ? [
+          {
+            disabled: true,
+            label: "Loading models...",
+            value: MODEL_DISCOVERY_LOADING_VALUE,
+          },
+        ]
+      : []),
     { label: "Custom model...", value: CUSTOM_MODEL_DROPDOWN_VALUE },
   ];
   const previewLabel = displayName.trim() || "Agent name";
