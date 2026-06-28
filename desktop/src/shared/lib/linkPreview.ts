@@ -37,11 +37,145 @@ const MARKDOWN_SUPPORTED_LINK_RE =
   /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
 
-function stripCodeBlocks(content: string): string {
-  return content
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/~~~[\s\S]*?~~~/g, " ")
-    .replace(/`[^`\n]*`/g, " ");
+type HiddenRange = {
+  start: number;
+  end: number;
+};
+
+function maskRanges(content: string, ranges: HiddenRange[]): string {
+  if (ranges.length === 0) return content;
+
+  const merged: HiddenRange[] = [];
+  for (const range of [...ranges].sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end) {
+      last.end = Math.max(last.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+
+  let masked = "";
+  let cursor = 0;
+  for (const range of merged) {
+    masked += content.slice(cursor, range.start);
+    masked += content.slice(range.start, range.end).replace(/[^\n]/g, " ");
+    cursor = range.end;
+  }
+
+  return masked + content.slice(cursor);
+}
+
+function isIndexInRanges(index: number, ranges: HiddenRange[]): boolean {
+  return ranges.some((range) => index >= range.start && index < range.end);
+}
+
+function overlapsRange(
+  start: number,
+  end: number,
+  ranges: HiddenRange[],
+): boolean {
+  return ranges.some((range) => start < range.end && end > range.start);
+}
+
+function collectCodeRanges(content: string): HiddenRange[] {
+  const ranges: HiddenRange[] = [];
+  for (const match of content.matchAll(/```[\s\S]*?```|~~~[\s\S]*?~~~/g)) {
+    ranges.push({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    });
+  }
+
+  for (const match of content.matchAll(/`[^`\n]*`/g)) {
+    ranges.push({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    });
+  }
+
+  return ranges;
+}
+
+function collectBlockSpoilerRanges(
+  content: string,
+  excludedRanges: HiddenRange[],
+): HiddenRange[] {
+  const ranges: HiddenRange[] = [];
+  let openStart: number | null = null;
+  let lineStart = 0;
+
+  while (lineStart < content.length) {
+    const newlineIndex = content.indexOf("\n", lineStart);
+    const lineEnd =
+      newlineIndex === -1 ? content.length : newlineIndex + "\n".length;
+    const line = content.slice(
+      lineStart,
+      newlineIndex === -1 ? lineEnd : newlineIndex,
+    );
+
+    if (
+      line.trim() === "||" &&
+      !overlapsRange(lineStart, lineEnd, excludedRanges)
+    ) {
+      if (openStart == null) {
+        openStart = lineStart;
+      } else {
+        ranges.push({ start: openStart, end: lineEnd });
+        openStart = null;
+      }
+    }
+
+    lineStart = lineEnd;
+  }
+
+  return ranges;
+}
+
+function collectInlineSpoilerRanges(
+  content: string,
+  excludedRanges: HiddenRange[],
+): HiddenRange[] {
+  const ranges: HiddenRange[] = [];
+  let openStart: number | null = null;
+  let index = 0;
+
+  while (index < content.length - 1) {
+    if (
+      content[index] === "|" &&
+      content[index + 1] === "|" &&
+      !isIndexInRanges(index, excludedRanges) &&
+      !isIndexInRanges(index + 1, excludedRanges)
+    ) {
+      if (openStart == null) {
+        openStart = index;
+      } else {
+        ranges.push({ start: openStart, end: index + 2 });
+        openStart = null;
+      }
+      index += 2;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return ranges;
+}
+
+function stripHiddenLinkPreviewContent(content: string): string {
+  const codeRanges = collectCodeRanges(content);
+  const blockSpoilerRanges = collectBlockSpoilerRanges(content, codeRanges);
+  const inlineSpoilerRanges = collectInlineSpoilerRanges(content, [
+    ...codeRanges,
+    ...blockSpoilerRanges,
+  ]);
+
+  return maskRanges(content, [
+    ...codeRanges,
+    ...blockSpoilerRanges,
+    ...inlineSpoilerRanges,
+  ]);
 }
 
 function countChar(value: string, char: string): number {
@@ -317,7 +451,7 @@ export function extractSupportedLinkPreviews(
 ): SupportedLinkPreview[] {
   const previews: SupportedLinkPreview[] = [];
   const seen = new Set<string>();
-  const searchable = stripCodeBlocks(content);
+  const searchable = stripHiddenLinkPreviewContent(content);
   const candidates: LinkPreviewCandidate[] = [];
   let order = 0;
 

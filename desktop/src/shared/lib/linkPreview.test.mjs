@@ -172,6 +172,35 @@ test("extractSupportedLinkPreviews skips URLs inside inline and fenced code", ()
   );
 });
 
+test("extractSupportedLinkPreviews skips links inside inline spoilers", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "Keep",
+        "||[roadmap](https://docs.google.com/document/d/hidden/edit)||",
+        "hidden, but show https://github.com/block/sprout/pull/7",
+      ].join(" "),
+    ).map((preview) => preview.title),
+    ["block/sprout #7"],
+  );
+});
+
+test("extractSupportedLinkPreviews skips links inside block spoilers", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "||",
+        "",
+        "https://linear.app/buzz/issue/BUG-99/hidden-spoiler-link",
+        "",
+        "||",
+        "https://github.com/block/sprout/pull/8",
+      ].join("\n"),
+    ).map((preview) => preview.title),
+    ["block/sprout #8"],
+  );
+});
+
 test("isSupportedLinkAutolinkLabel matches normalized bare URL labels", () => {
   const preview = parseSupportedLinkPreview("github.com/block/sprout/pull/5");
   assert.ok(preview);
