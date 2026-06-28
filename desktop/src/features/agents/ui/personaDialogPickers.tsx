@@ -45,9 +45,12 @@ const DEFAULT_MODEL_OPTION: PersonaModelOption = {
   label: "Default model",
 };
 
+const DATABRICKS_DEFAULT_MODEL_ID = "goose-claude-4-8-opus";
+const DATABRICKS_DEFAULT_MODEL_LABEL = "Claude Opus 4.8";
+
 const DATABRICKS_DEFAULT_MODEL_OPTION: PersonaModelOption = {
   id: "",
-  label: "Databricks default model",
+  label: `${DATABRICKS_DEFAULT_MODEL_LABEL} (default)`,
 };
 
 // Databricks IDs are sourced from squareup/goose-releases goose_models.json.
@@ -171,7 +174,7 @@ const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
-  { id: "databricks", label: "Databricks" },
+  { id: "databricks", label: "Databricks (Pro)" },
 ];
 
 const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
@@ -196,12 +199,30 @@ function isKnownLlmProvider(
   return (KNOWN_LLM_PROVIDER_IDS as readonly string[]).includes(providerId);
 }
 
+function runtimeDefaultsToDatabricks(runtimeId: string) {
+  return runtimeId === "buzz-agent" || runtimeId === "goose";
+}
+
+function effectiveModelProviderForOptions(
+  runtimeId: string,
+  providerId: string | null | undefined,
+) {
+  const trimmedProvider = providerId?.trim() ?? "";
+  if (trimmedProvider.length === 0 && runtimeDefaultsToDatabricks(runtimeId)) {
+    return "databricks";
+  }
+  return trimmedProvider;
+}
+
 export function getPersonaModelOptions(
   runtimeId: string,
   providerId: string | null | undefined,
 ): readonly PersonaModelOption[] {
   const options = getRuntimePersonaModelOptions(runtimeId);
-  const trimmedProvider = providerId?.trim() ?? "";
+  const trimmedProvider = effectiveModelProviderForOptions(
+    runtimeId,
+    providerId,
+  );
   if (trimmedProvider.length === 0) {
     return options.filter((option) => option.id.length === 0);
   }
@@ -213,7 +234,8 @@ export function getPersonaModelOptions(
     (option) =>
       (option.id.length === 0 &&
         !providerRequiresExplicitModel(trimmedProvider)) ||
-      option.providers?.includes(trimmedProvider),
+      (option.id !== DATABRICKS_DEFAULT_MODEL_ID &&
+        option.providers?.includes(trimmedProvider)),
   );
 }
 
@@ -267,8 +289,8 @@ export function providerRequiresExplicitModel(
 }
 
 export function getDefaultLlmProviderLabel(runtimeId: string) {
-  return runtimeId === "buzz-agent" || runtimeId === "goose"
-    ? "Databricks default"
+  return runtimeDefaultsToDatabricks(runtimeId)
+    ? "Databricks (Pro)"
     : "Default";
 }
 
@@ -277,10 +299,16 @@ export function getPersonaProviderOptions(
   runtimeId: string,
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
-  const options = [
-    { id: "", label: getDefaultLlmProviderLabel(runtimeId) },
-    ...PERSONA_LLM_PROVIDER_OPTIONS,
-  ];
+  const providerOptions = runtimeDefaultsToDatabricks(runtimeId)
+    ? PERSONA_LLM_PROVIDER_OPTIONS.filter((option) =>
+        trimmedProvider === "databricks" ? true : option.id !== "databricks",
+      )
+    : PERSONA_LLM_PROVIDER_OPTIONS;
+  const defaultProviderOptions =
+    runtimeDefaultsToDatabricks(runtimeId) && trimmedProvider === "databricks"
+      ? []
+      : [{ id: "", label: getDefaultLlmProviderLabel(runtimeId) }];
+  const options = [...defaultProviderOptions, ...providerOptions];
   if (
     trimmedProvider.length === 0 ||
     options.some((option) => option.id === trimmedProvider)
@@ -352,6 +380,53 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
           ? " (not installed)"
           : "";
   return `${runtime.label}${suffix}`;
+}
+
+function runtimeAvailabilitySortRank(
+  availability: AcpRuntimeCatalogEntry["availability"],
+) {
+  switch (availability) {
+    case "available":
+      return 0;
+    case "cli_missing":
+      return 1;
+    case "not_installed":
+      return 2;
+    case "adapter_missing":
+      return 3;
+  }
+}
+
+function runtimePreferenceSortRank(runtimeId: string) {
+  switch (runtimeId) {
+    case "buzz-agent":
+      return 0;
+    case "goose":
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+export function sortPersonaRuntimes(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+) {
+  return [...runtimes].sort((left, right) => {
+    const availabilityDelta =
+      runtimeAvailabilitySortRank(left.availability) -
+      runtimeAvailabilitySortRank(right.availability);
+    if (availabilityDelta !== 0) {
+      return availabilityDelta;
+    }
+
+    const preferenceDelta =
+      runtimePreferenceSortRank(left.id) - runtimePreferenceSortRank(right.id);
+    if (preferenceDelta !== 0) {
+      return preferenceDelta;
+    }
+
+    return left.label.localeCompare(right.label);
+  });
 }
 
 export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {

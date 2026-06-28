@@ -246,9 +246,68 @@ fn is_agent_text_model_id(id: &str) -> bool {
     lower.starts_with("gpt-") || lower.starts_with('o') || lower.starts_with("chatgpt-")
 }
 
+fn openai_dated_snapshot_alias(id: &str) -> Option<String> {
+    let (base, date) = id.rsplit_once('-')?;
+    if date.len() != 2 || !date.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let (base, month) = base.rsplit_once('-')?;
+    if month.len() != 2 || !month.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let (base, year) = base.rsplit_once('-')?;
+    if year.len() != 4 || !year.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(base.to_string())
+}
+
+fn openai_model_display_name(id: &str) -> String {
+    let canonical = openai_dated_snapshot_alias(id).unwrap_or_else(|| id.to_string());
+    if let Some(rest) = canonical.strip_prefix("chatgpt-") {
+        return format!("ChatGPT {}", title_case_model_suffix(rest, false));
+    }
+    if let Some(rest) = canonical.strip_prefix("gpt-") {
+        return format!("GPT-{}", title_case_model_suffix(rest, true));
+    }
+
+    canonical
+}
+
+fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> String {
+    value
+        .split('-')
+        .enumerate()
+        .map(|(index, part)| {
+            let part = if part.eq_ignore_ascii_case("pro") {
+                "Pro".to_string()
+            } else if part.eq_ignore_ascii_case("mini") {
+                "mini".to_string()
+            } else if part.eq_ignore_ascii_case("nano") {
+                "nano".to_string()
+            } else {
+                part.to_string()
+            };
+
+            if preserve_first_separator && index == 0 {
+                part
+            } else if index == 0 {
+                part
+            } else {
+                format!(" {part}")
+            }
+        })
+        .collect::<String>()
+}
+
 fn normalize_openai_compatible_models(response: OpenAiModelListResponse) -> Vec<AgentModelInfo> {
     let mut seen = HashSet::new();
     let mut items = response.data;
+    let all_ids = items
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<HashSet<String>>();
     items.sort_by(|left, right| {
         right
             .created
@@ -259,10 +318,14 @@ fn normalize_openai_compatible_models(response: OpenAiModelListResponse) -> Vec<
     items
         .into_iter()
         .filter(|item| is_agent_text_model_id(&item.id))
+        .filter(|item| match openai_dated_snapshot_alias(&item.id) {
+            Some(alias) => !all_ids.contains(&alias),
+            None => true,
+        })
         .filter(|item| seen.insert(item.id.clone()))
         .map(|item| AgentModelInfo {
+            name: Some(openai_model_display_name(&item.id)),
             id: item.id,
-            name: None,
             description: None,
         })
         .collect()
@@ -677,6 +740,14 @@ mod tests {
                     created: Some(5),
                 },
                 OpenAiModelListItem {
+                    id: "chatgpt-5.5-pro-2026-04-23".to_string(),
+                    created: Some(7),
+                },
+                OpenAiModelListItem {
+                    id: "chatgpt-5.5-pro".to_string(),
+                    created: Some(6),
+                },
+                OpenAiModelListItem {
                     id: "gpt-5.4-mini".to_string(),
                     created: Some(2),
                 },
@@ -691,8 +762,21 @@ mod tests {
             ],
         });
 
-        let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
-        assert_eq!(ids, vec!["o4-mini", "gpt-5.4-mini"]);
+        let ids_and_names = models
+            .into_iter()
+            .map(|model| (model.id, model.name))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids_and_names,
+            vec![
+                (
+                    "chatgpt-5.5-pro".to_string(),
+                    Some("ChatGPT 5.5 Pro".to_string()),
+                ),
+                ("o4-mini".to_string(), Some("o4-mini".to_string())),
+                ("gpt-5.4-mini".to_string(), Some("GPT-5.4 mini".to_string()),),
+            ]
+        );
     }
 
     #[test]

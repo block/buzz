@@ -53,6 +53,7 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
   shouldClearKnownModelForSelectionScope,
+  sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
 import {
@@ -480,6 +481,10 @@ export function PersonaDialog({
     providerApiKeyConfig?.envVar ?? null,
   );
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
+  const sortedRuntimes = React.useMemo(
+    () => sortPersonaRuntimes(runtimes),
+    [runtimes],
+  );
   const blankRuntimeOptionLabel = runtimesLoading
     ? "Loading providers..."
     : isCreateMode
@@ -494,7 +499,7 @@ export function PersonaDialog({
           },
         ]
       : []),
-    ...runtimes.map((candidate) => ({
+    ...sortedRuntimes.map((candidate) => ({
       disabled: isCreateMode && candidate.availability !== "available",
       label: `${formatRuntimeOptionLabel(candidate)}${
         isCreateMode && candidate.id === defaultRuntime?.id ? " (default)" : ""

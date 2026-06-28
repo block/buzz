@@ -16,6 +16,7 @@ import {
 } from "./personaDialogPickers";
 
 export function PersonaDropdownField({
+  contentClassName,
   disabled,
   id,
   onValueChange,
@@ -23,6 +24,7 @@ export function PersonaDropdownField({
   placeholder,
   value,
 }: {
+  contentClassName?: string;
   disabled?: boolean;
   id: string;
   onValueChange: (value: string) => void;
@@ -60,6 +62,7 @@ export function PersonaDropdownField({
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="start"
+          className={contentClassName}
           onCloseAutoFocus={(event) => event.preventDefault()}
           sideOffset={5}
           style={{
