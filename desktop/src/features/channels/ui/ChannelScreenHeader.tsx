@@ -26,6 +26,7 @@ type ChannelScreenHeaderProps = {
   isAddBotOpen?: boolean;
   isJoining?: boolean;
   showHeaderContent?: boolean;
+  transparentChrome?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
@@ -46,6 +47,7 @@ export function ChannelScreenHeader({
   isJoining = false,
   onAddBotOpenChange,
   showHeaderContent = true,
+  transparentChrome = false,
   onJoinChannel,
   onManageChannel,
   onToggleMembers,
@@ -120,6 +122,7 @@ export function ChannelScreenHeader({
         />
       }
       title={activeChannelTitle}
+      transparentChrome={transparentChrome}
       visibility={activeChannel?.visibility}
     />
   );

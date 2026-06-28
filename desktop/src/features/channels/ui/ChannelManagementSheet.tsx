@@ -88,6 +88,7 @@ type ChannelManagementSheetProps = {
   onDeleted?: () => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  transparentChrome?: boolean;
 };
 
 const DEFAULT_EPHEMERAL_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -100,6 +101,7 @@ export function ChannelManagementSheet({
   onDeleted,
   onOpenChange,
   open,
+  transparentChrome = false,
 }: ChannelManagementSheetProps) {
   const { isDark } = useTheme();
   const isSplitLayout = layout === "split";
@@ -348,6 +350,7 @@ export function ChannelManagementSheet({
             isDeleteDialogOpen={isDeleteDialogOpen}
             isOwner={isOwner}
             isSplitLayout={isSplitLayout}
+            transparentChrome={transparentChrome}
             joinChannelMutation={joinChannelMutation}
             leaveChannelMutation={leaveChannelMutation}
             memberCount={memberCount}
@@ -628,6 +631,7 @@ type ChannelManagementPanelContentProps = {
   isDeleteDialogOpen: boolean;
   isOwner: boolean;
   isSplitLayout: boolean;
+  transparentChrome?: boolean;
   joinChannelMutation: ChannelMutation;
   leaveChannelMutation: ChannelMutation;
   memberCount: number;
@@ -659,6 +663,7 @@ function ChannelManagementPanelContent({
   isDeleteDialogOpen,
   isOwner,
   isSplitLayout,
+  transparentChrome = false,
   joinChannelMutation,
   leaveChannelMutation,
   memberCount,
@@ -680,7 +685,7 @@ function ChannelManagementPanelContent({
   return (
     <>
       {isSplitLayout ? (
-        <AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
           <AuxiliaryPanelHeaderGroup>
             {activeView === "canvas" ? (
               <Button

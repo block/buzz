@@ -613,6 +613,13 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
+  const hasSplitAuxiliaryPane =
+    useSplitAuxiliaryPane &&
+    (channelManagementOpen ||
+      Boolean(threadHeadMessage) ||
+      shouldShowThreadSkeleton ||
+      Boolean(activeChannel && selectedAgent) ||
+      Boolean(profilePanelPubkey));
   const wrapAux = (panel: React.ReactNode, testId: string) =>
     useSplitAuxiliaryPane ? (
       <RightAuxiliaryPane
@@ -628,7 +635,18 @@ export const ChannelPane = React.memo(function ChannelPane({
       panel
     );
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+      {!isSinglePanelView ? (
+        <div
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-x-0 top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+            channelChrome.headerHeight,
+          )}
+          data-testid="channel-shared-header-backdrop"
+        />
+      ) : null}
+
       {!isSinglePanelView ? (
         <section
           aria-label="Channel messages and composer"
@@ -829,6 +847,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           onThreadPanelResizeStart={onThreadPanelResizeStart}
           threadPanelWidthPx={threadPanelWidthPx}
           useSplitAuxiliaryPane={useSplitAuxiliaryPane}
+          transparentChrome={hasSplitAuxiliaryPane}
         />
       ) : threadHeadMessage ? (
         (() => {
@@ -849,6 +868,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               onCancelEdit={onCancelEdit}
               onCancelReply={onCancelThreadReply}
               onClose={onCloseThread}
@@ -900,6 +920,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               onClose={onCloseThread}
               widthPx={threadPanelWidthPx}
             />
@@ -929,6 +950,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               profiles={profiles}
               onBackToProfile={() => onOpenProfilePanel(selectedAgent.pubkey)}
               onClose={onCloseAgentSession}
@@ -946,6 +968,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               onClose={onCloseProfilePanel}
               onOpenDm={onOpenDm}
               onOpenProfile={onOpenProfilePanel}

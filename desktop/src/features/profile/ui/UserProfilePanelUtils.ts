@@ -110,6 +110,7 @@ export type UserProfilePanelProps = {
   tab?: ProfilePanelTab;
   view?: ProfilePanelView;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 export function deriveProfileChannels(

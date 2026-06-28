@@ -39,6 +39,7 @@ type AgentSessionThreadPanelProps = {
   onBackToProfile: () => void;
   onClose: () => void;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 export function AgentSessionThreadPanel({
@@ -52,6 +53,7 @@ export function AgentSessionThreadPanel({
   onBackToProfile,
   onClose,
   widthPx,
+  transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
@@ -176,7 +178,9 @@ export function AgentSessionThreadPanel({
   if (isSplitLayout) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{agentHeaderContent}</AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
+          {agentHeaderContent}
+        </AuxiliaryPanelHeader>
         {agentBody}
       </div>
     );

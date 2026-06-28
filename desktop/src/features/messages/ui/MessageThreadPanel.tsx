@@ -88,6 +88,7 @@ type MessageThreadPanelProps = {
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
+  transparentChrome?: boolean;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
@@ -103,6 +104,7 @@ type MessageThreadPanelSkeletonProps = {
   layout?: "standalone" | "split";
   onClose: () => void;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 function canManageMessage(
@@ -225,6 +227,7 @@ export function MessageThreadPanelSkeleton({
   layout = "standalone",
   onClose,
   widthPx,
+  transparentChrome = false,
 }: MessageThreadPanelSkeletonProps) {
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
@@ -296,7 +299,9 @@ export function MessageThreadPanelSkeleton({
   if (isSplitLayout) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
+          {threadHeaderContent}
+        </AuxiliaryPanelHeader>
         {threadBody}
         <ThreadComposerSkeleton />
       </div>
@@ -379,6 +384,7 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   toolbarExtraActions,
   widthPx,
+  transparentChrome = false,
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
@@ -943,7 +949,9 @@ export function MessageThreadPanel({
   if (isSplitLayout) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
+          {threadHeaderContent}
+        </AuxiliaryPanelHeader>
         {threadScrollRegion}
         {threadFooter}
       </div>

@@ -725,6 +725,7 @@ export function ChannelScreen({
       }}
       onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
       showHeaderContent={!isSinglePanelView}
+      transparentChrome={activeChannel?.channelType !== "forum"}
     />
   );
 
