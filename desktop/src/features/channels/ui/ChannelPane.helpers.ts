@@ -45,6 +45,24 @@ export function isWelcomeSetupSystemMessage(message: TimelineMessage) {
   }
 }
 
+export function canOpenAgentConversationInChannel({
+  channel,
+  publishMarker,
+}: {
+  channel: Channel | null;
+  publishMarker?: boolean;
+}) {
+  if (!channel) {
+    return false;
+  }
+
+  if (publishMarker === false) {
+    return true;
+  }
+
+  return channel.archivedAt === null && channel.isMember;
+}
+
 export function mentionsKnownAgent(
   mentionPubkeys: string[],
   knownAgentPubkeys: ReadonlySet<string>,

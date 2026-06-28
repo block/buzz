@@ -47,6 +47,7 @@ import {
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import {
+  canOpenAgentConversationInChannel,
   getChannelIntroDescription,
   getChannelIntroKind,
   isWelcomeSetupSystemMessage,
@@ -439,7 +440,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const handleOpenAgentConversation = React.useCallback(
     (message: TimelineMessage, options?: { publishMarker?: boolean }) => {
-      if (!activeChannel || !message.pubkey) {
+      if (
+        !activeChannel ||
+        !message.pubkey ||
+        !canOpenAgentConversationInChannel({
+          channel: activeChannel,
+          publishMarker: options?.publishMarker,
+        })
+      ) {
         return;
       }
 

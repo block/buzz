@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canOpenAgentConversationInChannel,
   getDmAutoRouteAgentPubkeys,
   getThreadAutoRouteAgentPubkeys,
   mergeAutoRouteMentionPubkeys,
@@ -151,5 +152,43 @@ test("auto-routed mentions merge with explicit mentions without duplicates", () 
       mentionPubkeys: ["agent-one", "agent-two"],
     }),
     ["AGENT-ONE", "agent-two"],
+  );
+});
+
+test("new agent conversations require a writable channel", () => {
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel(),
+    }),
+    true,
+  );
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ archivedAt: "2026-06-27T00:00:00.000Z" }),
+    }),
+    false,
+  );
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ isMember: false }),
+    }),
+    false,
+  );
+});
+
+test("existing agent conversation markers can open in read-only channels", () => {
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ archivedAt: "2026-06-27T00:00:00.000Z" }),
+      publishMarker: false,
+    }),
+    true,
+  );
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ isMember: false }),
+      publishMarker: false,
+    }),
+    true,
   );
 });
