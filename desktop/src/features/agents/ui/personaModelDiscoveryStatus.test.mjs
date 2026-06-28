@@ -10,7 +10,7 @@ test("model discovery status names missing Anthropic credentials", () => {
   );
 
   assert.equal(status?.tone, "warning");
-  assert.match(status?.message ?? "", /ANTHROPIC_API_KEY/);
+  assert.match(status?.message ?? "", /Anthropic API key/);
   assert.match(status?.message ?? "", /Anthropic models/);
 });
 
@@ -21,7 +21,7 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   );
 
   assert.equal(status?.tone, "warning");
-  assert.match(status?.message ?? "", /OPENAI_COMPAT_API_KEY/);
+  assert.match(status?.message ?? "", /OpenAI API key/);
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 

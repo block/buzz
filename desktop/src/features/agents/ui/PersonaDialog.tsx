@@ -16,7 +16,9 @@ import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import { PersonaDropdownField } from "./PersonaDropdownField";
-import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
+import type { EnvVarsValue } from "./EnvVarsEditor";
+import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
+import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   getImportButtonLabel,
   getImportButtonTone,
@@ -38,6 +40,7 @@ import {
   getModelSelectValue,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getProviderApiKeyConfig,
   getProviderApiKeyEnvVar,
   getRuntimePersonaModelOptions,
   hasPersonaModelOption,
@@ -82,6 +85,26 @@ const ADVANCED_FIELDS_MOTION_TRANSITION = {
 
 function hasText(value: string | null | undefined): boolean {
   return (value?.trim().length ?? 0) > 0;
+}
+
+function hasAdvancedEnvVars(
+  value: EnvVarsValue,
+  managedKey: string | null,
+): boolean {
+  return Object.keys(value).some((key) => key !== managedKey);
+}
+
+function getAdvancedEnvVars(
+  value: EnvVarsValue,
+  managedKey: string | null,
+): EnvVarsValue {
+  if (!managedKey || !(managedKey in value)) {
+    return value;
+  }
+
+  const next = { ...value };
+  delete next[managedKey];
+  return next;
 }
 
 export function PersonaDialog({
@@ -155,10 +178,14 @@ export function PersonaDialog({
         : "";
     const nextEnvVars =
       "envVars" in initialValues ? (initialValues.envVars ?? {}) : {};
+    const managedApiKeyEnvVar = getProviderApiKeyEnvVar(
+      initialValues.provider ?? "",
+    );
     setNamePoolText(nextNamePoolText);
     setEnvVars(nextEnvVars);
     setShowAdvancedFields(
-      nextNamePoolText.trim().length > 0 || Object.keys(nextEnvVars).length > 0,
+      nextNamePoolText.trim().length > 0 ||
+        hasAdvancedEnvVars(nextEnvVars, managedApiKeyEnvVar),
     );
     setIsAvatarUploadPending(false);
     setImportErrorMessage(null);
@@ -389,7 +416,18 @@ export function PersonaDialog({
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const llmProviderFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
-  const modelFieldVisible = llmProviderFieldVisible;
+  const trimmedProvider = provider.trim();
+  const providerApiKeyConfig = isCustomProviderEditing
+    ? null
+    : getProviderApiKeyConfig(trimmedProvider);
+  const providerApiKeyValue = providerApiKeyConfig
+    ? (envVars[providerApiKeyConfig.envVar] ?? "")
+    : "";
+  const providerApiKeyFieldVisible =
+    llmProviderFieldVisible && providerApiKeyConfig !== null;
+  const modelFieldVisible =
+    llmProviderFieldVisible &&
+    (!providerApiKeyFieldVisible || providerApiKeyValue.trim().length > 0);
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
@@ -426,12 +464,15 @@ export function PersonaDialog({
   const showCustomModelInput =
     modelFieldVisible && (isCustomModelEditing || isModelCustom);
   const providerOptions = getPersonaProviderOptions(provider);
-  const trimmedProvider = provider.trim();
   const providerSelectValue = isCustomProviderEditing
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
   const showCustomProviderInput =
     llmProviderFieldVisible && isCustomProviderEditing;
+  const advancedEnvVars = getAdvancedEnvVars(
+    envVars,
+    providerApiKeyConfig?.envVar ?? null,
+  );
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
   const blankRuntimeOptionLabel = runtimesLoading
     ? "Loading providers..."
@@ -518,15 +559,40 @@ export function PersonaDialog({
     setIsCustomModelEditing(false);
   }, [isCustomModelEditing, model, modelFieldVisible, open, provider, runtime]);
 
-  function showProviderEnvVar(envKey: string) {
-    setShowAdvancedFields(true);
+  function updateProviderApiKey(envKey: string, value: string) {
     setEnvVars((current) => {
-      if (Object.keys(current).includes(envKey)) {
+      if ((current[envKey] ?? "") === value) {
         return current;
       }
+
+      const next = { ...current };
+      if (value.length > 0) {
+        next[envKey] = value;
+      } else {
+        delete next[envKey];
+      }
+      return next;
+    });
+  }
+
+  function handleProviderApiKeyChange(value: string) {
+    if (!providerApiKeyConfig) {
+      return;
+    }
+
+    updateProviderApiKey(providerApiKeyConfig.envVar, value);
+  }
+
+  function handleAdvancedEnvVarsChange(nextAdvancedEnvVars: EnvVarsValue) {
+    setEnvVars((current) => {
+      const managedEnvVar = providerApiKeyConfig?.envVar ?? null;
+      if (!managedEnvVar || !(managedEnvVar in current)) {
+        return nextAdvancedEnvVars;
+      }
+
       return {
-        ...current,
-        [envKey]: "",
+        ...nextAdvancedEnvVars,
+        [managedEnvVar]: current[managedEnvVar],
       };
     });
   }
@@ -566,8 +632,9 @@ export function PersonaDialog({
     setIsCustomProviderEditing(false);
     setProvider(nextProvider);
     const requiredEnvVar = getProviderApiKeyEnvVar(nextProvider);
-    if (requiredEnvVar) {
-      showProviderEnvVar(requiredEnvVar);
+    if (requiredEnvVar && !envVars[requiredEnvVar]?.trim()) {
+      setModel("");
+      setIsCustomModelEditing(false);
     }
     if (
       !isCustomModelEditing &&
@@ -801,6 +868,14 @@ export function PersonaDialog({
                     />
                   </div>
                 ) : null}
+                {providerApiKeyFieldVisible && providerApiKeyConfig ? (
+                  <PersonaProviderApiKeyField
+                    config={providerApiKeyConfig}
+                    disabled={isPending}
+                    onChange={handleProviderApiKeyChange}
+                    value={providerApiKeyValue}
+                  />
+                ) : null}
               </div>
             ) : null}
 
@@ -899,48 +974,13 @@ export function PersonaDialog({
                     key="persona-advanced-fields"
                     transition={advancedFieldsTransition}
                   >
-                    <div className="space-y-5 pt-2">
-                      <div className="space-y-1.5">
-                        <label
-                          className="text-sm font-medium text-foreground"
-                          htmlFor="persona-name-pool"
-                        >
-                          Instance name pool
-                          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
-                            Optional
-                          </span>
-                        </label>
-                        <div
-                          className={cn(
-                            "flex min-h-11 items-center px-3",
-                            PERSONA_FIELD_SHELL_CLASS,
-                          )}
-                        >
-                          <Input
-                            autoCapitalize="words"
-                            autoCorrect="off"
-                            className={cn(
-                              "h-8 px-0 py-0 leading-6",
-                              PERSONA_FIELD_CONTROL_CLASS,
-                            )}
-                            disabled={isPending}
-                            id="persona-name-pool"
-                            onChange={(event) =>
-                              setNamePoolText(event.target.value)
-                            }
-                            placeholder="Birch, Compass, Ridge, Thistle"
-                            spellCheck={false}
-                            value={namePoolText}
-                          />
-                        </div>
-                      </div>
-
-                      <EnvVarsEditor
-                        disabled={isPending}
-                        onChange={setEnvVars}
-                        value={envVars}
-                      />
-                    </div>
+                    <PersonaAdvancedFields
+                      disabled={isPending}
+                      envVars={advancedEnvVars}
+                      namePoolText={namePoolText}
+                      onEnvVarsChange={handleAdvancedEnvVarsChange}
+                      onNamePoolTextChange={setNamePoolText}
+                    />
                   </motion.div>
                 ) : null}
               </AnimatePresence>

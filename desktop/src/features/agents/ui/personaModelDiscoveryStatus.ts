@@ -38,16 +38,14 @@ export function formatModelDiscoveryErrorStatus(
 
   if (message.includes("ANTHROPIC_API_KEY required")) {
     return {
-      message:
-        "Enter ANTHROPIC_API_KEY in Advanced env vars to load Anthropic models.",
+      message: "Enter an Anthropic API key to load Anthropic models.",
       tone: "warning",
     };
   }
 
   if (message.includes("OPENAI_COMPAT_API_KEY required")) {
     return {
-      message:
-        "Enter OPENAI_COMPAT_API_KEY in Advanced env vars to load OpenAI models.",
+      message: "Enter an OpenAI API key to load OpenAI models.",
       tone: "warning",
     };
   }

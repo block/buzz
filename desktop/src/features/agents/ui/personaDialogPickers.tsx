@@ -32,6 +32,12 @@ export type PersonaDropdownOption = {
   value: string;
 };
 
+export type ProviderApiKeyConfig = {
+  envVar: string;
+  label: string;
+  placeholder: string;
+};
+
 const AUTO_MODEL_OPTION: PersonaModelOption = {
   id: "",
   label: "Auto (default)",
@@ -235,16 +241,35 @@ export function getPersonaProviderOptions(
   ];
 }
 
-export function getProviderApiKeyEnvVar(providerId: string): string | null {
+export function getProviderApiKeyConfig(
+  providerId: string,
+): ProviderApiKeyConfig | null {
   switch (providerId.trim()) {
     case "anthropic":
-      return "ANTHROPIC_API_KEY";
+      return {
+        envVar: "ANTHROPIC_API_KEY",
+        label: "Anthropic API key",
+        placeholder: "sk-ant-...",
+      };
     case "openai":
+      return {
+        envVar: "OPENAI_COMPAT_API_KEY",
+        label: "OpenAI API key",
+        placeholder: "sk-...",
+      };
     case "openai-compat":
-      return "OPENAI_COMPAT_API_KEY";
+      return {
+        envVar: "OPENAI_COMPAT_API_KEY",
+        label: "OpenAI-compatible API key",
+        placeholder: "sk-...",
+      };
     default:
       return null;
   }
+}
+
+export function getProviderApiKeyEnvVar(providerId: string): string | null {
+  return getProviderApiKeyConfig(providerId)?.envVar ?? null;
 }
 
 export function shouldClearKnownModelForSelectionScope({
