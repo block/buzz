@@ -76,6 +76,7 @@ import {
   mergeAgentNamesIntoProfiles,
   useChannelActivityTyping,
 } from "./useChannelActivityTyping";
+import { useAgentConversationRouteTarget } from "./useAgentConversationRouteTarget";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
@@ -164,12 +165,21 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
+  const canShowTasksSurface = activeChannel?.channelType === "stream";
+  const effectiveSurfaceTab = canShowTasksSurface
+    ? activeSurfaceTab
+    : "messages";
   useResetChannelSurfaceTabOnRouteOpen({
     activeChannelId,
     openThreadHeadId,
     setActiveSurfaceTab,
     targetMessageId,
   });
+  React.useEffect(() => {
+    if (!canShowTasksSurface && activeSurfaceTab === "tasks") {
+      setActiveSurfaceTab("messages");
+    }
+  }, [activeSurfaceTab, canShowTasksSurface]);
   const effectiveOpenThreadHeadId =
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
@@ -310,6 +320,11 @@ export function ChannelScreen({
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
   });
+  const messageProfilesReady =
+    messageProfilePubkeys.length === 0 ||
+    (!messageProfilesQuery.isPending &&
+      !messageProfilesQuery.isFetching &&
+      !messageProfilesQuery.isPlaceholderData);
   const channelMembersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
   const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
@@ -678,71 +693,15 @@ export function ChannelScreen({
       setProfilePanelPubkey,
     ],
   );
-  const handledAgentConversationRouteTargetRef = React.useRef<string | null>(
-    null,
-  );
-  React.useEffect(() => {
-    if (!targetAgentConversationReplyId) {
-      handledAgentConversationRouteTargetRef.current = null;
-      return;
-    }
-
-    const targetKey = `${activeChannelId ?? "none"}:${targetAgentConversationReplyId}`;
-    if (handledAgentConversationRouteTargetRef.current === targetKey) {
-      return;
-    }
-    if (!activeChannel || activeChannel.channelType === "forum") {
-      return;
-    }
-
-    const agentReply =
-      timelineMessages.find(
-        (message) => message.id === targetAgentConversationReplyId,
-      ) ?? null;
-    const agentReplyPubkey = agentReply?.pubkey;
-    if (!agentReply || !agentReplyPubkey) {
-      return;
-    }
-
-    const rootId = agentReply.rootId ?? agentReply.parentId ?? agentReply.id;
-    const contextMessages = timelineMessages.filter(
-      (candidate) =>
-        candidate.id === rootId ||
-        candidate.id === agentReply.id ||
-        candidate.rootId === rootId ||
-        candidate.parentId === rootId,
-    );
-    const parentMessage = agentReply.parentId
-      ? (timelineMessages.find(
-          (candidate) => candidate.id === agentReply.parentId,
-        ) ?? null)
-      : null;
-    const threadRootMessage =
-      timelineMessages.find((candidate) => candidate.id === rootId) ?? null;
-
-    handledAgentConversationRouteTargetRef.current = targetKey;
-    void goChannel(activeChannel.id, { replace: true }).then(() => {
-      openAgentConversation(
-        {
-          agentName: agentReply.author,
-          agentPubkey: agentReplyPubkey,
-          agentReply,
-          channel: activeChannel,
-          contextMessages,
-          parentMessage,
-          threadRootMessage,
-        },
-        { publishMarker: false },
-      );
-    });
-  }, [
+  useAgentConversationRouteTarget({
     activeChannel,
     activeChannelId,
     goChannel,
+    messageProfilesReady,
     openAgentConversation,
     targetAgentConversationReplyId,
     timelineMessages,
-  ]);
+  });
   const mainTimelineTargetMessageId = useChannelRouteTarget({
     activeChannel,
     activeChannelId,
@@ -839,7 +798,7 @@ export function ChannelScreen({
       activeChannel={activeChannel}
       activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
       activeChannelTitle={activeChannelTitle}
-      activeSurfaceTab={activeSurfaceTab}
+      activeSurfaceTab={effectiveSurfaceTab}
       actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
       activeDmAvatarUrl={activeDmAvatarUrl}
       activeDmHeaderParticipants={activeDmHeaderParticipants}
@@ -1000,7 +959,7 @@ export function ChannelScreen({
                   profilePanelView={profilePanelView}
                   personaLookup={personaLookup}
                   profiles={messageProfiles}
-                  surfaceTab={activeSurfaceTab}
+                  surfaceTab={effectiveSurfaceTab}
                   onSurfaceTabChange={handleSurfaceTabChange}
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
