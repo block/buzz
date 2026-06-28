@@ -2522,6 +2522,11 @@ function emitMockHistory(
   const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
   const isVisibleOlderHistoryPage =
     subId.startsWith("history-") && filter.until !== undefined && !filter["#e"];
+  if (isVisibleOlderHistoryPage) {
+    const counter = window as unknown as { __HISTORY_FETCH_COUNT__?: number };
+    counter.__HISTORY_FETCH_COUNT__ =
+      (counter.__HISTORY_FETCH_COUNT__ ?? 0) + 1;
+  }
   if (delayMs > 0 && isVisibleOlderHistoryPage) {
     const probe = window as unknown as {
       __HISTORY_INFLIGHT__?: number;
