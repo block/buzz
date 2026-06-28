@@ -826,6 +826,7 @@ export function ChannelScreen({
         setThreadReplyTargetId(null);
         handleCloseAgentSession();
         setProfilePanelPubkey(null);
+        handleSurfaceTabChange("messages");
         setChannelManagementOpen(true);
       }}
       onSurfaceTabChange={handleSurfaceTabChange}
