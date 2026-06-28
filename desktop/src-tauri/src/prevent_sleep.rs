@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter};
 pub struct PreventSleepState {
     assertion_id: Option<u32>,
     timer_handle: Option<tauri::async_runtime::JoinHandle<()>>,
+    timer_generation: u64,
 }
 
 // ── macOS implementation ────────────────────────────────────────────────────
@@ -43,19 +44,68 @@ const K_IOPM_ASSERTION_LEVEL_ON: u32 = 255;
 #[cfg(target_os = "macos")]
 const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 
-/// 4-hour cap in seconds.
-const CAP_SECONDS: u64 = 4 * 3600;
+/// One hour covers a silent long-running tool call while bounding idle keep-awake time.
+const INACTIVITY_CAP_SECONDS: u64 = 60 * 60;
+
+fn arm_cap_timer(
+    guard: &mut PreventSleepState,
+    state: &Arc<Mutex<PreventSleepState>>,
+    app_handle: &AppHandle,
+) {
+    if let Some(handle) = guard.timer_handle.take() {
+        handle.abort();
+    }
+
+    guard.timer_generation = guard.timer_generation.wrapping_add(1);
+    let generation = guard.timer_generation;
+    let handle = app_handle.clone();
+    let timer_state = Arc::clone(state);
+    let timer_task = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(INACTIVITY_CAP_SECONDS)).await;
+        if expire_if_current(&timer_state, generation) {
+            let _ = handle.emit("prevent-sleep-expired", ());
+        }
+    });
+    guard.timer_handle = Some(timer_task);
+}
+
+fn expire_if_current(state: &Arc<Mutex<PreventSleepState>>, generation: u64) -> bool {
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+
+    if guard.timer_generation != generation {
+        return false;
+    }
+
+    guard.timer_handle = None;
+
+    #[cfg(target_os = "macos")]
+    if let Some(id) = guard.assertion_id.take() {
+        unsafe {
+            macos::IOPMAssertionRelease(id);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        guard.assertion_id = None;
+    }
+
+    true
+}
 
 /// Create a `PreventUserIdleSystemSleep` assertion if not already held.
-/// Starts a 4-hour timer that auto-releases and emits `prevent-sleep-expired`.
+/// Refreshes the inactivity cap when the assertion is already held.
 pub fn acquire(
     state: &Arc<Mutex<PreventSleepState>>,
     app_handle: &AppHandle,
 ) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
 
-    // Idempotent — already held.
     if guard.assertion_id.is_some() {
+        arm_cap_timer(&mut guard, state, app_handle);
         return Ok(());
     }
 
@@ -107,16 +157,9 @@ pub fn acquire(
         }
     }
 
-    // Start the 4-hour cap timer only if an assertion was actually created.
+    // Start the inactivity cap timer only if an assertion was actually created.
     if guard.assertion_id.is_some() {
-        let handle = app_handle.clone();
-        let timer_state = Arc::clone(state);
-        let timer_task = tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(CAP_SECONDS)).await;
-            release(&timer_state);
-            let _ = handle.emit("prevent-sleep-expired", ());
-        });
-        guard.timer_handle = Some(timer_task);
+        arm_cap_timer(&mut guard, state, app_handle);
     }
 
     Ok(())
@@ -132,6 +175,7 @@ pub fn release(state: &Arc<Mutex<PreventSleepState>>) {
     if let Some(handle) = guard.timer_handle.take() {
         handle.abort();
     }
+    guard.timer_generation = guard.timer_generation.wrapping_add(1);
 
     #[cfg(target_os = "macos")]
     if let Some(id) = guard.assertion_id.take() {
