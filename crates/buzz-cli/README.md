@@ -78,7 +78,7 @@ buzz canvas set --channel <uuid> --content "# Welcome"
 buzz mem ls
 buzz mem get <slug>
 buzz mem set <slug> "my-value"
-buzz mem patch <slug> < diff.patch
+buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
 # Pipe to jq
