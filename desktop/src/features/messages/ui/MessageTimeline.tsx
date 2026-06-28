@@ -400,7 +400,8 @@ const MessageTimelineBase = React.forwardRef<
             className={cn(
               "flex w-full flex-col gap-2",
               channelChrome.contentPadding,
-              (showIntro || showGenericEmpty) && "min-h-full",
+              (showIntro || showGenericEmpty || showMessageList) &&
+                "min-h-full",
             )}
             ref={contentRef}
           >
