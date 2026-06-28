@@ -38,6 +38,7 @@ import {
   getModelSelectValue,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
   getRuntimePersonaModelOptions,
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
@@ -517,6 +518,19 @@ export function PersonaDialog({
     setIsCustomModelEditing(false);
   }, [isCustomModelEditing, model, modelFieldVisible, open, provider, runtime]);
 
+  function showProviderEnvVar(envKey: string) {
+    setShowAdvancedFields(true);
+    setEnvVars((current) => {
+      if (Object.keys(current).includes(envKey)) {
+        return current;
+      }
+      return {
+        ...current,
+        [envKey]: "",
+      };
+    });
+  }
+
   function handleRuntimeDropdownChange(nextValue: string) {
     const nextRuntime =
       nextValue === NO_RUNTIME_DROPDOWN_VALUE ? "" : nextValue;
@@ -551,6 +565,10 @@ export function PersonaDialog({
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
     setIsCustomProviderEditing(false);
     setProvider(nextProvider);
+    const requiredEnvVar = getProviderApiKeyEnvVar(nextProvider);
+    if (requiredEnvVar) {
+      showProviderEnvVar(requiredEnvVar);
+    }
     if (
       !isCustomModelEditing &&
       shouldClearKnownModelForSelectionScope({

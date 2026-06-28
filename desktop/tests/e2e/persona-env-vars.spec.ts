@@ -284,6 +284,10 @@ test("persona model options follow the selected LLM provider", async ({
   await page
     .getByRole("menuitemradio", { name: "OpenAI", exact: true })
     .click();
+  await expect(page.getByTestId("env-vars-editor")).toBeVisible();
+  const envKeys = page.getByTestId("env-vars-key");
+  await expect(envKeys).toHaveCount(1);
+  await expect(envKeys.first()).toHaveValue("OPENAI_COMPAT_API_KEY");
   await expect(model).toBeVisible();
   await model.click();
   await expect(
@@ -299,6 +303,8 @@ test("persona model options follow the selected LLM provider", async ({
   await page
     .getByRole("menuitemradio", { name: "Anthropic", exact: true })
     .click();
+  await expect(envKeys).toHaveCount(2);
+  await expect(envKeys.nth(1)).toHaveValue("ANTHROPIC_API_KEY");
   await expect(model).toContainText("Auto (default)");
 
   await model.click();

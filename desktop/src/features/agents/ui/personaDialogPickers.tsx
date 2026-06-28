@@ -235,6 +235,18 @@ export function getPersonaProviderOptions(
   ];
 }
 
+export function getProviderApiKeyEnvVar(providerId: string): string | null {
+  switch (providerId.trim()) {
+    case "anthropic":
+      return "ANTHROPIC_API_KEY";
+    case "openai":
+    case "openai-compat":
+      return "OPENAI_COMPAT_API_KEY";
+    default:
+      return null;
+  }
+}
+
 export function shouldClearKnownModelForSelectionScope({
   model,
   provider,

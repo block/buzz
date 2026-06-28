@@ -8,7 +8,6 @@ import type {
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import {
   formatModelDiscoveryErrorStatus,
-  formatModelDiscoveryFallbackStatus,
   type PersonaModelDiscoveryStatus,
 } from "./personaModelDiscoveryStatus";
 import type { PersonaModelOption } from "./personaDialogPickers";
@@ -163,16 +162,6 @@ export function usePersonaModelDiscovery({
     () => getDiscoveredPersonaModelOptions(modelDiscoveryData),
     [modelDiscoveryData],
   );
-  const modelDiscoveryFallbackStatus = React.useMemo(
-    () =>
-      discoveredModelOptions === null
-        ? formatModelDiscoveryFallbackStatus({
-            provider: trimmedProvider,
-            response: modelDiscoveryData,
-          })
-        : null,
-    [discoveredModelOptions, modelDiscoveryData, trimmedProvider],
-  );
 
   return {
     discoveredModelOptions,
@@ -180,6 +169,6 @@ export function usePersonaModelDiscovery({
     modelDiscoveryStatus:
       modelDiscoveryLoading || discoveredModelOptions !== null
         ? null
-        : (modelDiscoveryStatus ?? modelDiscoveryFallbackStatus),
+        : modelDiscoveryStatus,
   };
 }
