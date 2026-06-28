@@ -84,7 +84,6 @@ import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import { useResetChannelSurfaceTabOnRouteOpen } from "./useResetChannelSurfaceTabOnRouteOpen";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
-
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
 export function ChannelScreen({
   activeChannel,
