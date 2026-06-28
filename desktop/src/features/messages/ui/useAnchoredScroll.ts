@@ -9,10 +9,28 @@ import type { TimelineMessage } from "@/features/messages/types";
  * rounding from the layout engine.
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
+// Tests and user-visible "pinned" affordances need the view at the physical
+// floor, not merely within the looser UI at-bottom threshold. The loose
+// threshold decides whether the user is close enough to count as reading the
+// latest message; this strict threshold decides when a programmatic bottom pin
+// has actually finished settling.
+const TRUE_BOTTOM_THRESHOLD_PX = 1;
 
 type AnchorState =
   | { kind: "at-bottom" }
   | { kind: "message"; messageId: string; topOffset: number };
+
+type BottomSettleContainer = Pick<
+  HTMLDivElement,
+  "scrollHeight" | "clientHeight" | "scrollTop" | "scrollTo"
+>;
+
+export function settleProgrammaticBottomPin(
+  container: BottomSettleContainer,
+): boolean {
+  container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+  return isAtTrueBottom(container);
+}
 
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
@@ -88,10 +106,27 @@ type UseAnchoredScrollResult = {
   getAnchorIsAtBottom: () => boolean;
 };
 
-function isAtBottomNow(container: HTMLDivElement) {
+function isAtBottomNow(
+  container: Pick<
+    HTMLDivElement,
+    "scrollHeight" | "clientHeight" | "scrollTop"
+  >,
+) {
   return (
     container.scrollHeight - container.clientHeight - container.scrollTop <=
     AT_BOTTOM_THRESHOLD_PX
+  );
+}
+
+function isAtTrueBottom(
+  container: Pick<
+    HTMLDivElement,
+    "scrollHeight" | "clientHeight" | "scrollTop"
+  >,
+) {
+  return (
+    container.scrollHeight - container.clientHeight - container.scrollTop <=
+    TRUE_BOTTOM_THRESHOLD_PX
   );
 }
 
@@ -346,17 +381,14 @@ export function useAnchoredScroll({
       const container = scrollContainerRef.current;
       if (!container) return;
       anchorRef.current = { kind: "at-bottom" };
-      // A smooth (animated) jump-to-latest is not atomic: the browser scrolls
-      // over several frames, and each intermediate `scroll` event would drive
-      // `onScroll` → `computeAnchor`, which latches a mid-history message anchor
-      // because the view is transiently NOT at the bottom. The ResizeObserver
-      // then "restores" that stale anchor and strands the view mid-list. Arm
-      // the same settle window the mount pin uses so `onScroll` holds the
-      // at-bottom anchor until the animation lands a true at-bottom; the
-      // observer's at-bottom re-pin then keeps the view glued as late row
-      // measurement grows `scrollHeight`. (An instant "auto" scroll completes
-      // before any scroll event, so it needs no guard.)
-      if (behavior === "smooth") settlingRef.current = true;
+      // A programmatic jump-to-bottom is not atomic, even for `behavior: "auto"`:
+      // the browser can emit `scroll` while the virtualized list is still
+      // settling row measurements. During that window `computeAnchor` may read
+      // the transient gap as a deliberate scroll-up and latch a mid-history
+      // message anchor, which strands future appends above the floor. Arm the
+      // settle guard for every imperative bottom jump so `onScroll` holds the
+      // at-bottom anchor until it can snap to the true floor.
+      settlingRef.current = true;
       container.scrollTo({ top: container.scrollHeight, behavior });
       setIsAtBottom(true);
       setNewMessageCount(0);
@@ -497,7 +529,7 @@ export function useAnchoredScroll({
     // once a scroll event reads a genuine at-bottom. Scoped to the initial
     // settle so post-settle user scroll-up re-evaluates the anchor normally.
     if (settlingRef.current) {
-      if (isAtBottomNow(container)) {
+      if (settleProgrammaticBottomPin(container)) {
         settlingRef.current = false;
       } else {
         return;
@@ -640,8 +672,9 @@ export function useAnchoredScroll({
     // message pulls the view down.
     if (newLatestArrived && forceBottomOnNextAppendRef.current) {
       forceBottomOnNextAppendRef.current = false;
-      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       anchorRef.current = { kind: "at-bottom" };
+      settlingRef.current = true;
+      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       setIsAtBottom(true);
       setNewMessageCount(0);
       prevLastMessageIdRef.current = lastMessage?.id;
