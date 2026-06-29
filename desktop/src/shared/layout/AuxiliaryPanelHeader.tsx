@@ -71,7 +71,7 @@ export function AuxiliaryPanelHeader({
       {...props}
     >
       <div
-        className="pointer-events-auto relative z-40 shrink-0 cursor-default select-none px-5 py-2"
+        className="pointer-events-auto relative z-40 shrink-0 cursor-default select-none py-2 pl-5 pr-3"
         data-tauri-drag-region
       >
         <div className="flex h-9 min-w-0 items-center gap-2.5">{children}</div>
