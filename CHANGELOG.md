@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.36
+
+- Polish agent runtime cards ([#1327](https://github.com/block/buzz/pull/1327)) ([`a3c4f3f6`](https://github.com/block/buzz/commit/a3c4f3f625a23addb6053c12f11f79f583c394c1))
+- Rework desktop message-timeline scrolling: de-virtualize + native overflow-anchor ([#1338](https://github.com/block/buzz/pull/1338)) ([`4d619693`](https://github.com/block/buzz/commit/4d6196934e1f082ff5f16277edd33e3108aee38f))
+- Keep wave huddles pending for placeholder profiles ([#1349](https://github.com/block/buzz/pull/1349)) ([`c1d6f3f2`](https://github.com/block/buzz/commit/c1d6f3f291b0f419bf0666f258d4689041747327))
+- Polish profile hover cards ([#1346](https://github.com/block/buzz/pull/1346)) ([`e3fc0e02`](https://github.com/block/buzz/commit/e3fc0e0278d76b545adb6e7921387da9eeb7fdc3))
+- Fix channel header shared blur layering ([#1336](https://github.com/block/buzz/pull/1336)) ([`360d2e54`](https://github.com/block/buzz/commit/360d2e54409eec21ec59a31c9a12d9d7821506a3))
+- Add rich link previews ([#1334](https://github.com/block/buzz/pull/1334)) ([`bc925780`](https://github.com/block/buzz/commit/bc925780eed2169dd6dba9a2c9f85d05e2c9de1b))
+- Revamp new agent dialog ([#1201](https://github.com/block/buzz/pull/1201)) ([`826d735f`](https://github.com/block/buzz/commit/826d735fe6712be820616d4cb1d6228cfe3be47e))
+- Image attachment gallery lightbox ([#1345](https://github.com/block/buzz/pull/1345)) ([`7d3ee683`](https://github.com/block/buzz/commit/7d3ee6833665a4370db51b1ce0fa13f7174d9279))
+- Reset prevent-sleep cap on agent activity ([#1335](https://github.com/block/buzz/pull/1335)) ([`433b1794`](https://github.com/block/buzz/commit/433b1794d55b568f8a1331d18536d136a1a03463))
+- docs: update sprout repository references and document buzz mem ([#1333](https://github.com/block/buzz/pull/1333)) ([`52b6365e`](https://github.com/block/buzz/commit/52b6365e17529f385864433210985813023476ff))
+- fix(buzz-agent): charge images a token-equivalent for the handoff gate ([#1332](https://github.com/block/buzz/pull/1332)) ([`744c77bc`](https://github.com/block/buzz/commit/744c77bc2d2db7d57a07a7701042db73ca40faa2))
+- Polish thread reply hover states ([#1329](https://github.com/block/buzz/pull/1329)) ([`aca40b62`](https://github.com/block/buzz/commit/aca40b62899248359c2587efaae80c44009b87bb))
+- Add persona and team import polish ([#1203](https://github.com/block/buzz/pull/1203)) ([`f00c86e7`](https://github.com/block/buzz/commit/f00c86e7446b6addfc83870f7d0571373642afd4))
+- fix(desktop): reserve PTT shortcut only during active huddle ([#1315](https://github.com/block/buzz/pull/1315)) ([`6c60cb59`](https://github.com/block/buzz/commit/6c60cb59abb3e086281dd470390ba7e87bc5ab25))
+
+
 ## v0.3.35
 
 - fix(desktop): split lib modules under size guard ([#1314](https://github.com/block/buzz/pull/1314)) ([`e7d43dc2`](https://github.com/block/buzz/commit/e7d43dc2253f0d1efe7689ac82a8b6b4a7788fd0))
