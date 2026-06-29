@@ -29,12 +29,14 @@ on:
         required: false
         default: main
   push:
+    # No `paths` filter here: GitHub applies a push `paths` filter to tag
+    # pushes too, so a `chart-v*` tag whose commit didn't touch a chart file
+    # would be filtered out and never publish. docker.yml / release.yml / sprig
+    # all keep `paths` out of a tag-carrying `push` for exactly this reason —
+    # PR runs stay scoped via `pull_request.paths` below; main pushes lint
+    # unconditionally (cheap), and tag pushes always run so publish can fire.
     branches: [main]
     tags: ["chart-v[0-9]*"]
-    paths:
-      - "deploy/charts/buzz/**"
-      - ".github/workflows/helm-chart.yml"
-      - "ct.yaml"
   pull_request:
     paths:
       - "deploy/charts/buzz/**"
