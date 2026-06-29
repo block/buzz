@@ -1028,6 +1028,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: "gpt-4o-mini",
         overriddenOrigin: "configFile",
         isRequired: false,
+        writeVia: { type: "readOnly" },
       },
       provider: {
         value: "openai",
@@ -1035,6 +1036,10 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
       },
       mode: {
         value: "auto",
@@ -1042,6 +1047,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
       },
       thinkingEffort: {
         value: "medium",
@@ -1049,6 +1055,10 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1061,6 +1071,10 @@ function buildMockConfigSurface(pubkey: string): {
         value: "enabled",
         origin: "configFile",
         schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.developer",
+        },
       },
       {
         key: "extensions.web_search",
@@ -1068,6 +1082,10 @@ function buildMockConfigSurface(pubkey: string): {
         value: "enabled",
         origin: "configFile",
         schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.web_search",
+        },
       },
       {
         key: "extensions.memory",
@@ -1075,6 +1093,10 @@ function buildMockConfigSurface(pubkey: string): {
         value: "disabled",
         origin: "configFile",
         schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.memory",
+        },
       },
     ],
     sources: {
@@ -1098,6 +1120,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "model" },
       },
       provider: {
         value: "anthropic",
@@ -1105,6 +1128,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "provider" },
       },
       mode: {
         value: "code",
@@ -1112,6 +1136,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "mode" },
       },
       thinkingEffort: {
         value: "high",
@@ -1119,6 +1144,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "thinkingEffort" },
       },
       maxOutputTokens: {
         value: "16384",
@@ -1126,6 +1152,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "maxOutputTokens" },
       },
       contextLimit: null,
       systemPrompt: null,
@@ -1152,6 +1179,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.model" },
       },
       provider: {
         value: "openai",
@@ -1159,6 +1187,10 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
       },
       mode: {
         value: null,
@@ -1166,6 +1198,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "readOnly" },
       },
       thinkingEffort: {
         value: null,
@@ -1173,6 +1206,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "readOnly" },
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1200,6 +1234,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.model" },
       },
       provider: {
         value: "openai",
@@ -1207,6 +1242,10 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
       },
       mode: {
         value: "suggest / auto-edit",
@@ -1214,6 +1253,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.mode" },
       },
       thinkingEffort: null,
       maxOutputTokens: null,
@@ -1230,6 +1270,10 @@ function buildMockConfigSurface(pubkey: string): {
           type: "enum",
           options: ["suggest", "auto-edit", "full-auto", "unless-allow-listed"],
         },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.approval_policy",
+        },
       },
       {
         key: "sandbox_mode",
@@ -1240,6 +1284,7 @@ function buildMockConfigSurface(pubkey: string): {
           type: "enum",
           options: ["container", "host", "none"],
         },
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_SANDBOX_MODE" },
       },
     ],
     sources: {
@@ -1265,6 +1310,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: "gpt-4o",
         overriddenOrigin: "personaDefault",
         isRequired: false,
+        writeVia: { type: "acpSetSessionModel" },
       },
       provider: {
         value: "anthropic",
@@ -1272,6 +1318,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "provider" },
       },
       mode: {
         value: "auto",
@@ -1279,6 +1326,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
       },
       thinkingEffort: {
         value: "high",
@@ -1286,6 +1334,10 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1316,6 +1368,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "readOnly" },
       },
       provider: {
         value: "openai",
@@ -1323,6 +1376,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "readOnly" },
       },
       mode: {
         value: "auto",
@@ -1330,6 +1384,7 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
       },
       thinkingEffort: {
         value: "medium",
@@ -1337,6 +1392,10 @@ function buildMockConfigSurface(pubkey: string): {
         overriddenValue: null,
         overriddenOrigin: null,
         isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
       },
       maxOutputTokens: null,
       contextLimit: null,
@@ -1450,6 +1509,17 @@ function resetMockManagedAgents(config?: E2eConfig) {
 
   for (const seed of config?.mock?.managedAgents ?? []) {
     mockManagedAgents.push(buildSeededManagedAgent(seed));
+    applyMockDisplayName(seed.pubkey, seed.name);
+    mockAgentPubkeys.add(seed.pubkey);
+    mockProfiles.set(seed.pubkey, {
+      pubkey: seed.pubkey,
+      display_name: seed.name,
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: MOCK_IDENTITY_PUBKEY,
+      is_agent: true,
+    });
     for (const channel of mockChannels) {
       const isSeedChannel =
         seed.channelIds?.includes(channel.id) ||
@@ -2779,6 +2849,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 content: "Indexing the channel catalog now.",
                 sig: "mocksig".repeat(20).slice(0, 128),
               },
+              // Seed one message per managed agent that is a member of #agents.
+              // This lets e2e specs open the profile panel by clicking the
+              // agent's avatar in a message-row (the same pattern as charlie).
+              ...mockManagedAgents
+                .filter((agent) =>
+                  mockChannels
+                    .find((ch) => ch.id === channelId)
+                    ?.members.some((m) => m.pubkey === agent.pubkey),
+                )
+                .map((agent, index) => ({
+                  id: `mock-agents-managed-${agent.pubkey.slice(0, 8)}`,
+                  pubkey: agent.pubkey,
+                  created_at: Math.floor(Date.now() / 1000) - 80 + index,
+                  kind: 9 as const,
+                  tags: [["h", channelId]],
+                  content: `${agent.name} reporting in.`,
+                  sig: "mocksig".repeat(20).slice(0, 128),
+                })),
             ]
           : channelId === "feedf00d-0000-4000-8000-000000000007"
             ? // 600 messages > CHANNEL_HISTORY_LIMIT (300): the initial load
