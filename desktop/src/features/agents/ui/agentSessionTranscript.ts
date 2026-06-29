@@ -405,15 +405,20 @@ export function processTranscriptEvent(
           channelId,
         );
       } else if (updateType === "user_message_chunk") {
-        upsertMessage(
-          d,
-          `user:${ch}:${messageId ?? turnKey}`,
-          "user",
-          "User",
-          extractContentText(update.content),
-          event.timestamp,
-          channelId,
-        );
+        // Suppress user_message_chunk echo when a steer already rendered
+        // the user message for this turn (Goose echoes steered content back).
+        const steerKey = `steer:${ch}:${event.turnId ?? event.seq}`;
+        if (!d.itemsById.has(steerKey)) {
+          upsertMessage(
+            d,
+            `user:${ch}:${messageId ?? turnKey}`,
+            "user",
+            "User",
+            extractContentText(update.content),
+            event.timestamp,
+            channelId,
+          );
+        }
       } else if (updateType === "agent_thought_chunk") {
         upsertTextItem(
           d,
