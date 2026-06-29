@@ -1188,6 +1188,8 @@ test("hovering avatar opens popover, clicking opens profile panel", async ({
 });
 
 test("profile popover wave sends a direct message", async ({ page }) => {
+  await installMockBridge(page, { sendMessageDelayMs: 2_500 });
+
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1207,9 +1209,10 @@ test("profile popover wave sends a direct message", async ({ page }) => {
     .click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
-  await waitForTimelineSettled(page);
   const waveAttachment = page.getByTestId("message-wave-attachment");
-  await expect(waveAttachment).toBeVisible();
+  await expect(waveAttachment).toBeVisible({ timeout: 1_500 });
+  await expect(page.getByText("Sending")).toHaveCount(0, { timeout: 4_000 });
+  await waitForTimelineSettled(page);
   await expect(waveAttachment).toContainText("👋");
   await expect(waveAttachment).toContainText("npub1mock... waved at you.");
   await expect(waveAttachment).toContainText("Start a huddle to talk to them.");

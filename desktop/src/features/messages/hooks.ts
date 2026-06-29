@@ -118,7 +118,7 @@ export function mergeTimelineCacheMessages(
   );
 }
 
-function createOptimisticMessage(
+export function createOptimisticMessage(
   channelId: string,
   content: string,
   identity: Identity,

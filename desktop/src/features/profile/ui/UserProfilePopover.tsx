@@ -25,10 +25,17 @@ import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { ProfileAvatarWithStatus } from "@/features/profile/ui/ProfileAvatarWithStatus";
+import {
+  createOptimisticMessage,
+  mergeTimelineCacheMessages,
+} from "@/features/messages/hooks";
 import { buildWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { sendChannelMessage } from "@/shared/api/tauri";
+import type { Channel, RelayEvent } from "@/shared/api/types";
+import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -67,6 +74,43 @@ function InfoBadge({ children }: { children: React.ReactNode }) {
     <span className="inline-flex items-center rounded-full bg-muted/50 px-2 py-0.5 text-xs text-muted-foreground">
       {children}
     </span>
+  );
+}
+
+function findCachedOneToOneDm(
+  channels: Channel[] | undefined,
+  targetPubkey: string,
+  currentPubkey: string | undefined,
+) {
+  const normalizedTargetPubkey = normalizePubkey(targetPubkey);
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
+
+  return (
+    channels?.find((channel) => {
+      if (channel.channelType !== "dm") {
+        return false;
+      }
+
+      const participantPubkeys =
+        channel.participantPubkeys.map(normalizePubkey);
+      if (!participantPubkeys.includes(normalizedTargetPubkey)) {
+        return false;
+      }
+
+      const otherParticipantPubkeys = normalizedCurrentPubkey
+        ? participantPubkeys.filter(
+            (participantPubkey) =>
+              participantPubkey !== normalizedCurrentPubkey,
+          )
+        : participantPubkeys;
+
+      return (
+        otherParticipantPubkeys.length === 1 &&
+        otherParticipantPubkeys[0] === normalizedTargetPubkey
+      );
+    }) ?? null
   );
 }
 
@@ -306,17 +350,67 @@ export function UserProfilePopover({
     setPendingAction("wave");
 
     try {
-      const dm = await openDmMutation.mutateAsync({ pubkeys: [pubkey] });
+      const identity = identityQuery.data;
+      if (!identity) {
+        throw new Error("No identity available for sending messages.");
+      }
+
+      const dm =
+        findCachedOneToOneDm(channelsQuery.data, pubkey, currentPubkey) ??
+        (await openDmMutation.mutateAsync({ pubkeys: [pubkey] }));
       const senderName =
         selfProfileQuery.data?.displayName?.trim() ||
-        (currentPubkey ? truncatePubkey(currentPubkey) : "Someone");
-      await sendChannelMessage(dm.id, buildWaveMessageContent(senderName));
-      await queryClient.invalidateQueries({
-        queryKey: channelMessagesKey(dm.id),
-      });
-      await goChannel(dm.id);
-      if (isMountedRef.current) {
-        setOpen(false);
+        identity.displayName.trim() ||
+        truncatePubkey(identity.pubkey);
+      const content = buildWaveMessageContent(senderName);
+      const queryKey = channelMessagesKey(dm.id);
+
+      await queryClient.cancelQueries({ queryKey });
+      const previousMessages =
+        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const optimisticMessage = createOptimisticMessage(
+        dm.id,
+        content,
+        identity,
+        previousMessages,
+      );
+
+      queryClient.setQueryData<RelayEvent[]>(
+        queryKey,
+        mergeTimelineCacheMessages(previousMessages, optimisticMessage),
+      );
+
+      try {
+        await goChannel(dm.id);
+        if (isMountedRef.current) {
+          setOpen(false);
+        }
+
+        const result = await sendChannelMessage(dm.id, content);
+        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
+          mergeTimelineCacheMessages(current, {
+            id: result.eventId,
+            localKey: optimisticMessage.id,
+            pubkey: identity.pubkey,
+            created_at: result.createdAt,
+            kind: KIND_STREAM_MESSAGE,
+            tags: [
+              ["h", dm.id],
+              ["p", identity.pubkey],
+            ],
+            content: content.trim(),
+            sig: "",
+          }),
+        );
+      } catch (error) {
+        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
+          current.filter(
+            (message) =>
+              message.id !== optimisticMessage.id &&
+              message.localKey !== optimisticMessage.localKey,
+          ),
+        );
+        throw error;
       }
     } catch (error) {
       toast.error(
@@ -328,9 +422,11 @@ export function UserProfilePopover({
       }
     }
   }, [
+    channelsQuery.data,
     clearHoverTimer,
     currentPubkey,
     goChannel,
+    identityQuery.data,
     openDmMutation,
     pendingAction,
     pubkey,

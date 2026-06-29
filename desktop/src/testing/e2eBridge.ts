@@ -86,6 +86,7 @@ type E2eConfig = {
     feedReadError?: string;
     canvasReadError?: string;
     openDmDelayMs?: number;
+    sendMessageDelayMs?: number;
     /** Delay (ms) applied to older-history (`history-` subId) fetches so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     historyDelayMs?: number;
@@ -5554,6 +5555,13 @@ async function handleSendChannelMessage(
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
   const kind = args.kind ?? 9;
+  const sendMessageDelayMs = config?.mock?.sendMessageDelayMs ?? 0;
+  if (sendMessageDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, sendMessageDelayMs),
+    );
+  }
+
   // NIP-92 imeta attachments. The real relay echoes these back on the stored
   // event; mirror that here so attachment renderers (FileCard, images, video)
   // have the imeta tags they key on. `null`/empty → no extra tags.
