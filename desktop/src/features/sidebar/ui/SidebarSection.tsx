@@ -18,6 +18,9 @@ import {
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/CustomChannelSection";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
 import {
@@ -28,6 +31,7 @@ import {
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -99,7 +103,7 @@ function UnreadDotBadge({
   );
 }
 
-function ChannelWorkingBadge({
+function ChannelWorkingAgents({
   channelName,
   isActive,
   summary,
@@ -110,24 +114,110 @@ function ChannelWorkingBadge({
 }) {
   const now = useNow(1000);
   const elapsed = formatElapsed(now - summary.anchorAt);
+  const profilesQuery = useUsersBatchQuery(summary.agentPubkeys, {
+    enabled: summary.agentPubkeys.length > 0,
+  });
+  const profiles = profilesQuery.data?.profiles;
+  const agents = summary.agentPubkeys.map((pubkey) => {
+    const profile = profiles?.[pubkey.toLowerCase()];
+    const label = resolveUserLabel({
+      pubkey,
+      profiles,
+    });
+
+    return {
+      avatarUrl: profile?.avatarUrl ?? null,
+      label,
+      pubkey,
+    };
+  });
+  const visibleAgents = agents.slice(0, agents.length > 3 ? 2 : 3);
+  const overflowCount = agents.length > 3 ? agents.length - 2 : 0;
   const label =
-    summary.agentCount > 1
-      ? `${summary.agentCount} working · ${elapsed}`
-      : `Working · ${elapsed}`;
+    agents.length > 1
+      ? `${agents.length} agents working · ${elapsed}`
+      : `${agents[0]?.label ?? "Agent"} is working · ${elapsed}`;
 
   return (
-    <span
-      className={cn(
-        "hidden max-w-32 shrink-0 truncate rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none tabular-nums motion-safe:animate-pulse group-data-[collapsible=icon]:hidden sm:inline-flex",
-        isActive
-          ? "bg-sidebar-active-foreground/20 text-sidebar-active-foreground"
-          : "bg-primary/10 text-primary",
-      )}
-      data-testid={`channel-working-${channelName}`}
-      title={label}
-    >
-      {label}
-    </span>
+    <Popover>
+      <PopoverTrigger asChild>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/useKeyWithClickEvents: Radix popover trigger sits inside the channel row button; click opens the popover without navigating the row. */}
+        <span
+          className="hidden shrink-0 items-center py-px transition-opacity motion-safe:animate-pulse group-data-[collapsible=icon]:hidden sm:inline-flex"
+          data-testid={`channel-working-${channelName}`}
+          onClick={(event) => {
+            event.stopPropagation();
+          }}
+          onPointerDown={(event) => {
+            event.stopPropagation();
+          }}
+          title={label}
+        >
+          <span className="flex items-center -space-x-1 overflow-visible px-0.5">
+            {visibleAgents.map((agent) => (
+              <ProfileAvatar
+                avatarUrl={agent.avatarUrl}
+                className={cn(
+                  "h-[18px] w-[18px] text-3xs shadow-xs",
+                  isActive
+                    ? "bg-sidebar-active-foreground/15 text-sidebar-active-foreground"
+                    : "bg-sidebar text-sidebar-foreground",
+                )}
+                iconClassName="h-3 w-3"
+                key={agent.pubkey}
+                label={agent.label}
+                testId={`channel-working-avatar-${channelName}-${agent.pubkey}`}
+              />
+            ))}
+            {overflowCount > 0 ? (
+              <span
+                className={cn(
+                  "flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1 text-3xs font-semibold leading-none shadow-xs",
+                  isActive
+                    ? "bg-sidebar-active-foreground/15 text-sidebar-active-foreground"
+                    : "bg-sidebar text-sidebar-foreground",
+                )}
+              >
+                +{overflowCount}
+              </span>
+            ) : null}
+          </span>
+        </span>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        className="w-60 p-1"
+        onClick={(event) => event.stopPropagation()}
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        side="right"
+        sideOffset={8}
+      >
+        <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
+          Working · {elapsed}
+        </div>
+        <div className="mt-1 flex flex-col gap-1">
+          {agents.map((agent) => (
+            <div
+              className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-foreground"
+              data-testid={`channel-working-agent-${channelName}-${agent.pubkey}`}
+              key={agent.pubkey}
+            >
+              <ProfileAvatar
+                avatarUrl={agent.avatarUrl}
+                className="h-6 w-6 shrink-0 text-2xs"
+                iconClassName="h-3.5 w-3.5"
+                label={agent.label}
+              />
+              <span className="min-w-0 flex-1 truncate">{agent.label}</span>
+              <span
+                aria-hidden="true"
+                className="h-2 w-2 shrink-0 rounded-full bg-primary motion-safe:animate-pulse"
+              />
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -283,7 +373,7 @@ export function ChannelMenuButton({
         />
       ) : null}
       {activeWorking ? (
-        <ChannelWorkingBadge
+        <ChannelWorkingAgents
           channelName={channel.name}
           isActive={isActive}
           summary={activeWorking}

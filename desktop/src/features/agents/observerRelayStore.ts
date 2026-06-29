@@ -37,6 +37,11 @@ const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+const observerCandidatePubkeys = new Set<string>();
+let cachedObserverCandidatePubkeys: string[] | null = null;
+const pendingEventsByAgent = new Map<string, RelayEvent[]>();
+const MAX_PENDING_EVENTS_PER_AGENT = 100;
+const EMPTY_PUBKEYS: string[] = [];
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
@@ -49,6 +54,38 @@ const snapshotByAgent = new Map<string, ObserverSnapshot>();
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
 
+function registerObserverCandidate(agentPubkey: string) {
+  const key = normalizePubkey(agentPubkey);
+  if (observerCandidatePubkeys.has(key)) return;
+  observerCandidatePubkeys.add(key);
+  cachedObserverCandidatePubkeys = null;
+  notifyListeners();
+}
+
+function flushPendingEventsForAgent(
+  agentPubkey: string,
+  activeGeneration: number,
+) {
+  const key = normalizePubkey(agentPubkey);
+  const pendingEvents = pendingEventsByAgent.get(key);
+  if (!pendingEvents || pendingEvents.length === 0) return;
+  pendingEventsByAgent.delete(key);
+  for (const event of pendingEvents) {
+    eventProcessingQueue = eventProcessingQueue
+      .then(() => handleRelayObserverEvent(event, activeGeneration))
+      .catch((error) => {
+        if (activeGeneration !== generation) {
+          return;
+        }
+        setConnectionState(
+          "error",
+          error instanceof Error
+            ? `Observer event handling failed: ${error.message}`
+            : "Observer event handling failed.",
+        );
+      });
+  }
+}
 function recomputeKnownAgentPubkeys() {
   knownAgentPubkeys.clear();
   for (const subscriptionAgents of knownAgentsBySubscription.values()) {
@@ -172,15 +209,33 @@ async function handleRelayObserverEvent(
     return;
   }
 
-  // Verify agent is known/trusted before decrypting.
-  // Silently drop events from agents we are not managing.
-  if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
+  // Defense-in-depth: verify the event sender matches the claimed agent pubkey
+  // before surfacing it as an owner-resolution candidate. The relay gates on
+  // is_agent_owner, but a compromised relay could misroute.
+  if (normalizePubkey(event.pubkey) !== normalizePubkey(agentPubkey)) {
     return;
   }
 
-  // Defense-in-depth: verify the event sender matches the claimed agent pubkey.
-  // The relay gates on is_agent_owner, but a compromised relay could misroute.
-  if (normalizePubkey(event.pubkey) !== normalizePubkey(agentPubkey)) {
+  // Surface every routed agent pubkey to owner-gated callers before the trusted
+  // known-agent check. The relay subscription is already scoped to the viewer's
+  // pubkey, so these are candidates for the same declared-owner gate used by
+  // profile surfaces. We still defer decryption until a caller explicitly adds
+  // the agent to `knownAgentPubkeys` below.
+  registerObserverCandidate(agentPubkey);
+
+  // Verify agent is known/trusted before decrypting.
+  // Silently hold events from agents we have not yet resolved as owned.
+  if (!knownAgentPubkeys.has(normalizePubkey(agentPubkey))) {
+    const key = normalizePubkey(agentPubkey);
+    const pendingEvents = pendingEventsByAgent.get(key) ?? [];
+    pendingEvents.push(event);
+    if (pendingEvents.length > MAX_PENDING_EVENTS_PER_AGENT) {
+      pendingEvents.splice(
+        0,
+        pendingEvents.length - MAX_PENDING_EVENTS_PER_AGENT,
+      );
+    }
+    pendingEventsByAgent.set(key, pendingEvents);
     return;
   }
 
@@ -325,6 +380,9 @@ export function useManagedAgentObserverBridge(
   // a co-mounted caller no longer wipes out this caller's agents.
   React.useEffect(() => {
     registerKnownAgents(subscriptionId, agentPubkeys);
+    for (const agentPubkey of agentPubkeys) {
+      flushPendingEventsForAgent(agentPubkey, generation);
+    }
     return () => {
       unregisterKnownAgents(subscriptionId);
     };
@@ -338,6 +396,21 @@ export function useManagedAgentObserverBridge(
   }, [hasActiveAgent]);
 }
 
+export function useObserverCandidatePubkeys(): string[] {
+  React.useEffect(() => {
+    void ensureRelayObserverSubscription();
+  }, []);
+
+  const getSnapshot = React.useCallback(() => {
+    if (observerCandidatePubkeys.size === 0) return EMPTY_PUBKEYS;
+    if (cachedObserverCandidatePubkeys) return cachedObserverCandidatePubkeys;
+    cachedObserverCandidatePubkeys = [...observerCandidatePubkeys].sort();
+    return cachedObserverCandidatePubkeys;
+  }, []);
+
+  return React.useSyncExternalStore(subscribeAgentObserverStore, getSnapshot);
+}
+
 export function resetAgentObserverStore() {
   generation += 1;
   const unsubscribe = unsubscribeRelay;
@@ -349,6 +422,9 @@ export function resetAgentObserverStore() {
   snapshotByAgent.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  observerCandidatePubkeys.clear();
+  cachedObserverCandidatePubkeys = null;
+  pendingEventsByAgent.clear();
   connectionState = "idle";
   errorMessage = null;
   notifyListeners();
