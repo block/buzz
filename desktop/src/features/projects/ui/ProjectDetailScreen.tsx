@@ -18,6 +18,7 @@ import {
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useOpenDmMutation } from "@/features/channels/hooks";
 import {
   type Project,
   type ProjectPullRequest,
@@ -28,11 +29,22 @@ import {
   useProjectRepoSnapshotQuery,
   useRepoStateQuery,
 } from "@/features/projects/hooks";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import {
+  mergeCurrentProfileIntoLookup,
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import {
+  type ProfilePanelTab,
+  type ProfilePanelView,
+  UserProfilePanel,
+} from "@/features/profile/ui/UserProfilePanel";
+import {
+  profilePanelTabFromSearch,
+  profilePanelViewFromSearch,
+} from "@/features/profile/ui/UserProfilePanelUtils";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -44,6 +56,9 @@ import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isSafeUrl } from "@/shared/lib/url";
 import type { ProjectRepoCommit } from "@/shared/api/types";
+import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
+import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import {
@@ -54,12 +69,15 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   findReadmeFile,
   ReadmePanel,
   RepositoryFilesPanel,
 } from "./ProjectRepositoryPanel";
+import {
+  ProfileAuthorName,
+  ProfileIdentityButton,
+} from "./ProjectProfileIdentity";
 
 function CloneUrlRow({ url }: { url: string }) {
   const [copied, setCopied] = React.useState(false);
@@ -192,13 +210,27 @@ function profileMatchesContributor(
   if (!profile) return false;
   const name = contributor.name.trim().toLowerCase();
   const email = contributor.email.trim().toLowerCase();
+  const emailLocalPart = email.split("@")[0] ?? "";
   const candidates = [
     pubkey,
     profile.displayName,
     profile.nip05Handle,
     profile.ownerPubkey,
-  ].map((value) => value?.trim().toLowerCase() ?? "");
-  return candidates.includes(name) || candidates.includes(email);
+  ]
+    .map((value) => value?.trim().toLowerCase() ?? "")
+    .filter(Boolean);
+  const candidateLocalParts = candidates.map(
+    (candidate) => candidate.split("@")[0] ?? "",
+  );
+
+  return (
+    candidates.includes(name) ||
+    candidates.includes(email) ||
+    candidateLocalParts.includes(emailLocalPart) ||
+    candidates.some(
+      (candidate) => candidate.length >= 4 && name.startsWith(candidate),
+    )
+  );
 }
 
 function profileForContributor(
@@ -257,6 +289,7 @@ function ContributorsPanel({
       isAgent: matchedProfile?.profile.isAgent === true,
       label,
       lastCommitAt: contributor.lastCommitAt,
+      pubkey: matchedProfile?.pubkey ?? null,
       role:
         matchedProfile?.profile.nip05Handle ||
         contributor.email ||
@@ -290,22 +323,13 @@ function ContributorsPanel({
                 key={row.id}
               >
                 <td className="min-w-52 p-3 align-middle">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <UserAvatar
-                      accent={row.isAgent}
-                      avatarUrl={row.avatarUrl}
-                      displayName={row.label}
-                      size="xs"
-                    />
-                    <div className="min-w-0">
-                      <p className="truncate font-medium text-foreground">
-                        {row.label}
-                      </p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {row.role}
-                      </p>
-                    </div>
-                  </div>
+                  <ProfileIdentityButton
+                    avatarUrl={row.avatarUrl}
+                    isAgent={row.isAgent}
+                    label={row.label}
+                    pubkey={row.pubkey}
+                    role={row.role}
+                  />
                 </td>
                 <td className="hidden p-3 align-middle text-muted-foreground sm:table-cell">
                   {row.commitCount === null
@@ -356,8 +380,14 @@ function ActivityPanel({
   }
 
   return (
-    <div className="space-y-1 p-2">
-      {commits.map((commit, index) => {
+    <div className="relative space-y-1 p-2">
+      {commits.length > 1 ? (
+        <div
+          aria-hidden="true"
+          className="absolute bottom-7 left-9 top-7 w-px bg-border/45"
+        />
+      ) : null}
+      {commits.map((commit) => {
         const matchedProfile = profileForCommitAuthor(commit, profiles);
         const authorLabel = matchedProfile
           ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
@@ -376,30 +406,26 @@ function ActivityPanel({
 
         return (
           <article
-            className="group/feed-item relative flex min-w-0 gap-3 rounded-lg p-3 transition-colors hover:bg-muted/35"
+            className="group/feed-item relative flex min-w-0 items-start gap-3 rounded-lg p-3 transition-colors hover:bg-muted/35"
             data-testid="project-activity-feed-item"
             key={commit.hash}
           >
-            {index < commits.length - 1 ? (
-              <div
-                aria-hidden="true"
-                className="absolute bottom-0 left-7 top-12 w-px bg-border/45"
-              />
-            ) : null}
-            <UserAvatar
-              accent={matchedProfile?.profile.isAgent === true}
+            <ProfileIdentityButton
+              avatarClassName="relative z-10 mt-0.5 shrink-0 ring-2 ring-card"
+              avatarSize="md"
               avatarUrl={matchedProfile?.profile.avatarUrl ?? null}
-              className="relative z-10 mt-0.5 shrink-0 ring-2 ring-card"
-              displayName={authorLabel}
-              size="md"
+              isAgent={matchedProfile?.profile.isAgent === true}
+              label={authorLabel}
+              pubkey={matchedProfile?.pubkey ?? null}
+              showLabel={false}
             />
             <div className="min-w-0 flex-1 space-y-2">
               <div className="flex min-w-0 items-start gap-3">
                 <div className="min-w-0 flex-1">
                   <p className="min-w-0 text-sm leading-5 text-muted-foreground">
-                    <span className="font-semibold text-foreground">
+                    <ProfileAuthorName pubkey={matchedProfile?.pubkey ?? null}>
                       {authorLabel}
-                    </span>{" "}
+                    </ProfileAuthorName>{" "}
                     pushed a commit
                   </p>
                   <p className="truncate text-xs text-muted-foreground/80">
@@ -530,30 +556,30 @@ function WorkspaceTabs({
       onValueChange={setSelectedTab}
       value={selectedTab}
     >
-      <TabsList className="h-8 w-fit justify-start">
+      <TabsList className="h-9 w-fit justify-start">
         {readmeFile ? (
           <TabsTrigger
             aria-label="README"
-            className="h-7 px-2"
+            className={PROJECT_TAB_TRIGGER_CLASS}
             title="README"
             value="readme"
           >
             <BookOpen className="h-3.5 w-3.5" />
           </TabsTrigger>
         ) : null}
-        <TabsTrigger className="h-7 gap-1 px-2" value="activity">
+        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
           <CircleDot className="h-3.5 w-3.5" />
           Activity
         </TabsTrigger>
-        <TabsTrigger className="h-7 gap-1 px-2" value="prs">
+        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="prs">
           <GitPullRequest className="h-3.5 w-3.5" />
           PRs
         </TabsTrigger>
-        <TabsTrigger className="h-7 gap-1 px-2" value="files">
+        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
           <FolderGit2 className="h-3.5 w-3.5" />
           Files
         </TabsTrigger>
-        <TabsTrigger className="h-7 gap-1 px-2" value="contributors">
+        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="contributors">
           <Users className="h-3.5 w-3.5" />
           Contributors
         </TabsTrigger>
@@ -614,6 +640,15 @@ type ProjectDetailScreenProps = {
   projectId: string;
 };
 
+const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
+  "profile",
+  "profileTab",
+  "profileView",
+] as const;
+
+const PROJECT_TAB_TRIGGER_CLASS =
+  "h-7 gap-1 px-2 data-[state=active]:bg-foreground data-[state=active]:text-background data-[state=active]:shadow-sm";
+
 export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const { goChannel, goProjects } = useAppNavigation();
   const mainInsetRef = useMainInsetRef();
@@ -667,7 +702,50 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const profilesQuery = useUsersBatchQuery(peoplePubkeys, {
     enabled: peoplePubkeys.length > 0,
   });
-  const profiles = profilesQuery.data?.profiles;
+  const currentProfileQuery = useProfileQuery();
+  const profiles = React.useMemo(
+    () =>
+      mergeCurrentProfileIntoLookup(
+        profilesQuery.data?.profiles,
+        currentProfileQuery.data,
+      ),
+    [currentProfileQuery.data, profilesQuery.data?.profiles],
+  );
+  const identityQuery = useIdentityQuery();
+  const { applyPatch, values } = useHistorySearchState(
+    PROJECT_DETAIL_PANEL_SEARCH_KEYS,
+  );
+  const profilePanelPubkey = values.profile;
+  const profilePanelTab = profilePanelTabFromSearch(values.profileTab);
+  const profilePanelView = profilePanelViewFromSearch(values.profileView);
+  const handleOpenProfilePanel = React.useCallback(
+    (pubkey: string) =>
+      applyPatch({ profile: pubkey, profileTab: null, profileView: null }),
+    [applyPatch],
+  );
+  const handleCloseProfilePanel = React.useCallback(
+    () => applyPatch({ profile: null, profileTab: null, profileView: null }),
+    [applyPatch],
+  );
+  const handleProfilePanelViewChange = React.useCallback(
+    (view: ProfilePanelView, options?: { replace?: boolean }) =>
+      applyPatch({ profileView: view === "summary" ? null : view }, options),
+    [applyPatch],
+  );
+  const handleProfilePanelTabChange = React.useCallback(
+    (tab: ProfilePanelTab, options?: { replace?: boolean }) =>
+      applyPatch({ profileTab: tab === "info" ? null : tab }, options),
+    [applyPatch],
+  );
+  const threadPanelWidth = useThreadPanelWidth();
+  const openDmMutation = useOpenDmMutation();
+  const handleOpenDm = React.useCallback(
+    async (pubkeys: string[]) => {
+      const dm = await openDmMutation.mutateAsync({ pubkeys });
+      await goChannel(dm.id);
+    },
+    [goChannel, openDmMutation],
+  );
 
   if (projectQuery.isLoading) {
     return null;
@@ -729,148 +807,173 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
     project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div
-        className={cn(
-          "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-          channelChrome.negativeMargin,
-          topChromeInset.divider,
-        )}
-        ref={projectDetailHeaderChromeRef}
-      >
-        <div
-          className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-5 py-2"
-          data-tauri-drag-region
-        >
-          <Button
-            className="h-9 gap-1.5 text-muted-foreground"
-            onClick={() => {
-              void goProjects();
-            }}
-            size="sm"
-            variant="ghost"
+    <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div
+            className={cn(
+              "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+              channelChrome.negativeMargin,
+              topChromeInset.divider,
+            )}
+            ref={projectDetailHeaderChromeRef}
           >
-            <ArrowLeft className="h-4 w-4" />
-            Back to Projects
-          </Button>
-          {project.projectChannelId ? (
-            <Button
-              className="h-9 shrink-0 gap-1.5"
-              onClick={() => {
-                if (project.projectChannelId) {
-                  void goChannel(project.projectChannelId);
-                }
-              }}
-              size="sm"
-              variant="outline"
+            <div
+              className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-5 py-2"
+              data-tauri-drag-region
             >
-              <MessageSquare className="h-4 w-4" />
-              Open Discussion
-            </Button>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
-        <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
-          <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
-            <div className="flex min-w-0 items-start justify-between gap-3">
-              <div className="min-w-0 flex-1 space-y-1">
-                <h2 className="truncate text-lg font-semibold">
-                  {project.name}
-                </h2>
-                {project.description ? (
-                  <p className="text-sm text-muted-foreground">
-                    {project.description}
-                  </p>
-                ) : null}
-                <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                  <UserAvatar
-                    accent={ownerProfile?.isAgent === true}
-                    avatarUrl={ownerProfile?.avatarUrl ?? null}
-                    className="shrink-0"
-                    displayName={ownerLabel}
-                    size="sm"
-                  />
-                  <span className="truncate">{ownerLabel}</span>
-                </div>
-              </div>
-              {safeWebUrl ? (
+              <Button
+                className="h-9 gap-1.5 text-muted-foreground"
+                onClick={() => {
+                  void goProjects();
+                }}
+                size="sm"
+                variant="ghost"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Back to Projects
+              </Button>
+              {project.projectChannelId ? (
                 <Button
-                  asChild
-                  className="h-8 shrink-0 gap-1.5"
+                  className="h-9 shrink-0 gap-1.5"
+                  onClick={() => {
+                    if (project.projectChannelId) {
+                      void goChannel(project.projectChannelId);
+                    }
+                  }}
                   size="sm"
                   variant="outline"
                 >
-                  <a
-                    href={safeWebUrl}
-                    rel="noopener noreferrer"
-                    target="_blank"
-                  >
-                    <ExternalLink className="h-4 w-4" />
-                    Web
-                  </a>
+                  <MessageSquare className="h-4 w-4" />
+                  Open Discussion
                 </Button>
               ) : null}
             </div>
+          </div>
 
-            <RepositorySourceCard
-              branch={displayedBranch ?? ""}
-              branchOptions={displayedBranchOptions}
-              cloneUrls={project.cloneUrls}
-              onBranchChange={setSelectedBranch}
-            />
-          </section>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
+            <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
+              <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
+                <div className="flex min-w-0 items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <h2 className="truncate text-lg font-semibold">
+                        {project.name}
+                      </h2>
+                      {safeWebUrl ? (
+                        <Button
+                          asChild
+                          aria-label="Open project web page"
+                          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                          size="icon-xs"
+                          variant="ghost"
+                        >
+                          <a
+                            href={safeWebUrl}
+                            rel="noopener noreferrer"
+                            target="_blank"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5" />
+                          </a>
+                        </Button>
+                      ) : null}
+                    </div>
+                    {project.description ? (
+                      <p className="text-sm text-muted-foreground">
+                        {project.description}
+                      </p>
+                    ) : null}
+                    <ProfileIdentityButton
+                      avatarSize="sm"
+                      avatarUrl={ownerProfile?.avatarUrl ?? null}
+                      isAgent={ownerProfile?.isAgent === true}
+                      label={ownerLabel}
+                      pubkey={project.owner}
+                    />
+                  </div>
+                </div>
 
-          <WorkspaceTabs
-            key={project.id}
-            profiles={profiles}
-            project={project}
-            pullRequests={pullRequestsQuery.data ?? []}
-            pullRequestsError={pullRequestsQuery.error}
-            pullRequestsLoading={pullRequestsQuery.isLoading}
-            repoContributors={repoContributors}
-            snapshot={repoSnapshotQuery.data}
-            snapshotError={repoSnapshotQuery.error}
-            snapshotLoading={repoSnapshotQuery.isLoading}
-          />
+                <RepositorySourceCard
+                  branch={displayedBranch ?? ""}
+                  branchOptions={displayedBranchOptions}
+                  cloneUrls={project.cloneUrls}
+                  onBranchChange={setSelectedBranch}
+                />
+              </section>
 
-          <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">
-              <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                <Bot className="h-4 w-4" />
-                Agent Work
-              </h3>
-              <p className="text-sm text-muted-foreground">
-                Start agents from project issues so their summaries, branches,
-                patches, and review notes stay attached to this project.
-              </p>
-            </Card>
-            <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">
-              <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                <FileDiff className="h-4 w-4" />
-                Code Discussion
-              </h3>
-              <p className="text-sm text-muted-foreground">
-                Diff messages and NIP-34 patches render in the linked discussion
-                channel, giving humans and agents a shared review surface.
-              </p>
-            </Card>
-          </section>
+              <WorkspaceTabs
+                key={project.id}
+                profiles={profiles}
+                project={project}
+                pullRequests={pullRequestsQuery.data ?? []}
+                pullRequestsError={pullRequestsQuery.error}
+                pullRequestsLoading={pullRequestsQuery.isLoading}
+                repoContributors={repoContributors}
+                snapshot={repoSnapshotQuery.data}
+                snapshotError={repoSnapshotQuery.error}
+                snapshotLoading={repoSnapshotQuery.isLoading}
+              />
 
-          <section className="space-y-2">
-            <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Details
-            </h3>
-            <div className="space-y-1 text-sm text-muted-foreground">
-              <p className="truncate">Repo: {project.repoAddress}</p>
-              <p className="truncate">
-                Owner: {resolveUserLabel({ pubkey: project.owner, profiles })}
-              </p>
+              <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">
+                  <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    <Bot className="h-4 w-4" />
+                    Agent Work
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    Start agents from project issues so their summaries,
+                    branches, patches, and review notes stay attached to this
+                    project.
+                  </p>
+                </Card>
+                <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">
+                  <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    <FileDiff className="h-4 w-4" />
+                    Code Discussion
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    Diff messages and NIP-34 patches render in the linked
+                    discussion channel, giving humans and agents a shared review
+                    surface.
+                  </p>
+                </Card>
+              </section>
+
+              <section className="space-y-2">
+                <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Details
+                </h3>
+                <div className="space-y-1 text-sm text-muted-foreground">
+                  <p className="truncate">Repo: {project.repoAddress}</p>
+                  <p className="truncate">
+                    Owner:{" "}
+                    <ProfileAuthorName pubkey={project.owner}>
+                      {resolveUserLabel({ pubkey: project.owner, profiles })}
+                    </ProfileAuthorName>
+                  </p>
+                </div>
+              </section>
             </div>
-          </section>
+          </div>
         </div>
+        {profilePanelPubkey ? (
+          <UserProfilePanel
+            canResetWidth={threadPanelWidth.canReset}
+            currentPubkey={identityQuery.data?.pubkey}
+            onClose={handleCloseProfilePanel}
+            onOpenDm={handleOpenDm}
+            onOpenProfile={handleOpenProfilePanel}
+            onResetWidth={threadPanelWidth.onResetWidth}
+            onResizeStart={threadPanelWidth.onResizeStart}
+            onTabChange={handleProfilePanelTabChange}
+            onViewChange={handleProfilePanelViewChange}
+            pubkey={profilePanelPubkey}
+            tab={profilePanelTab}
+            view={profilePanelView}
+            widthPx={threadPanelWidth.widthPx}
+          />
+        ) : null}
       </div>
-    </div>
+    </ProfilePanelProvider>
   );
 }
