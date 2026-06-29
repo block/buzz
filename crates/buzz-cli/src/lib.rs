@@ -414,7 +414,7 @@ pub enum ChannelsCmd {
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
     },
-    /// Update channel name, description, or ephemeral TTL
+    /// Update channel name, description, visibility, or ephemeral TTL
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -425,6 +425,10 @@ pub enum ChannelsCmd {
         /// New channel description
         #[arg(long)]
         description: Option<String>,
+        /// Change channel visibility: "open" (publicly listable/joinable) or
+        /// "private" (invite-only). Requires owner/admin.
+        #[arg(long, value_enum)]
+        visibility: Option<ChannelVisibility>,
         /// Make the channel ephemeral (or change its lifetime): seconds until
         /// the relay archives it after the last message. Conflicts with --no-ttl.
         #[arg(long, value_name = "SECONDS", conflicts_with = "no_ttl")]

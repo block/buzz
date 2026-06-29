@@ -349,6 +349,7 @@ pub async fn cmd_update_channel(
     channel_id: &str,
     name: Option<&str>,
     description: Option<&str>,
+    visibility: Option<&str>,
     ttl: Option<i64>,
     no_ttl: bool,
 ) -> Result<(), CliError> {
@@ -360,15 +361,25 @@ pub async fn cmd_update_channel(
         (None, false) => None,
     };
 
-    if name.is_none() && description.is_none() && ttl_change.is_none() {
+    if let Some(v) = visibility {
+        if v != "open" && v != "private" {
+            return Err(CliError::Usage(format!(
+                "--visibility must be 'open' or 'private' (got: {v})"
+            )));
+        }
+    }
+
+    if name.is_none() && description.is_none() && visibility.is_none() && ttl_change.is_none() {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description, --ttl, --no-ttl)".into(),
+            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl)"
+                .into(),
         ));
     }
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_update_channel(channel_uuid, name, description, None, ttl_change)
-        .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
+    let builder =
+        buzz_sdk::build_update_channel(channel_uuid, name, description, visibility, ttl_change)
+            .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -621,14 +632,17 @@ pub async fn dispatch(
             channel,
             name,
             description,
+            visibility,
             ttl,
             no_ttl,
         } => {
+            let vis = visibility.as_ref().map(|v| v.to_string());
             cmd_update_channel(
                 client,
                 &channel,
                 name.as_deref(),
                 description.as_deref(),
+                vis.as_deref(),
                 ttl,
                 no_ttl,
             )
