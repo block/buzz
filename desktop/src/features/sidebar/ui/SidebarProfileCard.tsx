@@ -6,48 +6,30 @@ import { useSelfProfileCache } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
-import type { Workspace } from "@/features/workspaces/types";
-import { WorkspaceSwitcher } from "@/features/workspaces/ui/WorkspaceSwitcher";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
-  activeWorkspace: Workspace | null;
   isPresencePending?: boolean;
-  onOpenAddWorkspace: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
-  onRemoveWorkspace: (id: string) => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
-  onSwitchWorkspace: (id: string) => void;
-  onUpdateWorkspace: (
-    id: string,
-    updates: Partial<Pick<Workspace, "name" | "relayUrl" | "token">>,
-  ) => void;
   profile?: Profile;
   resolvedDisplayName: string;
   selfPresenceStatus: PresenceStatus;
   selfUserStatus?: UserStatus;
-  workspaces: Workspace[];
 };
 
 export function SidebarProfileCard({
-  activeWorkspace,
   isPresencePending,
-  onOpenAddWorkspace,
   onOpenSettings,
-  onRemoveWorkspace,
   onSetPresenceStatus,
   onSetUserStatus,
   onClearUserStatus,
-  onSwitchWorkspace,
-  onUpdateWorkspace,
   profile,
   resolvedDisplayName,
   selfPresenceStatus,
   selfUserStatus,
-  workspaces,
 }: SidebarProfileCardProps) {
   const selfProfileCache = useSelfProfileCache();
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
@@ -70,18 +52,6 @@ export function SidebarProfileCard({
     [toggleProfilePopover],
   );
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
-  const workspaceLabel = activeWorkspace?.name ?? "No workspace";
-  const readonlyWorkspaceLabel = (
-    <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
-      <span
-        aria-hidden="true"
-        className="flex w-3.5 shrink-0 items-center justify-center text-2xs"
-      >
-        <span className="-translate-y-px leading-normal">🐝</span>
-      </span>
-      <span className="truncate">{workspaceLabel}</span>
-    </span>
-  );
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions lint/a11y/useKeyWithClickEvents: child buttons provide keyboard access; wrapper fills pointer gaps between them.
@@ -136,17 +106,6 @@ export function SidebarProfileCard({
             triggerContainerRef={profileCardRef}
             userStatusEmoji={selfUserStatus?.emoji}
             userStatusText={selfUserStatus?.text}
-            workspaceSwitcherSlot={
-              <WorkspaceSwitcher
-                activeWorkspace={activeWorkspace}
-                onAddWorkspace={onOpenAddWorkspace}
-                onRemoveWorkspace={onRemoveWorkspace}
-                onSwitchWorkspace={onSwitchWorkspace}
-                onUpdateWorkspace={onUpdateWorkspace}
-                variant="profile-menu"
-                workspaces={workspaces}
-              />
-            }
           >
             <button
               onClick={(event) => {
@@ -167,40 +126,25 @@ export function SidebarProfileCard({
           </ProfilePopover>
 
           {hasStatus ? (
-            <div className="relative mt-0.5">
-              <button
-                aria-label={`Open profile menu for ${resolvedDisplayName}`}
-                className={cn(
-                  "flex w-full min-w-0 items-center truncate rounded-sm text-left text-xs leading-snug text-sidebar-foreground/70 outline-hidden transition-opacity duration-150 focus:outline-none focus-visible:outline-none group-hover/profile-card:opacity-0",
-                  profilePopoverOpen && "opacity-100",
-                )}
-                data-testid="sidebar-profile-user-status"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  toggleProfilePopover();
-                }}
-                type="button"
-              >
-                {selfUserStatus?.emoji ? (
-                  <StatusEmoji
-                    className="mr-1 w-4 shrink-0 text-xs"
-                    value={selfUserStatus.emoji}
-                  />
-                ) : null}
-                <span className="truncate">{selfUserStatus?.text}</span>
-              </button>
-              <div
-                className={cn(
-                  "pointer-events-none absolute inset-0 flex min-w-0 items-center text-xs leading-snug text-sidebar-foreground/70 opacity-0 transition-opacity duration-150 group-hover/profile-card:opacity-100",
-                  profilePopoverOpen && "opacity-0",
-                )}
-              >
-                {readonlyWorkspaceLabel}
-              </div>
-            </div>
-          ) : (
-            <div className="relative mt-0.5">{readonlyWorkspaceLabel}</div>
-          )}
+            <button
+              aria-label={`Open profile menu for ${resolvedDisplayName}`}
+              className="mt-0.5 flex w-full min-w-0 items-center truncate rounded-sm text-left text-xs leading-snug text-sidebar-foreground/70 outline-hidden focus:outline-none focus-visible:outline-none"
+              data-testid="sidebar-profile-user-status"
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleProfilePopover();
+              }}
+              type="button"
+            >
+              {selfUserStatus?.emoji ? (
+                <StatusEmoji
+                  className="mr-1 w-4 shrink-0 text-xs"
+                  value={selfUserStatus.emoji}
+                />
+              ) : null}
+              <span className="truncate">{selfUserStatus?.text}</span>
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

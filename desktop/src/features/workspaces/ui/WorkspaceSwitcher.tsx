@@ -28,6 +28,7 @@ import {
   isRelayConnectionDegraded,
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
+import { cn } from "@/shared/lib/cn";
 import { EditWorkspaceDialog } from "./EditWorkspaceDialog";
 
 const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
@@ -42,7 +43,7 @@ const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
 type WorkspaceSwitcherProps = {
   activeWorkspace: Workspace | null;
   workspaces: Workspace[];
-  variant?: "sidebar" | "profile" | "profile-menu";
+  variant?: "sidebar" | "sidebar-card" | "profile" | "profile-menu";
   onSwitchWorkspace: (id: string) => void;
   onAddWorkspace: () => void;
   onUpdateWorkspace: (
@@ -52,10 +53,43 @@ type WorkspaceSwitcherProps = {
   onRemoveWorkspace: (id: string) => void;
 };
 
-function WorkspaceEmojiIcon({ className }: { className: string }) {
+function getWorkspaceInitial(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || "W";
+}
+
+function WorkspaceAvatar({
+  className,
+  emoji,
+  imageUrl,
+  name,
+}: {
+  className: string;
+  emoji?: string;
+  imageUrl?: string | null;
+  name: string;
+}) {
   return (
-    <span aria-hidden="true" className={className}>
-      <span className="-translate-y-px leading-normal">🐝</span>
+    <span
+      aria-hidden="true"
+      className={cn(
+        "overflow-hidden rounded-xl bg-sidebar-accent/40 text-sidebar-foreground/80",
+        className,
+      )}
+    >
+      {imageUrl ? (
+        <img
+          alt=""
+          className="h-full w-full object-cover"
+          draggable={false}
+          src={imageUrl}
+        />
+      ) : emoji ? (
+        <span className="-translate-y-px leading-normal">{emoji}</span>
+      ) : (
+        <span className="font-medium leading-none">
+          {getWorkspaceInitial(name)}
+        </span>
+      )}
     </span>
   );
 }
@@ -77,6 +111,8 @@ export function WorkspaceSwitcher({
   const degraded = isRelayConnectionDegraded(connectionState);
   const connectionLabel = CONNECTION_STATE_LABEL[connectionState];
   const isProfileVariant = variant === "profile";
+  const isSidebarCardVariant = variant === "sidebar-card";
+  const workspaceName = activeWorkspace?.name ?? "No workspace";
 
   function clearProfileMenuHoverTimer() {
     if (profileMenuHoverTimer.current !== null) {
@@ -137,12 +173,14 @@ export function WorkspaceSwitcher({
           </TooltipContent>
         </Tooltip>
       ) : (
-        <WorkspaceEmojiIcon
+        <WorkspaceAvatar
           className={
             isProfileVariant
-              ? "flex w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs"
-              : "flex w-5 shrink-0 items-center justify-center text-xs"
+              ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-2xs"
+              : "flex h-5 w-5 shrink-0 items-center justify-center text-xs"
           }
+          emoji="🐝"
+          name={workspaceName}
         />
       )}
       <span
@@ -270,6 +308,45 @@ export function WorkspaceSwitcher({
           >
             {triggerContent}
           </button>
+        ) : isSidebarCardVariant ? (
+          <button
+            aria-label={
+              degraded
+                ? `${workspaceName} — ${connectionLabel}`
+                : `Switch workspace: ${workspaceName}`
+            }
+            className="group/workspace-card inline-flex max-w-full min-w-0 items-center gap-0.5 rounded-xl px-2 py-1.5 text-left text-sidebar-foreground outline-hidden transition-colors hover:bg-sidebar-border/35 focus:outline-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-sidebar-ring dark:hover:bg-sidebar-border/30"
+            data-testid="sidebar-workspace-card"
+            type="button"
+          >
+            {degraded ? (
+              <span
+                aria-hidden="true"
+                className="-ml-1.5 flex h-7 w-7 shrink-0 items-center justify-center text-sm"
+              >
+                <WifiOff className="h-3.5 w-3.5 text-destructive" />
+              </span>
+            ) : (
+              <WorkspaceAvatar
+                className="-ml-1.5 flex h-7 w-7 shrink-0 items-center justify-center text-sm"
+                emoji="🐝"
+                name={workspaceName}
+              />
+            )}
+            <span className="flex min-w-0 max-w-full items-center gap-1">
+              <span
+                className={
+                  degraded
+                    ? "min-w-0 truncate text-sm leading-tight text-destructive"
+                    : "min-w-0 truncate text-sm leading-tight text-sidebar-foreground"
+                }
+                data-testid="sidebar-workspace-name"
+              >
+                {workspaceName}
+              </span>
+              <ChevronDown className="h-4 w-4 shrink-0 text-sidebar-foreground/45 opacity-0 transition-[opacity,transform] group-hover/workspace-card:opacity-100 group-focus-visible/workspace-card:opacity-100 group-data-[state=open]/workspace-card:rotate-180 group-data-[state=open]/workspace-card:opacity-100" />
+            </span>
+          </button>
         ) : (
           <SidebarMenuButton
             aria-label={
@@ -336,6 +413,8 @@ export function WorkspaceSwitcher({
         switcherDropdown
       ) : variant === "profile-menu" ? (
         profileMenuPopover
+      ) : isSidebarCardVariant ? (
+        switcherDropdown
       ) : (
         <SidebarMenu>
           <SidebarMenuItem>{switcherDropdown}</SidebarMenuItem>
