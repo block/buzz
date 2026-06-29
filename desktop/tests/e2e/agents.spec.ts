@@ -373,6 +373,35 @@ test("custom personas can be shown in the agent catalog", async ({ page }) => {
   ).toHaveText("Added to My Agents");
 });
 
+test("team-managed personas do not expose editable actions", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: "team:analyst",
+        displayName: "Team Analyst",
+        sourceTeam: "team-research-002",
+        systemPrompt: "You are Team Analyst.",
+      },
+    ],
+  });
+  await gotoApp(page);
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByLabel("Open actions for Team Analyst").click();
+
+  await expect(page.getByRole("menuitem")).toHaveText([
+    "Catalog options",
+    "Duplicate",
+    "Managed by team",
+  ]);
+  await expect(page.getByRole("menuitem", { name: "Edit" })).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Remove from My Agents" }),
+  ).toHaveCount(0);
+});
+
 test("inactive built-ins cannot be used to create teams", async ({ page }) => {
   await gotoApp(page);
 

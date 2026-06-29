@@ -64,6 +64,7 @@ type MockPersonaSeed = {
   avatarUrl?: string | null;
   systemPrompt: string;
   isActive?: boolean;
+  sourceTeam?: string | null;
   envVars?: Record<string, string>;
 };
 
@@ -460,6 +461,7 @@ type RawPersona = {
   system_prompt: string;
   is_builtin: boolean;
   is_active: boolean;
+  source_team?: string | null;
   env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
@@ -1188,6 +1190,7 @@ function resetMockPersonas(config?: E2eConfig) {
     system_prompt: persona.system_prompt,
     is_builtin: true,
     is_active: activePersonaIds.has(persona.id),
+    source_team: null,
     created_at: now,
     updated_at: now,
   }));
@@ -1200,6 +1203,7 @@ function resetMockPersonas(config?: E2eConfig) {
       system_prompt: persona.systemPrompt,
       is_builtin: false,
       is_active: persona.isActive ?? true,
+      source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
       created_at: now,
       updated_at: now,
@@ -4905,6 +4909,7 @@ async function handleCreatePersona(args: {
     system_prompt: args.input.systemPrompt.trim(),
     is_builtin: false,
     is_active: true,
+    source_team: null,
     env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,

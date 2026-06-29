@@ -82,6 +82,7 @@ type MockPersonaSeed = {
   avatarUrl?: string | null;
   systemPrompt: string;
   isActive?: boolean;
+  sourceTeam?: string | null;
   envVars?: Record<string, string>;
 };
 

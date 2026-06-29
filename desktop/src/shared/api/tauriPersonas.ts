@@ -49,7 +49,7 @@ export type ParsePersonaFilesResult = {
   skipped: SkippedFile[];
 };
 
-type RawPersona = {
+export type RawPersona = {
   id: string;
   display_name: string;
   avatar_url: string | null;
@@ -60,12 +60,13 @@ type RawPersona = {
   name_pool?: string[];
   is_builtin: boolean;
   is_active?: boolean;
+  source_team?: string | null;
   env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
 };
 
-function fromRawPersona(persona: RawPersona): AgentPersona {
+export function fromRawPersona(persona: RawPersona): AgentPersona {
   return {
     id: persona.id,
     displayName: persona.display_name,
@@ -77,6 +78,7 @@ function fromRawPersona(persona: RawPersona): AgentPersona {
     namePool: persona.name_pool ?? [],
     isBuiltIn: persona.is_builtin,
     isActive: persona.is_active ?? true,
+    sourceTeam: persona.source_team ?? null,
     envVars: persona.env_vars ?? {},
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
