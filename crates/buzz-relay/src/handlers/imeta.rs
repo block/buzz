@@ -435,6 +435,19 @@ mod tests {
     }
 
     #[test]
+    fn imeta_accepts_tenant_host_url_when_base_matches_tenant() {
+        const TENANT_BASE: &str = "https://b.localhost:3100/media";
+        let tag = vec![
+            "imeta".into(),
+            format!("url {TENANT_BASE}/{HASH}.jpg"),
+            "m image/jpeg".into(),
+            format!("x {HASH}"),
+            "size 100".into(),
+        ];
+        assert!(validate_imeta_tags(&[tag], TENANT_BASE).is_ok());
+    }
+
+    #[test]
     fn test_local_media_url_rejects_external() {
         assert!(!is_local_media_url(
             &format!("https://evil.com/media/{HASH}.jpg"),

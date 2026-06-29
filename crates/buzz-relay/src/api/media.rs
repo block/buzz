@@ -161,7 +161,7 @@ pub async fn upload_blob(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let descriptor = if content_type.starts_with("video/") {
+    let mut descriptor = if content_type.starts_with("video/") {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
@@ -217,6 +217,12 @@ pub async fn upload_blob(
         }
     };
 
+    rewrite_descriptor_urls_for_tenant(
+        &mut descriptor,
+        &state.config.relay_url,
+        auth.tenant.host(),
+    );
+
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
         "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "video/mp4" => {
@@ -248,6 +254,35 @@ pub async fn upload_blob(
     }
 
     Ok(Json(descriptor))
+}
+
+pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &str) -> String {
+    let scheme = if config_relay_url.trim_start().starts_with("wss://")
+        || config_relay_url.trim_start().starts_with("https://")
+    {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{tenant_host}/media")
+}
+
+fn rewrite_descriptor_urls_for_tenant(
+    descriptor: &mut BlobDescriptor,
+    config_relay_url: &str,
+    tenant_host: &str,
+) {
+    let base = media_base_url_for_tenant(config_relay_url, tenant_host);
+    let ext = descriptor
+        .url
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|ext| is_safe_ext(ext))
+        .unwrap_or("bin");
+    descriptor.url = format!("{base}/{}.{ext}", descriptor.sha256);
+    if descriptor.thumb.is_some() {
+        descriptor.thumb = Some(format!("{base}/{}.thumb.jpg", descriptor.sha256));
+    }
 }
 
 async fn bind_media_read_tenant(
@@ -801,6 +836,49 @@ mod tests {
     #[test]
     fn test_validate_media_path_rejects_empty() {
         assert!(validate_media_path("").is_err());
+    }
+
+    #[test]
+    fn media_base_url_for_tenant_uses_tenant_host_and_http_scheme() {
+        assert_eq!(
+            media_base_url_for_tenant("wss://config.example", "tenant-b.example"),
+            "https://tenant-b.example/media"
+        );
+        assert_eq!(
+            media_base_url_for_tenant("ws://config.example", "localhost:3100"),
+            "http://localhost:3100/media"
+        );
+    }
+
+    #[test]
+    fn rewrite_descriptor_urls_for_tenant_replaces_global_media_host() {
+        let hash = "a".repeat(64);
+        let mut descriptor = BlobDescriptor {
+            url: format!("https://primary.example/media/{hash}.jpg"),
+            sha256: hash.clone(),
+            size: 42,
+            mime_type: "image/jpeg".to_string(),
+            uploaded: 1700000000,
+            dim: Some("1x1".to_string()),
+            blurhash: None,
+            thumb: Some(format!("https://primary.example/media/{hash}.thumb.jpg")),
+            duration: None,
+        };
+
+        rewrite_descriptor_urls_for_tenant(
+            &mut descriptor,
+            "wss://primary.example",
+            "tenant-b.example",
+        );
+
+        assert_eq!(
+            descriptor.url,
+            format!("https://tenant-b.example/media/{hash}.jpg")
+        );
+        assert_eq!(
+            descriptor.thumb,
+            Some(format!("https://tenant-b.example/media/{hash}.thumb.jpg"))
+        );
     }
 
     #[test]

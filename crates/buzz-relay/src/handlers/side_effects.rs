@@ -913,13 +913,14 @@ async fn handle_kind0_profile(
 
     let about = content.get("about").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Validate NIP-05 handle: must be user@domain where domain matches this relay.
-    // Invalid or off-domain handles are silently cleared (treated as absent) rather
-    // than stored, since the event is already persisted and can't be rejected.
+    // Validate NIP-05 handle: must be user@domain where domain matches the
+    // bound tenant host. Invalid or off-domain handles are silently cleared
+    // (treated as absent) rather than stored, since the event is already
+    // persisted and can't be rejected.
     let nip05_owned = content
         .get("nip05")
         .and_then(|v| v.as_str())
-        .and_then(|raw| crate::api::nip05::canonicalize_nip05(raw, &state.config.relay_url).ok());
+        .and_then(|raw| crate::api::nip05::canonicalize_nip05(raw, tenant.host()).ok());
     let nip05_handle = nip05_owned.as_deref().unwrap_or("");
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();

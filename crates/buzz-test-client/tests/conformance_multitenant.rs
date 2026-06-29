@@ -973,9 +973,8 @@ mod users_profiles_nip05 {
     /// `crates/buzz-relay/src/api/nip05.rs::extract_domain` — strips the
     /// scheme prefix and any port, returning the bare hostname. The relay's
     /// `canonicalize_nip05` requires a kind:0 `nip05` value to end in
-    /// `@<this domain>`. On the two-host harness with
-    /// `RELAY_URL=ws://localhost:3100`, that domain is `localhost`, so handles
-    /// must be registered as `local@localhost`.
+    /// `@<this domain>`. In multi-tenant mode the expected domain is the bound
+    /// request host (`tenant.host()`), not the global `RELAY_URL` host.
     fn extract_relay_domain(relay_url_env: &str) -> String {
         // Match the relay's logic exactly: strip wss/ws, then take everything
         // before the first ':' or '/' (port and path).
@@ -1147,32 +1146,33 @@ mod users_profiles_nip05 {
         let pk_b_hex = keys_b.public_key().to_hex();
         assert_ne!(pk_a_hex, pk_b_hex, "test design requires distinct pubkeys");
 
-        // Same local-part `alice` in both communities. The handle's domain
-        // piece must match `extract_domain(state.config.relay_url)` for
-        // `canonicalize_nip05` to accept — extract it dynamically rather than
-        // hard-code, so the test still works if RELAY_URL changes.
-        //
-        // `state.config.relay_url` isn't exposed over the wire; we read it
-        // from the env the harness was started with. The conformance recipe
-        // sets `RELAY_URL=ws://localhost:3100`, so the canonical domain is
-        // `localhost`. Fall back to `localhost` for the common case.
-        let relay_url_env =
-            std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3100".to_string());
-        let domain = extract_relay_domain(&relay_url_env);
+        // Same local-part `alice` in both communities, but each registered
+        // under its own host's domain. Post-fix, `canonicalize_nip05` runs
+        // against `tenant.host()` (not `config.relay_url`), so `alice@
+        // a.localhost` is canonical on host A and `alice@b.localhost` is
+        // canonical on host B. Pre-fix, both hosts only accept the global
+        // `config.relay_url` domain; this registration would have been
+        // silently dropped and the well-known lookup would return empty.
+        // Deriving each handle from its own host URL ties the test to the
+        // canonicalize-against-`tenant.host()` fix at the registration step.
+        let domain_a = extract_relay_domain(&url_a());
+        let domain_b = extract_relay_domain(&url_b());
         let local = format!("alice_{}", uuid::Uuid::new_v4().simple());
-        let handle = format!("{local}@{domain}");
-        let content = serde_json::json!({"display_name": local, "nip05": handle}).to_string();
+        let handle_a = format!("{local}@{domain_a}");
+        let handle_b = format!("{local}@{domain_b}");
+        let content_a = serde_json::json!({"display_name": local, "nip05": handle_a}).to_string();
+        let content_b = serde_json::json!({"display_name": local, "nip05": handle_b}).to_string();
 
         // Register each pubkey under the same local-part in its own community.
         let mut client_a = BuzzTestClient::connect(&ws_a, &keys_a)
             .await
             .expect("connect A");
-        let _ = publish_kind0(&mut client_a, &keys_a, &content).await;
+        let _ = publish_kind0(&mut client_a, &keys_a, &content_a).await;
 
         let mut client_b = BuzzTestClient::connect(&ws_b, &keys_b)
             .await
             .expect("connect B");
-        let _ = publish_kind0(&mut client_b, &keys_b, &content).await;
+        let _ = publish_kind0(&mut client_b, &keys_b, &content_b).await;
 
         // Let the side-effect (handle_kind0_profile → update_user_profile)
         // settle.
@@ -1198,6 +1198,26 @@ mod users_profiles_nip05 {
              the community fence on `get_user_by_nip05` has been dropped and B's \
              user leaked through A's lookup."
         );
+        // Host-local NIP-05 identity (Mari's product bar): the relays
+        // map for A's user must advertise A's own host, never the global
+        // config.relay_url. Pre-fix, line 52 of `api/nip05.rs` cloned
+        // `state.config.relay_url` here regardless of bound tenant, so a
+        // client on host A would have been pointed back at the global URL
+        // (e.g. `ws://localhost:3100`) instead of `ws://a.localhost:3000`.
+        let relays_a = body_a["relays"][&pk_a_hex]
+            .as_array()
+            .expect("NIP-05 response from A must include a relays map entry for A's pubkey");
+        let relay_a_url = relays_a
+            .first()
+            .and_then(|v| v.as_str())
+            .expect("relays[] must contain at least one URL string");
+        assert!(
+            relay_a_url.contains(&domain_a),
+            "NIP-05 relays map on host A must advertise A's own host \
+             (expected to contain {domain_a:?}); got {relay_a_url:?}. If \
+             this advertises the global config.relay_url, the line-52 \
+             tenant-host drift in api/nip05.rs has regressed."
+        );
 
         // (2) Mirror: same local-part on B resolves to B's pubkey, not A's.
         let nip05_url_b = format!("{http_b}/.well-known/nostr.json?name={local}");
@@ -1218,6 +1238,19 @@ mod users_profiles_nip05 {
              ({pk_b_hex}); got {resolved_b:?}. If this is A's pubkey ({pk_a_hex}), \
              the community fence on `get_user_by_nip05` has been dropped and A's \
              user leaked through B's lookup."
+        );
+        let relays_b = body_b["relays"][&pk_b_hex]
+            .as_array()
+            .expect("NIP-05 response from B must include a relays map entry for B's pubkey");
+        let relay_b_url = relays_b
+            .first()
+            .and_then(|v| v.as_str())
+            .expect("relays[] must contain at least one URL string");
+        assert!(
+            relay_b_url.contains(&domain_b),
+            "NIP-05 relays map on host B must advertise B's own host \
+             (expected to contain {domain_b:?}); got {relay_b_url:?}. \
+             Mirror of A's host-local identity check."
         );
 
         client_a.disconnect().await.expect("disconnect A");

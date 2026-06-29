@@ -1718,7 +1718,9 @@ async fn ingest_event_inner(
         .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
         .collect();
     if !imeta_tags.is_empty() {
-        crate::api::validate_imeta_tags(&imeta_tags, &state.config.media.public_base_url)
+        let tenant_media_base =
+            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+        crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
         crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
             .await

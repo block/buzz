@@ -155,7 +155,7 @@ async fn handle_audio_connection(
     // Extract NIP-OA auth tag before verify_auth_event consumes the event.
     let auth_tag_json = crate::handlers::auth::extract_auth_tag_json(&auth_msg.event);
 
-    let relay_url = state.config.relay_url.clone();
+    let relay_url = crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &tenant);
     let auth_ctx = match state
         .auth
         .verify_auth_event(auth_msg.event, &challenge, &relay_url)
