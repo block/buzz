@@ -173,9 +173,9 @@ class _PulseBody extends ConsumerWidget {
           return ListView.separated(
             physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(
-              Grid.xs,
+              Grid.gutter,
               Grid.xxs,
-              Grid.xs,
+              Grid.gutter,
               Grid.xs,
             ),
             itemCount: groups.length,
@@ -190,9 +190,9 @@ class _PulseBody extends ConsumerWidget {
         return ListView.separated(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.fromLTRB(
-            Grid.xs,
+            Grid.gutter,
             Grid.xxs,
-            Grid.xs,
+            Grid.gutter,
             Grid.xs,
           ),
           itemCount: notes.length,
@@ -289,7 +289,12 @@ class _TimelineSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.xxs, Grid.xs, Grid.xs),
+      padding: const EdgeInsets.fromLTRB(
+        Grid.gutter,
+        Grid.xxs,
+        Grid.gutter,
+        Grid.xs,
+      ),
       itemCount: 5,
       separatorBuilder: (_, _) => const _NoteDivider(),
       itemBuilder: (_, _) => Padding(

@@ -182,7 +182,12 @@ class ForumPostCard extends ConsumerWidget {
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

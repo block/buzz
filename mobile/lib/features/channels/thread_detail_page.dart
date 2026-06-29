@@ -117,8 +117,8 @@ class ThreadDetailPage extends HookConsumerWidget {
           Expanded(
             child: ListView.builder(
               padding: EdgeInsets.only(
-                left: Grid.xs,
-                right: Grid.xs,
+                left: Grid.gutter,
+                right: Grid.gutter,
                 top: frostedAppBarHeight(context),
                 bottom: Grid.xxs,
               ),
@@ -498,7 +498,7 @@ class _ThreadTypingIndicator extends ConsumerWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.quarter + 2,
       ),
       child: Row(

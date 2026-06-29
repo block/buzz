@@ -34,7 +34,14 @@ const accentColors = [
     light: Color(0xFF6366F1),
     dark: Color(0xFF818CF8),
   ),
+  AccentColor(name: 'Black', light: Color(0xFF000000), dark: Color(0xFF000000)),
 ];
 
-/// Default: Catppuccin Mauve (the current primary).
-const defaultAccentIndex = -1; // -1 means "use theme default (Mauve)"
+/// New default: Black.
+///
+/// Keep this at the end of [accentColors] so existing saved accent indexes keep
+/// pointing at the same colors.
+const defaultAccentIndex = 8;
+
+/// Legacy default: Catppuccin Mauve/the base theme primary.
+const legacyDefaultAccentIndex = -1;

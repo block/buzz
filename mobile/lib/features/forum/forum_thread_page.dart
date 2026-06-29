@@ -110,7 +110,12 @@ class ForumThreadPage extends HookConsumerWidget {
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -228,7 +233,7 @@ class _ThreadContent extends HookConsumerWidget {
 
               Padding(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.xs,
+                  horizontal: Grid.gutter,
                   vertical: Grid.xxs,
                 ),
                 child: Row(
@@ -392,7 +397,7 @@ class _ReplyRow extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.xxs,
       ),
       child: Column(
@@ -470,7 +475,12 @@ class _ReplyRow extends ConsumerWidget {
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [

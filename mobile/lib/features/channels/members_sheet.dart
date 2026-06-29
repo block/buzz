@@ -80,9 +80,9 @@ class MembersSheet extends HookConsumerWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.xs,
+        Grid.gutter,
         0,
-        Grid.xs,
+        Grid.gutter,
         MediaQuery.viewInsetsOf(context).bottom,
       ),
       child: SingleChildScrollView(
@@ -307,7 +307,7 @@ class _MemberTile extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
               child: Text(label, style: context.textTheme.titleSmall),
             ),
             const SizedBox(height: Grid.xxs),
@@ -406,7 +406,7 @@ class _RoleSelector extends StatelessWidget {
     final hasKnownRole = _changeableRoles.contains(selectedRole);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

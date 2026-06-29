@@ -79,7 +79,7 @@ class AgentActivitySheet extends HookConsumerWidget {
         return Column(
           children: [
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -128,9 +128,9 @@ class AgentActivitySheet extends HookConsumerWidget {
                   : ListView.builder(
                       controller: sheetScrollController,
                       padding: EdgeInsets.fromLTRB(
-                        Grid.xs,
+                        Grid.gutter,
                         Grid.xxs,
-                        Grid.xs,
+                        Grid.gutter,
                         bottomPadding,
                       ),
                       itemCount: transcript.length,

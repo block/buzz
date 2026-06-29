@@ -53,7 +53,7 @@ class SettingsPage extends HookConsumerWidget {
                       icon: LucideIcons.palette,
                       title: 'Color Scheme',
                       subtitle: selectedScheme == null
-                          ? 'Default (Catppuccin)'
+                          ? 'Default ($defaultSchemeDisplayName)'
                           : findTheme(selectedScheme)?.displayName ??
                                 selectedScheme,
                       trailing: Icon(
@@ -69,9 +69,9 @@ class SettingsPage extends HookConsumerWidget {
                     ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(
-                        Grid.xs,
+                        Grid.gutter,
                         Grid.xxs,
-                        Grid.xs,
+                        Grid.gutter,
                         Grid.twelve,
                       ),
                       child: Column(
@@ -88,19 +88,6 @@ class SettingsPage extends HookConsumerWidget {
                             spacing: Grid.xxs,
                             runSpacing: Grid.xxs,
                             children: [
-                              // Default (Mauve) swatch
-                              _AccentSwatch(
-                                color:
-                                    context.colors.brightness ==
-                                        Brightness.light
-                                    ? const Color(0xFF8839EF)
-                                    : const Color(0xFFA875F5),
-                                label: 'Mauve',
-                                selected: selectedAccent == defaultAccentIndex,
-                                onTap: () => ref
-                                    .read(accentProvider.notifier)
-                                    .setAccent(defaultAccentIndex),
-                              ),
                               for (var i = 0; i < accentColors.length; i++)
                                 _AccentSwatch(
                                   color:

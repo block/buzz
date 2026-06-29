@@ -25,6 +25,7 @@ class ThemePickerPage extends HookConsumerWidget {
       ..sort((a, b) => a.displayName.compareTo(b.displayName));
 
     final query = searchQuery.value.toLowerCase();
+    final defaultLabel = 'Default ($defaultSchemeDisplayName)';
     final filtered = query.isEmpty
         ? sorted
         : sorted
@@ -33,19 +34,14 @@ class ThemePickerPage extends HookConsumerWidget {
     final showDefault =
         query.isEmpty ||
         'default'.contains(query) ||
-        'catppuccin'.contains(query);
+        defaultLabel.toLowerCase().contains(query);
 
-    // Default entry colors based on current brightness
-    final isLight = context.colors.brightness == Brightness.light;
-    final defaultBg = isLight
-        ? const Color(0xFFEFF1F5)
-        : const Color(0xFF24273A);
-    final defaultFg = isLight
-        ? const Color(0xFF4C4F69)
-        : const Color(0xFFCAD3F5);
-    final defaultComment = isLight
-        ? const Color(0xFF7C7F93)
-        : const Color(0xFF939AB7);
+    // Default entry colors.
+    final defaultTheme = findTheme(defaultSchemeName);
+    final defaultBg = defaultTheme?.bg ?? lightColorScheme.surface;
+    final defaultFg = defaultTheme?.fg ?? lightColorScheme.onSurface;
+    final defaultComment =
+        defaultTheme?.comment ?? lightColorScheme.onSurfaceVariant;
 
     // Auto-scroll to the selected theme on first build (no search active)
     useEffect(() {
@@ -74,7 +70,7 @@ class ThemePickerPage extends HookConsumerWidget {
           // Always-visible search bar
           Padding(
             padding: const EdgeInsets.symmetric(
-              horizontal: Grid.xs,
+              horizontal: Grid.gutter,
               vertical: Grid.xxs,
             ),
             child: Container(
@@ -139,7 +135,7 @@ class ThemePickerPage extends HookConsumerWidget {
                     bg: defaultBg,
                     fg: defaultFg,
                     comment: defaultComment,
-                    label: 'Default (Catppuccin)',
+                    label: defaultLabel,
                     selected: selectedScheme == null,
                     onTap: () =>
                         ref.read(schemeProvider.notifier).setScheme(null),
