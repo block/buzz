@@ -357,6 +357,36 @@ export function processTranscriptEvent(
           );
         }
       }
+    } else if (
+      event.kind === "acp_write" &&
+      method === "_goose/unstable/session/steer"
+    ) {
+      const promptText = extractPromptText(payload);
+      if (promptText) {
+        const parsedPrompt = parsePromptText(promptText);
+        if (parsedPrompt.userText) {
+          upsertMessage(
+            d,
+            `steer:${ch}:${event.turnId ?? event.seq}`,
+            "user",
+            parsedPrompt.userTitle,
+            parsedPrompt.userText,
+            event.timestamp,
+            channelId,
+            parsedPrompt.userPubkey,
+          );
+        }
+        if (parsedPrompt.sections.length > 0) {
+          upsertMetadata(
+            d,
+            `steer-context:${ch}:${event.turnId ?? event.seq}`,
+            "Prompt context",
+            parsedPrompt.sections,
+            event.timestamp,
+            channelId,
+          );
+        }
+      }
     } else if (event.kind === "acp_read" && method === "session/update") {
       const params = asRecord(payload.params);
       const update = asRecord(params.update);
