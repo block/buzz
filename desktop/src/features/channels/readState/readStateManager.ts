@@ -925,8 +925,8 @@ export class ReadStateManager {
    * when even READ_STATE_MAX_SLOTS slots can't accommodate all channel keys.
    *
    * Channel keys are distributed round-robin across all slots. Thread: and
-   * msg: entries (already semantically evicted where possible) are added to
-   * the primary slot and trimmed by the byte-budget guard there.
+   * msg: entries are added to the primary slot and trimmed by the
+   * byte-budget guard there.
    */
   private splitContextsIntoSlots(): Array<{
     slotId: string;
@@ -962,7 +962,10 @@ export class ReadStateManager {
       return null;
     }
 
-    // Persist any newly allocated extra slot IDs.
+    // Persist any newly allocated extra slot IDs. Length comparison is
+    // sufficient: splitContextsIntoBudgetedSlots only appends new IDs (via
+    // slotIdGenerator) and never replaces existing ones — initialSlotCount
+    // ensures the existing slots are reused in place.
     const newExtraSlotIds = [...allSlotIds.slice(1), ...result.extraSlotIds];
     if (newExtraSlotIds.length !== this.extraSlotIds.length) {
       this.extraSlotIds = newExtraSlotIds;
