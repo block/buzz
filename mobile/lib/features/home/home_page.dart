@@ -19,23 +19,24 @@ class HomePage extends HookConsumerWidget {
   static const double _selectedTabRadius =
       (_tabBarHeight - (_tabBarInnerInset * 2)) / 2;
   static const double _tabBarBottomGap = Grid.twelve;
-  static const double _tabBarHorizontalMargin = Grid.sm;
+  static const double _tabBarHorizontalMargin = Grid.gutter;
   static const double _fabClearance = _tabBarHeight + _tabBarBottomGap;
+  static const Duration _tabIconWeightDuration = Duration(milliseconds: 120);
 
   static const _destinations = [
     _HomeDestination(
-      icon: LucideIcons.house,
-      selectedIcon: LucideIcons.house,
+      icon: LucideIcons.house300,
+      selectedIcon: LucideIcons.house500,
       label: 'Home',
     ),
     _HomeDestination(
-      icon: LucideIcons.bell,
-      selectedIcon: LucideIcons.bell,
+      icon: LucideIcons.bell300,
+      selectedIcon: LucideIcons.bell400,
       label: 'Activity',
     ),
     _HomeDestination(
-      icon: LucideIcons.search,
-      selectedIcon: LucideIcons.search,
+      icon: LucideIcons.search300,
+      selectedIcon: LucideIcons.search500,
       label: 'Search',
     ),
   ];
@@ -106,6 +107,17 @@ class _FloatingTabBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    if (destinations.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final destinationCount = destinations.length;
+    final safeSelectedIndex = selectedIndex
+        .clamp(0, destinationCount - 1)
+        .toInt();
+    final selectedAlignment = destinationCount <= 1
+        ? Alignment.center
+        : Alignment(-1 + (2 * safeSelectedIndex / (destinationCount - 1)), 0);
+
     return SafeArea(
       minimum: const EdgeInsets.fromLTRB(
         HomePage._tabBarHorizontalMargin,
@@ -115,8 +127,8 @@ class _FloatingTabBar extends StatelessWidget {
       ),
       child: Align(
         alignment: Alignment.bottomCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 336),
+        child: SizedBox(
+          width: double.infinity,
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(HomePage._tabBarRadius),
@@ -183,16 +195,42 @@ class _FloatingTabBar extends StatelessWidget {
                           height:
                               HomePage._tabBarHeight -
                               (HomePage._tabBarInnerInset * 2),
-                          child: Row(
+                          child: Stack(
                             children: [
-                              for (var i = 0; i < destinations.length; i++)
-                                Expanded(
-                                  child: _FloatingTabDestination(
-                                    destination: destinations[i],
-                                    selected: i == selectedIndex,
-                                    onTap: () => onDestinationSelected(i),
+                              AnimatedAlign(
+                                alignment: selectedAlignment,
+                                duration: const Duration(milliseconds: 180),
+                                curve: Curves.easeOutCubic,
+                                child: FractionallySizedBox(
+                                  widthFactor: 1 / destinationCount,
+                                  heightFactor: 1,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: Grid.quarter,
+                                    ),
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        color: colorScheme.secondaryContainer,
+                                        borderRadius: BorderRadius.circular(
+                                          HomePage._selectedTabRadius,
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ),
+                              ),
+                              Row(
+                                children: [
+                                  for (var i = 0; i < destinations.length; i++)
+                                    Expanded(
+                                      child: _FloatingTabDestination(
+                                        destination: destinations[i],
+                                        selected: i == selectedIndex,
+                                        onTap: () => onDestinationSelected(i),
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ],
                           ),
                         ),
@@ -224,24 +262,24 @@ class _FloatingTabDestination extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textStyle = Theme.of(context).textTheme.labelSmall;
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
     final foregroundColor = selected
-        ? colorScheme.onPrimary
+        ? colorScheme.onSecondaryContainer
         : colorScheme.onSurfaceVariant;
+    final icon = selected ? destination.selectedIcon : destination.icon;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: Grid.quarter),
       child: Material(
-        color: selected
-            ? colorScheme.primary.withValues(alpha: 0.94)
-            : Colors.transparent,
+        color: Colors.transparent,
         borderRadius: BorderRadius.circular(HomePage._selectedTabRadius),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
           onTap: onTap,
+          splashFactory: NoSplash.splashFactory,
+          overlayColor: const WidgetStatePropertyAll<Color>(Colors.transparent),
           borderRadius: BorderRadius.circular(HomePage._selectedTabRadius),
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
+          child: Padding(
             padding: const EdgeInsets.symmetric(
               horizontal: Grid.xxs,
               vertical: Grid.xxs,
@@ -250,10 +288,20 @@ class _FloatingTabDestination extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  selected ? destination.selectedIcon : destination.icon,
-                  color: foregroundColor,
-                  size: 20,
+                AnimatedSwitcher(
+                  duration: reducedMotion
+                      ? Duration.zero
+                      : HomePage._tabIconWeightDuration,
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeOutCubic,
+                  transitionBuilder: (child, animation) =>
+                      FadeTransition(opacity: animation, child: child),
+                  child: Icon(
+                    icon,
+                    key: ValueKey('${destination.label}-$icon'),
+                    color: foregroundColor,
+                    size: 20,
+                  ),
                 ),
                 const SizedBox(height: 1),
                 Text(
@@ -263,8 +311,9 @@ class _FloatingTabDestination extends StatelessWidget {
                   style: textStyle?.copyWith(
                     color: foregroundColor,
                     fontSize: 10.5,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
-                    letterSpacing: 0.05,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+                    height: 1.15,
+                    letterSpacing: 0,
                   ),
                 ),
               ],
