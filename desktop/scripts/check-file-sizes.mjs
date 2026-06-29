@@ -67,9 +67,11 @@ const overrides = new Map([
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
+  // alias-preservation coverage extends that matrix so create-time persona
+  // agents keep an installed runtime alias when the primary command is absent.
   // types.rs adds the persona/instance harness fields. Load-bearing, not
   // generic debt.
-  ["src-tauri/src/managed_agents/discovery.rs", 1043],
+  ["src-tauri/src/managed_agents/discovery.rs", 1085],
   ["src-tauri/src/managed_agents/types.rs", 1037],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90

@@ -20,7 +20,11 @@ import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurn
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  ProfileAvatarWithStatus,
+  scaleProfileAvatarStatusGeometry,
+} from "@/features/profile/ui/ProfileAvatarWithStatus";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -32,8 +36,6 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
-
-import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
@@ -47,6 +49,11 @@ const SIDEBAR_ROW_ACTION_REPLACED_BADGE_CLASS =
   "max-md:opacity-0 md:group-focus-within/menu-item:opacity-0 md:group-hover/menu-item:opacity-0";
 const SIDEBAR_ROW_ICON_ACTION_CLASS =
   "flex size-6 items-center justify-center p-1 text-sidebar-foreground/45 transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring peer-data-[active=true]/menu-button:text-sidebar-active-foreground/75 peer-data-[active=true]/menu-button:hover:text-sidebar-active-foreground [&>svg]:size-4 [&>svg]:shrink-0";
+const DM_AVATAR_SIZE = 24;
+const DM_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  DM_AVATAR_SIZE,
+);
 
 function formatUnreadCount(count: number): string {
   return count > 99 ? "99+" : String(count);
@@ -151,7 +158,7 @@ function DmChannelIcon({
     return (
       <span
         aria-hidden="true"
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs font-semibold leading-none text-sidebar-foreground shadow-none"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-sidebar-accent/80 text-2xs font-semibold leading-none text-sidebar-foreground shadow-none"
         data-testid={`channel-dm-count-${channelName}`}
       >
         <span className="translate-x-px leading-none">
@@ -163,22 +170,18 @@ function DmChannelIcon({
 
   if (isPair || !participants || participants.length <= 1) {
     return (
-      <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
-        <ProfileAvatar
+      <span className="relative flex h-6 w-6 shrink-0 items-center justify-center">
+        <ProfileAvatarWithStatus
+          avatarClassName="bg-sidebar-accent/80 text-2xs text-sidebar-foreground shadow-none"
           avatarUrl={primaryParticipant.avatarUrl}
-          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs text-sidebar-foreground shadow-none"
-          iconClassName="h-3 w-3"
+          className="h-6 w-6"
+          geometry={DM_AVATAR_STATUS_GEOMETRY}
+          iconClassName="h-3.5 w-3.5"
           label={primaryParticipant.label}
+          size={DM_AVATAR_SIZE}
+          status={presenceStatus}
+          statusTestId={`channel-presence-${channelName}`}
         />
-        {presenceStatus ? (
-          <span className="absolute -bottom-0.5 -right-0.5 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-sidebar">
-            <PresenceDot
-              className="h-1.5 w-1.5"
-              data-testid={`channel-presence-${channelName}`}
-              status={presenceStatus}
-            />
-          </span>
-        ) : null}
       </span>
     );
   }

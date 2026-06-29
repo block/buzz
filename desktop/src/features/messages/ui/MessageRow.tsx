@@ -22,6 +22,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
+import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import {
   resolveMentionNames,
   resolveMentionPubkeysByName,
@@ -31,6 +32,7 @@ import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
@@ -54,6 +56,8 @@ export const MessageRow = React.memo(
     highlightReplyConnector = false,
     highlightThreadLineDepths,
     hoverBackground = true,
+    huddleMemberPubkeys,
+    huddleMemberPubkeysPending = false,
     actionBarPlacement = "floating",
     collapseDescendantsLabel,
     isFollowingThread,
@@ -88,6 +92,8 @@ export const MessageRow = React.memo(
     highlightReplyConnector?: boolean;
     highlightThreadLineDepths?: ReadonlyArray<number>;
     hoverBackground?: boolean;
+    huddleMemberPubkeys?: readonly string[];
+    huddleMemberPubkeysPending?: boolean;
     actionBarPlacement?: "floating" | "inside";
     collapseDescendantsLabel?: string;
     isFollowingThread?: boolean;
@@ -155,6 +161,12 @@ export const MessageRow = React.memo(
 
       return pubkeys;
     }, [agentPubkeys, profiles]);
+    const profilePopoverRole =
+      message.role === "bot" ||
+      (message.pubkey &&
+        resolvedAgentPubkeys.has(normalizePubkey(message.pubkey)))
+        ? "bot"
+        : message.role;
     const agentMentionPubkeysByName = React.useMemo(() => {
       if (!mentionPubkeysByName) {
         return undefined;
@@ -197,7 +209,10 @@ export const MessageRow = React.memo(
     const depthGuideItems = React.useMemo(() => {
       const depths =
         depthGuideDepths ??
-        Array.from({ length: message.depth }, (_, depth) => depth);
+        Array.from(
+          { length: Math.max(0, message.depth - 1) },
+          (_, index) => index + 1,
+        );
 
       return depths.map((depth) => ({
         depth,
@@ -272,6 +287,20 @@ export const MessageRow = React.memo(
             </React.Suspense>
           );
         default:
+          {
+            const waveMessage = parseWaveMessageContent(message.body);
+            if (waveMessage) {
+              return (
+                <WaveMessageAttachment
+                  channelId={channelId}
+                  fallbackText={waveMessage.fallbackText}
+                  huddleMemberPubkeys={huddleMemberPubkeys}
+                  huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                />
+              );
+            }
+          }
+
           return (
             <Markdown
               channelNames={channelNames}
@@ -623,7 +652,7 @@ export const MessageRow = React.memo(
               {message.pubkey ? (
                 <UserProfilePopover
                   pubkey={message.pubkey}
-                  role={message.role}
+                  role={profilePopoverRole}
                   botIdenticonValue={message.author}
                 >
                   <button
@@ -644,7 +673,7 @@ export const MessageRow = React.memo(
                   {message.pubkey ? (
                     <UserProfilePopover
                       pubkey={message.pubkey}
-                      role={message.role}
+                      role={profilePopoverRole}
                       botIdenticonValue={message.author}
                     >
                       <button
@@ -673,7 +702,7 @@ export const MessageRow = React.memo(
               {message.pubkey ? (
                 <UserProfilePopover
                   pubkey={message.pubkey}
-                  role={message.role}
+                  role={profilePopoverRole}
                   botIdenticonValue={message.author}
                 >
                   <button
@@ -694,7 +723,7 @@ export const MessageRow = React.memo(
                   {message.pubkey ? (
                     <UserProfilePopover
                       pubkey={message.pubkey}
-                      role={message.role}
+                      role={profilePopoverRole}
                       botIdenticonValue={message.author}
                     >
                       <button
@@ -742,6 +771,7 @@ export const MessageRow = React.memo(
     prev.message.tags === next.message.tags &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
+    prev.agentPubkeys === next.agentPubkeys &&
     prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&
     prev.connectDescendants === next.connectDescendants &&
@@ -751,6 +781,8 @@ export const MessageRow = React.memo(
     prev.highlightReplyConnector === next.highlightReplyConnector &&
     prev.highlightThreadLineDepths === next.highlightThreadLineDepths &&
     prev.hoverBackground === next.hoverBackground &&
+    prev.huddleMemberPubkeys === next.huddleMemberPubkeys &&
+    prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
     prev.isFollowingThread === next.isFollowingThread &&
     prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&

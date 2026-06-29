@@ -67,6 +67,24 @@ function resolveDisplayLabel(
   return resolveLabel(pubkey, currentPubkey, profiles);
 }
 
+function isKnownAgentPubkey(
+  pubkey: string | undefined,
+  profiles: UserProfileLookup | undefined,
+  personaLookup?: Map<string, string>,
+  agentPubkeys?: ReadonlySet<string>,
+) {
+  if (!pubkey) {
+    return false;
+  }
+
+  const normalizedPubkey = normalizePubkey(pubkey);
+  return (
+    agentPubkeys?.has(normalizedPubkey) === true ||
+    profiles?.[normalizedPubkey]?.isAgent === true ||
+    personaLookup?.has(normalizedPubkey) === true
+  );
+}
+
 function ProfileName({
   children,
   highlight = false,
@@ -100,8 +118,15 @@ function ProfileName({
     </span>
   );
 
+  const botIdenticonValue = typeof children === "string" ? children : undefined;
+
   return pubkey ? (
-    <UserProfilePopover pubkey={pubkey} triggerElement="span">
+    <UserProfilePopover
+      botIdenticonValue={botIdenticonValue}
+      pubkey={pubkey}
+      role={isAgent ? "bot" : undefined}
+      triggerElement="span"
+    >
       {node}
     </UserProfilePopover>
   ) : (
@@ -111,12 +136,16 @@ function ProfileName({
 
 function SystemMessageAvatar({
   actorPubkey,
+  agentPubkeys,
   currentPubkey,
+  personaLookup,
   profiles,
   targetPubkey,
 }: {
   actorPubkey: string | undefined;
+  agentPubkeys?: ReadonlySet<string>;
   currentPubkey: string | undefined;
+  personaLookup?: Map<string, string>;
   profiles: UserProfileLookup | undefined;
   targetPubkey: string | undefined;
 }) {
@@ -134,6 +163,12 @@ function SystemMessageAvatar({
   const singlePubkey = actorPubkey ?? targetPubkey;
 
   if (!hasActorAndTarget) {
+    const isSingleAgent = isKnownAgentPubkey(
+      singlePubkey,
+      profiles,
+      personaLookup,
+      agentPubkeys,
+    );
     const avatar = (
       <UserAvatar
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
@@ -145,9 +180,14 @@ function SystemMessageAvatar({
 
     if (singlePubkey) {
       return (
-        <UserProfilePopover pubkey={singlePubkey}>
+        <UserProfilePopover
+          botIdenticonValue={isSingleAgent ? actorLabel : undefined}
+          pubkey={singlePubkey}
+          role={isSingleAgent ? "bot" : undefined}
+        >
           <button
             className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            data-testid="system-message-avatar"
             type="button"
           >
             {avatar}
@@ -159,6 +199,12 @@ function SystemMessageAvatar({
     return avatar;
   }
 
+  const isActorAgent = isKnownAgentPubkey(
+    actorPubkey,
+    profiles,
+    personaLookup,
+    agentPubkeys,
+  );
   const targetLabel = resolveUserLabel({
     pubkey: targetPubkey,
     currentPubkey,
@@ -185,7 +231,11 @@ function SystemMessageAvatar({
   );
 
   return (
-    <UserProfilePopover pubkey={actorPubkey}>
+    <UserProfilePopover
+      botIdenticonValue={isActorAgent ? actorLabel : undefined}
+      pubkey={actorPubkey}
+      role={isActorAgent ? "bot" : undefined}
+    >
       <button
         className="shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
         type="button"
@@ -203,11 +253,12 @@ function describeSystemEvent(
   personaLookup?: Map<string, string>,
   agentPubkeys?: ReadonlySet<string>,
 ): SystemMessageDescription | null {
-  const isTargetAgent =
-    payload.target !== undefined &&
-    (agentPubkeys?.has(normalizePubkey(payload.target)) === true ||
-      profiles?.[normalizePubkey(payload.target)]?.isAgent === true ||
-      personaLookup?.has(normalizePubkey(payload.target)) === true);
+  const isTargetAgent = isKnownAgentPubkey(
+    payload.target,
+    profiles,
+    personaLookup,
+    agentPubkeys,
+  );
   const actorLabel = resolveDisplayLabel(
     payload.actor,
     currentPubkey,
@@ -343,7 +394,9 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
       <div className="flex items-start gap-2.5">
         <SystemMessageAvatar
           actorPubkey={payload.actor}
+          agentPubkeys={agentPubkeys}
           currentPubkey={currentPubkey}
+          personaLookup={personaLookup}
           profiles={profiles}
           targetPubkey={payload.target}
         />

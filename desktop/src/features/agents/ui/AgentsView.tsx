@@ -200,6 +200,16 @@ export function AgentsView() {
           }}
         />
       ) : null}
+      {personas.createdAgent ? (
+        <SecretRevealDialog
+          created={personas.createdAgent}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setCreatedAgent(null);
+            }
+          }}
+        />
+      ) : null}
       {personas.personaDialogState ? (
         <PersonaDialog
           description={personas.personaDialogState.description}
@@ -214,10 +224,7 @@ export function AgentsView() {
           isImportPending={
             personas.personaImportActions.isApplyingPersonaImportUpdate
           }
-          isPending={
-            personas.createPersonaMutation.isPending ||
-            personas.updatePersonaMutation.isPending
-          }
+          isPending={personas.isPending}
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
           onImportUpdateFile={

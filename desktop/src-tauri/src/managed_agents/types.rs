@@ -310,11 +310,10 @@ pub struct CreateManagedAgentRequest {
     pub relay_url: Option<String>,
     pub acp_command: Option<String>,
     pub agent_command: Option<String>,
-    /// True when `agent_command` is a runtime the user deliberately picked to
-    /// override the linked persona (a deploy-dialog runtime selector). Distinguishes
-    /// a real pin from a missing-runtime fallback so a persona-backed create only
-    /// stores an `agent_command_override` for the former. Defaults `false`: callers
-    /// that don't set it (persona-less creates, fallback divergence) inherit.
+    /// True when `agent_command` is a runtime command the user deliberately
+    /// picked for a linked persona. Distinguishes a real selection, including an
+    /// installed alias, from a missing-runtime fallback so a persona-backed
+    /// create only stores an `agent_command_override` for the former.
     #[serde(default)]
     pub harness_override: bool,
     #[serde(default)]

@@ -6,7 +6,7 @@ import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
-import { Selection, TextSelection } from "@tiptap/pm/state";
+import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
 
 import { isMacPlatform } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
@@ -93,6 +93,63 @@ export type RichTextEditorOptions = {
    */
   onLinkSelectionChange?: (info: LinkSelectionInfo | null) => void;
 };
+
+const PASTED_LINK_AT_END_RE =
+  /(?:^|\s)((?:https?:\/\/|www\.)[^\s]+|(?:github\.com|linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s]+)$/i;
+
+function shouldAppendSpaceAfterPaste(text: string): boolean {
+  const trimmedEnd = text.trimEnd();
+  if (!trimmedEnd || trimmedEnd.length !== text.length) return false;
+  return PASTED_LINK_AT_END_RE.test(trimmedEnd);
+}
+
+const LinkPasteTrailingSpace = Extension.create({
+  name: "linkPasteTrailingSpace",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        props: {
+          handlePaste(view, event) {
+            const pastedText = event.clipboardData?.getData("text/plain") ?? "";
+            if (!shouldAppendSpaceAfterPaste(pastedText)) return false;
+
+            window.setTimeout(() => {
+              if (!view.dom.isConnected) return;
+              const { state } = view;
+              if (!state.selection.empty) return;
+
+              const from = state.selection.from;
+              if (from < state.doc.content.size) {
+                const nextText = state.doc.textBetween(
+                  from,
+                  Math.min(state.doc.content.size, from + 1),
+                  "\n",
+                  "\n",
+                );
+                if (/^\s$/.test(nextText)) return;
+              }
+
+              let transaction = state.tr.insertText(" ", from, from);
+              const linkMark = state.schema.marks.link;
+              if (linkMark) {
+                transaction = transaction.removeMark(from, from + 1, linkMark);
+              }
+              transaction = transaction.setSelection(
+                TextSelection.create(transaction.doc, from + 1),
+              );
+              transaction.setStoredMarks([]);
+              view.dispatch(transaction.scrollIntoView());
+              view.focus();
+            }, 0);
+
+            return false;
+          },
+        },
+      }),
+    ];
+  },
+});
 
 /**
  * Creates and manages a Tiptap editor configured for Markdown output.
@@ -342,6 +399,7 @@ export function useRichTextEditor({
             class: "text-primary underline underline-offset-4 cursor-text",
           },
         }),
+        LinkPasteTrailingSpace,
         createLinkInteractionExtension({
           getEditLinkHandler: () => onEditLinkRef.current,
           getSelectionChangeHandler: () => onLinkSelectionChangeRef.current,

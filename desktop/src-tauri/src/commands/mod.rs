@@ -11,6 +11,7 @@ mod export_util;
 mod identity;
 mod identity_archive;
 mod legacy_storage;
+mod link_preview;
 mod media;
 mod media_download;
 mod media_transcode;
@@ -41,6 +42,7 @@ pub use engrams::*;
 pub use identity::*;
 pub use identity_archive::*;
 pub use legacy_storage::*;
+pub use link_preview::*;
 pub use media::*;
 pub use media_download::*;
 #[cfg(feature = "mesh-llm")]

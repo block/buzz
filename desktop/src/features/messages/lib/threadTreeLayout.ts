@@ -34,16 +34,32 @@ function clampVisibleDepth(depth: number) {
   return Math.min(Math.max(depth, 0), THREAD_REPLY_MAX_VISIBLE_DEPTH);
 }
 
-export function getThreadReplyIndentRem(depth: number) {
-  const visibleDepth = clampVisibleDepth(depth);
+function getThreadReplyVisualDepth(depth: number) {
+  return clampVisibleDepth(Math.max(0, depth - 1));
+}
+
+function getThreadReplyIndentForVisibleDepthRem(visibleDepth: number) {
   return visibleDepth > 0
     ? THREAD_REPLY_ROOT_INDENT_REM +
         (visibleDepth - 1) * THREAD_REPLY_NESTED_INDENT_REM
     : 0;
 }
 
+export function getThreadReplyIndentRem(depth: number) {
+  return getThreadReplyIndentForVisibleDepthRem(
+    getThreadReplyVisualDepth(depth),
+  );
+}
+
 export function getThreadReplyAvatarCenterRem(depth: number) {
   return getThreadReplyIndentRem(depth) + THREAD_REPLY_AVATAR_CENTER_OFFSET_REM;
+}
+
+function getThreadReplyAvatarCenterForVisibleDepthRem(visibleDepth: number) {
+  return (
+    getThreadReplyIndentForVisibleDepthRem(visibleDepth) +
+    THREAD_REPLY_AVATAR_CENTER_OFFSET_REM
+  );
 }
 
 export function getThreadReplyAvatarCenterYRem() {
@@ -59,13 +75,16 @@ export function getThreadReplyDescendantRailStartYRem() {
 }
 
 export function getThreadReplyConnectorLayout(depth: number) {
-  const visibleDepth = clampVisibleDepth(depth);
+  const visibleDepth = getThreadReplyVisualDepth(depth);
   if (visibleDepth === 0) {
     return null;
   }
 
-  const parentOffsetRem = getThreadReplyAvatarCenterRem(visibleDepth - 1);
-  const childOffsetRem = getThreadReplyAvatarCenterRem(visibleDepth);
+  const parentOffsetRem = getThreadReplyAvatarCenterForVisibleDepthRem(
+    visibleDepth - 1,
+  );
+  const childOffsetRem =
+    getThreadReplyAvatarCenterForVisibleDepthRem(visibleDepth);
   const childEdgeOffsetRem =
     childOffsetRem -
     THREAD_REPLY_AVATAR_RADIUS_REM -
