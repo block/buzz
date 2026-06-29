@@ -128,6 +128,11 @@ pub struct Config {
     pub git_repo_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
+    /// Maximum total bytes materialized for one git repo request. Default: 1 GB.
+    ///
+    /// This bounds clone/fetch hydration work across a repo's historical pack
+    /// set rather than only bounding one incoming push body.
+    pub git_max_repo_bytes: u64,
     /// Maximum number of repos per pubkey. Default: 100.
     pub git_max_repos_per_pubkey: u32,
     /// Maximum concurrent git subprocess operations. Default: 20.
@@ -325,6 +330,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(500 * 1024 * 1024); // 500 MB
+        let git_max_repo_bytes: u64 = std::env::var("BUZZ_GIT_MAX_REPO_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
         let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -392,6 +401,7 @@ impl Config {
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
+            git_max_repo_bytes,
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,

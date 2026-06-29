@@ -68,7 +68,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{debug, warn};
 
-use crate::api::git::manifest::{pointer_key, Manifest, ManifestError, MANIFEST_VERSION};
+use crate::api::git::manifest::{
+    pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_REFS,
+};
 use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
 use buzz_core::TenantContext;
 
@@ -124,6 +126,21 @@ pub enum CasError {
     /// workspace. Pre-CAS — the pointer was never written.
     #[error("pack capture: {0}")]
     PackCapture(String),
+
+    /// The push would make the repo exceed the relay's configured byte budget.
+    #[error("resource limit: {0}")]
+    ResourceLimit(String),
+}
+
+/// Resource limits carried from hydration into the publish step.
+#[derive(Debug, Clone, Copy)]
+pub struct PublishLimits {
+    /// Bytes already materialized from the parent manifest.
+    pub parent_hydrated_bytes: u64,
+    /// Maximum bytes allowed in one newly captured pack.
+    pub max_pack_bytes: u64,
+    /// Maximum total hydrated bytes allowed for the resulting repo.
+    pub max_repo_bytes: u64,
 }
 
 /// Outcome of a successful CAS. Carries the composed manifest so the
@@ -209,23 +226,52 @@ impl ParentState {
 async fn snapshot_workspace_state(
     repo_path: &Path,
 ) -> Result<(BTreeMap<String, String>, String), CasError> {
+    const MAX_REF_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
+
+    let refs_stdout_tmp = tempfile::NamedTempFile::new()
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout tempfile: {e}")))?;
+    let refs_stdout_file = refs_stdout_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout reopen: {e}")))?;
+    let refs_stderr_tmp = tempfile::NamedTempFile::new()
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref stderr tempfile: {e}")))?;
+    let refs_stderr_file = refs_stderr_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref stderr reopen: {e}")))?;
+
     let mut refs_cmd = Command::new("git");
     refs_cmd
         .args(["for-each-ref", "--format=%(refname) %(objectname)"])
-        .current_dir(repo_path);
+        .current_dir(repo_path)
+        .stdout(Stdio::from(refs_stdout_file))
+        .stderr(Stdio::from(refs_stderr_file));
     super::transport::harden_git_env(&mut refs_cmd);
-    let refs_out = refs_cmd
-        .output()
+    let refs_status = refs_cmd
+        .status()
         .await
         .map_err(|e| CasError::PackCapture(format!("for-each-ref spawn: {e}")))?;
-    if !refs_out.status.success() {
+    if !refs_status.success() {
         return Err(CasError::PackCapture(format!(
-            "for-each-ref failed: status={:?}",
-            refs_out.status.code()
+            "for-each-ref failed: status={:?} stderr={}",
+            refs_status.code(),
+            read_prefix(refs_stderr_tmp.path(), 64 * 1024).await
         )));
     }
+    let refs_stdout_len = tokio::fs::metadata(refs_stdout_tmp.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout metadata: {e}")))?
+        .len();
+    if refs_stdout_len > MAX_REF_SNAPSHOT_BYTES {
+        return Err(CasError::ResourceLimit(format!(
+            "ref snapshot is {refs_stdout_len} bytes (max {MAX_REF_SNAPSHOT_BYTES})"
+        )));
+    }
+    let refs_stdout = tokio::fs::read(refs_stdout_tmp.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout read: {e}")))?;
+
     let mut refs = BTreeMap::new();
-    for line in std::str::from_utf8(&refs_out.stdout)
+    for line in std::str::from_utf8(&refs_stdout)
         .unwrap_or_default()
         .lines()
     {
@@ -236,6 +282,11 @@ async fn snapshot_workspace_state(
         if oid.len() != 40 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
             warn!(ref_name = %name, oid = %oid, "for-each-ref returned malformed oid; skipping");
             continue;
+        }
+        if refs.len() >= MAX_MANIFEST_REFS && !refs.contains_key(name) {
+            return Err(CasError::ResourceLimit(format!(
+                "workspace contains more than {MAX_MANIFEST_REFS} refs"
+            )));
         }
         refs.insert(name.to_string(), oid.to_string());
     }
@@ -328,6 +379,7 @@ async fn capture_pack(
     repo_path: &Path,
     refs_before: &BTreeMap<String, String>,
     refs_after: &BTreeMap<String, String>,
+    max_pack_bytes: u64,
 ) -> Result<Option<Vec<u8>>, CasError> {
     // Build rev-spec stdin: positive new tips, negative old tips.
     // Deduplicate against the same-oid case — no point feeding `X ^X`.
@@ -349,12 +401,23 @@ async fn capture_pack(
         stdin_lines.push('\n');
     }
 
+    let stdout_tmp = tempfile::NamedTempFile::new()
+        .map_err(|e| CasError::PackCapture(format!("pack-objects stdout tempfile: {e}")))?;
+    let stdout_file = stdout_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("pack-objects stdout reopen: {e}")))?;
+    let stderr_tmp = tempfile::NamedTempFile::new()
+        .map_err(|e| CasError::PackCapture(format!("pack-objects stderr tempfile: {e}")))?;
+    let stderr_file = stderr_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("pack-objects stderr reopen: {e}")))?;
+
     let mut cmd = Command::new("git");
     cmd.args(["pack-objects", "--revs", "--stdout", "-q"])
         .current_dir(repo_path)
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
     super::transport::harden_git_env(&mut cmd);
     let mut child = cmd
         .spawn()
@@ -375,16 +438,43 @@ async fn capture_pack(
         .await
         .map_err(|e| CasError::PackCapture(format!("pack-objects wait: {e}")))?;
     if !out.status.success() {
+        let stderr = read_prefix(stderr_tmp.path(), 64 * 1024).await;
         return Err(CasError::PackCapture(format!(
             "pack-objects failed: status={:?} stderr={}",
             out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
+            stderr
         )));
     }
-    if out.stdout.is_empty() {
+    let pack_len = tokio::fs::metadata(stdout_tmp.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("pack-objects stdout metadata: {e}")))?
+        .len();
+    if pack_len > max_pack_bytes {
+        return Err(CasError::ResourceLimit(format!(
+            "pack-objects output is {pack_len} bytes (max {max_pack_bytes})"
+        )));
+    }
+    if pack_len == 0 {
         return Ok(None);
     }
-    Ok(Some(out.stdout))
+    let pack_bytes = tokio::fs::read(stdout_tmp.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("pack-objects stdout read: {e}")))?;
+    Ok(Some(pack_bytes))
+}
+
+async fn read_prefix(path: &Path, max_bytes: u64) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return "<stderr unavailable>".to_string();
+    };
+    let mut bytes = Vec::new();
+    let mut limited = file.take(max_bytes);
+    if limited.read_to_end(&mut bytes).await.is_err() {
+        return "<stderr unavailable>".to_string();
+    }
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 /// Compose `m_after` from the parent manifest and the new ref/pack state.
@@ -464,6 +554,7 @@ pub async fn cas_publish(
     owner: &str,
     repo: &str,
     parent_state: &ParentState,
+    limits: PublishLimits,
 ) -> Result<CasSuccess, CasError> {
     let pkey = pointer_key(ctx.community(), owner, repo);
 
@@ -487,8 +578,25 @@ pub async fn cas_publish(
     // parent manifest's refs — i.e. the set the workspace was hydrated
     // against — so the delta covers exactly the objects this push
     // introduced.
-    let pack_bytes = capture_pack(repo_path, &parent_state.parent.refs, &refs_after).await?;
+    let pack_bytes = capture_pack(
+        repo_path,
+        &parent_state.parent.refs,
+        &refs_after,
+        limits.max_pack_bytes,
+    )
+    .await?;
     let new_pack_key = if let Some(bytes) = pack_bytes {
+        let new_pack_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let total_bytes = limits
+            .parent_hydrated_bytes
+            .checked_add(new_pack_bytes)
+            .ok_or_else(|| CasError::ResourceLimit("repo byte count overflowed u64".into()))?;
+        if total_bytes > limits.max_repo_bytes {
+            return Err(CasError::ResourceLimit(format!(
+                "repo would need {total_bytes} hydrated bytes (max {})",
+                limits.max_repo_bytes
+            )));
+        }
         debug!(bytes = bytes.len(), "captured push pack");
         let pack_key = store.put_pack(&bytes).await?;
         if let Err(e) = write_idx_sidecar(store, &pack_key, &bytes).await {
@@ -618,6 +726,9 @@ mod tests {
 
     // `pointer_key` is owned by `manifest.rs` and unit-tested there
     // (one source of truth — Max/Sami's centralization point).
+    fn pack_key(ch: char) -> String {
+        format!("packs/{}", ch.to_string().repeat(64))
+    }
 
     #[test]
     fn digest_from_pack_key_strips_prefix() {
@@ -655,12 +766,12 @@ mod tests {
             None,
             "refs/heads/main".into(),
             refs.clone(),
-            Some("packs/abc".into()),
+            Some(pack_key('a')),
         );
         assert_eq!(m.version, MANIFEST_VERSION);
         assert_eq!(m.head, "refs/heads/main");
         assert_eq!(m.refs, refs);
-        assert_eq!(m.packs, vec!["packs/abc".to_string()]);
+        assert_eq!(m.packs, vec![pack_key('a')]);
         assert_eq!(m.parent, None);
     }
 
@@ -674,19 +785,19 @@ mod tests {
     #[test]
     fn compose_after_covers_parent_packs() {
         let mut parent = ParentState::fresh().parent;
-        parent.packs = vec!["packs/old1".into(), "packs/old2".into()];
+        parent.packs = vec![pack_key('1'), pack_key('2')];
         let m = compose_after(
             &parent,
             Some(parent_digest()),
             "refs/heads/main".into(),
             BTreeMap::new(),
-            Some("packs/new".into()),
+            Some(pack_key('3')),
         );
         // Inv_Closed: child covers parent.
         for p in &parent.packs {
             assert!(m.packs.contains(p));
         }
-        assert!(m.packs.contains(&"packs/new".to_string()));
+        assert!(m.packs.contains(&pack_key('3')));
         // Sorted.
         let mut sorted = m.packs.clone();
         sorted.sort();
@@ -700,7 +811,7 @@ mod tests {
     #[test]
     fn compose_after_no_new_pack_refs_only_push() {
         let mut parent = ParentState::fresh().parent;
-        parent.packs = vec!["packs/x".into()];
+        parent.packs = vec![pack_key('e')];
         let m = compose_after(
             &parent,
             Some(parent_digest()),
@@ -708,21 +819,21 @@ mod tests {
             BTreeMap::new(),
             None,
         );
-        assert_eq!(m.packs, vec!["packs/x".to_string()]);
+        assert_eq!(m.packs, vec![pack_key('e')]);
     }
 
     #[test]
     fn compose_after_dedupes_pack_already_in_parent() {
         let mut parent = ParentState::fresh().parent;
-        parent.packs = vec!["packs/x".into()];
+        parent.packs = vec![pack_key('e')];
         let m = compose_after(
             &parent,
             Some(parent_digest()),
             "refs/heads/main".into(),
             BTreeMap::new(),
-            Some("packs/x".into()),
+            Some(pack_key('e')),
         );
-        assert_eq!(m.packs, vec!["packs/x".to_string()]);
+        assert_eq!(m.packs, vec![pack_key('e')]);
     }
 
     /// `cas_publish` must invoke `Manifest::validate()` between
@@ -745,7 +856,7 @@ mod tests {
             None,
             "refs/heads/main".into(),
             refs,
-            Some("packs/abc".into()),
+            Some(pack_key('a')),
         );
         let manifest_err = m.validate().expect_err("unsafe refname must reject");
         match &manifest_err {
@@ -776,7 +887,7 @@ mod tests {
             None,
             String::new(), // empty HEAD — the fallback's worst case
             refs,
-            Some("packs/abc".into()),
+            Some(pack_key('a')),
         );
         assert!(matches!(
             m.validate(),
