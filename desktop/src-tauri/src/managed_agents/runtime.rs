@@ -1985,7 +1985,7 @@ pub fn stop_managed_agent_process(
 /// switching need the initial bootstrap value. Provider injection is skipped
 /// when `provider_locked` is true (e.g. Claude runtimes that only work with
 /// Anthropic).
-fn runtime_metadata_env_vars<'a>(
+pub(crate) fn runtime_metadata_env_vars<'a>(
     model_env_var: Option<&'a str>,
     provider_env_var: Option<&'a str>,
     provider_locked: bool,

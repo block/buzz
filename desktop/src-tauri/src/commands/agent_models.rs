@@ -73,7 +73,7 @@ pub async fn get_agent_models(
         // provider/env snapshot, and runtime spawn reads that same snapshot.
         // Discover models against the record snapshot so an out-of-date persona
         // cannot offer models for a provider this agent will not launch with.
-        let discovery = saved_agent_model_discovery_config(record);
+        let discovery = saved_agent_model_discovery_config(record, &effective_command);
 
         (
             resolved,
@@ -126,11 +126,25 @@ struct SavedAgentModelDiscoveryConfig {
 
 fn saved_agent_model_discovery_config(
     record: &crate::managed_agents::ManagedAgentRecord,
+    agent_command: &str,
 ) -> SavedAgentModelDiscoveryConfig {
+    let mut derived_env = BTreeMap::new();
+    if let Some(meta) = known_acp_runtime(agent_command) {
+        for (key, value) in crate::managed_agents::runtime_metadata_env_vars(
+            meta.model_env_var,
+            meta.provider_env_var,
+            meta.provider_locked,
+            record.model.as_deref(),
+            record.provider.as_deref(),
+        ) {
+            derived_env.insert(key.to_string(), value.to_string());
+        }
+    }
+
     SavedAgentModelDiscoveryConfig {
         model: record.model.clone(),
         provider: record.provider.clone(),
-        env: crate::managed_agents::merged_user_env(&BTreeMap::new(), &record.env_vars),
+        env: crate::managed_agents::merged_user_env(&derived_env, &record.env_vars),
     }
 }
 

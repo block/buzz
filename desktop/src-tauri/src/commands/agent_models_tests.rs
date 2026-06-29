@@ -193,10 +193,18 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
     )
     .expect("sample managed agent record");
 
-    let config = saved_agent_model_discovery_config(&record);
+    let config = saved_agent_model_discovery_config(&record, "goose");
 
     assert_eq!(config.model.as_deref(), Some("record-model"));
     assert_eq!(config.provider.as_deref(), Some("databricks"));
+    assert_eq!(
+        config.env.get("GOOSE_MODEL").map(String::as_str),
+        Some("record-model")
+    );
+    assert_eq!(
+        config.env.get("GOOSE_PROVIDER").map(String::as_str),
+        Some("databricks")
+    );
     assert_eq!(
         config.env.get("OPENAI_API_KEY").map(String::as_str),
         Some("record-key")
