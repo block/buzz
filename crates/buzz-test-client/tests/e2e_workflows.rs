@@ -582,6 +582,13 @@ async fn test_workflow_update_and_delete() {
     );
     assert_eq!(wf_record.owner_pubkey, pubkey_bytes, "owner mismatch in DB");
 
+    // Extract webhook secret to verify it is preserved later
+    let secret_v1 = def_v1["_webhook_secret"].as_str().map(|s| s.to_string());
+    assert!(
+        secret_v1.is_some(),
+        "V1 workflow must have a webhook secret generated"
+    );
+
     // 5. Update to workflow V2
     let yaml_v2 = webhook_workflow_yaml("e2e-crud-updated");
     let builder_v2 = buzz_sdk::build_workflow_def(channel_id, workflow_id, &yaml_v2)
@@ -603,6 +610,13 @@ async fn test_workflow_update_and_delete() {
         "V2 definition name not updated in DB"
     );
 
+    // Verify webhook secret was preserved (did not change)
+    let secret_v2 = def_v2["_webhook_secret"].as_str().map(|s| s.to_string());
+    assert_eq!(
+        secret_v1, secret_v2,
+        "Webhook secret must be preserved across updates"
+    );
+
     // Check that there is no duplicate row with a different database ID (e.g. query channel workflows)
     let workflows = db
         .list_channel_workflows(channel_id, None, None)
@@ -619,7 +633,76 @@ async fn test_workflow_update_and_delete() {
         "Expected exactly 1 workflow row in DB, found duplicate rows!"
     );
 
-    // 7. Delete workflow
+    // Enforce Channel Immutability: try to update with a different channel ID (after joining it)
+    let different_channel_id = Uuid::new_v4();
+    let create_ch2_builder = buzz_sdk::build_create_channel(
+        different_channel_id,
+        "e2e-crud-test-channel-2",
+        Some(buzz_sdk::Visibility::Open),
+        Some(buzz_sdk::ChannelKind::Stream),
+        None,
+        None,
+    )
+    .expect("build create channel 2");
+    let create_ch2_event = create_ch2_builder
+        .sign_with_keys(&keys)
+        .expect("sign create channel 2");
+    ws.send_event(create_ch2_event)
+        .await
+        .expect("send create channel 2");
+
+    let builder_bad_chan =
+        buzz_sdk::build_workflow_def(different_channel_id, workflow_id, &yaml_v2)
+            .expect("build bad channel workflow def");
+    let event_bad_chan = builder_bad_chan
+        .sign_with_keys(&keys)
+        .expect("sign bad chan");
+    let bad_chan_resp = ws
+        .send_event(event_bad_chan)
+        .await
+        .expect("send bad chan event");
+    assert!(
+        !bad_chan_resp.accepted,
+        "Updating channel ID must be rejected"
+    );
+    assert!(
+        bad_chan_resp
+            .message
+            .contains("forbidden: cannot change the channel of an existing workflow"),
+        "Expected channel change forbidden message, got: {}",
+        bad_chan_resp.message
+    );
+
+    // Enforce Deletion Authorization: try to delete workflow from an unauthorized user key
+    let attacker_keys = Keys::generate();
+    let mut attacker_ws = BuzzTestClient::connect(&ws_url, &attacker_keys)
+        .await
+        .expect("attacker connect");
+    let builder_forged_del =
+        buzz_sdk::build_workflow_delete(&attacker_keys.public_key().to_hex(), workflow_id)
+            .expect("build forged workflow delete");
+    let event_forged_del = builder_forged_del
+        .sign_with_keys(&attacker_keys)
+        .expect("sign forged delete");
+    let forged_resp = attacker_ws
+        .send_event(event_forged_del)
+        .await
+        .expect("send forged delete event");
+
+    // The kind 5 event itself is accepted and stored, but the side effect must fail to delete the workflow row
+    assert!(
+        forged_resp.accepted,
+        "Forged deletion event itself must be accepted"
+    );
+
+    // Verify workflow is still in DB (not deleted by attacker)
+    let wf_still_there = db.get_workflow(workflow_id).await;
+    assert!(
+        wf_still_there.is_ok(),
+        "Workflow must not be deleted by unauthorized user"
+    );
+
+    // 7. Delete workflow (authorized)
     let builder_del = buzz_sdk::build_workflow_delete(&keys.public_key().to_hex(), workflow_id)
         .expect("build workflow delete");
     let event_del = builder_del.sign_with_keys(&keys).expect("sign delete");

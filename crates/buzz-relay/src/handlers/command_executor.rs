@@ -575,6 +575,33 @@ async fn handle_workflow_def(
         IngestError::Rejected("invalid: workflow ID in d tag must be a valid UUID".into())
     })?;
 
+    // Check if workflow already exists to perform update or create checks
+    let existing = state.db.get_workflow(workflow_id).await;
+    let existing_record = match existing {
+        Ok(record) => {
+            if record.owner_pubkey != self_bytes {
+                return Err(IngestError::Rejected(
+                    "forbidden: cannot update a workflow owned by another user".into(),
+                ));
+            }
+            if let Some(existing_chan) = record.channel_id {
+                if existing_chan != channel_id {
+                    return Err(IngestError::Rejected(
+                        "forbidden: cannot change the channel of an existing workflow".into(),
+                    ));
+                }
+            }
+            Some(record)
+        }
+        Err(buzz_db::DbError::NotFound(_)) => None,
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: db lookup workflow: {e}"
+            )));
+        }
+    };
+    let is_update = existing_record.is_some();
+
     // 2. Validate caller has channel access (minimum: is a member)
     let is_member = state
         .is_member_cached(channel_id, &self_bytes)
@@ -595,9 +622,17 @@ async fn handle_workflow_def(
 
     // Generate webhook secret if this workflow uses a Webhook trigger
     let webhook_secret = if matches!(def.trigger, buzz_workflow::TriggerDef::Webhook) {
-        let secret = webhook_secret::generate_webhook_secret();
-        webhook_secret::inject_secret(&mut definition_json, &secret);
-        Some(secret)
+        let existing_secret = existing_record
+            .as_ref()
+            .and_then(|r| crate::webhook_secret::extract_secret(&r.definition));
+        if let Some(secret) = existing_secret {
+            webhook_secret::inject_secret(&mut definition_json, &secret);
+            None
+        } else {
+            let secret = webhook_secret::generate_webhook_secret();
+            webhook_secret::inject_secret(&mut definition_json, &secret);
+            Some(secret)
+        }
     } else {
         None
     };
@@ -617,25 +652,6 @@ async fn handle_workflow_def(
             });
         }
         PersistResult::Inserted(tx) => tx,
-    };
-
-    // Check if workflow already exists to perform update or create
-    let existing = state.db.get_workflow(workflow_id).await;
-    let is_update = match existing {
-        Ok(record) => {
-            if record.owner_pubkey != self_bytes {
-                return Err(IngestError::Rejected(
-                    "forbidden: cannot update a workflow owned by another user".into(),
-                ));
-            }
-            true
-        }
-        Err(buzz_db::DbError::NotFound(_)) => false,
-        Err(e) => {
-            return Err(IngestError::Internal(format!(
-                "error: db lookup workflow: {e}"
-            )));
-        }
     };
 
     // 4. Execute: update_workflow or create_workflow

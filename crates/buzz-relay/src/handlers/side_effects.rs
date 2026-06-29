@@ -1586,12 +1586,24 @@ async fn handle_a_tag_deletion(event: &Event, state: &Arc<AppState>) -> anyhow::
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                state
-                    .db
-                    .delete_workflow(wf_id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
-                tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                let owner_bytes = hex::decode(pubkey_hex).unwrap_or_default();
+                match state.db.get_workflow(wf_id).await {
+                    Ok(wf) => {
+                        if wf.owner_pubkey != owner_bytes {
+                            return Err(anyhow::anyhow!("forbidden: deletion owner mismatch"));
+                        }
+                        state.db.delete_workflow(wf_id).await.map_err(|e| {
+                            anyhow::anyhow!("failed to delete workflow {wf_id}: {e}")
+                        })?;
+                        tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                    }
+                    Err(buzz_db::DbError::NotFound(_)) => {
+                        tracing::warn!("NIP-09 a-tag deletion: no workflow '{wf_id}' found");
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("failed to lookup workflow for delete: {e}"));
+                    }
+                }
             } else {
                 // Name-based lookup
                 let owner_bytes = hex::decode(pubkey_hex).unwrap_or_default();
