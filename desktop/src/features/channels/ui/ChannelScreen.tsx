@@ -528,6 +528,7 @@ export function ChannelScreen({
     (message: TimelineMessage) => handleMarkMessageRead(message.id),
     [handleMarkMessageRead],
   );
+  const sendMessageMutateAsync = sendMessageMutation.mutateAsync;
   const handleSendVideoReviewComment = React.useCallback(
     async (
       message: { id: string },
@@ -536,19 +537,32 @@ export function ChannelScreen({
       mediaTags?: string[][],
       parentEventId?: string,
     ) => {
-      await sendMessageMutation.mutateAsync({
+      await sendMessageMutateAsync({
         content,
         mediaTags,
         mentionPubkeys,
         parentEventId: parentEventId ?? message.id,
       });
     },
-    [sendMessageMutation],
+    [sendMessageMutateAsync],
   );
   const effectiveSendVideoReviewComment =
     activeChannel && !activeChannel.archivedAt && activeChannel.isMember
       ? handleSendVideoReviewComment
       : undefined;
+  const handleOpenAddBot = React.useCallback(() => setIsAddBotOpen(true), []);
+  const handleOpenMembersSidebar = React.useCallback(
+    () => setIsMembersSidebarOpen(true),
+    [],
+  );
+  const handleCloseChannelManagement = React.useCallback(
+    () => setChannelManagementOpen(false),
+    [setChannelManagementOpen],
+  );
+  const handleChannelManagementDeleted = React.useCallback(() => {
+    setChannelManagementOpen(false);
+    void goHome({ replace: true });
+  }, [setChannelManagementOpen, goHome]);
   const {
     agentSessionAgents,
     channelAgentSessionAgents,
@@ -727,44 +741,77 @@ export function ChannelScreen({
     enabled: !isSinglePanelView,
   });
 
-  const channelHeader = (
-    <ChannelScreenHeader
-      activeChannel={activeChannel}
-      activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
-      activeChannelTitle={activeChannelTitle}
-      actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
-      activeDmAvatarUrl={activeDmAvatarUrl}
-      activeDmHeaderParticipants={activeDmHeaderParticipants}
-      activeDmPresenceStatus={activeDmPresenceStatus}
-      chromeWrapperRef={channelHeaderChromeRef}
-      currentPubkey={currentPubkey}
-      isAddBotOpen={isAddBotOpen}
-      isJoining={joinChannelMutation.isPending}
-      onAddBotOpenChange={setIsAddBotOpen}
-      onJoinChannel={joinChannelMutation.mutateAsync}
-      onManageChannel={() => {
-        if (activeChannel?.channelType === "forum") {
-          openGlobalChannelManagement();
-          return;
-        }
+  const handleManageChannel = React.useCallback(() => {
+    if (activeChannel?.channelType === "forum") {
+      openGlobalChannelManagement();
+      return;
+    }
 
-        if (channelManagementOpen) {
-          setChannelManagementOpen(false);
-          return;
-        }
+    if (channelManagementOpen) {
+      setChannelManagementOpen(false);
+      return;
+    }
 
-        setOpenThreadHeadId(null);
-        setExpandedThreadReplyIds(new Set());
-        setThreadScrollTargetId(null);
-        setThreadReplyTargetId(null);
-        handleCloseAgentSession();
-        setProfilePanelPubkey(null);
-        setChannelManagementOpen(true);
-      }}
-      onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
-      showHeaderContent={!isSinglePanelView}
-      transparentChrome={activeChannel?.channelType !== "forum"}
-    />
+    setOpenThreadHeadId(null);
+    setExpandedThreadReplyIds(new Set());
+    setThreadScrollTargetId(null);
+    setThreadReplyTargetId(null);
+    handleCloseAgentSession();
+    setProfilePanelPubkey(null);
+    setChannelManagementOpen(true);
+  }, [
+    activeChannel?.channelType,
+    channelManagementOpen,
+    openGlobalChannelManagement,
+    setChannelManagementOpen,
+    setOpenThreadHeadId,
+    handleCloseAgentSession,
+    setProfilePanelPubkey,
+  ]);
+  const handleToggleMembers = React.useCallback(
+    () => setIsMembersSidebarOpen((prev) => !prev),
+    [],
+  );
+
+  const channelHeader = React.useMemo(
+    () => (
+      <ChannelScreenHeader
+        activeChannel={activeChannel}
+        activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
+        activeChannelTitle={activeChannelTitle}
+        actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
+        activeDmAvatarUrl={activeDmAvatarUrl}
+        activeDmHeaderParticipants={activeDmHeaderParticipants}
+        activeDmPresenceStatus={activeDmPresenceStatus}
+        chromeWrapperRef={channelHeaderChromeRef}
+        currentPubkey={currentPubkey}
+        isAddBotOpen={isAddBotOpen}
+        isJoining={joinChannelMutation.isPending}
+        onAddBotOpenChange={setIsAddBotOpen}
+        onJoinChannel={joinChannelMutation.mutateAsync}
+        onManageChannel={handleManageChannel}
+        onToggleMembers={handleToggleMembers}
+        showHeaderContent={!isSinglePanelView}
+        transparentChrome={activeChannel?.channelType !== "forum"}
+      />
+    ),
+    [
+      activeChannel,
+      activeChannelEphemeralDisplay,
+      activeChannelTitle,
+      shouldCompactHeaderActions,
+      activeDmAvatarUrl,
+      activeDmHeaderParticipants,
+      activeDmPresenceStatus,
+      channelHeaderChromeRef,
+      currentPubkey,
+      isAddBotOpen,
+      joinChannelMutation.isPending,
+      joinChannelMutation.mutateAsync,
+      handleManageChannel,
+      handleToggleMembers,
+      isSinglePanelView,
+    ],
   );
 
   return (
@@ -807,9 +854,9 @@ export function ChannelScreen({
                   fetchOlder={fetchOlder}
                   header={channelHeader}
                   hasOlderMessages={hasOlderMessages}
-                  onAddAgent={() => setIsAddBotOpen(true)}
+                  onAddAgent={handleOpenAddBot}
                   onCreateChannel={openCreateChannel}
-                  onOpenMembers={() => setIsMembersSidebarOpen(true)}
+                  onOpenMembers={handleOpenMembersSidebar}
                   isFetchingOlder={isFetchingOlder}
                   editTarget={
                     editTargetMessage
@@ -834,10 +881,7 @@ export function ChannelScreen({
                   messages={timelineMessages}
                   onCancelEdit={handleCancelEdit}
                   onCancelThreadReply={handleCancelThreadReply}
-                  onChannelManagementDeleted={() => {
-                    setChannelManagementOpen(false);
-                    void goHome({ replace: true });
-                  }}
+                  onChannelManagementDeleted={handleChannelManagementDeleted}
                   onFollowThread={
                     effectiveOpenThreadHeadId != null &&
                     !isNotifiedForEffectiveThread
@@ -851,9 +895,7 @@ export function ChannelScreen({
                       : undefined
                   }
                   onCloseAgentSession={handleCloseAgentSession}
-                  onCloseChannelManagement={() =>
-                    setChannelManagementOpen(false)
-                  }
+                  onCloseChannelManagement={handleCloseChannelManagement}
                   onCloseThread={handleCloseThread}
                   onDelete={
                     activeChannel?.archivedAt ? undefined : handleDelete
