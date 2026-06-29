@@ -160,10 +160,17 @@ pub async fn handle_count(
             } else {
                 // Fallback: query + post-filter for non-pushable constraints.
                 let mut q = query;
-                q.limit = Some(100_000);
-                q.max_limit = Some(100_000);
+                super::req::apply_count_fallback_limit(&mut q);
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
+                        if super::req::count_fallback_exceeded(stored_events.len()) {
+                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            conn.send(RelayMessage::closed(
+                                &sub_id,
+                                "restricted: count filter requires narrower constraints",
+                            ));
+                            return;
+                        }
                         for se in stored_events {
                             if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
                             {
@@ -215,11 +222,18 @@ pub async fn handle_count(
                     }
                 }
             } else {
-                // Fallback: query with high limit + post-filter for correctness.
-                query.limit = Some(100_000);
-                query.max_limit = Some(100_000);
+                // Fallback: query a bounded candidate set + post-filter.
+                super::req::apply_count_fallback_limit(&mut query);
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
+                        if super::req::count_fallback_exceeded(stored_events.len()) {
+                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            conn.send(RelayMessage::closed(
+                                &sub_id,
+                                "restricted: count filter requires narrower constraints",
+                            ));
+                            return;
+                        }
                         for se in stored_events {
                             if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
                             {
