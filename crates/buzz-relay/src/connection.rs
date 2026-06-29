@@ -22,6 +22,9 @@ use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::AppState;
 use buzz_pubsub::EventTopic;
 
+/// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
 
@@ -190,6 +193,29 @@ pub async fn handle_connection(
         heartbeat_cancel,
     ));
 
+    let auth_timeout_conn = Arc::clone(&conn);
+    let auth_timeout_cancel = cancel.clone();
+    let auth_timeout_task = tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(AUTH_TIMEOUT) => {
+                let authenticated = matches!(
+                    *auth_timeout_conn.auth_state.read().await,
+                    AuthState::Authenticated(_)
+                );
+                if !authenticated {
+                    warn!(
+                        conn_id = %auth_timeout_conn.conn_id,
+                        timeout_secs = AUTH_TIMEOUT.as_secs(),
+                        "NIP-42 auth timeout — closing connection"
+                    );
+                    metrics::counter!("buzz_ws_auth_timeouts_total").increment(1);
+                    auth_timeout_cancel.cancel();
+                }
+            }
+            _ = auth_timeout_cancel.cancelled() => {}
+        }
+    });
+
     recv_loop(
         ws_recv,
         Arc::clone(&conn),
@@ -202,6 +228,7 @@ pub async fn handle_connection(
     cancel.cancel();
     let _ = send_task.await;
     let _ = heartbeat_task.await;
+    let _ = auth_timeout_task.await;
 
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
         state
