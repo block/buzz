@@ -4,7 +4,6 @@ import {
   Bot,
   Check,
   ChevronDown,
-  CircleDot,
   Copy,
   ExternalLink,
   FileDiff,
@@ -556,7 +555,7 @@ function WorkspaceTabs({
       onValueChange={setSelectedTab}
       value={selectedTab}
     >
-      <TabsList className="h-9 w-fit justify-start">
+      <TabsList className="h-9 w-fit justify-start gap-1.5 bg-transparent p-0">
         {readmeFile ? (
           <TabsTrigger
             aria-label="README"
@@ -568,19 +567,15 @@ function WorkspaceTabs({
           </TabsTrigger>
         ) : null}
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
-          <CircleDot className="h-3.5 w-3.5" />
           Activity
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="prs">
-          <GitPullRequest className="h-3.5 w-3.5" />
           PRs
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
-          <FolderGit2 className="h-3.5 w-3.5" />
           Files
         </TabsTrigger>
         <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="contributors">
-          <Users className="h-3.5 w-3.5" />
           Contributors
         </TabsTrigger>
       </TabsList>
@@ -647,7 +642,7 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
 ] as const;
 
 const PROJECT_TAB_TRIGGER_CLASS =
-  "h-7 gap-1 px-2 data-[state=active]:bg-foreground data-[state=active]:text-background data-[state=active]:shadow-sm";
+  "h-8 gap-1.5 rounded-full px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
 
 export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const { goChannel, goProjects } = useAppNavigation();
@@ -819,11 +814,11 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             ref={projectDetailHeaderChromeRef}
           >
             <div
-              className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-5 py-2"
+              className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-4 py-2"
               data-tauri-drag-region
             >
               <Button
-                className="h-9 gap-1.5 text-muted-foreground"
+                className="-ml-2 h-9 gap-1.5 px-2 text-muted-foreground"
                 onClick={() => {
                   void goProjects();
                 }}
@@ -853,9 +848,9 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
             <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
-              <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
+              <section className="space-y-3">
                 <div className="flex min-w-0 items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1 space-y-1">
+                  <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-1.5">
                       <h2 className="truncate text-lg font-semibold">
                         {project.name}
@@ -879,13 +874,15 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                       ) : null}
                     </div>
                     {project.description ? (
-                      <p className="text-sm text-muted-foreground">
+                      <p className="mt-0.5 text-sm text-muted-foreground">
                         {project.description}
                       </p>
                     ) : null}
                     <ProfileIdentityButton
-                      avatarSize="sm"
+                      align="center"
+                      avatarSize="xs"
                       avatarUrl={ownerProfile?.avatarUrl ?? null}
+                      avatarClassName="mt-0.5"
                       isAgent={ownerProfile?.isAgent === true}
                       label={ownerLabel}
                       pubkey={project.owner}

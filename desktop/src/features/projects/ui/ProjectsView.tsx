@@ -1,9 +1,7 @@
 import {
-  Bot,
   CalendarDays,
   FolderGit2,
   GitFork,
-  GitPullRequest,
   LayoutGrid,
   List,
   MessageSquare,
@@ -440,30 +438,18 @@ function ProjectsToolbar({
       </div>
 
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-        <fieldset className="flex flex-wrap items-center gap-1 rounded-lg border border-border/60 bg-muted/30 p-1">
+        <fieldset className="flex flex-wrap items-center gap-1.5">
           <legend className="sr-only">Project owner filter</legend>
           {filterOptions.map((option) => (
             <Button
               aria-pressed={filter === option.value}
-              className="h-7 gap-1.5 px-2"
+              className="h-8 gap-1.5 rounded-full px-3"
               key={option.value}
               onClick={() => onFilterChange(option.value)}
-              size="xs"
+              size="sm"
               type="button"
               variant={filter === option.value ? "secondary" : "ghost"}
             >
-              {option.value === "agents" ? (
-                <Bot className="h-3.5 w-3.5" />
-              ) : null}
-              {option.value === "repositories" ? (
-                <FolderGit2 className="h-3.5 w-3.5" />
-              ) : null}
-              {option.value === "prs" ? (
-                <GitPullRequest className="h-3.5 w-3.5" />
-              ) : null}
-              {option.value === "users" ? (
-                <Users className="h-3.5 w-3.5" />
-              ) : null}
               {option.label}
             </Button>
           ))}

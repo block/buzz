@@ -5,6 +5,7 @@ import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProfileIdentityButtonProps = {
+  align?: "center" | "start";
   avatarClassName?: string;
   avatarSize?: "xs" | "sm" | "md";
   avatarUrl: string | null;
@@ -19,6 +20,7 @@ export function ProfileIdentityButton({
   avatarClassName,
   avatarSize = "xs",
   avatarUrl,
+  align = "start",
   isAgent,
   label,
   pubkey,
@@ -26,7 +28,8 @@ export function ProfileIdentityButton({
   showLabel = true,
 }: ProfileIdentityButtonProps) {
   const className = cn(
-    "flex min-w-0 items-start rounded-lg text-left",
+    "flex min-w-0 rounded-lg text-left",
+    align === "center" ? "items-center" : "items-start",
     pubkey &&
       "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
     showLabel ? "gap-2" : "shrink-0",
