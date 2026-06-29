@@ -656,6 +656,34 @@ pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid)
     Ok(())
 }
 
+/// Delete a workflow only when it belongs to `owner_pubkey`.
+///
+/// Used by event-driven deletion paths where the workflow UUID is attacker
+/// controlled. Keeping the owner predicate in the DELETE statement avoids a
+/// check-then-delete race and ensures a caller cannot delete another user's
+/// workflow just by learning its UUID.
+pub async fn delete_workflow_for_owner(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    owner_pubkey: &[u8],
+) -> Result<()> {
+    let affected = sqlx::query(
+        "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(owner_pubkey)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(DbError::NotFound(format!("workflow {id}")));
+    }
+    Ok(())
+}
+
 // -- Workflow Run CRUD --------------------------------------------------------
 
 /// Insert a new workflow run. Returns the new run's UUID.

@@ -1679,6 +1679,16 @@ impl Db {
         workflow::delete_workflow(&self.pool, community_id, id).await
     }
 
+    /// Delete a workflow only when it belongs to the provided owner.
+    pub async fn delete_workflow_for_owner(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<()> {
+        workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
+    }
+
     /// Find a workflow by owner pubkey and name within a community. Used for
     /// NIP-09 a-tag deletion where the d-tag is the workflow name (not UUID).
     pub async fn find_workflow_by_owner_and_name(
