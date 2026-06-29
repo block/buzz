@@ -665,6 +665,12 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   );
   const activeBranch =
     selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
+  const displayedBranch =
+    activeBranch === "main" && branchOptions.length <= 1 && project?.dtag
+      ? project.dtag
+      : activeBranch;
+  const displayedBranchOptions =
+    displayedBranch === activeBranch ? branchOptions : [];
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
   const pullRequestsQuery = useProjectPullRequestsQuery(project);
 
@@ -747,6 +753,8 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const ownerProfile = profiles?.[normalizePubkey(project.owner)];
   const ownerLabel = resolveUserLabel({ pubkey: project.owner, profiles });
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
+  const safeWebUrl =
+    project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -794,14 +802,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
         <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
           <section className="space-y-3 rounded-xl border border-border/50 bg-card/60 p-4">
-            <div className="flex min-w-0 items-start gap-3">
-              <UserAvatar
-                accent={ownerProfile?.isAgent === true}
-                avatarUrl={ownerProfile?.avatarUrl ?? null}
-                className="shrink-0"
-                displayName={ownerLabel}
-                size="md"
-              />
+            <div className="flex min-w-0 items-start justify-between gap-3">
               <div className="min-w-0 flex-1 space-y-1">
                 <h2 className="truncate text-lg font-semibold">
                   {project.name}
@@ -811,33 +812,43 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                     {project.description}
                   </p>
                 ) : null}
+                <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                  <UserAvatar
+                    accent={ownerProfile?.isAgent === true}
+                    avatarUrl={ownerProfile?.avatarUrl ?? null}
+                    className="shrink-0"
+                    displayName={ownerLabel}
+                    size="sm"
+                  />
+                  <span className="truncate">{ownerLabel}</span>
+                </div>
               </div>
+              {safeWebUrl ? (
+                <Button
+                  asChild
+                  className="h-8 shrink-0 gap-1.5"
+                  size="sm"
+                  variant="outline"
+                >
+                  <a
+                    href={safeWebUrl}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                  >
+                    <ExternalLink className="h-4 w-4" />
+                    Web
+                  </a>
+                </Button>
+              ) : null}
             </div>
 
             <RepositorySourceCard
-              branch={activeBranch ?? ""}
-              branchOptions={branchOptions}
+              branch={displayedBranch ?? ""}
+              branchOptions={displayedBranchOptions}
               cloneUrls={project.cloneUrls}
               onBranchChange={setSelectedBranch}
             />
           </section>
-
-          {project.webUrl && isSafeUrl(project.webUrl) ? (
-            <section className="space-y-2">
-              <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Web
-              </h3>
-              <a
-                className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
-                href={project.webUrl}
-                rel="noopener noreferrer"
-                target="_blank"
-              >
-                <ExternalLink className="h-4 w-4" />
-                {project.webUrl}
-              </a>
-            </section>
-          ) : null}
 
           <WorkspaceTabs
             key={project.id}
