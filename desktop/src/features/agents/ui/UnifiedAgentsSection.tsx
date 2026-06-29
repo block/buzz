@@ -37,7 +37,7 @@ type UnifiedAgentsSectionProps = {
   isActionPending: boolean;
   isAgentsLoading: boolean;
   startingAgentPubkey: string | null;
-  startingPersonaId: string | null;
+  startingPersonaIds: ReadonlySet<string>;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
   onCreateAgent: () => void;
@@ -72,7 +72,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isActionPending,
     isAgentsLoading,
     startingAgentPubkey,
-    startingPersonaId,
+    startingPersonaIds,
     onBulkRemoveStopped,
     onBulkStopRunning,
     onCreateAgent,
@@ -174,7 +174,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   key={group.persona.id}
                   persona={group.persona}
                   startingAgentPubkey={startingAgentPubkey}
-                  startingPersonaId={startingPersonaId}
+                  startingPersonaIds={startingPersonaIds}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
                   onStartAgent={onStartAgent}
@@ -253,7 +253,7 @@ function AgentPersonaCard({
   agent,
   persona,
   startingAgentPubkey,
-  startingPersonaId,
+  startingPersonaIds,
   onOpenAgentProfile,
   onOpenPersonaProfile,
   onStartAgent,
@@ -262,7 +262,7 @@ function AgentPersonaCard({
   agent: ManagedAgent | undefined;
   persona: AgentPersona;
   startingAgentPubkey: string | null;
-  startingPersonaId: string | null;
+  startingPersonaIds: ReadonlySet<string>;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -307,7 +307,7 @@ function AgentPersonaCard({
             activeTestId={`persona-runtime-active-${persona.id}`}
             avatarUrl={avatarUrl}
             isActive={false}
-            isStarting={startingPersonaId === persona.id}
+            isStarting={startingPersonaIds.has(persona.id)}
             label={title}
             startTestId={`persona-runtime-start-${persona.id}`}
             onStart={() => onStartPersona(persona)}

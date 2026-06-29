@@ -51,6 +51,10 @@ export function useManagedAgentActions() {
     React.useState<ManagedAgent | null>(null);
   const [createdAgent, setCreatedAgent] =
     React.useState<CreateManagedAgentResponse | null>(null);
+  const [startingPersonaIds, setStartingPersonaIds] = React.useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const startingPersonaIdsRef = React.useRef(new Set<string>());
   const [logAgentPubkey, setLogAgentPubkey] = React.useState<string | null>(
     null,
   );
@@ -177,7 +181,22 @@ export function useManagedAgentActions() {
     return filterAvailableRuntimes(result.data);
   }
 
+  function setPersonaStartPending(personaId: string, pending: boolean) {
+    const next = new Set(startingPersonaIdsRef.current);
+    if (pending) {
+      next.add(personaId);
+    } else {
+      next.delete(personaId);
+    }
+    startingPersonaIdsRef.current = next;
+    setStartingPersonaIds(next);
+  }
+
   async function handleStartPersona(persona: AgentPersona) {
+    if (startingPersonaIdsRef.current.has(persona.id)) {
+      return;
+    }
+    setPersonaStartPending(persona.id, true);
     clearFeedback();
     try {
       const runtimes = await getAvailableRuntimesForStart();
@@ -238,6 +257,8 @@ export function useManagedAgentActions() {
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
       );
+    } finally {
+      setPersonaStartPending(persona.id, false);
     }
   }
 
@@ -436,11 +457,6 @@ export function useManagedAgentActions() {
     startMutation.isPending && typeof startMutation.variables === "string"
       ? startMutation.variables
       : null;
-  const startingPersonaId =
-    createAgentMutation.isPending &&
-    typeof createAgentMutation.variables?.personaId === "string"
-      ? createAgentMutation.variables.personaId
-      : null;
 
   return {
     relayAgentsQuery,
@@ -465,7 +481,7 @@ export function useManagedAgentActions() {
     actionErrorMessage,
     setActionErrorMessage,
     startingAgentPubkey,
-    startingPersonaId,
+    startingPersonaIds,
     handleStart,
     handleStartPersona,
     handleStop,
