@@ -2054,6 +2054,11 @@
     contain-intrinsic-size: auto 60px;
   }
 
+  /* paint containment clips the action bar's upward bleed; un-pause the active row */
+  .timeline-row-cv:is(:hover, :focus-within) {
+    content-visibility: visible;
+  }
+
   .content-visibility-auto-interactive {
     content-visibility: auto;
     contain-intrinsic-size: auto 200px;
