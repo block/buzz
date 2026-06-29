@@ -4,7 +4,7 @@ import {
   AUXILIARY_PANEL_DEFAULT_WIDTH_PX,
   AUXILIARY_PANEL_MAX_WIDTH_PX,
   AUXILIARY_PANEL_MIN_WIDTH_PX,
-} from "@/shared/layout/auxiliaryPanelLayout";
+} from "@/shared/layout/AuxiliaryPanel";
 
 const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
 

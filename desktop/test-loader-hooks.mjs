@@ -25,6 +25,13 @@ function resolveSourcePath(basePath) {
     }
   }
 
+  for (const extension of [".ts", ".tsx", ".js", ".jsx", ".mjs"]) {
+    const candidate = path.join(basePath, `index${extension}`);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
   return `${basePath}.ts`;
 }
 

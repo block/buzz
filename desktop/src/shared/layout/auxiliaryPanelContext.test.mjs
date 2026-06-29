@@ -4,16 +4,16 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { AuxiliaryPanel } from "./AuxiliaryPanel.tsx";
-import { AuxiliaryPanelBody } from "./AuxiliaryPanelBody.tsx";
+import { AuxiliaryPanel } from "./AuxiliaryPanel/index.ts";
+import { AuxiliaryPanelBody } from "./AuxiliaryPanel/index.ts";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
-} from "./AuxiliaryPanelHeader.tsx";
+} from "./AuxiliaryPanel/index.ts";
 import {
   AuxiliaryPanelContext,
   useAuxiliaryPanel,
-} from "./auxiliaryPanelContext.ts";
+} from "./AuxiliaryPanel/index.ts";
 
 function render(element) {
   return renderToStaticMarkup(element);

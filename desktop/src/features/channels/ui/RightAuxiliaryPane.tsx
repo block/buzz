@@ -1,6 +1,6 @@
 import type * as React from "react";
 
-import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/auxiliaryPanelLayout";
+import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/AuxiliaryPanel";
 import { cn } from "@/shared/lib/cn";
 
 type RightAuxiliaryPaneProps = {

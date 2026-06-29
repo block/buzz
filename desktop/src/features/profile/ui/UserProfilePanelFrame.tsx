@@ -1,7 +1,7 @@
 import type * as React from "react";
 
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
-import { AuxiliaryPanelHeader } from "@/shared/layout/AuxiliaryPanelHeader";
+import { AuxiliaryPanelHeader } from "@/shared/layout/AuxiliaryPanel";
 
 type UserProfilePanelFrameProps = {
   addAgentToChannelDialog: React.ReactNode;

@@ -58,8 +58,8 @@ import {
   AuxiliaryPanelTitle,
   type AuxiliaryPanelMode,
   getAuxiliaryPanelMode,
-} from "@/shared/layout/AuxiliaryPanelHeader";
-import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
+} from "@/shared/layout/AuxiliaryPanel";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,

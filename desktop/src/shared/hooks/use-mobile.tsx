@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/auxiliaryPanelLayout";
+import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 
 const MOBILE_BREAKPOINT = 768;
 

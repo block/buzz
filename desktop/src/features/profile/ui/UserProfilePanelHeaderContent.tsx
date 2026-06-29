@@ -11,7 +11,7 @@ import {
   AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelHeaderTitleBlock,
-} from "@/shared/layout/AuxiliaryPanelHeader";
+} from "@/shared/layout/AuxiliaryPanel";
 
 export function getUserProfilePanelHeaderContent({
   agentSettingsMenu,
