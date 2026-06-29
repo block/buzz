@@ -488,7 +488,7 @@ export function UserProfilePopover({
                 <div className="flex gap-2">
                   <Button
                     aria-label="Wave"
-                    className="shrink-0 px-3"
+                    className="buzz-wave-hover-trigger shrink-0 px-3"
                     data-testid={`user-profile-popover-wave-${pubkey}`}
                     disabled={
                       pendingAction !== null || openDmMutation.isPending
@@ -506,7 +506,10 @@ export function UserProfilePopover({
                         className="h-3.5 w-3.5 border-2"
                       />
                     ) : (
-                      <span aria-hidden="true" className="text-sm leading-none">
+                      <span
+                        aria-hidden="true"
+                        className="buzz-wave-hand text-sm leading-none"
+                      >
                         👋
                       </span>
                     )}
