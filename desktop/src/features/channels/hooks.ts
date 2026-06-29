@@ -125,8 +125,14 @@ export function useCreateChannelMutation() {
         ]),
       );
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+    onSettled: () => {
+      // refetchType "none": onSuccess already cached the relay-returned channel;
+      // an immediate getChannels() refetch blocked the dialog and could clobber
+      // it with a read-after-write-lagged snapshot. Live updates reconcile later.
+      void queryClient.invalidateQueries({
+        queryKey: channelsQueryKey,
+        refetchType: "none",
+      });
     },
   });
 }
