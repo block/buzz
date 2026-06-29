@@ -25,6 +25,8 @@ url = { workspace = true }
 rustls = "0.23"
 
 [dev-dependencies]
+buzz-db = { workspace = true }
+buzz-sdk = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 futures-util = { workspace = true }

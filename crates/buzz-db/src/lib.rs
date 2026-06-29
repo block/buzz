@@ -1088,6 +1088,7 @@ impl Db {
     /// Create a new workflow.
     pub async fn create_workflow(
         &self,
+        id: Uuid,
         channel_id: Option<Uuid>,
         owner_pubkey: &[u8],
         name: &str,
@@ -1096,6 +1097,7 @@ impl Db {
     ) -> Result<Uuid> {
         workflow::create_workflow(
             &self.pool,
+            id,
             channel_id,
             owner_pubkey,
             name,

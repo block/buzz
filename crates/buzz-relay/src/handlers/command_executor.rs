@@ -568,6 +568,13 @@ async fn handle_workflow_def(
             IngestError::Rejected("invalid: missing workflow name (name or d tag)".into())
         })?;
 
+    // Parse the d-tag as the workflow_id UUID
+    let d_tag = extract_d_tag(event)
+        .ok_or_else(|| IngestError::Rejected("invalid: missing d tag (workflow ID)".into()))?;
+    let workflow_id = Uuid::parse_str(&d_tag).map_err(|_| {
+        IngestError::Rejected("invalid: workflow ID in d tag must be a valid UUID".into())
+    })?;
+
     // 2. Validate caller has channel access (minimum: is a member)
     let is_member = state
         .is_member_cached(channel_id, &self_bytes)
@@ -612,20 +619,48 @@ async fn handle_workflow_def(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 4. Execute: create_workflow
-    let workflow_id = state
-        .db
-        .create_workflow(
-            Some(channel_id),
-            &self_bytes,
-            &workflow_name,
-            &definition_json_final,
-            &hash,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db create_workflow: {e}")))?;
+    // Check if workflow already exists to perform update or create
+    let existing = state.db.get_workflow(workflow_id).await;
+    let is_update = match existing {
+        Ok(record) => {
+            if record.owner_pubkey != self_bytes {
+                return Err(IngestError::Rejected(
+                    "forbidden: cannot update a workflow owned by another user".into(),
+                ));
+            }
+            true
+        }
+        Err(buzz_db::DbError::NotFound(_)) => false,
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: db lookup workflow: {e}"
+            )));
+        }
+    };
 
-    // Commit: event + workflow creation succeeded atomically.
+    // 4. Execute: update_workflow or create_workflow
+    if is_update {
+        state
+            .db
+            .update_workflow(workflow_id, &workflow_name, &definition_json_final, &hash)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: db update_workflow: {e}")))?;
+    } else {
+        state
+            .db
+            .create_workflow(
+                workflow_id,
+                Some(channel_id),
+                &self_bytes,
+                &workflow_name,
+                &definition_json_final,
+                &hash,
+            )
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: db create_workflow: {e}")))?;
+    }
+
+    // Commit: event + workflow creation/update succeeded atomically.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;

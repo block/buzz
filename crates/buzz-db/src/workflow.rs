@@ -244,14 +244,13 @@ pub struct ApprovalRecord {
 /// New workflows start as `active` and `enabled = TRUE`.
 pub async fn create_workflow(
     pool: &PgPool,
+    id: Uuid,
     channel_id: Option<Uuid>,
     owner_pubkey: &[u8],
     name: &str,
     definition_json: &str,
     definition_hash: &[u8],
 ) -> Result<Uuid> {
-    let id = Uuid::new_v4();
-
     sqlx::query(
         r#"
         INSERT INTO workflows

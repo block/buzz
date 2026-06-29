@@ -502,86 +502,136 @@ steps:
 #[tokio::test]
 #[ignore]
 async fn test_workflow_update_and_delete() {
-    let client = http_client();
-    let pubkey_hex: &str = SEEDED_PUBKEY;
-    let base = relay_http_url();
+    use buzz_db::{Db, DbConfig};
+    use buzz_test_client::BuzzTestClient;
+    use uuid::Uuid;
 
+    let ws_url = relay_ws_url();
+    let keys = Keys::generate();
+    let pubkey_bytes = keys.public_key().to_bytes().to_vec();
+
+    // 1. Connect to relay via WebSocket
+    let mut ws = BuzzTestClient::connect(&ws_url, &keys)
+        .await
+        .expect("connect");
+
+    // 2. Connect to database for direct verification
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    let db = Db::new(&DbConfig {
+        database_url: db_url,
+        ..Default::default()
+    })
+    .await
+    .expect("DB connect failed");
+
+    let channel_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+
+    // Create the channel first so we are members of it
+    let create_ch_builder = buzz_sdk::build_create_channel(
+        channel_id,
+        "e2e-crud-test-channel",
+        Some(buzz_sdk::Visibility::Open),
+        Some(buzz_sdk::ChannelKind::Stream),
+        None,
+        None,
+    )
+    .expect("build create channel");
+    let create_ch_event = create_ch_builder
+        .sign_with_keys(&keys)
+        .expect("sign create channel");
+    let ch_resp = ws
+        .send_event(create_ch_event)
+        .await
+        .expect("send create channel");
+    assert!(
+        ch_resp.accepted,
+        "channel creation must be accepted, message: {}",
+        ch_resp.message
+    );
+
+    // 3. Create workflow V1
     let yaml_v1 = webhook_workflow_yaml("e2e-crud-original");
-    let created = create_workflow(&client, &base, pubkey_hex, CHANNEL_GENERAL, &yaml_v1).await;
-    let workflow_id = created["id"]
-        .as_str()
-        .expect("workflow must have 'id'")
-        .to_string();
+    let builder_v1 = buzz_sdk::build_workflow_def(channel_id, workflow_id, &yaml_v1)
+        .expect("build workflow def V1");
+    let event_v1 = builder_v1.sign_with_keys(&keys).expect("sign V1");
 
-    let get_url = format!("{base}/api/workflows/{workflow_id}");
-    let get_resp = client
-        .get(&get_url)
-        .header("X-Pubkey", pubkey_hex)
-        .send()
+    let ok_resp = ws.send_event(event_v1).await.expect("send event V1");
+    assert!(
+        ok_resp.accepted,
+        "V1 event must be accepted, message: {}",
+        ok_resp.message
+    );
+
+    // 4. Verify in DB: exactly 1 workflow exists with this ID and name matches the UUID, definition name matches YAML
+    let wf_record = db
+        .get_workflow(workflow_id)
         .await
-        .expect("GET workflow failed");
-    assert_eq!(get_resp.status(), 200, "GET workflow must return 200");
-    let fetched: serde_json::Value = get_resp.json().await.expect("GET response must be JSON");
+        .expect("workflow V1 not found in DB");
     assert_eq!(
-        fetched["name"].as_str().unwrap_or(""),
+        wf_record.name,
+        workflow_id.to_string(),
+        "V1 name in DB must match workflow UUID"
+    );
+    let def_v1 = &wf_record.definition;
+    assert_eq!(
+        def_v1["name"].as_str().unwrap_or(""),
         "e2e-crud-original",
-        "fetched workflow name must match original"
+        "V1 definition name mismatch in DB"
     );
-    assert_eq!(
-        fetched["id"].as_str().unwrap_or(""),
-        workflow_id,
-        "fetched workflow id must match"
-    );
+    assert_eq!(wf_record.owner_pubkey, pubkey_bytes, "owner mismatch in DB");
 
+    // 5. Update to workflow V2
     let yaml_v2 = webhook_workflow_yaml("e2e-crud-updated");
-    let put_url = format!("{base}/api/workflows/{workflow_id}");
-    let put_resp = client
-        .put(&put_url)
-        .header("X-Pubkey", pubkey_hex)
-        .json(&serde_json::json!({ "yaml_definition": yaml_v2 }))
-        .send()
+    let builder_v2 = buzz_sdk::build_workflow_def(channel_id, workflow_id, &yaml_v2)
+        .expect("build workflow def V2");
+    let event_v2 = builder_v2.sign_with_keys(&keys).expect("sign V2");
+
+    let ok_resp2 = ws.send_event(event_v2).await.expect("send event V2");
+    assert!(ok_resp2.accepted, "V2 event must be accepted");
+
+    // 6. Verify in DB: still exactly 1 workflow exists, definition name is updated to V2, no duplicate rows
+    let wf_record2 = db
+        .get_workflow(workflow_id)
         .await
-        .expect("PUT workflow failed");
-    assert_eq!(put_resp.status(), 200, "PUT workflow must return 200");
-    let updated: serde_json::Value = put_resp.json().await.expect("PUT response must be JSON");
+        .expect("workflow V2 not found in DB");
+    let def_v2 = &wf_record2.definition;
     assert_eq!(
-        updated["name"].as_str().unwrap_or(""),
+        def_v2["name"].as_str().unwrap_or(""),
         "e2e-crud-updated",
-        "updated workflow name must reflect new YAML"
-    );
-    assert_eq!(
-        updated["id"].as_str().unwrap_or(""),
-        workflow_id,
-        "PUT must return the same workflow id"
+        "V2 definition name not updated in DB"
     );
 
-    let get_resp2 = client
-        .get(&get_url)
-        .header("X-Pubkey", pubkey_hex)
-        .send()
+    // Check that there is no duplicate row with a different database ID (e.g. query channel workflows)
+    let workflows = db
+        .list_channel_workflows(channel_id, None, None)
         .await
-        .expect("second GET workflow failed");
-    assert_eq!(get_resp2.status(), 200);
-    let refetched: serde_json::Value = get_resp2.json().await.expect("second GET must be JSON");
+        .expect("DB query failed");
+    // Filter to only workflows owned by our test pubkey to isolate from other concurrent test runs
+    let our_workflows: Vec<_> = workflows
+        .into_iter()
+        .filter(|w| w.owner_pubkey == pubkey_bytes)
+        .collect();
     assert_eq!(
-        refetched["name"].as_str().unwrap_or(""),
-        "e2e-crud-updated",
-        "re-fetched workflow must have updated name"
+        our_workflows.len(),
+        1,
+        "Expected exactly 1 workflow row in DB, found duplicate rows!"
     );
 
-    let del_status = delete_workflow(&client, &base, pubkey_hex, &workflow_id).await;
-    assert_eq!(del_status, 204, "DELETE must return 204 No Content");
+    // 7. Delete workflow
+    let builder_del = buzz_sdk::build_workflow_delete(&keys.public_key().to_hex(), workflow_id)
+        .expect("build workflow delete");
+    let event_del = builder_del.sign_with_keys(&keys).expect("sign delete");
 
-    let get_after_del = client
-        .get(&get_url)
-        .header("X-Pubkey", pubkey_hex)
-        .send()
-        .await
-        .expect("GET after DELETE failed");
-    assert_eq!(
-        get_after_del.status(),
-        404,
-        "GET after DELETE must return 404"
+    let ok_resp3 = ws.send_event(event_del).await.expect("send delete event");
+    assert!(ok_resp3.accepted, "delete event must be accepted");
+
+    // 8. Verify in DB: workflow is completely gone
+    let wf_after_del = db.get_workflow(workflow_id).await;
+    assert!(
+        matches!(wf_after_del, Err(buzz_db::DbError::NotFound(_))),
+        "workflow must be deleted from DB"
     );
 }
 
