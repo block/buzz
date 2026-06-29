@@ -116,7 +116,7 @@ const overrides = new Map([
   ["src/features/channels/readState/readStateManager.ts", 1030],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
-  ["src/shared/ui/markdown.tsx", 2344],
+  ["src/shared/ui/markdown.tsx", 2082],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
 ]);

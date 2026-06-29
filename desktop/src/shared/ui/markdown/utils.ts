@@ -71,3 +71,19 @@ export function messageLinkUrlTransform(value: string, key: string): string {
   }
   return defaultUrlTransform(value);
 }
+
+export function getReactNodeText(node: React.ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map(getReactNodeText).join("");
+  }
+
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return getReactNodeText(node.props.children);
+  }
+
+  return "";
+}
