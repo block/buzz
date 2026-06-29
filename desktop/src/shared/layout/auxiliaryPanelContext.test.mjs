@@ -177,6 +177,53 @@ test("AuxiliaryPanelHeader renders a generic close action from context", () => {
   assert.match(html, /data-testid="auxiliary-panel-close"/);
 });
 
+test("AuxiliaryPanelHeader keeps resize border in single-panel mode when requested", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          { resizeBorder: true },
+          React.createElement(AuxiliaryPanelHeaderGroup, null, "Title"),
+        ),
+        onClose: () => {},
+        onResizeStart: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, /after:-left-px/);
+  assert.match(html, /peer-hover\/auxiliary-panel-resize:after:bg-border\/80/);
+});
+
+test("AuxiliaryPanelHeader omits resize border in single-panel mode by default", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          null,
+          React.createElement(AuxiliaryPanelHeaderGroup, null, "Title"),
+        ),
+        onClose: () => {},
+        onResizeStart: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.doesNotMatch(html, /after:-left-px/);
+  assert.doesNotMatch(
+    html,
+    /peer-hover\/auxiliary-panel-resize:after:bg-border\/80/,
+  );
+});
+
 test("AuxiliaryPanel resize handle uses a generic namespace", () => {
   const html = render(
     React.createElement(

@@ -49,6 +49,8 @@ type AuxiliaryPanelSurface = "default" | "soft" | "transparent";
 const AUXILIARY_PANEL_HEADER_HEIGHT_CLASS = "pt-13";
 const AUXILIARY_PANEL_CLOSE_LABEL = "Close panel";
 const AUXILIARY_PANEL_CLOSE_TEST_ID = "auxiliary-panel-close";
+const AUXILIARY_PANEL_RESIZE_BORDER_CLASS =
+  "after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/auxiliary-panel-resize:after:bg-border/80 peer-focus-visible/auxiliary-panel-resize:after:bg-border/80";
 
 export function getAuxiliaryPanelMode(
   isSplitLayout: boolean,
@@ -126,10 +128,14 @@ export function AuxiliaryPanelHeader({
               ? cn(
                   "relative z-41 -mb-13 min-h-13 shrink-0 gap-2.5 px-4 py-2 sm:pr-3",
                   inset === "wide" && "sm:pl-6",
+                  resizeBorder && AUXILIARY_PANEL_RESIZE_BORDER_CLASS,
                   getAuxiliaryPanelSurfaceClass(effectiveSurface),
                 )
               : resizeBorder
-                ? "absolute inset-x-0 top-0 z-50 min-h-13 gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/auxiliary-panel-resize:after:bg-border/80 peer-focus-visible/auxiliary-panel-resize:after:bg-border/80"
+                ? cn(
+                    "absolute inset-x-0 top-0 z-50 min-h-13 gap-3 bg-transparent px-3 py-2",
+                    AUXILIARY_PANEL_RESIZE_BORDER_CLASS,
+                  )
                 : cn(
                     "relative z-50 shrink-0 gap-3",
                     density === "compact"
