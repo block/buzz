@@ -201,25 +201,19 @@ function profileMatchesContributor(
   return candidates.includes(name) || candidates.includes(email);
 }
 
-function contributorMatchesProfiles(
+function profileForContributor(
   contributor: ProjectRepoContributor,
   profiles: UserProfileLookup | undefined,
 ) {
-  if (!profiles) return false;
-  return Object.entries(profiles).some(([pubkey, profile]) =>
-    profileMatchesContributor(contributor, profile, pubkey),
-  );
-}
+  if (!profiles) return null;
 
-function contributorForProfile(
-  pubkey: string,
-  profiles: UserProfileLookup | undefined,
-  repoContributors: ProjectRepoContributor[],
-) {
-  const profile = profiles?.[normalizePubkey(pubkey)];
-  return repoContributors.find((contributor) =>
-    profileMatchesContributor(contributor, profile, pubkey),
-  );
+  for (const [pubkey, profile] of Object.entries(profiles)) {
+    if (profileMatchesContributor(contributor, profile, pubkey)) {
+      return { pubkey, profile };
+    }
+  }
+
+  return null;
 }
 
 function profileForCommitAuthor(
@@ -244,57 +238,39 @@ function profileForCommitAuthor(
 }
 
 function ContributorsPanel({
-  peoplePubkeys,
-  project,
   profiles,
   repoContributors,
 }: {
-  peoplePubkeys: string[];
-  project: Project;
   profiles?: UserProfileLookup;
   repoContributors: ProjectRepoContributor[];
 }) {
-  const rows = [
-    ...peoplePubkeys.map((pubkey) => {
-      const normalizedPubkey = normalizePubkey(pubkey);
-      const profile = profiles?.[normalizedPubkey];
-      const isOwner = normalizedPubkey === normalizePubkey(project.owner);
-      const contributor = contributorForProfile(
-        pubkey,
-        profiles,
-        repoContributors,
-      );
-      const label = resolveUserLabel({ pubkey, profiles });
-      return {
-        avatarUrl: profile?.avatarUrl ?? null,
-        commitCount: contributor?.commitCount ?? null,
-        id: `profile:${normalizedPubkey}`,
-        isAgent: profile?.isAgent === true,
-        label,
-        lastCommitAt: contributor?.lastCommitAt ?? null,
-        role: isOwner
-          ? "Project owner"
-          : profile?.isAgent
-            ? "Agent"
-            : "Contributor",
-      };
-    }),
-    ...repoContributors
-      .filter(
-        (contributor) => !contributorMatchesProfiles(contributor, profiles),
-      )
-      .map((contributor) => ({
-        avatarUrl: null,
-        commitCount: contributor.commitCount,
-        id: `git:${contributorKey(contributor)}`,
-        isAgent: false,
-        label: contributor.name || contributor.email,
-        lastCommitAt: contributor.lastCommitAt,
-        role: contributor.email || "Git contributor",
-      })),
-  ];
+  const rows = repoContributors.map((contributor) => {
+    const matchedProfile = profileForContributor(contributor, profiles);
+    const label = matchedProfile
+      ? resolveUserLabel({ pubkey: matchedProfile.pubkey, profiles })
+      : contributor.name || contributor.email || "Unknown contributor";
 
-  if (rows.length === 0) return null;
+    return {
+      avatarUrl: matchedProfile?.profile.avatarUrl ?? null,
+      commitCount: contributor.commitCount,
+      id: `git:${contributorKey(contributor)}`,
+      isAgent: matchedProfile?.profile.isAgent === true,
+      label,
+      lastCommitAt: contributor.lastCommitAt,
+      role:
+        matchedProfile?.profile.nip05Handle ||
+        contributor.email ||
+        "Git contributor",
+    };
+  });
+
+  if (rows.length === 0) {
+    return (
+      <p className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+        No git contributors are available yet.
+      </p>
+    );
+  }
 
   return (
     <section className="space-y-2">
@@ -524,7 +500,6 @@ function WorkspaceTabs({
   snapshotError,
   snapshotLoading,
   profiles,
-  peoplePubkeys,
   repoContributors,
 }: {
   project: Project;
@@ -535,7 +510,6 @@ function WorkspaceTabs({
   snapshotError: unknown;
   snapshotLoading: boolean;
   profiles?: UserProfileLookup;
-  peoplePubkeys: string[];
   repoContributors: ProjectRepoContributor[];
 }) {
   const files = snapshot?.files ?? [];
@@ -628,9 +602,7 @@ function WorkspaceTabs({
 
       <TabsContent className="m-0" value="contributors">
         <ContributorsPanel
-          peoplePubkeys={peoplePubkeys}
           profiles={profiles}
-          project={project}
           repoContributors={repoContributors}
         />
       </TabsContent>
@@ -841,7 +813,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
 
           <WorkspaceTabs
             key={project.id}
-            peoplePubkeys={peoplePubkeys}
             profiles={profiles}
             project={project}
             pullRequests={pullRequestsQuery.data ?? []}
