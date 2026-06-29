@@ -23,7 +23,7 @@ const rules = [
 // glyph is a fixed display size sized to its avatar box (not readable message
 // text), so it stays as the lone documented `text-[6rem]` literal.
 const overrides = new Set([
-  "src/features/settings/ui/ProfileSettingsCard.tsx:572",
+  "src/features/settings/ui/ProfileSettingsCard.tsx:584",
   "src/features/onboarding/ui/AvatarStep.tsx:89",
 ]);
 

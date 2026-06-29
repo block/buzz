@@ -8,18 +8,18 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Ecosystem
 
-Buzz spans five repos. This one (`block/sprout`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
 
 | Repo | Purpose |
 |------|---------|
-| [block/sprout](https://github.com/block/sprout) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
+| [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
 | [squareup/sprout-releases](https://github.com/squareup/sprout-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
 | [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
 | [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
 | [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
 
 ```
-block/sprout (source)
+block/buzz (source)
   ├─► sprout-releases    (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
   ├─► sprout-oss         (relay Docker image → ECR)
   │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
@@ -324,9 +324,9 @@ only the current set remains, otherwise reviewers still see the stale images:
 
 ```bash
 # List screenshot comments to find the stale one's id
-gh pr view <pr> --repo block/sprout --json comments \
+gh pr view <pr> --repo block/buzz --json comments \
   --jq '.comments[] | select(.body | test("pr-<pr>--")) | {id, url}'
-gh api -X DELETE repos/block/sprout/issues/comments/<stale-comment-id>
+gh api -X DELETE repos/block/buzz/issues/comments/<stale-comment-id>
 ```
 
 Branch cleanup when fully done: `git push origin --delete agent-screenshots/<username>`.
@@ -400,7 +400,7 @@ not post. This catches the most common screenshot regression.
 
 **PR comments:** Use a body template (3rd arg to `post-screenshots.sh`) with
 `{{filename}}` placeholders. Each screenshot gets a `###` heading + one-line
-description. See [PR #803](https://github.com/block/sprout/pull/803).
+description. See [PR #803](https://github.com/block/buzz/pull/803).
 
 ---
 

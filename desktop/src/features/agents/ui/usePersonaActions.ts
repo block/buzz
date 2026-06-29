@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   personasQueryKey,
   useAcpRuntimesQuery,
+  useCreateManagedAgentMutation,
   useCreatePersonaMutation,
   useDeletePersonaMutation,
   useExportPersonaJsonMutation,
@@ -18,7 +19,10 @@ import {
 } from "@/shared/api/tauriPersonas";
 import { isSingleItemFile } from "@/shared/lib/fileMagic";
 import type {
+  AcpRuntime,
   AgentPersona,
+  CreateManagedAgentInput,
+  CreateManagedAgentResponse,
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -29,6 +33,7 @@ import {
   importPersonaDialogState,
   type PersonaDialogState,
 } from "./personaDialogState";
+import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import { usePersonaImportActions } from "./usePersonaImportActions";
 
 type PersonaFeedbackSurface = "catalog" | "library";
@@ -41,6 +46,7 @@ export function usePersonaActions() {
   const acpRuntimesQuery = useAcpRuntimesQuery({
     enabled: shouldLoadAcpRuntimes,
   });
+  const createAgentMutation = useCreateManagedAgentMutation();
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
@@ -63,8 +69,20 @@ export function usePersonaActions() {
   >(null);
   const [personaFeedbackSurface, setPersonaFeedbackSurface] =
     React.useState<PersonaFeedbackSurface>("library");
+  const [createdAgent, setCreatedAgent] =
+    React.useState<CreateManagedAgentResponse | null>(null);
+  const [isPersonaSubmitPending, setIsPersonaSubmitPending] =
+    React.useState(false);
 
   const personas = personasQuery.data ?? [];
+  const availableRuntimes = React.useMemo(
+    () =>
+      (acpRuntimesQuery.data ?? []).filter(
+        (runtime): runtime is AcpRuntime =>
+          runtime.availability === "available",
+      ),
+    [acpRuntimesQuery.data],
+  );
   const { catalogPersonas, libraryPersonas, personaLabelsById } = React.useMemo(
     () => getPersonaLibraryState(personas),
     [personas],
@@ -86,20 +104,84 @@ export function usePersonaActions() {
   }
 
   async function handleSubmit(input: CreatePersonaInput | UpdatePersonaInput) {
+    if (isPersonaSubmitPending) {
+      return;
+    }
+
     clearFeedback("library");
+    setIsPersonaSubmitPending(true);
     try {
       if ("id" in input) {
         await updatePersonaMutation.mutateAsync(input);
         setPersonaNoticeMessage(`Updated ${input.displayName}.`);
       } else {
-        await createPersonaMutation.mutateAsync(input);
-        setPersonaNoticeMessage(`Created ${input.displayName}.`);
+        const runtime = availableRuntimes.find(
+          (candidate) => candidate.id === input.runtime,
+        );
+        if (!runtime) {
+          setPersonaErrorMessage(
+            "Choose an available provider for this agent.",
+          );
+          return;
+        }
+
+        const avatarUrl = await resolveManagedAgentAvatarUrl(
+          input.avatarUrl,
+          undefined,
+          runtime.avatarUrl,
+        );
+        const persona = await createPersonaMutation.mutateAsync({
+          ...input,
+          avatarUrl,
+        });
+        const agentInput: CreateManagedAgentInput = {
+          name: persona.displayName,
+          acpCommand: "buzz-acp",
+          agentCommand: runtime.command,
+          agentArgs: runtime.defaultArgs,
+          mcpCommand: runtime.mcpCommand ?? "",
+          personaId: persona.id,
+          harnessOverride: true,
+          systemPrompt: persona.systemPrompt,
+          avatarUrl: persona.avatarUrl ?? avatarUrl,
+          model: persona.model ?? undefined,
+          spawnAfterCreate: true,
+          startOnAppLaunch: true,
+          backend: { type: "local" },
+        };
+
+        try {
+          const created = await createAgentMutation.mutateAsync(agentInput);
+          setCreatedAgent(created);
+          if (created.spawnError) {
+            setPersonaErrorMessage(
+              `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
+            );
+          } else {
+            setPersonaNoticeMessage(
+              `Created and started ${created.agent.name}.`,
+            );
+          }
+          if (created.profileSyncError) {
+            setPersonaErrorMessage(
+              `${created.agent.name} was created, but profile sync failed: ${created.profileSyncError}`,
+            );
+          }
+        } catch (error) {
+          setPersonaErrorMessage(
+            error instanceof Error
+              ? `${persona.displayName} was created, but the agent instance could not be created: ${error.message}`
+              : `${persona.displayName} was created, but the agent instance could not be created.`,
+          );
+        }
       }
       setPersonaDialogState(null);
     } catch (error) {
       setPersonaErrorMessage(
         error instanceof Error ? error.message : "Failed to save persona.",
       );
+    } finally {
+      setIsPersonaSubmitPending(false);
     }
   }
 
@@ -217,7 +299,9 @@ export function usePersonaActions() {
   }
 
   const isPending =
+    isPersonaSubmitPending ||
     createPersonaMutation.isPending ||
+    createAgentMutation.isPending ||
     updatePersonaMutation.isPending ||
     deletePersonaMutation.isPending ||
     setPersonaActiveMutation.isPending ||
@@ -245,6 +329,8 @@ export function usePersonaActions() {
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
+    createdAgent,
+    setCreatedAgent,
     personaImportActions,
     handleSubmit,
     handleDelete,

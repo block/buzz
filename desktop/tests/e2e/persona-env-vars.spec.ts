@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 test.beforeEach(async ({ page }) => {
@@ -55,6 +56,24 @@ async function invokeTauri<T>(
     },
     { command, payload },
   );
+}
+
+async function openModelMenu(
+  page: import("@playwright/test").Page,
+  model: import("@playwright/test").Locator,
+) {
+  await model.click();
+  const menu = page
+    .getByRole("menu")
+    .filter({
+      has: page.getByRole("menuitemradio", {
+        name: "Custom model...",
+        exact: true,
+      }),
+    })
+    .last();
+  await expect(menu).toBeVisible();
+  return menu;
 }
 
 test("persona env_vars round-trip through create_persona + update_persona", async ({
@@ -221,12 +240,15 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
 }) => {
   await gotoApp(page);
 
-  // Open the Agents view, click New > Persona to open the persona dialog.
+  // Open the Agents view, click New > New agent to open the persona dialog.
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^Persona$/ }).click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
 
-  // The env vars editor should be present.
+  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
+  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+  // The env vars editor should be present after opening Advanced.
   await expect(page.getByTestId("env-vars-editor")).toBeVisible();
   // Initially empty (no rows).
   await expect(page.getByTestId("env-vars-key")).toHaveCount(0);
@@ -247,7 +269,110 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   await keys.nth(2).fill("OPENAI_BASE_URL");
   await values.nth(2).fill("https://api.openai.com/v1");
 
+  // Capture a screenshot of the dialog with three env vars filled. Helps
+  // reviewers see the UI at a glance.
+  await waitForAnimations(page);
+  await page
+    .getByRole("dialog")
+    .screenshot({ path: "test-results/persona-env-dialog.png" });
+
   // Remove the first row to verify per-row removal still works.
   await page.getByTestId("env-vars-remove").first().click();
   await expect(keys).toHaveCount(2);
+});
+
+test("persona model options follow the selected LLM provider", async ({
+  page,
+}) => {
+  await gotoApp(page);
+
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+
+  const provider = page.locator("#persona-runtime");
+  const llmProvider = page.locator("#persona-llm-provider");
+  const model = page.locator("#persona-model");
+  await expect(provider).toContainText("Buzz Agent (default)");
+  await expect(llmProvider).toBeVisible();
+  await expect(model).toBeVisible();
+  await expect(model).toContainText("Default model");
+
+  await llmProvider.click();
+  await page
+    .getByRole("menuitemradio", { name: "OpenAI", exact: true })
+    .click();
+  const providerApiKey = page.getByTestId("persona-provider-api-key");
+  await expect(page.getByText("OpenAI API key")).toBeVisible();
+  await expect(providerApiKey).toBeVisible();
+  await expect(page.getByTestId("env-vars-editor")).toHaveCount(0);
+  await expect(model).toBeVisible();
+
+  await providerApiKey.fill("sk-openai-test");
+  const openAiModelMenu = await openModelMenu(page, model);
+  await expect(
+    openAiModelMenu.getByRole("menuitemradio", {
+      name: "GPT-5.5",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    openAiModelMenu.getByRole("menuitemradio", { name: "GPT-5", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    openAiModelMenu.getByRole("menuitemradio", { name: /Claude/ }),
+  ).toHaveCount(0);
+  await openAiModelMenu
+    .getByRole("menuitemradio", { name: "GPT-5.5", exact: true })
+    .click();
+  await expect(model).toContainText("GPT-5.5");
+
+  await llmProvider.click();
+  await page
+    .getByRole("menuitemradio", { name: "Anthropic", exact: true })
+    .click();
+  await expect(page.getByText("Anthropic API key")).toBeVisible();
+  await expect(providerApiKey).toHaveValue("");
+  await expect(model).toBeVisible();
+
+  await providerApiKey.fill("sk-ant-test");
+
+  const anthropicModelMenu = await openModelMenu(page, model);
+  await expect(
+    anthropicModelMenu.getByRole("menuitemradio", {
+      name: "Claude Sonnet 4.6",
+    }),
+  ).toBeVisible();
+  await expect(
+    anthropicModelMenu.getByRole("menuitemradio", {
+      name: "GPT-5.5",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await anthropicModelMenu
+    .getByRole("menuitemradio", { name: "Claude Sonnet 4.6" })
+    .click();
+  await expect(model).toContainText("Claude Sonnet 4.6");
+
+  await llmProvider.click();
+  const llmProviderMenu = page.getByRole("menu").filter({
+    has: page.getByRole("menuitemradio", { name: "OpenAI", exact: true }),
+  });
+  await llmProviderMenu
+    .last()
+    .getByRole("menuitemradio", { name: "Databricks (default)", exact: true })
+    .click();
+  await expect(model).toBeVisible();
+  await expect(model).toContainText("Claude Sonnet 4.6");
+
+  const defaultModelMenu = await openModelMenu(page, model);
+  await expect(
+    defaultModelMenu.getByRole("menuitemradio", { name: "Claude Sonnet 4.6" }),
+  ).toBeVisible();
+  await expect(
+    defaultModelMenu.getByRole("menuitemradio", {
+      name: "GPT-5.5",
+      exact: true,
+    }),
+  ).toBeVisible();
 });

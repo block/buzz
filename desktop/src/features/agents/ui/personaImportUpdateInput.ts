@@ -1,5 +1,6 @@
 import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
 import type { AgentPersona, UpdatePersonaInput } from "@/shared/api/types";
+import { importedAvatarUrl } from "./personaDialogState";
 
 type BuildPersonaImportUpdateInputArgs = {
   existing: AgentPersona;
@@ -23,7 +24,7 @@ export function buildPersonaImportUpdateInput({
       ? preview.systemPrompt
       : existing.systemPrompt,
     avatarUrl: selectedFieldSet.has("avatarUrl")
-      ? (preview.avatarDataUrl ?? undefined)
+      ? importedAvatarUrl(preview) || undefined
       : (existing.avatarUrl ?? undefined),
     runtime: selectedFieldSet.has("runtime")
       ? (preview.runtime ?? undefined)

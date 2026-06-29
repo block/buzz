@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Camera, Link2, Upload, X } from "lucide-react";
 
+import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { Input } from "@/shared/ui/input";
@@ -76,13 +77,27 @@ export function AvatarUpload({
       <p className="text-sm font-medium">Add a profile photo</p>
       <div className="flex items-center gap-4">
         <div className="relative h-20 w-20 shrink-0">
-          <ProfileAvatar
-            avatarUrl={avatarUrl || null}
-            className="h-full w-full text-xl"
-            iconClassName="h-6 w-6"
-            label={previewName}
-            testId={`${testIdPrefix}-preview`}
-          />
+          <MaskedAvatarBadgeFrame
+            badge={
+              showClear ? null : (
+                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                  <Camera className="h-4 w-4" />
+                </div>
+              )
+            }
+            badgeBox={{ bottom: -4, height: 32, right: -4, width: 32 }}
+            className="h-20 w-20"
+            cutout={{ cx: 68, cy: 68, r: 20 }}
+            size={80}
+          >
+            <ProfileAvatar
+              avatarUrl={avatarUrl || null}
+              className="h-full w-full text-xl"
+              iconClassName="h-6 w-6"
+              label={previewName}
+              testId={`${testIdPrefix}-preview`}
+            />
+          </MaskedAvatarBadgeFrame>
           {showClear && onClear ? (
             <button
               className="absolute -right-1 -top-1 flex h-6 w-6 items-center justify-center rounded-full border border-background bg-destructive text-destructive-foreground shadow-xs transition-colors hover:bg-destructive/80"
@@ -93,11 +108,7 @@ export function AvatarUpload({
             >
               <X className="h-4 w-4" />
             </button>
-          ) : (
-            <div className="absolute -bottom-1 -right-1 flex h-8 w-8 items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow-xs">
-              <Camera className="h-4 w-4" />
-            </div>
-          )}
+          ) : null}
         </div>
         <button
           className={`flex flex-1 cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed bg-transparent px-4 py-5 transition-colors ${

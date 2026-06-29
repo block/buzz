@@ -3,7 +3,10 @@ import type * as React from "react";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 
-type AuxiliaryPanelHeaderProps = React.ComponentProps<"div">;
+type AuxiliaryPanelHeaderProps = React.ComponentProps<"div"> & {
+  /** Render header content without its own backdrop for a shared parent chrome. */
+  transparent?: boolean;
+};
 type AuxiliaryPanelHeaderGroupProps = React.ComponentProps<"div">;
 type AuxiliaryPanelTitleProps = React.ComponentProps<"h2">;
 
@@ -11,19 +14,23 @@ type AuxiliaryPanelTitleProps = React.ComponentProps<"h2">;
 export function AuxiliaryPanelHeader({
   className,
   children,
+  transparent = false,
   ...props
 }: AuxiliaryPanelHeaderProps) {
   return (
     <div
       className={cn(
-        "pointer-events-none relative z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+        "pointer-events-none relative z-40 overflow-visible",
+        transparent
+          ? "bg-transparent"
+          : "bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
         channelChrome.negativeMargin,
         className,
       )}
       {...props}
     >
       <div
-        className="pointer-events-auto relative z-30 shrink-0 cursor-default select-none px-5 py-2"
+        className="pointer-events-auto relative z-40 shrink-0 cursor-default select-none px-5 py-2"
         data-tauri-drag-region
       >
         <div className="flex h-9 min-w-0 items-center gap-2.5">{children}</div>

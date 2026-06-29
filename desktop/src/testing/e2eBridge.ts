@@ -44,6 +44,7 @@ type MockManagedAgentSeed = {
   channelNames?: string[];
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
+  lastError?: string | null;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -80,12 +81,15 @@ type E2eConfig = {
     };
     managedAgents?: MockManagedAgentSeed[];
     relayAgents?: MockRelayAgentSeed[];
+    agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
     feedReadError?: string;
     canvasReadError?: string;
     openDmDelayMs?: number;
+    sendMessageDelayMs?: number;
+    usersBatchDelayMs?: number;
     /** Delay (ms) applied to older-history (`history-` subId) fetches so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     historyDelayMs?: number;
@@ -448,6 +452,10 @@ type RawPersona = {
   display_name: string;
   avatar_url: string | null;
   system_prompt: string;
+  runtime?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
   env_vars?: Record<string, string>;
@@ -1027,7 +1035,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_started_at: status === "running" ? now : null,
     last_stopped_at: status === "stopped" ? now : null,
     last_exit_code: null,
-    last_error: null,
+    last_error: seed.lastError ?? null,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     backend: seed.backend ?? { type: "local" },
@@ -1112,6 +1120,8 @@ function resetMockPersonas(config?: E2eConfig) {
       display_name: "Fizz",
       avatar_url: null,
       system_prompt: "You are Fizz.",
+      runtime: "goose",
+      model: null,
       is_builtin: true,
       is_active: activePersonaIds.has("builtin:fizz"),
       created_at: now,
@@ -2519,6 +2529,11 @@ function emitMockHistory(
   const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
   const isVisibleOlderHistoryPage =
     subId.startsWith("history-") && filter.until !== undefined && !filter["#e"];
+  if (isVisibleOlderHistoryPage) {
+    const counter = window as unknown as { __HISTORY_FETCH_COUNT__?: number };
+    counter.__HISTORY_FETCH_COUNT__ =
+      (counter.__HISTORY_FETCH_COUNT__ ?? 0) + 1;
+  }
   if (delayMs > 0 && isVisibleOlderHistoryPage) {
     const probe = window as unknown as {
       __HISTORY_INFLIGHT__?: number;
@@ -3371,6 +3386,13 @@ async function handleGetUsersBatch(
   },
   config: E2eConfig | undefined,
 ) {
+  const usersBatchDelayMs = config?.mock?.usersBatchDelayMs ?? 0;
+  if (usersBatchDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, usersBatchDelayMs);
+    });
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const profiles: RawUsersBatchResponse["profiles"] = {};
@@ -4614,7 +4636,19 @@ async function handleGetFeed(
   };
 }
 
-async function handleListRelayAgents(): Promise<RawRelayAgent[]> {
+async function delayAgentList(config: E2eConfig | undefined) {
+  const agentListDelayMs = config?.mock?.agentListDelayMs ?? 0;
+  if (agentListDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, agentListDelayMs);
+    });
+  }
+}
+
+async function handleListRelayAgents(
+  config: E2eConfig | undefined,
+): Promise<RawRelayAgent[]> {
+  await delayAgentList(config);
   syncMockRelayAgentsFromManagedAgents();
   return mockRelayAgents.map(cloneRelayAgent);
 }
@@ -4741,7 +4775,10 @@ async function handleDiscoverManagedAgentPrereqs(
   };
 }
 
-async function handleListManagedAgents(): Promise<RawManagedAgent[]> {
+async function handleListManagedAgents(
+  config: E2eConfig | undefined,
+): Promise<RawManagedAgent[]> {
+  await delayAgentList(config);
   return mockManagedAgents.map(cloneManagedAgent);
 }
 
@@ -5084,6 +5121,7 @@ async function handleParsePersonaFiles(args: {
     display_name: string;
     system_prompt: string;
     avatar_data_url: string | null;
+    avatar_ref: string | null;
     source_file: string;
   }[];
   skipped: { source_file: string; reason: string }[];
@@ -5095,6 +5133,7 @@ async function handleParsePersonaFiles(args: {
         display_name: "Imported Persona",
         system_prompt: "You are an imported test persona.",
         avatar_data_url: null,
+        avatar_ref: null,
         source_file: args.fileName,
       },
     ],
@@ -5554,6 +5593,13 @@ async function handleSendChannelMessage(
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
   const kind = args.kind ?? 9;
+  const sendMessageDelayMs = config?.mock?.sendMessageDelayMs ?? 0;
+  if (sendMessageDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, sendMessageDelayMs),
+    );
+  }
+
   // NIP-92 imeta attachments. The real relay echoes these back on the stored
   // event; mirror that here so attachment renderers (FileCard, images, video)
   // have the imeta tags they key on. `null`/empty → no extra tags.
@@ -6679,7 +6725,7 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "list_relay_agents":
-        return handleListRelayAgents();
+        return handleListRelayAgents(activeConfig);
       case "list_personas":
         return handleListPersonas();
       case "create_persona":
@@ -6788,7 +6834,7 @@ export function maybeInstallE2eTauriMocks() {
       case "export_persona_to_json":
         return handleExportPersonaToJson(payload as { id: string });
       case "list_managed_agents":
-        return handleListManagedAgents();
+        return handleListManagedAgents(activeConfig);
       case "get_agent_memory":
         return handleGetAgentMemory(
           (payload as Parameters<typeof handleGetAgentMemory>[0]) ?? {},
@@ -6830,6 +6876,43 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: false,
         };
+      case "discover_agent_models": {
+        const input = (payload as { input?: { provider?: string } } | null)
+          ?.input;
+        const provider = input?.provider?.trim() ?? "";
+        const openAiModels = [
+          { id: "gpt-5.5", name: "GPT-5.5", description: null },
+          { id: "gpt-5.4", name: "GPT-5.4", description: null },
+          { id: "gpt-5.4-mini", name: "GPT-5.4 mini", description: null },
+          { id: "gpt-5.4-nano", name: "GPT-5.4 nano", description: null },
+        ];
+        const anthropicModels = [
+          {
+            id: "goose-claude-4-6-opus",
+            name: "Claude Opus 4.6",
+            description: null,
+          },
+          {
+            id: "goose-claude-4-6-sonnet",
+            name: "Claude Sonnet 4.6",
+            description: null,
+          },
+        ];
+        const models =
+          provider === "openai"
+            ? openAiModels
+            : provider === "anthropic"
+              ? anthropicModels
+              : [...anthropicModels, ...openAiModels];
+        return {
+          agentName: "mock-agent",
+          agentVersion: "0.0.0",
+          models,
+          agentDefaultModel: null,
+          selectedModel: null,
+          supportsSwitching: true,
+        };
+      }
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

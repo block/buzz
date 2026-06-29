@@ -2,6 +2,8 @@ import * as React from "react";
 
 import {
   type AttachManagedAgentToChannelResult,
+  useAvailableAcpRuntimes,
+  useCreateManagedAgentMutation,
   useManagedAgentLogQuery,
   useManagedAgentsQuery,
   useRelayAgentsQuery,
@@ -15,7 +17,11 @@ import { usePresenceQuery } from "@/features/presence/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import type {
+  AcpRuntime,
+  AcpRuntimeCatalogEntry,
+  AgentPersona,
   Channel,
+  CreateManagedAgentInput,
   CreateManagedAgentResponse,
   ManagedAgent,
 } from "@/shared/api/types";
@@ -27,6 +33,7 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "../lib/managedAgentControlActions";
+import { resolvePersonaRuntime } from "../lib/resolvePersonaRuntime";
 
 export function useManagedAgentActions() {
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -36,6 +43,8 @@ export function useManagedAgentActions() {
   const startMutation = useStartManagedAgentMutation();
   const stopMutation = useStopManagedAgentMutation();
   const deleteMutation = useDeleteManagedAgentMutation();
+  const createAgentMutation = useCreateManagedAgentMutation();
+  const availableRuntimesQuery = useAvailableAcpRuntimes();
   const startOnLaunchMutation = useSetManagedAgentStartOnAppLaunchMutation();
   const [isCreateOpen, setIsCreateOpen] = React.useState(false);
   const [agentToAddToChannel, setAgentToAddToChannel] =
@@ -152,6 +161,79 @@ export function useManagedAgentActions() {
         agent,
         startManagedAgent: startMutation.mutateAsync,
       });
+    } catch (error) {
+      setActionErrorMessage(
+        error instanceof Error ? error.message : "Failed to start agent.",
+      );
+    }
+  }
+
+  async function getAvailableRuntimesForStart() {
+    if (availableRuntimesQuery.isFetched) {
+      return availableRuntimesQuery.data ?? [];
+    }
+
+    const result = await availableRuntimesQuery.refetch();
+    return filterAvailableRuntimes(result.data);
+  }
+
+  async function handleStartPersona(persona: AgentPersona) {
+    clearFeedback();
+    try {
+      const runtimes = await getAvailableRuntimesForStart();
+      const defaultRuntime = runtimes[0] ?? null;
+      const { runtime, warnings, isOverridden } = resolvePersonaRuntime(
+        persona.runtime,
+        runtimes,
+        defaultRuntime,
+      );
+
+      if (!runtime) {
+        throw new Error("No available runtime found for this agent.");
+      }
+      if (isOverridden) {
+        throw new Error(
+          warnings[0] ??
+            "This agent's configured runtime is not available. Install the runtime or edit the agent before starting it.",
+        );
+      }
+
+      const input: CreateManagedAgentInput = {
+        name: persona.displayName,
+        acpCommand: "buzz-acp",
+        agentCommand: runtime.command,
+        agentArgs: runtime.defaultArgs,
+        mcpCommand: runtime.mcpCommand ?? "",
+        personaId: persona.id,
+        systemPrompt: persona.systemPrompt,
+        avatarUrl: persona.avatarUrl ?? undefined,
+        model: persona.model ?? undefined,
+        envVars: persona.envVars,
+        spawnAfterCreate: true,
+        startOnAppLaunch: true,
+        backend: { type: "local" },
+        harnessOverride: !persona.runtime || persona.runtime === runtime.id,
+      };
+
+      const created = await createAgentMutation.mutateAsync(input);
+      setCreatedAgent(created);
+      const notices = [...warnings];
+
+      if (created.spawnError) {
+        setActionErrorMessage(created.spawnError);
+      } else {
+        notices.push(`Started ${created.agent.name}.`);
+      }
+
+      if (created.profileSyncError) {
+        notices.push(created.profileSyncError);
+      }
+      if (notices.length > 0) {
+        setActionNoticeMessage(notices.join(" "));
+      }
+
+      void managedAgentsQuery.refetch();
+      void relayAgentsQuery.refetch();
     } catch (error) {
       setActionErrorMessage(
         error instanceof Error ? error.message : "Failed to start agent.",
@@ -345,10 +427,20 @@ export function useManagedAgentActions() {
   }
 
   const isPending =
+    createAgentMutation.isPending ||
     startMutation.isPending ||
     stopMutation.isPending ||
     startOnLaunchMutation.isPending ||
     deleteMutation.isPending;
+  const startingAgentPubkey =
+    startMutation.isPending && typeof startMutation.variables === "string"
+      ? startMutation.variables
+      : null;
+  const startingPersonaId =
+    createAgentMutation.isPending &&
+    typeof createAgentMutation.variables?.personaId === "string"
+      ? createAgentMutation.variables.personaId
+      : null;
 
   return {
     relayAgentsQuery,
@@ -372,7 +464,10 @@ export function useManagedAgentActions() {
     setActionNoticeMessage,
     actionErrorMessage,
     setActionErrorMessage,
+    startingAgentPubkey,
+    startingPersonaId,
     handleStart,
+    handleStartPersona,
     handleStop,
     handleDelete,
     handleToggleStartOnAppLaunch,
@@ -382,4 +477,12 @@ export function useManagedAgentActions() {
     refetchManagedAgents: () => void managedAgentsQuery.refetch(),
     refetchRelayAgents: () => void relayAgentsQuery.refetch(),
   };
+}
+
+function filterAvailableRuntimes(
+  runtimes: readonly AcpRuntimeCatalogEntry[] | undefined,
+): AcpRuntime[] {
+  return (runtimes ?? []).filter(
+    (runtime): runtime is AcpRuntime => runtime.availability === "available",
+  );
 }

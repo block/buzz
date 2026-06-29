@@ -59,15 +59,13 @@ export function AgentsView() {
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-4 pt-4 sm:px-6">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-          <div className="flex flex-col gap-6">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
+          <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
-              channelIdToName={agents.channelIdToName}
-              channelsByPubkey={agents.channelsByPubkey}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error
@@ -75,9 +73,8 @@ export function AgentsView() {
               }
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
-              personaLabelsById={personas.personaLabelsById}
-              presenceLoaded={agents.managedPresenceQuery.isSuccess}
-              presenceLookup={agents.managedPresenceQuery.data ?? {}}
+              startingAgentPubkey={agents.startingAgentPubkey}
+              startingPersonaId={agents.startingPersonaId}
               onBulkRemoveStopped={() => {
                 void agents.handleBulkRemoveStopped();
               }}
@@ -87,11 +84,17 @@ export function AgentsView() {
               onCreateAgent={() => {
                 agents.setIsCreateOpen(true);
               }}
-              onOpenAgentProfile={(pubkey) => {
-                openProfilePanel?.(pubkey);
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
               }}
               onOpenPersonaProfile={(persona) => {
                 openPersonaProfilePanel?.(persona);
+              }}
+              onStartAgent={(pubkey) => {
+                void agents.handleStart(pubkey);
+              }}
+              onStartPersona={(persona) => {
+                void agents.handleStartPersona(persona);
               }}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
@@ -192,6 +195,16 @@ export function AgentsView() {
           }}
         />
       ) : null}
+      {personas.createdAgent ? (
+        <SecretRevealDialog
+          created={personas.createdAgent}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setCreatedAgent(null);
+            }
+          }}
+        />
+      ) : null}
       {personas.personaDialogState ? (
         <PersonaDialog
           description={personas.personaDialogState.description}
@@ -206,10 +219,7 @@ export function AgentsView() {
           isImportPending={
             personas.personaImportActions.isApplyingPersonaImportUpdate
           }
-          isPending={
-            personas.createPersonaMutation.isPending ||
-            personas.updatePersonaMutation.isPending
-          }
+          isPending={personas.isPending}
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
           onImportUpdateFile={

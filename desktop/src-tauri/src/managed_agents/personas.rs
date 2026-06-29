@@ -50,7 +50,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[BuiltInPersona {
         "Orchard", "Buzz",
     ],
     model: None,
-    runtime: None,
+    runtime: Some("goose"),
 }];
 
 const RETIRED_PERSONAS: &[(&str, &str)] = &[

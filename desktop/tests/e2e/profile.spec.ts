@@ -301,7 +301,7 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
 
   await expect(page.getByTestId("profile-avatar-preview-clip")).toHaveCSS(
     "clip-path",
-    /url/,
+    /polygon/,
   );
   const editShell = page.getByTestId("profile-avatar-edit-shell");
   await expect(editShell).toHaveCSS("height", "54px");

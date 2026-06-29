@@ -65,8 +65,8 @@ versions in the table above.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/block/sprout.git
-cd sprout
+git clone https://github.com/block/buzz.git
+cd buzz
 
 # 2. Activate Hermit (optional but recommended)
 . ./bin/activate-hermit
@@ -308,7 +308,7 @@ to existing clients.
 
 ## Ecosystem
 
-Buzz is developed across multiple repositories. This repo (`block/sprout`)
+Buzz is developed across multiple repositories. This repo (`block/buzz`)
 is the open-source home for all application code — the relay, desktop app,
 mobile app, CLI, and agent harness. Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
@@ -316,7 +316,7 @@ enterprise-signed builds and infrastructure deployment.
 See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
 dependency diagram.
 
-**External contributors:** Fork `block/sprout`, open a PR, and CI runs
+**External contributors:** Fork `block/buzz`, open a PR, and CI runs
 automatically. No special access is required.
 
 **Block team members:** See the internal
