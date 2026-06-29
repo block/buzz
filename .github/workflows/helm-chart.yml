@@ -5,9 +5,9 @@ name: helm chart
 #
 # Publishing mirrors the relay image (see docker.yml): the chart is versioned
 # independently of the desktop app and the relay via its own `chart-v*` tags
-# (Chart.yaml `version`, cut by `just release-chart`). Only `chart-v*` tags
-# publish — `main` pushes and PRs stay lint/render-only so we never overwrite a
-# released chart version from an in-progress `main`.
+# (Chart.yaml `version`, cut by merging a `chart-release/<version>` PR). Only
+# `chart-v*` tags publish — `main` pushes and PRs stay lint/render-only so we
+# never overwrite a released chart version from an in-progress `main`.
 #
 # Why workflow_dispatch carries version/ref inputs (same reason as docker.yml):
 #   auto-tag-on-release-pr-merge.yml pushes `chart-v*` with the default
@@ -25,7 +25,7 @@ on:
         description: "Chart semver e.g. 0.1.0 (no chart-v prefix) — for chart-tag rescue dispatch"
         required: false
       ref:
-        description: "Tag/branch/SHA to publish, e.g. chart-v0.1.0"
+        description: "Chart tag ref to publish, e.g. chart-v0.1.0 (required when version is set)"
         required: false
         default: main
   push:
@@ -63,6 +63,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # On chart-tag rescue dispatch, lint/render the tagged commit that the
+          # publish job will package, not whatever `main` is when the dispatch
+          # runs. Empty string = default ref for push/PR events.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
           fetch-depth: 0
 
       - name: Set up Helm
@@ -184,6 +188,13 @@ jobs:
           set -euo pipefail
           if [ -n "$INPUT_VERSION" ]; then
             version="$INPUT_VERSION"
+            tag_ref="refs/tags/chart-v${version}"
+            tag_sha="$(git rev-parse -q --verify "${tag_ref}^{commit}" || true)"
+            head_sha="$(git rev-parse HEAD)"
+            if [ -z "$tag_sha" ] || [ "$head_sha" != "$tag_sha" ]; then
+              echo "::error::workflow_dispatch with version '$version' must check out matching tag 'chart-v${version}' (HEAD=$head_sha, tag=${tag_sha:-missing})"
+              exit 1
+            fi
           else
             # refs/tags/chart-v0.1.0 → github.ref_name is `chart-v0.1.0`.
             version="${REF_NAME#chart-v}"
