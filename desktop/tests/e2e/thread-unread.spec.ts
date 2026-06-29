@@ -365,23 +365,18 @@ test.describe("thread unread indicator", () => {
     await divider.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
 
+    const panel = page.getByTestId("message-thread-panel");
     await page.getByTestId("message-thread-head").scrollIntoViewIfNeeded();
-    await page
-      .locator(
+    await expect(
+      panel.locator(
         `[data-testid="thread-collapse-rail"][data-thread-head-id="mock-general-welcome"]`,
-      )
-      .click();
-    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expect(replies).toHaveCount(0);
-    const rootStack = page
-      .getByTestId("message-thread-replies")
-      .locator(
-        `[data-testid="message-thread-summary"][data-thread-head-id="mock-general-welcome"]`,
-      );
-    await expect(rootStack).toBeVisible();
-    await expect(rootStack).toContainText("6 replies");
-    await rootStack.click();
-    await expect(replies).toHaveCount(6);
+      ),
+    ).toHaveCount(0);
+    await expect(
+      panel.locator(
+        `[data-testid="thread-collapse-guide"][data-thread-head-id="mock-general-welcome"]`,
+      ),
+    ).toHaveCount(0);
 
     await page
       .locator(

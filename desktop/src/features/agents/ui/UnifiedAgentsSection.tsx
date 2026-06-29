@@ -221,7 +221,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               agents={ungrouped}
               collapsed={collapsed}
               groupKey="__ungrouped__"
-              label="Custom Agents"
+              label="Custom agents"
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -501,19 +501,19 @@ function NewAgentCard({
           disabled={isPersonasPending}
           onClick={onCreatePersona}
         >
-          Persona
+          New agent
         </DropdownMenuItem>
         {canChooseCatalog ? (
           <DropdownMenuItem
             disabled={isPersonasPending}
             onClick={onChooseCatalog}
           >
-            Choose from Catalog...
+            Choose from catalog
           </DropdownMenuItem>
         ) : null}
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={onCreateAgent}>
-          Custom Agent
+          Custom agent
         </DropdownMenuItem>
         <DropdownMenuItem onClick={openFilePicker}>
           Import persona file

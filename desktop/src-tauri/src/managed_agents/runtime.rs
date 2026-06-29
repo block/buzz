@@ -1522,28 +1522,6 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
-/// Resolve the effective system prompt, model, and provider from the *live*
-/// persona for **display and model-discovery only** — the ModelPicker shows the
-/// current persona model as selected. The spawn and deploy paths deliberately
-/// do NOT use this; they read the pinned record snapshot so a running agent
-/// stays on the config it was created with. The linked persona wins here; the
-/// record values are the fallback when no persona is linked or it was deleted.
-pub(crate) fn resolve_effective_prompt_model_provider(
-    persona_id: Option<&str>,
-    personas: &[crate::managed_agents::types::PersonaRecord],
-    record_prompt: Option<String>,
-    record_model: Option<String>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    match persona_id.and_then(|pid| personas.iter().find(|p| p.id == pid)) {
-        Some(p) => (
-            Some(p.system_prompt.clone()),
-            p.model.clone(),
-            p.provider.clone(),
-        ),
-        None => (record_prompt, record_model, None),
-    }
-}
-
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
@@ -1872,7 +1850,7 @@ fn child_rust_log_filter() -> String {
 
 /// Databricks host/model baked in at compile time for internal builds. Empty
 /// in OSS builds, where the `BUZZ_BUILD_DATABRICKS_*` env is unset.
-fn build_databricks_defaults() -> Vec<(&'static str, &'static str)> {
+pub(crate) fn build_databricks_defaults() -> Vec<(&'static str, &'static str)> {
     let mut defaults = Vec::new();
     if let Some(host) = option_env!("BUZZ_DESKTOP_BUILD_DATABRICKS_HOST") {
         if !host.is_empty() {
@@ -2007,7 +1985,7 @@ pub fn stop_managed_agent_process(
 /// switching need the initial bootstrap value. Provider injection is skipped
 /// when `provider_locked` is true (e.g. Claude runtimes that only work with
 /// Anthropic).
-fn runtime_metadata_env_vars<'a>(
+pub(crate) fn runtime_metadata_env_vars<'a>(
     model_env_var: Option<&'a str>,
     provider_env_var: Option<&'a str>,
     provider_locked: bool,

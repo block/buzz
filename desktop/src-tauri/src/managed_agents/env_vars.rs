@@ -296,36 +296,5 @@ pub(crate) fn merged_user_env(
     merged
 }
 
-/// Resolve a managed-agent record's persona env_vars, failing closed.
-///
-/// Three outcomes:
-/// - `persona_id` is `None` → returns `Ok({})` (agent has no persona, no env to inherit).
-/// - `persona_id = Some(id)` and the persona exists → returns `Ok(persona.env_vars)`.
-/// - `persona_id = Some(id)` and either personas.json fails to load OR no persona
-///   with that id exists → returns `Err(...)`.
-///
-/// Why fail closed: persona env_vars frequently carry API credentials
-/// (ANTHROPIC_API_KEY, OPENAI_API_KEY, …). If we swallow load errors and
-/// quietly spawn with an empty env, the agent comes up unauthenticated and
-/// the user sees a downstream "401 from provider" with no obvious cause.
-/// Better to surface the persona load failure at spawn/deploy/discovery
-/// time.
-pub(crate) fn resolve_persona_env(
-    app: &tauri::AppHandle,
-    persona_id: Option<&str>,
-) -> Result<BTreeMap<String, String>, String> {
-    let Some(pid) = persona_id else {
-        return Ok(BTreeMap::new());
-    };
-    let personas = super::load_personas(app).map_err(|e| {
-        format!("failed to load personas while resolving env for persona `{pid}`: {e}")
-    })?;
-    let persona = personas
-        .into_iter()
-        .find(|p| p.id == pid)
-        .ok_or_else(|| format!("persona `{pid}` not found while resolving env"))?;
-    Ok(persona.env_vars)
-}
-
 #[cfg(test)]
 mod tests;

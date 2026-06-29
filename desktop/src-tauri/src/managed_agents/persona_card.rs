@@ -9,6 +9,7 @@ pub struct ParsedPersonaPreview {
     pub display_name: String,
     pub system_prompt: String,
     pub avatar_data_url: Option<String>,
+    pub avatar_ref: Option<String>,
     pub runtime: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -69,6 +70,7 @@ pub fn parse_png_persona(png_bytes: &[u8]) -> Result<ParsedPersonaPreview, Strin
         display_name: fields.display_name,
         system_prompt: fields.system_prompt,
         avatar_data_url,
+        avatar_ref: None,
         runtime: fields.runtime,
         model: fields.model,
         provider: fields.provider,
@@ -224,6 +226,7 @@ pub fn parse_json_persona(json_bytes: &[u8]) -> Result<ParsedPersonaPreview, Str
         display_name: fields.display_name,
         system_prompt: fields.system_prompt,
         avatar_data_url: fields.avatar_url,
+        avatar_ref: None,
         runtime: fields.runtime,
         model: fields.model,
         provider: fields.provider,
@@ -284,6 +287,7 @@ pub fn parse_md_persona(md_bytes: &[u8]) -> Result<ParsedPersonaPreview, String>
         display_name: config.display_name,
         system_prompt: config.prompt,
         avatar_data_url: None, // .persona.md avatars are paths, not data URIs
+        avatar_ref: config.avatar,
         runtime: config.runtime,
         model,
         provider: None, // .persona.md format does not carry llmProvider
@@ -385,6 +389,7 @@ pub fn parse_zip_pack(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, Strin
             display_name: p.display_name.clone(),
             system_prompt: p.system_prompt.clone(),
             avatar_data_url: None,
+            avatar_ref: p.avatar.clone(),
             runtime: p.runtime.clone(),
             model: p.model.clone(),
             provider: None, // persona packs do not carry llmProvider
@@ -804,6 +809,16 @@ mod tests {
             Some("https://example.com/ada.png")
         );
         assert!(result.source_file.is_empty());
+    }
+
+    #[test]
+    fn parse_md_carries_avatar_ref() {
+        let md = b"---\nname: goosey\ndisplay_name: Goosey\navatar: app-avatar:gloopies-19\ndescription: A goose persona.\n---\nYou are Goosey.\n";
+        let result = parse_md_persona(md).unwrap();
+
+        assert_eq!(result.display_name, "Goosey");
+        assert!(result.avatar_data_url.is_none());
+        assert_eq!(result.avatar_ref.as_deref(), Some("app-avatar:gloopies-19"));
     }
 
     #[test]

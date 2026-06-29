@@ -6,7 +6,9 @@ import {
   createPersonaDialogState,
   duplicatePersonaDialogState,
   editPersonaDialogState,
+  formatPersonaNamePoolText,
   importPersonaDialogState,
+  parsePersonaNamePoolText,
 } from "./personaDialogState.ts";
 
 test("canSubmitPersonaDialog requires a display name but not a system prompt", () => {
@@ -40,11 +42,25 @@ test("canSubmitPersonaDialog blocks while a save is pending", () => {
   );
 });
 
+test("persona name pool helpers parse, format, and clear values", () => {
+  assert.deepEqual(parsePersonaNamePoolText("Birch, Compass, , Ridge "), [
+    "Birch",
+    "Compass",
+    "Ridge",
+  ]);
+  assert.deepEqual(parsePersonaNamePoolText("   "), []);
+  assert.equal(
+    formatPersonaNamePoolText(["Birch", "Compass", "Ridge"]),
+    "Birch, Compass, Ridge",
+  );
+  assert.equal(formatPersonaNamePoolText(undefined), "");
+});
+
 test("createPersonaDialogState returns a fresh empty draft", () => {
   const first = createPersonaDialogState();
   const second = createPersonaDialogState();
 
-  assert.equal(first.title, "Create persona");
+  assert.equal(first.title, "Create agent");
   assert.deepEqual(first.initialValues, {
     displayName: "",
     avatarUrl: "",
@@ -123,7 +139,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     updatedAt: "2025-01-02T00:00:00Z",
   });
 
-  assert.equal(state.title, "Edit persona");
+  assert.equal(state.title, "Edit agent");
   assert.equal(state.description, "");
   assert.equal(state.submitLabel, "Save changes");
   assert.deepEqual(state.initialValues, {
@@ -165,6 +181,7 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
   const state = importPersonaDialogState({
     displayName: "Imported",
     avatarDataUrl: null,
+    avatarRef: null,
     systemPrompt: "Imported prompt",
     runtime: null,
     model: "model-b",
@@ -182,6 +199,94 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
     model: "model-b",
     provider: undefined,
   });
+});
+
+test("importPersonaDialogState preserves imported name pools", () => {
+  const state = importPersonaDialogState({
+    displayName: "Named imports",
+    avatarDataUrl: null,
+    avatarRef: null,
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: ["Birch", "Compass"],
+    sourceFile: "named.persona.json",
+  });
+
+  assert.deepEqual(state.initialValues.namePool, ["Birch", "Compass"]);
+});
+
+test("importPersonaDialogState filters unresolved Goose app-avatar refs", () => {
+  const state = importPersonaDialogState({
+    displayName: "Goosey",
+    avatarDataUrl: null,
+    avatarRef: "app-avatar:gloopies-19",
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: [],
+    sourceFile: "goosey.persona.md",
+  });
+
+  assert.equal(state.initialValues.avatarUrl, "");
+});
+
+test("importPersonaDialogState filters nonpersistent imported avatar refs", () => {
+  for (const avatarRef of [
+    "blob:https://buzz.example/temporary-avatar",
+    "ipfs://bafybeigdyrzt",
+  ]) {
+    const state = importPersonaDialogState({
+      displayName: "Packed avatar",
+      avatarDataUrl: null,
+      avatarRef,
+      systemPrompt: "Imported prompt",
+      runtime: null,
+      model: null,
+      provider: null,
+      namePool: [],
+      sourceFile: "pack.persona.zip",
+    });
+
+    assert.equal(state.initialValues.avatarUrl, "");
+  }
+});
+
+test("importPersonaDialogState preserves URL-like avatar refs", () => {
+  const state = importPersonaDialogState({
+    displayName: "Hosted avatar",
+    avatarDataUrl: null,
+    avatarRef: "https://relay.example/avatar.png",
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: [],
+    sourceFile: "hosted.persona.md",
+  });
+
+  assert.equal(
+    state.initialValues.avatarUrl,
+    "https://relay.example/avatar.png",
+  );
+});
+
+test("importPersonaDialogState filters relative avatar refs from packs", () => {
+  const state = importPersonaDialogState({
+    displayName: "Packed avatar",
+    avatarDataUrl: null,
+    avatarRef: "./avatars/lep.png",
+    systemPrompt: "Imported prompt",
+    runtime: null,
+    model: null,
+    provider: null,
+    namePool: [],
+    sourceFile: "pack.persona.zip",
+  });
+
+  assert.equal(state.initialValues.avatarUrl, "");
 });
 
 test("editPersonaDialogState preserves provider=databricks", () => {
@@ -248,6 +353,7 @@ test("importPersonaDialogState preserves provider=anthropic", () => {
   const state = importPersonaDialogState({
     displayName: "Imported With Provider",
     avatarDataUrl: null,
+    avatarRef: null,
     systemPrompt: "Anthropic agent.",
     runtime: "goose",
     model: "claude-sonnet",

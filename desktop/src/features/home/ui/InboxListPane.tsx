@@ -169,16 +169,22 @@ export function InboxListPane({
       >
         <button
           className={cn(
-            "relative block w-full border-l px-3 py-4 text-left transition-colors after:pointer-events-none after:absolute after:bottom-0 after:left-[3.625rem] after:right-0 after:h-px after:bg-border/45 after:content-['']",
-            isSelected
-              ? "border-l-transparent bg-[var(--inbox-row-highlight-bg)]"
-              : "border-l-transparent group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] active:bg-muted/40",
+            "relative block w-full border-l border-l-transparent px-3 py-4 text-left after:pointer-events-none after:absolute after:bottom-0 after:left-[3.625rem] after:right-3 after:h-px after:bg-border/45 after:content-['']",
             index === items.length - 1 && "after:hidden",
           )}
           onClick={() => onSelect(item.id)}
           type="button"
         >
-          <div className="flex min-w-0 items-start gap-2.5">
+          <span
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute inset-y-0 left-0 right-3 transition-colors",
+              isSelected
+                ? "bg-[var(--inbox-row-highlight-bg)]"
+                : "group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-active/inbox-item:bg-muted/40",
+            )}
+          />
+          <div className="relative flex min-w-0 items-start gap-2.5">
             <div className="relative shrink-0">
               <UserAvatar
                 avatarUrl={item.avatarUrl}
@@ -233,7 +239,7 @@ export function InboxListPane({
           </div>
         </button>
 
-        <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-[var(--inbox-row-highlight-bg)] p-1 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
+        <div className="pointer-events-none absolute right-3 top-2 z-10 flex items-center gap-0.5 rounded-full bg-[var(--inbox-row-highlight-bg)] p-1 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
           {isDone ? (
             <InboxRowActionButton
               label="Mark unread"
@@ -444,7 +450,7 @@ export function InboxListPane({
         </div>
       ) : (
         <div
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"
           data-testid="home-inbox-list"
           ref={scrollRef}
         >
