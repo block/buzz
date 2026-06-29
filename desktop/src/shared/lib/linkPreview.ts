@@ -32,7 +32,7 @@ export type SupportedLinkPreview = {
 };
 
 const SUPPORTED_URL_RE =
-  /\b(?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+/gi;
+  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
   /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
 const MAX_PREVIEWS = 8;
@@ -88,6 +88,27 @@ function collectCodeRanges(content: string): HiddenRange[] {
   }
 
   for (const match of content.matchAll(/`[^`\n]*`/g)) {
+    ranges.push({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    });
+  }
+
+  for (const match of content.matchAll(/^(?: {4}|\t).*(?:\n|$)/gm)) {
+    ranges.push({
+      start: match.index ?? 0,
+      end: (match.index ?? 0) + match[0].length,
+    });
+  }
+
+  return ranges;
+}
+
+function collectMarkdownImageLinkRanges(content: string): HiddenRange[] {
+  const ranges: HiddenRange[] = [];
+
+  for (const match of content.matchAll(MARKDOWN_SUPPORTED_LINK_RE)) {
+    if (!match[0]?.startsWith("!")) continue;
     ranges.push({
       start: match.index ?? 0,
       end: (match.index ?? 0) + match[0].length,
@@ -165,14 +186,19 @@ function collectInlineSpoilerRanges(
 
 function stripHiddenLinkPreviewContent(content: string): string {
   const codeRanges = collectCodeRanges(content);
-  const blockSpoilerRanges = collectBlockSpoilerRanges(content, codeRanges);
+  const imageLinkRanges = collectMarkdownImageLinkRanges(content);
+  const nonSpoilerHiddenRanges = [...codeRanges, ...imageLinkRanges];
+  const blockSpoilerRanges = collectBlockSpoilerRanges(
+    content,
+    nonSpoilerHiddenRanges,
+  );
   const inlineSpoilerRanges = collectInlineSpoilerRanges(content, [
-    ...codeRanges,
+    ...nonSpoilerHiddenRanges,
     ...blockSpoilerRanges,
   ]);
 
   return maskRanges(content, [
-    ...codeRanges,
+    ...nonSpoilerHiddenRanges,
     ...blockSpoilerRanges,
     ...inlineSpoilerRanges,
   ]);
@@ -467,9 +493,12 @@ export function extractSupportedLinkPreviews(
   }
 
   for (const match of searchable.matchAll(SUPPORTED_URL_RE)) {
+    const prefix = match[1] ?? "";
+    const href = match[2];
+    if (!href) continue;
     candidates.push({
-      href: match[0],
-      index: match.index ?? 0,
+      href,
+      index: (match.index ?? 0) + prefix.length,
       order,
     });
     order += 1;

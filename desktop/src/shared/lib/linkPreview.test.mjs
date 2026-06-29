@@ -172,6 +172,45 @@ test("extractSupportedLinkPreviews skips URLs inside inline and fenced code", ()
   );
 });
 
+test("extractSupportedLinkPreviews skips URLs inside indented code", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "    https://docs.google.com/document/d/hidden/edit",
+        "\tgithub.com/block/sprout/pull/4",
+        "https://github.com/block/sprout/pull/5",
+      ].join("\n"),
+    ).map((preview) => preview.title),
+    ["block/sprout #5"],
+  );
+});
+
+test("extractSupportedLinkPreviews skips markdown image link URLs", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "![alt](https://docs.google.com/document/d/doc123/edit)",
+        "![alt](https://github.com/block/sprout)",
+        "[Composer attachment polish](https://docs.google.com/document/d/doc456/edit)",
+      ].join("\n"),
+    ).map((preview) => preview.title),
+    ["Composer attachment polish"],
+  );
+});
+
+test("extractSupportedLinkPreviews requires bare URL boundaries", () => {
+  assert.deepEqual(
+    extractSupportedLinkPreviews(
+      [
+        "https://evil-github.com/block/sprout/pull/1",
+        "https://example.com/go/https://docs.google.com/document/d/doc123/edit",
+        "(https://github.com/block/sprout/pull/2)",
+      ].join(" "),
+    ).map((preview) => preview.title),
+    ["block/sprout #2"],
+  );
+});
+
 test("extractSupportedLinkPreviews skips links inside inline spoilers", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
