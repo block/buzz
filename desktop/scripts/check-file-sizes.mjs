@@ -95,6 +95,13 @@ const overrides = new Map([
   // A small overage from load-bearing security plumbing on a file already at
   // 893 lines, not generic debt growth. Approved override; still queued to split.
   ["src-tauri/src/app_state.rs", 1012],
+  // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
+  // class grew from ~700 lines to ~1019 with the addition of
+  // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
+  // publishOneSlot, deleteExtraSlots, and the no-op suppression integration
+  // test. Load-bearing feature growth, queued to split publishSplitSlots path
+  // into readStateManagerSplit.ts.
+  ["src/features/channels/readState/readStateManager.ts", 1030],
 ]);
 
 await runFileSizeCheck({
