@@ -17,6 +17,8 @@ pub struct UserProfile {
     pub about: Option<String>,
     /// NIP-05 identifier (user@domain).
     pub nip05_handle: Option<String>,
+    /// Git email address for commit trailer injection (from NIP-01 kind:0 `email` field).
+    pub git_email: Option<String>,
 }
 
 /// Lightweight user record returned from search.
@@ -30,6 +32,8 @@ pub struct UserSearchProfile {
     pub avatar_url: Option<String>,
     /// NIP-05 identifier (user@domain).
     pub nip05_handle: Option<String>,
+    /// Git email address for commit trailer injection (from NIP-01 kind:0 `email` field).
+    pub git_email: Option<String>,
 }
 
 /// Ensure a user record exists for the given pubkey (upsert).
@@ -58,10 +62,11 @@ pub async fn get_user(pool: &PgPool, pubkey: &[u8]) -> Result<Option<UserProfile
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
-        SELECT pubkey, display_name, avatar_url, about, nip05_handle
+        SELECT pubkey, display_name, avatar_url, about, nip05_handle, git_email
         FROM users
         WHERE pubkey = $1
         "#,
@@ -71,17 +76,18 @@ pub async fn get_user(pool: &PgPool, pubkey: &[u8]) -> Result<Option<UserProfile
     .await?;
 
     Ok(row.map(
-        |(pubkey, display_name, avatar_url, about, nip05_handle)| UserProfile {
+        |(pubkey, display_name, avatar_url, about, nip05_handle, git_email)| UserProfile {
             pubkey,
             display_name,
             avatar_url,
             about,
             nip05_handle,
+            git_email,
         },
     ))
 }
 
-/// Update a user's profile fields (display_name, avatar_url, about, nip05_handle).
+/// Update a user's profile fields (display_name, avatar_url, about, nip05_handle, git_email).
 /// Only updates fields that are Some -- None fields are left unchanged.
 /// At least one field must be Some, otherwise returns Ok(()) without touching the DB.
 ///
@@ -96,6 +102,7 @@ pub async fn update_user_profile(
     avatar_url: Option<&str>,
     about: Option<&str>,
     nip05_handle: Option<&str>,
+    git_email: Option<&str>,
 ) -> Result<()> {
     let mut set_parts: Vec<String> = Vec::new();
     let mut param_idx = 1u32;
@@ -114,6 +121,10 @@ pub async fn update_user_profile(
     }
     if nip05_handle.is_some() {
         set_parts.push(format!("nip05_handle = ${param_idx}"));
+        param_idx += 1;
+    }
+    if git_email.is_some() {
+        set_parts.push(format!("git_email = ${param_idx}"));
         param_idx += 1;
     }
 
@@ -145,6 +156,9 @@ pub async fn update_user_profile(
     if nip05_handle.is_some() {
         query = query.bind(empty_to_none(nip05_handle));
     }
+    if git_email.is_some() {
+        query = query.bind(empty_to_none(git_email));
+    }
     query = query.bind(pubkey);
     query.execute(pool).await?;
     Ok(())
@@ -166,10 +180,11 @@ pub async fn get_user_by_nip05(
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
     >(
         r#"
-        SELECT pubkey, display_name, avatar_url, about, nip05_handle
+        SELECT pubkey, display_name, avatar_url, about, nip05_handle, git_email
         FROM users
         WHERE LOWER(nip05_handle) = LOWER($1)
         LIMIT 1
@@ -180,12 +195,13 @@ pub async fn get_user_by_nip05(
     .await?;
 
     Ok(row.map(
-        |(pubkey, display_name, avatar_url, about, nip05_handle)| UserProfile {
+        |(pubkey, display_name, avatar_url, about, nip05_handle, git_email)| UserProfile {
             pubkey,
             display_name,
             avatar_url,
             about,
             nip05_handle,
+            git_email,
         },
     ))
 }
@@ -220,9 +236,9 @@ pub async fn search_users(
     let prefix_pattern = format!("{escaped}%");
     let limit = limit.clamp(1, 50) as i64;
 
-    let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
+    let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>, Option<String>)>(
         r#"
-        SELECT pubkey, display_name, avatar_url, nip05_handle
+        SELECT pubkey, display_name, avatar_url, nip05_handle, git_email
         FROM users
         WHERE LOWER(COALESCE(display_name, '')) LIKE $1 ESCAPE '\'
            OR LOWER(COALESCE(nip05_handle, '')) LIKE $1 ESCAPE '\'
@@ -251,11 +267,12 @@ pub async fn search_users(
     Ok(rows
         .into_iter()
         .map(
-            |(pubkey, display_name, avatar_url, nip05_handle)| UserSearchProfile {
+            |(pubkey, display_name, avatar_url, nip05_handle, git_email)| UserSearchProfile {
                 pubkey,
                 display_name,
                 avatar_url,
                 nip05_handle,
+                git_email,
             },
         )
         .collect())

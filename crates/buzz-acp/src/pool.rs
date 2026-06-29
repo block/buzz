@@ -1648,7 +1648,7 @@ fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
 /// Parse kind:0 profile events into a `PromptProfileLookup`.
 ///
 /// Each kind:0 event has `pubkey` and JSON `content` with optional fields:
-/// `display_name` (or `name`), `nip05`.
+/// `display_name` (or `name`), `nip05`, `email`.
 fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLookup> {
     let events = json.as_array()?;
     let mut lookup = PromptProfileLookup::new();
@@ -1667,6 +1667,11 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
                     .get("nip05")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
+                let git_email = profile
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
                 let is_agent = profile_event_is_agent(ev);
                 lookup.insert(
                     pk.to_ascii_lowercase(),
@@ -1674,6 +1679,7 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
                         display_name,
                         nip05_handle,
                         is_agent,
+                        git_email,
                     },
                 );
             }
@@ -2805,6 +2811,7 @@ mod tests {
                 display_name: Some("Wes".into()),
                 nip05_handle: Some("wes@example.com".into()),
                 is_agent: false,
+                git_email: None,
             })
         );
     }
@@ -2835,6 +2842,46 @@ mod tests {
     fn test_parse_kind0_profile_lookup_returns_none_for_empty() {
         assert!(parse_kind0_profile_lookup(json!([])).is_none());
         assert!(parse_kind0_profile_lookup(json!({})).is_none());
+    }
+
+    #[test]
+    fn test_parse_kind0_profile_lookup_extracts_email() {
+        let lookup = parse_kind0_profile_lookup(json!([
+            {
+                "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "kind": 0,
+                "content": "{\"display_name\":\"Will\",\"email\":\"will@example.com\"}",
+                "created_at": 1000,
+                "tags": []
+            }
+        ]))
+        .expect("lookup should parse");
+
+        let profile = lookup
+            .get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .expect("profile should be present");
+        assert_eq!(profile.git_email, Some("will@example.com".into()));
+        assert_eq!(profile.display_name, Some("Will".into()));
+    }
+
+    #[test]
+    fn test_parse_kind0_profile_lookup_ignores_empty_email() {
+        let lookup = parse_kind0_profile_lookup(json!([
+            {
+                "pubkey": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "kind": 0,
+                "content": "{\"display_name\":\"Bob\",\"email\":\"\"}",
+                "created_at": 1000,
+                "tags": []
+            }
+        ]))
+        .expect("lookup should parse");
+
+        let profile = lookup
+            .get("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("profile should be present");
+        // Empty email string should be treated as absent (None).
+        assert_eq!(profile.git_email, None);
     }
 
     #[test]

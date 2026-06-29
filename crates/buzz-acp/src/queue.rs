@@ -740,6 +740,9 @@ pub struct PromptProfile {
     /// i.e. it is an owned agent rather than a human. Used to gate reply-anchor
     /// flattening (UX routing heuristic, not a security boundary).
     pub is_agent: bool,
+    /// Git email from the NIP-01 kind:0 `email` field. Injected into `[Context]`
+    /// as `Requester-Git-Email:` so agents can use it for commit trailers.
+    pub git_email: Option<String>,
 }
 
 /// Pubkey-keyed profile lookup used while formatting ACP prompts.
@@ -959,6 +962,7 @@ fn resolve_reply_anchor(
 /// replies; in the channel branch a `Some` anchor means a human-facing
 /// top-level mention whose reply should open a new thread rooted at the
 /// triggering event.
+#[allow(clippy::too_many_arguments)]
 fn format_context_hints(
     channel_id: Uuid,
     channel_info: Option<&PromptChannelInfo>,
@@ -966,11 +970,29 @@ fn format_context_hints(
     is_dm: bool,
     has_conversation_context: bool,
     reply_anchor: Option<&str>,
+    sender_pubkey: &str,
+    profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
     let channel_display = match channel_info {
         Some(ci) => format!("{} (#{channel_id})", ci.name),
         None => channel_id.to_string(),
     };
+
+    // Emit `Requester-Git-Email: Name <email>` when the triggering event's author
+    // has a git_email set in their profile. Agents use this for commit trailers
+    // instead of falling back to `git config user.email`.
+    let requester_git_email_line = profile_lookup
+        .and_then(|lookup| lookup.get(&normalize_lookup_key(sender_pubkey)))
+        .and_then(|profile| {
+            let email = profile.git_email.as_deref()?;
+            let name = profile
+                .display_name
+                .as_deref()
+                .or(profile.nip05_handle.as_deref())
+                .unwrap_or("Unknown");
+            Some(format!("\nRequester-Git-Email: {name} <{email}>"))
+        })
+        .unwrap_or_default();
 
     // DM check comes first — a DM reply has both thread tags AND is_dm=true,
     // and the scope should be "dm" (not "thread") because the agent is in a DM.
@@ -1005,6 +1027,7 @@ fn format_context_hints(
                 append_reply_instruction(&mut s, event_id);
             }
         }
+        s.push_str(&requester_git_email_line);
         s
     } else if let Some(ref root) = thread_tags.root_event_id {
         let ctx_hint = if has_conversation_context {
@@ -1027,6 +1050,7 @@ fn format_context_hints(
         if let Some(event_id) = reply_anchor {
             append_reply_instruction(&mut s, event_id);
         }
+        s.push_str(&requester_git_email_line);
         s
     } else {
         let mut s = format!(
@@ -1038,6 +1062,7 @@ fn format_context_hints(
         if let Some(event_id) = reply_anchor {
             append_new_thread_reply_instruction(&mut s, event_id);
         }
+        s.push_str(&requester_git_email_line);
         s
     }
 }
@@ -1194,6 +1219,8 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         is_dm,
         args.conversation_context.is_some(),
         reply_anchor.as_deref(),
+        &sender_pubkey,
+        args.profile_lookup,
     ));
 
     // 3. Conversation context (thread or DM).
@@ -3504,6 +3531,99 @@ mod tests {
         assert_eq!(
             slash_command_for_batch(&make_single_batch("@Eva hello"), &[]),
             None
+        );
+    }
+
+    // ── Requester-Git-Email injection ────────────────────────────────────────
+
+    /// When the triggering event's author has a git_email in their profile,
+    /// `[Context]` should include a `Requester-Git-Email:` line.
+    #[test]
+    fn test_format_context_hints_emits_requester_git_email_when_present() {
+        let batch = make_single_batch("hello");
+        let sender_hex = batch.events[0].event.pubkey.to_hex();
+        let profiles = HashMap::from([(
+            sender_hex.clone(),
+            PromptProfile {
+                display_name: Some("Will Pfleger".into()),
+                git_email: Some("will@example.com".into()),
+                ..Default::default()
+            },
+        )]);
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            prompt.contains("Requester-Git-Email: Will Pfleger <will@example.com>"),
+            "context block should include Requester-Git-Email when profile has git_email"
+        );
+    }
+
+    /// When the triggering event's author has no git_email, `[Context]` must
+    /// NOT include a `Requester-Git-Email:` line.
+    #[test]
+    fn test_format_context_hints_omits_requester_git_email_when_absent() {
+        let batch = make_single_batch("hello");
+        let sender_hex = batch.events[0].event.pubkey.to_hex();
+        let profiles = HashMap::from([(
+            sender_hex.clone(),
+            PromptProfile {
+                display_name: Some("Will Pfleger".into()),
+                git_email: None,
+                ..Default::default()
+            },
+        )]);
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            !prompt.contains("Requester-Git-Email"),
+            "context block should not include Requester-Git-Email when git_email is absent"
+        );
+    }
+
+    /// Falls back to display_name when constructing the Requester-Git-Email line.
+    /// When display_name is absent, nip05_handle is used as the name part.
+    #[test]
+    fn test_format_context_hints_requester_git_email_uses_nip05_as_name_fallback() {
+        let batch = make_single_batch("hello");
+        let sender_hex = batch.events[0].event.pubkey.to_hex();
+        let profiles = HashMap::from([(
+            sender_hex.clone(),
+            PromptProfile {
+                display_name: None,
+                nip05_handle: Some("will@relay.example.com".into()),
+                git_email: Some("will@example.com".into()),
+                ..Default::default()
+            },
+        )]);
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        assert!(
+            prompt.contains("Requester-Git-Email: will@relay.example.com <will@example.com>"),
+            "name part should fall back to nip05_handle when display_name is absent"
         );
     }
 }

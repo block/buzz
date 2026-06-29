@@ -571,6 +571,7 @@ impl Db {
         avatar_url: Option<&str>,
         about: Option<&str>,
         nip05_handle: Option<&str>,
+        git_email: Option<&str>,
     ) -> Result<()> {
         user::update_user_profile(
             &self.pool,
@@ -579,6 +580,7 @@ impl Db {
             avatar_url,
             about,
             nip05_handle,
+            git_email,
         )
         .await
     }
