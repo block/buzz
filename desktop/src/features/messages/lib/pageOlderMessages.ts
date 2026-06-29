@@ -22,22 +22,9 @@ export const MIN_TOP_LEVEL_ROWS_PER_FETCH = 30;
 
 // Hard ceiling on relay pages fetched in one pass. On reply-heavy channels a
 // batch yields only a few visible rows, so the row floor alone could dig through
-// hundreds of messages behind one spinner and commit them at once (a sudden
-// "flood" with a tiny scrollbar). Capping per-pass keeps each fetch a bounded
-// page; the scroll observer re-arms to page further while in view.
+// hundreds of messages behind one spinner. Capping per-pass keeps each fetch a
+// bounded page; the scroll observer re-arms to page further while in view.
 const MAX_BATCHES_PER_FETCH = 3;
-
-// Yield a frame so the rows just merged paint before the next round-trip;
-// otherwise a multi-batch pass renders as one bulk commit at the loop's end.
-function yieldToPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(() => resolve());
-    } else {
-      setTimeout(resolve, 0);
-    }
-  });
-}
 
 export type PageOlderResult = {
   /** False once a short relay page proves history is exhausted. */
@@ -68,16 +55,15 @@ export async function pageOlderMessagesUntilRowFloor(
   let hasOlderMessages = true;
   let batchesFetched = 0;
 
-  while (hasOlderMessages && shouldContinue()) {
-    const before = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-    if (before.length === 0) {
-      break;
-    }
+  // Accumulate every batch of this pass and commit to the cache once at the
+  // end. Committing per batch paints the timeline in several small steps under
+  // one spinner — on reply-heavy windows each 200-event batch adds only a few
+  // visible rows, so the user sees the loader dribble messages in 1-5 at a
+  // time. One commit = one bounded growth step.
+  const fetched: RelayEvent[] = [];
+  let oldestTimestamp = baseline[0].created_at;
 
-    // `until` is inclusive — the relay returns the boundary message again, but
-    // sortMessages dedupes by id. Subtracting 1 risks skipping same-second
-    // messages.
-    const oldestTimestamp = before[0].created_at;
+  while (hasOlderMessages && shouldContinue()) {
     const olderMessages = await relayClient.fetchChannelHistoryBefore(
       channelId,
       oldestTimestamp,
@@ -97,25 +83,24 @@ export async function pageOlderMessagesUntilRowFloor(
     }
 
     if (olderMessages.length > 0) {
-      queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-        mergeTimelineHistoryMessages(current, olderMessages),
-      );
-      void backfillAuxForMessages(queryClient, channelId, olderMessages);
+      fetched.push(...olderMessages);
     }
 
     // Progress guard, not exhaustion: if the oldest timestamp didn't move back
     // (empty page, or all-duplicate), stop this pass to avoid re-fetching the
     // same `until`.
-    const oldestAfterMerge = (queryClient.getQueryData<RelayEvent[]>(
-      queryKey,
-    ) ?? [])[0]?.created_at;
-    if (oldestAfterMerge === undefined || oldestAfterMerge >= oldestTimestamp) {
+    const oldestFetched = fetched.reduce(
+      (min, event) => (event.created_at < min ? event.created_at : min),
+      oldestTimestamp,
+    );
+    if (oldestFetched >= oldestTimestamp) {
       break;
     }
+    oldestTimestamp = oldestFetched;
 
     const rowsGained =
       countTopLevelTimelineRows(
-        queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [],
+        mergeTimelineHistoryMessages(baseline, fetched),
       ) - baselineRowCount;
     if (rowsGained >= MIN_TOP_LEVEL_ROWS_PER_FETCH) {
       break;
@@ -124,8 +109,13 @@ export async function pageOlderMessagesUntilRowFloor(
     if (batchesFetched >= MAX_BATCHES_PER_FETCH) {
       break;
     }
+  }
 
-    await yieldToPaint();
+  if (fetched.length > 0 && shouldContinue()) {
+    queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
+      mergeTimelineHistoryMessages(current, fetched),
+    );
+    void backfillAuxForMessages(queryClient, channelId, fetched);
   }
 
   return { hasOlderMessages };

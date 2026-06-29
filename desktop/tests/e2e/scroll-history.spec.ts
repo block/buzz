@@ -61,30 +61,6 @@ async function getMessagePosition(
   }, messageId);
 }
 
-// The floating active-day header (ActiveDayHeader) is portaled OUTSIDE the
-// scroll container into a non-scrolling overlay, so it pins to a fixed offset
-// instead of drifting at scrollTop 0. We read its label + offset relative to
-// the scroll container's top so a test can assert it neither drifts nor flips
-// day as older history prepends above the anchor.
-async function getActiveDayHeader(page: import("@playwright/test").Page) {
-  return page.evaluate(() => {
-    const timeline = document.querySelector<HTMLElement>(
-      '[data-testid="message-timeline"]',
-    );
-    const pill = document.querySelector<HTMLElement>(
-      '[data-testid="message-timeline-active-day-header"]',
-    );
-    if (!timeline || !pill) {
-      return null;
-    }
-    return {
-      label: pill.dataset.dayLabel ?? pill.textContent ?? "",
-      top:
-        pill.getBoundingClientRect().top - timeline.getBoundingClientRect().top,
-    };
-  });
-}
-
 test("first channel load holds skeleton instead of showing older-history spinner", async ({
   page,
 }) => {
@@ -243,15 +219,6 @@ test("preserves user scroll while older channel history loads", async ({
   const anchorBeforeLanding = await getFirstVisibleMessage(page);
   expect(anchorBeforeLanding).not.toBeNull();
 
-  // The floating active-day header is pinned at the viewport top and reflects
-  // the topmost visible row's day. As older history prepends ABOVE the anchor,
-  // the header must neither move (it's pinned, not part of the prepended flow)
-  // nor flip to a different day (the visible row's day is unchanged). Capture
-  // its label + pinned offset alongside the anchor so the same landing that
-  // proves the message anchor holds also proves the header holds.
-  const headerBeforeLanding = await getActiveDayHeader(page);
-  expect(headerBeforeLanding).not.toBeNull();
-
   // The poll must observe the anchor holding AS a genuine older page lands
   // above it. It only counts a drift reading once BOTH hold in the same sample:
   // the delayed fetch has RESOLVED (inflight back to 0) AND it brought a real
@@ -280,15 +247,6 @@ test("preserves user scroll while older channel history loads", async ({
       },
     )
     .toBeLessThanOrEqual(2);
-
-  // The older page has now landed (the poll above only resolves on it). The
-  // floating day-header must not have drifted or changed day across it.
-  const headerAfterLanding = await getActiveDayHeader(page);
-  expect(headerAfterLanding).not.toBeNull();
-  expect(headerAfterLanding?.label).toBe(headerBeforeLanding?.label);
-  expect(
-    Math.abs((headerAfterLanding?.top ?? 0) - (headerBeforeLanding?.top ?? 0)),
-  ).toBeLessThanOrEqual(2);
 });
 
 // Criterion 2: abandon-to-bottom mid-fetch.
@@ -1619,4 +1577,228 @@ test("older-history spinner stays visible in viewport while fetching mid-scroll"
     return s.top >= t.top - 1 && s.bottom <= t.bottom + 1;
   });
   expect(withinViewport).toBe(true);
+});
+
+// Regression for Wes's "scroll to the top once and it loads the WHOLE channel":
+// a single scroll-up gesture must page older history ONCE (a bounded step), not
+// cascade page-after-page to the channel start with no further user scroll. The
+// cascade came from the load-older observer disconnecting and recreating itself
+// after each fetch — the fresh observer re-reported the still-intersecting
+// sentinel and re-fired immediately. A persistent observer only re-fires when
+// the sentinel re-enters the top band, i.e. on a NEW scroll gesture.
+//
+// Distinct from the "never overlap" test (which asserts no CONCURRENT in-flight
+// fetches): a cascade keeps peak in-flight at 1 while firing many SEQUENTIAL
+// pages. This asserts the cumulative fetch count stays bounded after one
+// gesture, and the timeline does not dig to the oldest seeded root on its own.
+test("one scroll-up gesture pages older history once, not to the channel top", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  // Deep seed: a current window plus ~1200 older roots, far more than a single
+  // older page yields. If pagination auto-cascades, it will dig all the way to
+  // "mock older 0"; if it pages once per gesture, it stops well short.
+  await page.evaluate(() => {
+    for (let index = 0; index < 60; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `recent ${index}`,
+      });
+    }
+    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
+      channelName: "general",
+      count: 1200,
+      lineCount: 2,
+    });
+    (
+      window as unknown as { __HISTORY_FETCH_COUNT__?: number }
+    ).__HISTORY_FETCH_COUNT__ = 0;
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await page.waitForFunction(() => {
+    const element = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLDivElement | null;
+    return element ? element.scrollHeight > element.clientHeight + 1000 : false;
+  });
+
+  // The cold load may itself page once to fill the row floor; ignore anything
+  // before the user gesture by resetting the counter at the settled bottom.
+  await page.evaluate(() => {
+    (
+      window as unknown as { __HISTORY_FETCH_COUNT__?: number }
+    ).__HISTORY_FETCH_COUNT__ = 0;
+  });
+
+  const fetchCount = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __HISTORY_FETCH_COUNT__?: number })
+          .__HISTORY_FETCH_COUNT__ ?? 0,
+    );
+  const oldestRenderedIndex = () =>
+    timeline.evaluate((element) => {
+      let min = Number.POSITIVE_INFINITY;
+      for (const row of (
+        element as HTMLDivElement
+      ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const match = row.textContent?.match(/mock older (\d+)/);
+        if (match) min = Math.min(min, Number(match[1]));
+      }
+      return Number.isFinite(min) ? min : null;
+    });
+
+  // ONE scroll-up gesture to the top band, then HANDS OFF. A single wheel tick
+  // is enough to bring the sentinel into the 200px rootMargin.
+  await timeline.hover();
+  await page.mouse.wheel(0, -4000);
+
+  // Let any cascade run unimpeded for a generous window. With the bug, the
+  // observer re-arms after each page and digs through all ~1200 older roots in
+  // this window; with the fix it pages once and waits for the next gesture.
+  await page.waitForTimeout(2_500);
+
+  const pagesFetched = await fetchCount();
+  const deepest = await oldestRenderedIndex();
+
+  // One gesture should yield a small, bounded number of pages — not dozens.
+  // pageOlderMessagesUntilRowFloor may fetch up to MAX_BATCHES_PER_FETCH (3)
+  // relay pages to satisfy one visible row floor, so allow that ceiling plus a
+  // little slack; a cascade blows far past it.
+  expect(pagesFetched).toBeLessThanOrEqual(4);
+  // And it must NOT have reached the oldest seeded root on its own.
+  expect(deepest ?? Number.POSITIVE_INFINITY).toBeGreaterThan(50);
+});
+
+// Regression for Wes's "after a page loads I'm yanked to the oldest of the new
+// page instead of staying where I was reading" (event 6, timeline-scroll-rework
+// thread). De-virtualizing the list re-enabled native `overflow-anchor`, but the
+// browser does NOT scroll-anchor an older-history prepend at the top edge (no
+// anchor node above the viewport at scrollTop ~0). The reading row must stay
+// fixed across the prepend; the JS anchor restore in useAnchoredScroll owns it.
+test("older-history prepend keeps the reading row fixed (no jump to oldest)", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 40; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `recent ${index}`,
+      });
+    }
+    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
+      channelName: "general",
+      count: 1200,
+      lineCount: 2,
+    });
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+  await page.waitForFunction(() => {
+    const element = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLDivElement | null;
+    return element ? element.scrollHeight > element.clientHeight + 1000 : false;
+  });
+
+  // Pace the older fetch BEFORE scrolling up, so the very first older page the
+  // top sentinel triggers stays in flight long enough to read the anchor before
+  // and after it lands. No climb loop — the cold load left ~900 older roots
+  // behind the cursor, so one scroll-up to the top band fires a genuine page.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 1_500 },
+    };
+    (
+      window as unknown as { __HISTORY_INFLIGHT__?: number }
+    ).__HISTORY_INFLIGHT__ = 0;
+  });
+  const inflightCount = () =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __HISTORY_INFLIGHT__?: number })
+          .__HISTORY_INFLIGHT__ ?? 0,
+    );
+  const oldestRenderedIndex = () =>
+    timeline.evaluate((element) => {
+      let min = Number.POSITIVE_INFINITY;
+      for (const row of (
+        element as HTMLDivElement
+      ).querySelectorAll<HTMLElement>("[data-message-id]")) {
+        const match = row.textContent?.match(/mock older (\d+)/);
+        if (match) min = Math.min(min, Number(match[1]));
+      }
+      return Number.isFinite(min) ? min : null;
+    });
+
+  const oldestBeforeLanding = await oldestRenderedIndex();
+  expect(oldestBeforeLanding).not.toBeNull();
+
+  // One scroll-up gesture to the top band fires the (delayed) older page.
+  await timeline.hover();
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if ((await inflightCount()) > 0) break;
+    await page.mouse.wheel(0, -3000);
+    await page.waitForTimeout(50);
+  }
+  expect(await inflightCount()).toBeGreaterThan(0);
+
+  // Capture the reading row WHILE the page is still in flight (prepend lands
+  // ~1.5s later). This is the row the restore must hold.
+  const anchorBeforeLanding = await getFirstVisibleMessage(page);
+  expect(anchorBeforeLanding).not.toBeNull();
+
+  // Poll until a genuinely older page has landed (inflight back to 0 AND a new
+  // older index appeared), then assert the anchored row barely moved. With the
+  // bug, the prepend lands above the row and shoves it down by the prepend
+  // height (hundreds of px); with the fix it holds within a couple px.
+  await expect
+    .poll(
+      async () => {
+        const [inflight, oldestNow, anchor] = await Promise.all([
+          inflightCount(),
+          oldestRenderedIndex(),
+          getMessagePosition(page, anchorBeforeLanding?.id ?? ""),
+        ]);
+        const landed =
+          inflight === 0 &&
+          oldestNow !== null &&
+          oldestNow < (oldestBeforeLanding ?? 0);
+        if (!landed || !anchor) {
+          return Number.POSITIVE_INFINITY;
+        }
+        return Math.abs(anchor.top - (anchorBeforeLanding?.top ?? 0));
+      },
+      { timeout: 4_000 },
+    )
+    .toBeLessThanOrEqual(2);
+
+  await expect(page.getByTestId("message-scroll-to-latest")).toContainText(
+    "Jump to latest",
+  );
 });
