@@ -334,6 +334,7 @@ const IMAGE_LIGHTBOX_EASE_IN_OUT = "cubic-bezier(0.77, 0, 0.175, 1)";
 const IMAGE_LIGHTBOX_GALLERY_EASE: [number, number, number, number] = [
   0.22, 1, 0.36, 1,
 ];
+const IMAGE_LIGHTBOX_MARKDOWN_SCOPE_SELECTOR = `.${MESSAGE_MARKDOWN_CLASS}`;
 
 function imageLightboxBoxFromRect(rect: DOMRect): ImageLightboxBox {
   return {
@@ -485,6 +486,15 @@ function imageLightboxReturnBoxForItem(
     imageLightboxThumbnailBoxForItem(item, sourceScope) ??
     item.thumbnailBox ??
     fallbackBox
+  );
+}
+
+function imageLightboxSourceScopeForTrigger(
+  trigger: HTMLElement,
+): Element | null {
+  return (
+    trigger.closest(IMAGE_LIGHTBOX_MARKDOWN_SCOPE_SELECTOR) ??
+    trigger.closest("[data-testid='message-row']")
   );
 }
 
@@ -1541,8 +1551,9 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
 
       setMenu(null);
       const sourceBox = imageLightboxBoxFromRect(rect);
-      const sourceScope =
-        triggerRef.current?.closest("[data-testid='message-row']") ?? null;
+      const sourceScope = triggerRef.current
+        ? imageLightboxSourceScopeForTrigger(triggerRef.current)
+        : null;
       const gallery = triggerRef.current
         ? visibleImageGalleryForTrigger(
             triggerRef.current,

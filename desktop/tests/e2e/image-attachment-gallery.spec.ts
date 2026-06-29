@@ -300,3 +300,89 @@ test("gallery items without imeta dimensions keep their thumbnail aspect ratio",
   const portraitFrameBox = await getLightboxFrameBox(page);
   expect(portraitFrameBox.width / portraitFrameBox.height).toBeLessThan(0.6);
 });
+
+test("forum markdown images use the markdown root as their gallery scope", async ({
+  page,
+}) => {
+  await installNoDimImageRoutes(page);
+  await page.goto("/");
+  await expect
+    .poll(() => {
+      return page.evaluate(() => {
+        return (
+          typeof (
+            window as Window & {
+              __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: unknown;
+            }
+          ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function"
+        );
+      });
+    })
+    .toBe(true);
+
+  const postId = await page.evaluate(
+    ({ content }) => {
+      const event = (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            kind: number;
+          }) => { id: string };
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "watercooler",
+        content,
+        kind: 45001,
+      });
+      return event?.id ?? null;
+    },
+    {
+      content: [
+        "forum gallery scope",
+        `![wide](${NO_DIM_WIDE_URL})`,
+        `![portrait](${NO_DIM_PORTRAIT_URL})`,
+      ].join("\n"),
+    },
+  );
+  expect(postId).not.toBeNull();
+
+  await page.getByTestId("channel-watercooler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+
+  await page
+    .getByRole("button")
+    .filter({ hasText: "forum gallery scope" })
+    .first()
+    .getByText("forum gallery scope")
+    .click();
+
+  const threadPost = page.locator(`[data-forum-event-id="${postId}"]`);
+  await expect(threadPost).toBeVisible();
+  const triggers = threadPost.getByTestId("message-image-lightbox-trigger");
+  await expect(triggers).toHaveCount(2);
+  await expect
+    .poll(() =>
+      triggers.first().evaluate((trigger) => {
+        return trigger.closest("[data-testid='message-row']") !== null;
+      }),
+    )
+    .toBe(false);
+
+  await triggers.first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(`img[src="${NO_DIM_WIDE_URL}"]`)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Previous image" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next image" })).toBeVisible();
+
+  await page.getByRole("button", { name: "Next image" }).click();
+  await expect(
+    dialog.locator(`img[src="${NO_DIM_PORTRAIT_URL}"]`),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Previous image" }),
+  ).toBeVisible();
+});
