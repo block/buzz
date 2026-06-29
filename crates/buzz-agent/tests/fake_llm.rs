@@ -583,10 +583,10 @@ async fn recv_active_run_id(h: &mut Harness) -> String {
     let v = h
         .recv_until(|v| {
             v.get("method") == Some(&json!("session/update"))
-                && v["params"]["_meta"]["goose"]["activeRunId"].is_string()
+                && v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string()
         })
         .await;
-    v["params"]["_meta"]["goose"]["activeRunId"]
+    v["params"]["update"]["_meta"]["goose"]["activeRunId"]
         .as_str()
         .unwrap()
         .to_owned()

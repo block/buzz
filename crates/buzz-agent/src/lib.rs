@@ -47,7 +47,7 @@ struct Session {
     /// Run id of the in-flight prompt, set when a prompt starts and cleared
     /// when it ends. `None` means no active run — a steer request targeting
     /// this session is rejected. Steer-capable clients learn this value from
-    /// the `params._meta.goose.activeRunId` field on `session/update`.
+    /// the `params.update._meta.goose.activeRunId` field on `session/update`.
     active_run_id: Option<String>,
     /// Sender for mid-turn steer messages. Created fresh per prompt (like
     /// `cancel_tx`); the running prompt loop holds the matching receiver and

@@ -1253,11 +1253,13 @@ impl AcpClient {
                 // for them `active_run_id` stays `None` and steer callers
                 // will fall back to cancel+merge.
                 //
-                // Per the ACP `SessionNotification` schema, `_meta` is a
-                // sibling of `update` and `sessionId` at the params level —
-                // not nested inside `update`. Both goose and buzz-agent emit
-                // it at `params._meta.goose.activeRunId`.
-                let meta = msg["params"].get("_meta").and_then(|m| m.get("goose"));
+                // Per the ACP `SessionInfoUpdate` schema, `_meta` is a field
+                // on the update object itself — nested inside `update`, not
+                // alongside it at the params level. Goose and buzz-agent both
+                // emit it at `params.update._meta.goose.activeRunId`.
+                let meta = msg["params"]["update"]
+                    .get("_meta")
+                    .and_then(|m| m.get("goose"));
                 if let Some(goose_meta) = meta {
                     match goose_meta.get("activeRunId") {
                         Some(serde_json::Value::String(run_id)) => {
@@ -2478,8 +2480,8 @@ mod tests {
     /// `session_info_update` with the given `_meta.goose.activeRunId` value.
     /// Pass `None` to omit the `activeRunId` field entirely.
     ///
-    /// `_meta` is a sibling of `update` at the params level (per the ACP
-    /// `SessionNotification` schema), matching what both goose and buzz-agent
+    /// `_meta` is nested inside the `update` object (per the ACP
+    /// `SessionInfoUpdate` schema), matching what goose and buzz-agent
     /// emit on the wire.
     fn session_info_update_msg(active_run_id: Option<serde_json::Value>) -> serde_json::Value {
         let mut goose = serde_json::Map::new();
@@ -2495,8 +2497,8 @@ mod tests {
                 "sessionId": "test-session",
                 "update": {
                     "sessionUpdate": "session_info_update",
+                    "_meta": serde_json::Value::Object(meta),
                 },
-                "_meta": serde_json::Value::Object(meta),
             }
         })
     }
