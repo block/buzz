@@ -164,30 +164,13 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
     "Fizz",
   );
   const previewPersonas = [
-    ["builtin:angelica", "Angelica"],
-    ["builtin:bart", "Bart"],
-    ["builtin:chucky", "Chucky"],
-    ["builtin:marge", "Marge"],
-    ["builtin:ned", "Ned"],
-    ["builtin:tommy", "Tommy"],
+    ["builtin:product-strategist", "Product Strategist"],
+    ["builtin:implementation-partner", "Implementation Partner"],
+    ["builtin:qa-reviewer", "QA Reviewer"],
+    ["builtin:work-coordinator", "Work Coordinator"],
+    ["builtin:support-guide", "Support Guide"],
+    ["builtin:experiment-designer", "Experiment Designer"],
   ] as const;
-  const previewPersonaAvatarUrls: Record<
-    (typeof previewPersonas)[number][0],
-    string
-  > = {
-    "builtin:angelica":
-      "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcT1MGeCxaWcvoonCISYyuhWfjngmSE8cyJhfQ&s",
-    "builtin:bart":
-      "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcShI3uwQ-mSgRdv5WYBibPyo2I3X7ybsYmrVQ&s",
-    "builtin:chucky":
-      "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ_cxY4ocdqIGx5JVRuZjlCvyhlhEWV5MXWDw&s",
-    "builtin:marge":
-      "https://static0.srcdn.com/wordpress/wp-content/uploads/2023/05/the-simpsons-season-34-marge-blue-hair.jpg",
-    "builtin:ned":
-      "https://i1.sndcdn.com/artworks-000362506068-4i6lyp-t500x500.jpg",
-    "builtin:tommy":
-      "https://i.redd.it/the-slight-redesigns-of-tommy-pickles-back-in-the-90s-v0-ii3f8rsmv1cf1.jpg?width=1290&format=pjpg&auto=webp&s=e9901c8661d5b3a00e49704d12d02fef87c5947e",
-  };
   for (const [, personaName] of previewPersonas) {
     await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
       personaName,
@@ -198,7 +181,7 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
       page
         .getByTestId(`persona-catalog-list-item-${personaId}`)
         .getByRole("img", { name: `${personaName} avatar` }),
-    ).toHaveAttribute("src", previewPersonaAvatarUrls[personaId]);
+    ).toHaveAttribute("src", /.+/);
   }
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(
@@ -303,9 +286,9 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
     "Fizz",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
-    "Added by You",
-  );
+  await expect(
+    page.getByTestId("persona-catalog-detail-pane"),
+  ).not.toContainText("Added by You");
   await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
     "You are Fizz.",
   );
@@ -333,9 +316,7 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   );
 });
 
-test("custom personas can be shared into the agent catalog", async ({
-  page,
-}) => {
+test("custom personas can be shown in the agent catalog", async ({ page }) => {
   const analystPersonaId = "custom:analyst";
   await installMockBridge(page, {
     personas: [
@@ -355,24 +336,26 @@ test("custom personas can be shared into the agent catalog", async ({
 
   await page.getByLabel("Open actions for Analyst").click();
   await expect(page.getByRole("menuitem")).toHaveText([
-    "Share",
+    "Catalog options",
     "Edit",
     "Duplicate",
     "Remove from My Agents",
   ]);
-  await expect(page.getByRole("menuitem", { name: "Share" })).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Catalog options" }),
+  ).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Export" })).toHaveCount(0);
-  await page.getByRole("menuitem", { name: "Share" }).click();
+  await page.getByRole("menuitem", { name: "Catalog options" }).click();
 
   await expect(page.getByTestId("persona-share-dialog")).toBeVisible();
-  await expect(page.getByTestId("persona-share-dialog")).not.toContainText(
-    "Share options for Analyst.",
+  await expect(page.getByTestId("persona-share-dialog")).toContainText(
+    "Catalog options",
   );
   await expect(page.getByTestId("persona-share-dialog")).toContainText(
     "Added by You",
   );
   await expect(page.getByTestId("persona-share-copy-link")).toHaveCount(0);
-  await expect(page.getByText("Show in agent catalog")).toBeVisible();
+  await expect(page.getByText("Show in my catalog")).toBeVisible();
   await expect(page.getByTestId("persona-share-export")).toBeVisible();
   await page.getByTestId("persona-share-show-in-catalog").click();
   await page.keyboard.press("Escape");

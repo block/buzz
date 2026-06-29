@@ -138,19 +138,22 @@ test("getPersonaLibraryState keeps the working library and full catalog in one p
 });
 
 test("getLibraryPersonas keeps active custom personas even when catalog entries are similar", () => {
-  const avatarUrl = "https://example.test/marge.png";
+  const avatarUrl = "https://example.test/coordinator.png";
   const personas = [
-    createPersona("builtin:marge", "Marge", {
+    createPersona("builtin:work-coordinator", "Work Coordinator", {
       avatarUrl,
       isBuiltIn: true,
       isActive: false,
     }),
-    createPersona("custom:marge", "Marge", { avatarUrl, isActive: true }),
+    createPersona("custom:work-coordinator", "Work Coordinator", {
+      avatarUrl,
+      isActive: true,
+    }),
     createPersona("custom:builder", "Builder", { isActive: true }),
   ];
 
   assert.deepEqual(
     getLibraryPersonas(personas).map((persona) => persona.id),
-    ["custom:marge", "custom:builder"],
+    ["custom:work-coordinator", "custom:builder"],
   );
 });

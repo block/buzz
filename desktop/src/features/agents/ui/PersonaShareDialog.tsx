@@ -46,7 +46,7 @@ export function PersonaShareDialog({
       >
         <DialogHeader className="space-y-0">
           <div className="flex items-center justify-between gap-4">
-            <DialogTitle>Share agent</DialogTitle>
+            <DialogTitle>Catalog options</DialogTitle>
             <div className="flex items-center gap-2">
               <Button
                 data-testid="persona-share-export"
@@ -78,7 +78,7 @@ export function PersonaShareDialog({
               <p className="truncate text-sm font-semibold leading-snug">
                 {persona.displayName}
               </p>
-              <PersonaAddedBy className="mt-0.5" />
+              {persona.isBuiltIn ? null : <PersonaAddedBy className="mt-0.5" />}
             </div>
           </div>
 
@@ -88,7 +88,7 @@ export function PersonaShareDialog({
             <div className="flex min-w-0 items-center gap-2">
               <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
               <label className="text-sm font-medium" htmlFor={switchId}>
-                Show in agent catalog
+                Show in my catalog
               </label>
             </div>
             <Switch

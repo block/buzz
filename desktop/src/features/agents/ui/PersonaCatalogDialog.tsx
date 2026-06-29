@@ -274,7 +274,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
           <h3 className="truncate text-xl font-semibold leading-snug">
             {persona.displayName}
           </h3>
-          <PersonaAddedBy className="mt-0.5" />
+          {persona.isBuiltIn ? null : <PersonaAddedBy className="mt-0.5" />}
         </div>
       </div>
 

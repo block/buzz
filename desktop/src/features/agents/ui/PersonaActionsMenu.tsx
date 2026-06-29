@@ -1,4 +1,4 @@
-import { CopyPlus, Ellipsis, Pencil, Share2, Trash2 } from "lucide-react";
+import { BookUser, CopyPlus, Ellipsis, Pencil, Trash2 } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
 import {
@@ -47,8 +47,8 @@ export function PersonaActionsMenu({
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
         <DropdownMenuItem disabled={disabled} onClick={() => onShare(persona)}>
-          <Share2 className="h-4 w-4" />
-          Share
+          <BookUser className="h-4 w-4" />
+          Catalog options
         </DropdownMenuItem>
         {canEdit ? (
           <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>

@@ -39,7 +39,15 @@ fn merge_personas_adds_missing_built_ins() {
         .collect();
     assert_eq!(
         display_names,
-        vec!["Fizz", "Angelica", "Bart", "Chucky", "Marge", "Ned", "Tommy"]
+        vec![
+            "Fizz",
+            "Product Strategist",
+            "Implementation Partner",
+            "QA Reviewer",
+            "Work Coordinator",
+            "Support Guide",
+            "Experiment Designer"
+        ]
     );
     let active_ids: Vec<&str> = records
         .iter()
