@@ -589,6 +589,13 @@ async fn test_workflow_update_and_delete() {
         "V1 workflow must have a webhook secret generated"
     );
 
+    // Nostr `created_at` is second-granularity, and NIP-33 replacement rejects an
+    // incoming event whose (created_at, id) does not dominate the current one. If V1
+    // and V2 land in the same wall-clock second, V2 is accepted only when its event id
+    // sorts lower — a coin flip. Sleep 1s so V2 is unambiguously newer and the update
+    // is deterministic. (Real sub-second edits are subject to this same tie-break.)
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
     // 5. Update to workflow V2
     let yaml_v2 = webhook_workflow_yaml("e2e-crud-updated");
     let builder_v2 = buzz_sdk::build_workflow_def(channel_id, workflow_id, &yaml_v2)

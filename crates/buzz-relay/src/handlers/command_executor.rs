@@ -121,6 +121,28 @@ async fn persist_command_event(
         None
     };
 
+    // NIP-33 stale-write protection for parameterized-replaceable command kinds
+    // (only KIND_WORKFLOW_DEF today). Shares the relay-wide replacement logic with
+    // Db::replace_parameterized_event so command and normal store paths can't drift.
+    // A dominated (older/retried) event is treated as an idempotent duplicate so
+    // the handler skips its mutation.
+    if let Some(ref d_tag) = d_tag {
+        match buzz_db::nip33_stale_write_guard(
+            tx.as_mut(),
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            d_tag,
+            created_at,
+            id_bytes.as_slice(),
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: nip33 stale-write guard: {e}")))?
+        {
+            buzz_db::StaleWrite::Dominated => return Ok(PersistResult::Duplicate),
+            buzz_db::StaleWrite::Proceed => {}
+        }
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
