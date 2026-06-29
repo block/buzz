@@ -58,7 +58,7 @@ const CHANNEL_GENERAL: &str = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 ///
 /// If tests fail with 500 "FK constraint fails", run:
 /// ```
-/// DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+/// DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \ // sadscan:disable np.postgres.1
 ///   cargo run -p buzz-admin -- mint-token --name e2e-test --scopes messages:read \
 ///   --pubkey 0b5c83782cf123e698131ac976179f8366224e03db932c9da0074512aed2388d
 /// ```
@@ -723,9 +723,32 @@ async fn test_workflow_update_and_delete() {
         matches!(wf_after_del, Err(buzz_db::DbError::NotFound(_))),
         "workflow must be deleted from DB"
     );
-}
 
-/// Create a workflow with a `request_approval` step, trigger it, and verify
+    // 9. Verify via relay REQ: the live kind:30620 event must also be gone.
+    //    Clients (Desktop/CLI) read workflows from events, not the DB, so a
+    //    DB-only delete would leave the workflow visible.
+    let sub_id = "del-verify";
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_WORKFLOW_DEF as u16,
+        ))
+        .custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::D),
+            [workflow_id.to_string()],
+        );
+    ws.subscribe(sub_id, vec![filter])
+        .await
+        .expect("subscribe for deletion verification");
+    let events_after_del = ws
+        .collect_until_eose(sub_id, std::time::Duration::from_secs(5))
+        .await
+        .expect("collect events after deletion");
+    assert!(
+        events_after_del.is_empty(),
+        "deleted workflow kind:30620 event must not be returned by relay REQ (got {} events)",
+        events_after_del.len()
+    );
+}
 /// the run fails with the "approval gates not yet implemented" message.
 ///
 /// This test documents the current stub behavior. When WF-08 is implemented,

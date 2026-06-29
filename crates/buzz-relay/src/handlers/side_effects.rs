@@ -1595,6 +1595,20 @@ async fn handle_a_tag_deletion(event: &Event, state: &Arc<AppState>) -> anyhow::
                         state.db.delete_workflow(wf_id).await.map_err(|e| {
                             anyhow::anyhow!("failed to delete workflow {wf_id}: {e}")
                         })?;
+                        // Also soft-delete the live kind:30620 event so relay REQs
+                        // stop returning it. DB-only deletion leaves the event
+                        // queryable; clients read workflows from events, not the DB.
+                        state
+                            .db
+                            .soft_delete_by_coordinate(
+                                buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                                &owner_bytes,
+                                d_tag,
+                            )
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("failed to soft-delete workflow event {d_tag}: {e}")
+                            })?;
                         tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
                     }
                     Err(buzz_db::DbError::NotFound(_)) => {
@@ -1616,6 +1630,20 @@ async fn handle_a_tag_deletion(event: &Event, state: &Arc<AppState>) -> anyhow::
                         state.db.delete_workflow(wf.id).await.map_err(|e| {
                             anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
                         })?;
+                        // Also soft-delete the live kind:30620 event so relay REQs
+                        // stop returning it. DB-only deletion leaves the event
+                        // queryable; clients read workflows from events, not the DB.
+                        state
+                            .db
+                            .soft_delete_by_coordinate(
+                                buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                                &owner_bytes,
+                                d_tag,
+                            )
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("failed to soft-delete workflow event {d_tag}: {e}")
+                            })?;
                         tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
                     }
                     Ok(None) => {
@@ -1632,11 +1660,10 @@ async fn handle_a_tag_deletion(event: &Event, state: &Arc<AppState>) -> anyhow::
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
         //
         // Listed after the workflow branch so workflow's bespoke deletion
-        // (which doesn't soft-delete the `events` row by design — that's a
-        // separate concern) takes precedence. For every other addressable
-        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
-        // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
-        // See https://github.com/block/sprout/issues/714.
+        // (which also soft-deletes the `events` row — see above) takes precedence.
+        // For every other addressable kind, including kind:30023 (NIP-23 long-form),
+        // we soft-delete the live row matching `(kind, pubkey, d_tag)` so REQs stop
+        // returning it. See https://github.com/block/sprout/issues/714.
         k if is_parameterized_replaceable(k) => {
             let pubkey_bytes = match hex::decode(pubkey_hex) {
                 Ok(b) => b,
