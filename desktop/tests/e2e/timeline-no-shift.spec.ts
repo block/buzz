@@ -302,6 +302,39 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   expect(drift.maxDrift).toBeLessThanOrEqual(2);
 });
 
+test("de-virtualized timeline rows apply content-visibility", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(45_000);
+
+  await installMockBridge(page);
+  await page.goto("/");
+  await waitForMockTimelineBridge(page);
+  await seedNoShiftTimeline(page);
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  // Guards against a typo'd/removed wrapper class shipping inert — a bad
+  // utility name is invisible to typecheck.
+  const hasContentVisibility = await timeline
+    .locator("[data-message-id]")
+    .first()
+    .evaluate((element) => {
+      const scroller = element.closest('[data-testid="message-timeline"]');
+      let node: HTMLElement | null = element.parentElement;
+      while (node && node !== scroller) {
+        if (getComputedStyle(node).contentVisibility === "auto") return true;
+        node = node.parentElement;
+      }
+      return false;
+    });
+  expect(hasContentVisibility).toBe(true);
+});
+
 test("thread panel late row reflow keeps the reading reply stable", async ({
   page,
 }, testInfo) => {

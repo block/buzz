@@ -244,7 +244,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   return (
     <div className="flex flex-col">
       {itemsResult.items.map((item) => (
-        <div className="ln-auto" key={getTimelineItemKey(item)}>
+        <div className="timeline-row-cv" key={getTimelineItemKey(item)}>
           {renderItem(item)}
         </div>
       ))}
