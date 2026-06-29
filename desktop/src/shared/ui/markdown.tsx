@@ -302,6 +302,7 @@ type ImageGalleryItem = {
   dim?: string;
   resolvedSrc: string;
   src: string | undefined;
+  thumbnailBox?: ImageLightboxBox;
 };
 
 type ImageBlockProps = {
@@ -438,7 +439,7 @@ function imageLightboxBasisBoxForItem(
 ): ImageLightboxBox {
   const dimensions = dimensionsFromDim(item.dim);
   if (!dimensions) {
-    return fallbackBox;
+    return item.thumbnailBox ?? fallbackBox;
   }
 
   return {
@@ -448,11 +449,10 @@ function imageLightboxBasisBoxForItem(
   };
 }
 
-function imageLightboxReturnBoxForItem(
+function imageLightboxThumbnailBoxForItem(
   item: ImageGalleryItem,
-  fallbackBox: ImageLightboxBox,
   sourceScope: Element | null | undefined,
-): ImageLightboxBox {
+): ImageLightboxBox | null {
   const root = sourceScope?.isConnected ? sourceScope : document.body;
   const triggers = Array.from(
     root.querySelectorAll<HTMLElement>("[data-image-lightbox-trigger]"),
@@ -473,11 +473,24 @@ function imageLightboxReturnBoxForItem(
     }
   }
 
-  return fallbackBox;
+  return null;
+}
+
+function imageLightboxReturnBoxForItem(
+  item: ImageGalleryItem,
+  fallbackBox: ImageLightboxBox,
+  sourceScope: Element | null | undefined,
+): ImageLightboxBox {
+  return (
+    imageLightboxThumbnailBoxForItem(item, sourceScope) ??
+    item.thumbnailBox ??
+    fallbackBox
+  );
 }
 
 function imageGalleryItemFromTrigger(
   trigger: HTMLElement,
+  thumbnailBox?: ImageLightboxBox,
 ): ImageGalleryItem | null {
   const resolvedSrc = trigger.dataset.imageLightboxResolvedSrc;
   if (!resolvedSrc) {
@@ -489,6 +502,7 @@ function imageGalleryItemFromTrigger(
     dim: trigger.dataset.imageLightboxDim || undefined,
     resolvedSrc,
     src: trigger.dataset.imageLightboxSrc || undefined,
+    thumbnailBox,
   };
 }
 
@@ -542,7 +556,8 @@ function visibleImageGalleryForTrigger(
       continue;
     }
 
-    const item = imageGalleryItemFromTrigger(candidate);
+    const thumbnailBox = imageLightboxBoxFromRect(rect);
+    const item = imageGalleryItemFromTrigger(candidate, thumbnailBox);
     if (!item) {
       continue;
     }
@@ -676,8 +691,8 @@ function ImageZoomOverlay({
   const shouldReduceMotion = useReducedMotion();
   const prefersReducedMotion = shouldReduceMotion === true;
   const fallbackGalleryItems = React.useMemo<ImageGalleryItem[]>(
-    () => [{ alt, resolvedSrc, src }],
-    [alt, resolvedSrc, src],
+    () => [{ alt, resolvedSrc, src, thumbnailBox: sourceBox }],
+    [alt, resolvedSrc, sourceBox, src],
   );
   const items =
     galleryItems && galleryItems.length > 0
@@ -1525,19 +1540,20 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
       }
 
       setMenu(null);
+      const sourceBox = imageLightboxBoxFromRect(rect);
       const sourceScope =
         triggerRef.current?.closest("[data-testid='message-row']") ?? null;
       const gallery = triggerRef.current
         ? visibleImageGalleryForTrigger(
             triggerRef.current,
-            { alt, dim, resolvedSrc, src },
+            { alt, dim, resolvedSrc, src, thumbnailBox: sourceBox },
             sourceScope,
           )
         : { galleryIndex: 0, galleryItems: undefined };
       setLightboxState({
         galleryIndex: gallery.galleryIndex,
         galleryItems: gallery.galleryItems,
-        sourceBox: imageLightboxBoxFromRect(rect),
+        sourceBox,
         sourceScope,
       });
     },
