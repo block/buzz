@@ -7,7 +7,6 @@ import {
   buildAgentConversationRecap,
   buildAgentConversationMarkers,
   deriveAgentConversationTitle,
-  getAutoRoutedAgentConversationPubkeys,
   getHiddenAgentConversationMessageIds,
   parseAgentConversationMarker,
   readPersistedAgentConversations,
