@@ -9,7 +9,10 @@ import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
-import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import {
+  useManagedAgentObserverBridge,
+  useObserverCandidatePubkeys,
+} from "@/features/agents/observerRelayStore";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -32,13 +35,21 @@ export function useActiveWorkingChannelsById(): ReadonlyMap<
     () => relayAgentsQuery.data ?? [],
     [relayAgentsQuery.data],
   );
+  const observerCandidatePubkeys = useObserverCandidatePubkeys();
   const relayAgentPubkeys = React.useMemo(
     () => relayAgents.map((agent) => agent.pubkey),
     [relayAgents],
   );
-  const relayAgentProfilesQuery = useUsersBatchQuery(relayAgentPubkeys, {
-    enabled: Boolean(currentPubkey) && relayAgentPubkeys.length > 0,
-  });
+  const ownerCandidatePubkeys = React.useMemo(
+    () => [...new Set([...relayAgentPubkeys, ...observerCandidatePubkeys])],
+    [observerCandidatePubkeys, relayAgentPubkeys],
+  );
+  const ownerCandidateProfilesQuery = useUsersBatchQuery(
+    ownerCandidatePubkeys,
+    {
+      enabled: Boolean(currentPubkey) && ownerCandidatePubkeys.length > 0,
+    },
+  );
   const bridgeAgents = React.useMemo<BridgeAgent[]>(() => {
     const agentsByPubkey = new Map<string, BridgeAgent>();
     for (const agent of managedAgents) {
@@ -50,21 +61,26 @@ export function useActiveWorkingChannelsById(): ReadonlyMap<
 
     if (currentPubkey) {
       const currentPubkeyLower = currentPubkey.toLowerCase();
-      const profiles = relayAgentProfilesQuery.data?.profiles ?? {};
-      for (const agent of relayAgents) {
-        const key = agent.pubkey.toLowerCase();
+      const profiles = ownerCandidateProfilesQuery.data?.profiles ?? {};
+      for (const pubkey of ownerCandidatePubkeys) {
+        const key = pubkey.toLowerCase();
         const ownerPubkey = profiles[key]?.ownerPubkey;
         if (ownerPubkey?.toLowerCase() !== currentPubkeyLower) continue;
         if (agentsByPubkey.has(key)) continue;
         agentsByPubkey.set(key, {
-          pubkey: agent.pubkey,
+          pubkey,
           status: "deployed",
         });
       }
     }
 
     return [...agentsByPubkey.values()];
-  }, [currentPubkey, managedAgents, relayAgentProfilesQuery.data, relayAgents]);
+  }, [
+    currentPubkey,
+    managedAgents,
+    ownerCandidateProfilesQuery.data,
+    ownerCandidatePubkeys,
+  ]);
 
   useManagedAgentObserverBridge(bridgeAgents);
   useActiveAgentTurnsBridge(bridgeAgents);
