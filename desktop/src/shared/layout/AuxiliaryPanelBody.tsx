@@ -1,10 +1,11 @@
 import * as React from "react";
 
-import { AuxiliaryPanelContext } from "@/shared/layout/auxiliaryPanelContext";
 import {
-  type AuxiliaryPanelMode,
-  getAuxiliaryPanelBodyClass,
-} from "@/shared/layout/AuxiliaryPanelHeader";
+  AuxiliaryPanelContext,
+  resolveAuxiliaryPanelBodyMode,
+} from "@/shared/layout/auxiliaryPanelContext";
+import type { AuxiliaryPanelMode } from "@/shared/layout/auxiliaryPanelContext";
+import { getAuxiliaryPanelBodyClass } from "@/shared/layout/AuxiliaryPanelHeader";
 import { cn } from "@/shared/lib/cn";
 
 type AuxiliaryPanelBodyProps = Omit<
@@ -26,13 +27,10 @@ export function AuxiliaryPanelBody({
   ...props
 }: AuxiliaryPanelBodyProps) {
   const context = React.useContext(AuxiliaryPanelContext);
-  const mode = modeOverride ?? context?.mode;
-
-  if (mode == null) {
-    throw new Error(
-      "AuxiliaryPanelBody requires `mode` or an AuxiliaryPanel ancestor",
-    );
-  }
+  const mode = resolveAuxiliaryPanelBodyMode({
+    context,
+    mode: modeOverride,
+  });
 
   return (
     <div

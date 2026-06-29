@@ -3,11 +3,11 @@ import { ArrowLeft, X } from "lucide-react";
 
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { AuxiliaryPanelContext } from "@/shared/layout/auxiliaryPanelContext";
+import type { AuxiliaryPanelMode } from "@/shared/layout/auxiliaryPanelContext";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
-export type AuxiliaryPanelMode = "docked" | "panel" | "single-panel";
-type AuxiliaryPanelLayout = "overlay" | "split";
+export type { AuxiliaryPanelMode } from "@/shared/layout/auxiliaryPanelContext";
 type AuxiliaryPanelHeaderProps = Omit<
   React.ComponentProps<"div">,
   "className"
@@ -15,12 +15,12 @@ type AuxiliaryPanelHeaderProps = Omit<
   backdrop?: boolean;
   backdropSurface?: AuxiliaryPanelSurface;
   bordered?: boolean;
-  /** Render header content without its own backdrop for a shared parent chrome. */
   density?: "comfortable" | "compact";
   inset?: "default" | "wide";
   mode?: AuxiliaryPanelMode;
   resizeBorder?: boolean;
   surface?: AuxiliaryPanelSurface;
+  /** Render header content without its own backdrop for a shared parent chrome. */
   transparent?: boolean;
 };
 type AuxiliaryPanelHeaderGroupProps = Omit<
@@ -30,7 +30,7 @@ type AuxiliaryPanelHeaderGroupProps = Omit<
   align?: "center" | "start";
   backButtonAriaLabel?: string;
   backButtonTestId?: string;
-  layout?: AuxiliaryPanelLayout;
+  mode?: AuxiliaryPanelMode;
   onBack?: () => void;
 };
 type AuxiliaryPanelHeaderActionsProps = {
@@ -195,12 +195,14 @@ export function AuxiliaryPanelHeaderGroup({
   align = "center",
   backButtonAriaLabel = "Back",
   backButtonTestId,
-  layout = "split",
+  mode,
   children,
   onBack,
   ...props
 }: AuxiliaryPanelHeaderGroupProps) {
-  const isOverlayLayout = layout === "overlay";
+  const panelContext = React.useContext(AuxiliaryPanelContext);
+  const resolvedMode = mode ?? panelContext?.mode ?? "docked";
+  const isOverlayLayout = resolvedMode === "panel";
 
   return (
     <div

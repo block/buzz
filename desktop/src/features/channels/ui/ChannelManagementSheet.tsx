@@ -688,8 +688,6 @@ function ChannelManagementPanelContent({
     activeView === "summary" &&
     canManageChannel &&
     resolvedChannel.channelType !== "dm";
-  const headerLayout = mode === "panel" ? "overlay" : "split";
-
   return (
     <>
       <AuxiliaryPanelHeader
@@ -701,7 +699,7 @@ function ChannelManagementPanelContent({
         <AuxiliaryPanelHeaderGroup
           backButtonAriaLabel="Back to channel"
           backButtonTestId="channel-management-back"
-          layout={headerLayout}
+          mode={mode}
           onBack={
             activeView === "canvas" ? () => setActiveView("summary") : undefined
           }

@@ -1,7 +1,6 @@
 import * as React from "react";
 
-import type { AuxiliaryPanelMode } from "@/shared/layout/AuxiliaryPanelHeader";
-
+export type AuxiliaryPanelMode = "docked" | "panel" | "single-panel";
 export type AuxiliaryPanelLayout = "standalone" | "split";
 
 export type AuxiliaryPanelContextValue = {
@@ -19,12 +18,35 @@ export type AuxiliaryPanelContextValue = {
 export const AuxiliaryPanelContext =
   React.createContext<AuxiliaryPanelContextValue | null>(null);
 
-/** Read chrome/layout state from the nearest `AuxiliaryPanel` ancestor. */
-export function useAuxiliaryPanel(): AuxiliaryPanelContextValue {
-  const context = React.useContext(AuxiliaryPanelContext);
+export function requireAuxiliaryPanelContext(
+  context: AuxiliaryPanelContextValue | null,
+): AuxiliaryPanelContextValue {
   if (!context) {
     throw new Error("useAuxiliaryPanel must be used within AuxiliaryPanel");
   }
 
   return context;
+}
+
+export function resolveAuxiliaryPanelBodyMode({
+  context,
+  mode,
+}: {
+  context: AuxiliaryPanelContextValue | null;
+  mode?: AuxiliaryPanelMode;
+}): AuxiliaryPanelMode {
+  const resolvedMode = mode ?? context?.mode;
+
+  if (resolvedMode == null) {
+    throw new Error(
+      "AuxiliaryPanelBody requires `mode` or an AuxiliaryPanel ancestor",
+    );
+  }
+
+  return resolvedMode;
+}
+
+/** Read chrome/layout state from the nearest `AuxiliaryPanel` ancestor. */
+export function useAuxiliaryPanel(): AuxiliaryPanelContextValue {
+  return requireAuxiliaryPanelContext(React.useContext(AuxiliaryPanelContext));
 }
