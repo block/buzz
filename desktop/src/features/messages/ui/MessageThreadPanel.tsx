@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowDown, ArrowLeft, X } from "lucide-react";
+import { ArrowDown } from "lucide-react";
 
 import {
   buildThreadSummaryFromVisibleEntries,
@@ -15,17 +15,19 @@ import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
 import {
+  AuxiliaryPanelFloatingHeader,
   AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderActions,
+  AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
-  auxiliaryPanelContentPaddingClass,
+  getAuxiliaryPanelBodyClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
   PANEL_ENTER_BASE_CLASS,
   PANEL_OVERLAY_CLASS,
-  PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
 import { Skeleton } from "@/shared/ui/skeleton";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
@@ -238,31 +240,18 @@ export function MessageThreadPanelSkeleton({
 
   const threadHeaderContent = (
     <>
-      <AuxiliaryPanelHeaderGroup>
-        {isSinglePanelView ? (
-          <Button
-            aria-label="Back to conversation"
-            className="shrink-0"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <ArrowLeft />
-          </Button>
-        ) : null}
+      <AuxiliaryPanelHeaderGroup
+        backButtonAriaLabel="Back to conversation"
+        onBack={isSinglePanelView ? onClose : undefined}
+      >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
-      <Button
-        aria-label="Close thread"
-        className="ml-auto"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
+      <AuxiliaryPanelHeaderActions>
+        <AuxiliaryPanelHeaderCloseButton
+          ariaLabel="Close thread"
+          onClose={onClose}
+        />
+      </AuxiliaryPanelHeaderActions>
     </>
   );
 
@@ -270,8 +259,10 @@ export function MessageThreadPanelSkeleton({
     <div
       className={cn(
         "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
+        getAuxiliaryPanelBodyClass({
+          isSplitLayout,
+          reserveFloatingHeader: !isSplitLayout && !isFloatingOverlay,
+        }),
       )}
       data-testid="message-thread-loading"
     >
@@ -326,17 +317,9 @@ export function MessageThreadPanelSkeleton({
             : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
         }}
       >
-        <div
-          className={cn(
-            "flex cursor-default select-none items-center",
-            isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-background/80 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pr-3 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
-              : "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-          )}
-          data-tauri-drag-region
-        >
+        <AuxiliaryPanelFloatingHeader singleColumn={isSinglePanelView}>
           {threadHeaderContent}
-        </div>
+        </AuxiliaryPanelFloatingHeader>
 
         {threadBody}
         <ThreadComposerSkeleton />
@@ -623,8 +606,10 @@ export function MessageThreadPanel({
     <div
       className={cn(
         "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
+        getAuxiliaryPanelBodyClass({
+          isSplitLayout,
+          reserveFloatingHeader: !isSplitLayout && !isFloatingOverlay,
+        }),
       )}
       data-testid="message-thread-body"
       onScroll={onScroll}
@@ -924,33 +909,20 @@ export function MessageThreadPanel({
 
   const threadHeaderContent = (
     <>
-      <AuxiliaryPanelHeaderGroup>
-        {isSinglePanelView ? (
-          <Button
-            aria-label="Back to conversation"
-            className="shrink-0"
-            data-testid="message-thread-back"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="outline"
-          >
-            <ArrowLeft />
-          </Button>
-        ) : null}
+      <AuxiliaryPanelHeaderGroup
+        backButtonAriaLabel="Back to conversation"
+        backButtonTestId="message-thread-back"
+        onBack={isSinglePanelView ? onClose : undefined}
+      >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
-      <Button
-        aria-label="Close thread"
-        className="ml-auto"
-        data-testid="message-thread-close"
-        onClick={onClose}
-        size="icon"
-        type="button"
-        variant="ghost"
-      >
-        <X />
-      </Button>
+      <AuxiliaryPanelHeaderActions>
+        <AuxiliaryPanelHeaderCloseButton
+          ariaLabel="Close thread"
+          onClose={onClose}
+          testId="message-thread-close"
+        />
+      </AuxiliaryPanelHeaderActions>
     </>
   );
 
@@ -982,17 +954,9 @@ export function MessageThreadPanel({
             : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
         }}
       >
-        <div
-          className={cn(
-            "flex cursor-default select-none items-center",
-            isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 bg-background/80 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pr-3 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
-              : "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-          )}
-          data-tauri-drag-region
-        >
+        <AuxiliaryPanelFloatingHeader singleColumn={isSinglePanelView}>
           {threadHeaderContent}
-        </div>
+        </AuxiliaryPanelFloatingHeader>
 
         {threadScrollRegion}
         {threadFooter}

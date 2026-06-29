@@ -25,12 +25,6 @@ export const PANEL_ENTER_MOTION_CLASS = "buzz-side-panel-enter";
 
 export const PANEL_ENTER_BASE_CLASS = `${PANEL_BASE_CLASS} ${PANEL_ENTER_MOTION_CLASS}`;
 
-/**
- * Single-column panel headers should render above the local panel backdrop
- * (z-40) but stay below global top chrome controls (z-[45]).
- */
-export const PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS = "z-[41]";
-
 type OverlayPanelBackdropProps = {
   onClose: () => void;
 };

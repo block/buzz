@@ -83,7 +83,7 @@ import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { auxiliaryPanelContentPaddingClass } from "@/shared/layout/AuxiliaryPanelHeader";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import type {
   AgentPersona,
@@ -817,7 +817,7 @@ export function UserProfilePanel({
         isDiagnosticsLikeView
           ? "flex flex-col overflow-hidden"
           : "overflow-y-auto",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
+        isSplitLayout && channelChrome.contentPadding,
         !isSplitLayout && !isFloatingOverlay && "pt-13",
       )}
     >
