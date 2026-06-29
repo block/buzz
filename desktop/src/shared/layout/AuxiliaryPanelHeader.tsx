@@ -5,12 +5,21 @@ import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
+export type AuxiliaryPanelMode = "docked" | "panel" | "single-panel";
 type AuxiliaryPanelLayout = "overlay" | "split";
 type AuxiliaryPanelHeaderProps = Omit<
   React.ComponentProps<"div">,
   "className"
 > & {
+  backdrop?: boolean;
+  backdropSurface?: AuxiliaryPanelSurface;
+  bordered?: boolean;
   /** Render header content without its own backdrop for a shared parent chrome. */
+  density?: "comfortable" | "compact";
+  inset?: "default" | "wide";
+  mode?: AuxiliaryPanelMode;
+  resizeBorder?: boolean;
+  surface?: AuxiliaryPanelSurface;
   transparent?: boolean;
 };
 type AuxiliaryPanelHeaderGroupProps = Omit<
@@ -39,33 +48,109 @@ type AuxiliaryPanelHeaderTitleBlockProps = {
 };
 type AuxiliaryPanelTitleProps = Omit<React.ComponentProps<"h2">, "className">;
 type AuxiliaryPanelTitleContentProps = React.ComponentProps<"h2">;
-type AuxiliaryPanelFloatingHeaderBackdropProps = {
-  surface?: "default" | "soft";
-};
-type AuxiliaryPanelFloatingHeaderProps = Omit<
-  React.ComponentProps<"div">,
-  "className"
-> & {
-  children: React.ReactNode;
-  resizeBorder?: boolean;
-  singleColumn?: boolean;
-  singleColumnInset?: "default" | "wide";
-  surface?: "default" | "transparent";
+type AuxiliaryPanelSurface = "default" | "soft" | "transparent";
+
+const AUXILIARY_PANEL_HEADER_HEIGHT_CLASS = "pt-13";
+
+export function getAuxiliaryPanelMode(
+  isSplitLayout: boolean,
+  isFloatingOverlay: boolean,
+): AuxiliaryPanelMode {
+  if (isSplitLayout) {
+    return "docked";
+  }
+
+  return isFloatingOverlay ? "panel" : "single-panel";
+}
+
+function getAuxiliaryPanelSurfaceClass(surface: AuxiliaryPanelSurface) {
+  if (surface === "transparent") {
+    return "bg-transparent";
+  }
+
+  if (surface === "soft") {
+    return "bg-background/75 backdrop-blur-md supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35";
+  }
+
+  return "bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55";
+}
+
+type AuxiliaryPanelHeaderBackdropProps = {
+  surface: Exclude<AuxiliaryPanelSurface, "transparent">;
 };
 
-/** Compact title/action row for right auxiliary panels in split layouts. */
+function AuxiliaryPanelHeaderBackdrop({
+  surface,
+}: AuxiliaryPanelHeaderBackdropProps) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn(
+        "pointer-events-none absolute inset-x-0 top-0 z-40 h-13",
+        getAuxiliaryPanelSurfaceClass(surface),
+      )}
+    />
+  );
+}
+
+/** Title/action row for right auxiliary panels across docked and standalone modes. */
 export function AuxiliaryPanelHeader({
+  backdrop = false,
+  backdropSurface = "default",
+  bordered = false,
   children,
+  density = "comfortable",
+  inset = "default",
+  mode = "docked",
+  resizeBorder = false,
+  surface = "default",
   transparent = false,
   ...props
 }: AuxiliaryPanelHeaderProps) {
+  if (mode !== "docked") {
+    const isSinglePanel = mode === "single-panel";
+    const effectiveSurface = transparent ? "transparent" : surface;
+
+    return (
+      <>
+        {backdrop && backdropSurface !== "transparent" ? (
+          <AuxiliaryPanelHeaderBackdrop surface={backdropSurface} />
+        ) : null}
+        <div
+          className={cn(
+            "flex cursor-default select-none items-center",
+            isSinglePanel
+              ? cn(
+                  "relative z-41 -mb-13 min-h-13 shrink-0 gap-2.5 px-4 py-2 sm:pr-3",
+                  inset === "wide" && "sm:pl-6",
+                  getAuxiliaryPanelSurfaceClass(effectiveSurface),
+                )
+              : resizeBorder
+                ? "absolute inset-x-0 top-0 z-50 min-h-13 gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80"
+                : cn(
+                    "relative z-50 shrink-0 gap-3",
+                    density === "compact"
+                      ? "min-h-11 px-3 py-1.5 text-left shadow-none"
+                      : "min-h-13 px-5 py-2",
+                    inset === "wide" && "sm:pl-6",
+                    bordered && "border-b border-border/35",
+                    getAuxiliaryPanelSurfaceClass(effectiveSurface),
+                  ),
+          )}
+          data-tauri-drag-region
+          {...props}
+        >
+          {children}
+        </div>
+      </>
+    );
+  }
+
   return (
     <div
       className={cn(
         "pointer-events-none relative z-40 overflow-visible",
-        transparent
-          ? "bg-transparent"
-          : "bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+        getAuxiliaryPanelSurfaceClass(transparent ? "transparent" : surface),
         channelChrome.negativeMargin,
       )}
       {...props}
@@ -81,63 +166,20 @@ export function AuxiliaryPanelHeader({
 }
 
 export function getAuxiliaryPanelBodyClass({
+  isFloatingOverlay = false,
   isSplitLayout = false,
-  reserveFloatingHeader = false,
+  mode,
 }: {
+  isFloatingOverlay?: boolean;
   isSplitLayout?: boolean;
-  reserveFloatingHeader?: boolean;
+  mode?: AuxiliaryPanelMode;
 }) {
+  const resolvedMode =
+    mode ?? getAuxiliaryPanelMode(isSplitLayout, isFloatingOverlay);
+
   return cn(
-    isSplitLayout && channelChrome.contentPadding,
-    reserveFloatingHeader && "pt-[3.25rem]",
-  );
-}
-
-export function AuxiliaryPanelFloatingHeaderBackdrop({
-  surface = "default",
-}: AuxiliaryPanelFloatingHeaderBackdropProps) {
-  return (
-    <div
-      aria-hidden="true"
-      className={cn(
-        "pointer-events-none absolute inset-x-0 top-0 z-40 h-[3.25rem]",
-        surface === "soft"
-          ? "bg-background/75 backdrop-blur-md supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35"
-          : "bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-      )}
-    />
-  );
-}
-
-export function AuxiliaryPanelFloatingHeader({
-  children,
-  resizeBorder = false,
-  singleColumn = false,
-  singleColumnInset = "default",
-  surface = "default",
-  ...props
-}: AuxiliaryPanelFloatingHeaderProps) {
-  return (
-    <div
-      className={cn(
-        "flex cursor-default select-none items-center",
-        singleColumn
-          ? cn(
-              "relative z-[41] -mb-[3.25rem] min-h-[3.25rem] shrink-0 gap-2.5 px-4 py-2 sm:pr-3",
-              singleColumnInset === "wide" && "sm:pl-6",
-              surface === "transparent"
-                ? "bg-transparent"
-                : "bg-background/80 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-            )
-          : resizeBorder
-            ? "absolute inset-x-0 top-0 z-50 min-h-13 gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80"
-            : "relative z-50 min-h-[3.25rem] shrink-0 gap-3 bg-background/80 px-5 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-      )}
-      data-tauri-drag-region
-      {...props}
-    >
-      {children}
-    </div>
+    resolvedMode === "docked" && channelChrome.contentPadding,
+    resolvedMode === "single-panel" && AUXILIARY_PANEL_HEADER_HEIGHT_CLASS,
   );
 }
 

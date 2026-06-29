@@ -2,9 +2,8 @@ import type * as React from "react";
 
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import {
-  AuxiliaryPanelFloatingHeader,
-  AuxiliaryPanelFloatingHeaderBackdrop,
   AuxiliaryPanelHeader,
+  getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -52,11 +51,13 @@ export function UserProfilePanelFrame({
   widthPx,
   transparentChrome = false,
 }: UserProfilePanelFrameProps) {
-  if (isSplitLayout) {
+  const mode = getAuxiliaryPanelMode(isSplitLayout, isFloatingOverlay);
+
+  if (mode === "docked") {
     return (
       <>
         <div className="flex min-h-0 flex-1 flex-col">
-          <AuxiliaryPanelHeader transparent={transparentChrome}>
+          <AuxiliaryPanelHeader mode={mode} transparent={transparentChrome}>
             {headerLeftContent}
             {headerActions}
           </AuxiliaryPanelHeader>
@@ -105,17 +106,16 @@ export function UserProfilePanelFrame({
           </button>
         )}
 
-        {!isOverlay ? <AuxiliaryPanelFloatingHeaderBackdrop /> : null}
-
-        <AuxiliaryPanelFloatingHeader
+        <AuxiliaryPanelHeader
+          backdrop={!isOverlay}
+          inset="wide"
+          mode={mode}
           resizeBorder={!isSinglePanelView && !isOverlay}
-          singleColumn={isSinglePanelView}
-          singleColumnInset="wide"
           surface={isSinglePanelView ? "transparent" : "default"}
         >
           {headerLeftContent}
           {headerActions}
-        </AuxiliaryPanelFloatingHeader>
+        </AuxiliaryPanelHeader>
 
         {profileBody}
       </aside>

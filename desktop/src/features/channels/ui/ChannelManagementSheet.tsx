@@ -56,7 +56,9 @@ import {
   AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
+  type AuxiliaryPanelMode,
   getAuxiliaryPanelBodyClass,
+  getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
@@ -105,6 +107,10 @@ export function ChannelManagementSheet({
 }: ChannelManagementSheetProps) {
   const { isDark } = useTheme();
   const isSplitLayout = layout === "split";
+  const auxiliaryPanelMode = getAuxiliaryPanelMode(
+    isSplitLayout,
+    !isSplitLayout,
+  );
   const channelId = channel?.id ?? null;
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
@@ -349,8 +355,7 @@ export function ChannelManagementSheet({
             isDark={isDark}
             isDeleteDialogOpen={isDeleteDialogOpen}
             isOwner={isOwner}
-            isSplitLayout={isSplitLayout}
-            layout={layout}
+            mode={auxiliaryPanelMode}
             transparentChrome={transparentChrome}
             joinChannelMutation={joinChannelMutation}
             leaveChannelMutation={leaveChannelMutation}
@@ -396,8 +401,7 @@ export function ChannelManagementSheet({
               isDark={isDark}
               isDeleteDialogOpen={isDeleteDialogOpen}
               isOwner={isOwner}
-              isSplitLayout={isSplitLayout}
-              layout={layout}
+              mode={auxiliaryPanelMode}
               transparentChrome={transparentChrome}
               joinChannelMutation={joinChannelMutation}
               leaveChannelMutation={leaveChannelMutation}
@@ -633,8 +637,7 @@ type ChannelManagementPanelContentProps = {
   isDark: boolean;
   isDeleteDialogOpen: boolean;
   isOwner: boolean;
-  isSplitLayout: boolean;
-  layout: NonNullable<ChannelManagementSheetProps["layout"]>;
+  mode: AuxiliaryPanelMode;
   transparentChrome?: boolean;
   joinChannelMutation: ChannelMutation;
   leaveChannelMutation: ChannelMutation;
@@ -666,8 +669,7 @@ function ChannelManagementPanelContent({
   isDark,
   isDeleteDialogOpen,
   isOwner,
-  isSplitLayout,
-  layout,
+  mode,
   transparentChrome = false,
   joinChannelMutation,
   leaveChannelMutation,
@@ -686,91 +688,53 @@ function ChannelManagementPanelContent({
     activeView === "summary" &&
     canManageChannel &&
     resolvedChannel.channelType !== "dm";
+  const headerLayout = mode === "panel" ? "overlay" : "split";
 
   return (
     <>
-      {isSplitLayout ? (
-        <AuxiliaryPanelHeader transparent={transparentChrome}>
-          <AuxiliaryPanelHeaderGroup
-            backButtonAriaLabel="Back to channel"
-            backButtonTestId="channel-management-back"
-            onBack={
-              activeView === "canvas"
-                ? () => setActiveView("summary")
-                : undefined
-            }
-          >
-            <DialogPrimitive.Title asChild>
-              <AuxiliaryPanelTitle>
-                {activeView === "canvas" ? "Canvas" : "Channel"}
-              </AuxiliaryPanelTitle>
-            </DialogPrimitive.Title>
-          </AuxiliaryPanelHeaderGroup>
-          <AuxiliaryPanelHeaderActions>
-            <AuxiliaryPanelHeaderCloseButton
-              ariaLabel="Close channel management"
-              onClose={() => onOpenChange(false)}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenChange(false);
-              }}
-              testId="channel-management-close"
-            />
-          </AuxiliaryPanelHeaderActions>
-          <DialogPrimitive.Description className="sr-only">
-            Channel settings
-          </DialogPrimitive.Description>
-        </AuxiliaryPanelHeader>
-      ) : (
-        <div
-          className={cn(
-            "relative z-10 flex min-h-11 flex-row items-center gap-3 space-y-0 border-b border-border/35 px-3 py-1.5 text-left shadow-none",
-            isDark
-              ? "bg-background/70 backdrop-blur-xl supports-backdrop-filter:bg-background/55"
-              : "bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70",
-          )}
+      <AuxiliaryPanelHeader
+        bordered={mode === "panel"}
+        density={mode === "panel" ? "compact" : "comfortable"}
+        mode={mode}
+        transparent={transparentChrome}
+      >
+        <AuxiliaryPanelHeaderGroup
+          backButtonAriaLabel="Back to channel"
+          backButtonTestId="channel-management-back"
+          layout={headerLayout}
+          onBack={
+            activeView === "canvas" ? () => setActiveView("summary") : undefined
+          }
         >
-          <AuxiliaryPanelHeaderGroup
-            backButtonAriaLabel="Back to channel"
-            backButtonTestId="channel-management-back"
-            layout={layout}
-            onBack={
-              activeView === "canvas"
-                ? () => setActiveView("summary")
-                : undefined
-            }
-          >
-            <DialogPrimitive.Title asChild>
-              <AuxiliaryPanelTitle>
-                {activeView === "canvas" ? "Canvas" : "Channel"}
-              </AuxiliaryPanelTitle>
-            </DialogPrimitive.Title>
-          </AuxiliaryPanelHeaderGroup>
-          <AuxiliaryPanelHeaderActions>
-            <AuxiliaryPanelHeaderCloseButton
-              ariaLabel="Close channel management"
-              onClose={() => onOpenChange(false)}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onOpenChange(false);
-              }}
-              testId="channel-management-close"
-            />
-          </AuxiliaryPanelHeaderActions>
-          <DialogPrimitive.Description className="sr-only">
-            Channel settings
-          </DialogPrimitive.Description>
-        </div>
-      )}
+          <DialogPrimitive.Title asChild>
+            <AuxiliaryPanelTitle>
+              {activeView === "canvas" ? "Canvas" : "Channel"}
+            </AuxiliaryPanelTitle>
+          </DialogPrimitive.Title>
+        </AuxiliaryPanelHeaderGroup>
+        <AuxiliaryPanelHeaderActions>
+          <AuxiliaryPanelHeaderCloseButton
+            ariaLabel="Close channel management"
+            onClose={() => onOpenChange(false)}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenChange(false);
+            }}
+            testId="channel-management-close"
+          />
+        </AuxiliaryPanelHeaderActions>
+        <DialogPrimitive.Description className="sr-only">
+          Channel settings
+        </DialogPrimitive.Description>
+      </AuxiliaryPanelHeader>
 
       <div
         className={cn(
           "flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-background px-4 [overflow-anchor:none]",
           showModerationActions ? "pb-20" : "pb-8",
-          getAuxiliaryPanelBodyClass({ isSplitLayout }),
-          !isSplitLayout && "pt-4",
+          getAuxiliaryPanelBodyClass({ mode }),
+          mode === "panel" && "pt-4",
         )}
         ref={scrollRef}
       >

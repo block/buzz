@@ -10,14 +10,13 @@ import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
 import { cn } from "@/shared/lib/cn";
 import {
-  AuxiliaryPanelFloatingHeader,
-  AuxiliaryPanelFloatingHeaderBackdrop,
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
   getAuxiliaryPanelBodyClass,
+  getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -66,6 +65,10 @@ export function AgentSessionThreadPanel({
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
+  const auxiliaryPanelMode = getAuxiliaryPanelMode(
+    isSplitLayout,
+    isFloatingOverlay,
+  );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
@@ -174,11 +177,8 @@ export function AgentSessionThreadPanel({
       onScroll={onScroll}
       className={cn(
         "min-h-0 flex-1 overflow-y-auto px-3 pb-4",
-        getAuxiliaryPanelBodyClass({
-          isSplitLayout,
-          reserveFloatingHeader: !isSplitLayout && !isFloatingOverlay,
-        }),
-        !isSplitLayout && isFloatingOverlay && "pt-4",
+        getAuxiliaryPanelBodyClass({ mode: auxiliaryPanelMode }),
+        auxiliaryPanelMode === "panel" && "pt-4",
       )}
     >
       <ManagedAgentSessionPanel
@@ -200,7 +200,10 @@ export function AgentSessionThreadPanel({
   if (isSplitLayout) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader transparent={transparentChrome}>
+        <AuxiliaryPanelHeader
+          mode={auxiliaryPanelMode}
+          transparent={transparentChrome}
+        >
           {agentHeaderContent}
         </AuxiliaryPanelHeader>
         {agentBody}
@@ -224,16 +227,14 @@ export function AgentSessionThreadPanel({
             : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
         }}
       >
-        {!isOverlay ? (
-          <AuxiliaryPanelFloatingHeaderBackdrop surface="soft" />
-        ) : null}
-
-        <AuxiliaryPanelFloatingHeader
-          singleColumn={isSinglePanelView}
-          singleColumnInset="wide"
+        <AuxiliaryPanelHeader
+          backdrop={!isOverlay}
+          backdropSurface="soft"
+          inset="wide"
+          mode={auxiliaryPanelMode}
         >
           {agentHeaderContent}
-        </AuxiliaryPanelFloatingHeader>
+        </AuxiliaryPanelHeader>
 
         {agentBody}
       </aside>

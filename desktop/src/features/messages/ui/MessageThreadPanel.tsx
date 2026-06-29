@@ -15,13 +15,13 @@ import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
 import {
-  AuxiliaryPanelFloatingHeader,
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
   getAuxiliaryPanelBodyClass,
+  getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Button } from "@/shared/ui/button";
 import {
@@ -236,6 +236,10 @@ export function MessageThreadPanelSkeleton({
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
+  const auxiliaryPanelMode = getAuxiliaryPanelMode(
+    isSplitLayout,
+    isFloatingOverlay,
+  );
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const threadHeaderContent = (
@@ -259,10 +263,7 @@ export function MessageThreadPanelSkeleton({
     <div
       className={cn(
         "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
-        getAuxiliaryPanelBodyClass({
-          isSplitLayout,
-          reserveFloatingHeader: !isSplitLayout && !isFloatingOverlay,
-        }),
+        getAuxiliaryPanelBodyClass({ mode: auxiliaryPanelMode }),
       )}
       data-testid="message-thread-loading"
     >
@@ -292,7 +293,10 @@ export function MessageThreadPanelSkeleton({
   if (isSplitLayout) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader transparent={transparentChrome}>
+        <AuxiliaryPanelHeader
+          mode={auxiliaryPanelMode}
+          transparent={transparentChrome}
+        >
           {threadHeaderContent}
         </AuxiliaryPanelHeader>
         {threadBody}
@@ -317,9 +321,9 @@ export function MessageThreadPanelSkeleton({
             : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
         }}
       >
-        <AuxiliaryPanelFloatingHeader singleColumn={isSinglePanelView}>
+        <AuxiliaryPanelHeader mode={auxiliaryPanelMode}>
           {threadHeaderContent}
-        </AuxiliaryPanelFloatingHeader>
+        </AuxiliaryPanelHeader>
 
         {threadBody}
         <ThreadComposerSkeleton />
@@ -385,6 +389,10 @@ export function MessageThreadPanel({
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
+  const auxiliaryPanelMode = getAuxiliaryPanelMode(
+    isSplitLayout,
+    isFloatingOverlay,
+  );
   const threadHeadId = threadHead?.id ?? null;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
   useComposerHeightPadding(
@@ -606,10 +614,7 @@ export function MessageThreadPanel({
     <div
       className={cn(
         "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
-        getAuxiliaryPanelBodyClass({
-          isSplitLayout,
-          reserveFloatingHeader: !isSplitLayout && !isFloatingOverlay,
-        }),
+        getAuxiliaryPanelBodyClass({ mode: auxiliaryPanelMode }),
       )}
       data-testid="message-thread-body"
       onScroll={onScroll}
@@ -929,7 +934,10 @@ export function MessageThreadPanel({
   if (isSplitLayout) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader transparent={transparentChrome}>
+        <AuxiliaryPanelHeader
+          mode={auxiliaryPanelMode}
+          transparent={transparentChrome}
+        >
           {threadHeaderContent}
         </AuxiliaryPanelHeader>
         {threadScrollRegion}
@@ -954,9 +962,9 @@ export function MessageThreadPanel({
             : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
         }}
       >
-        <AuxiliaryPanelFloatingHeader singleColumn={isSinglePanelView}>
+        <AuxiliaryPanelHeader mode={auxiliaryPanelMode}>
           {threadHeaderContent}
-        </AuxiliaryPanelFloatingHeader>
+        </AuxiliaryPanelHeader>
 
         {threadScrollRegion}
         {threadFooter}
