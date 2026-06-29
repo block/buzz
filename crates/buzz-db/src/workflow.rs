@@ -301,6 +301,56 @@ pub async fn create_workflow(
     Ok(id)
 }
 
+/// Insert or update a workflow at the caller-supplied NIP-33 `d`-tag UUID.
+///
+/// Updates are allowed only when the existing row has the same owner and
+/// channel. That keeps a learned workflow UUID from becoming a cross-user or
+/// cross-channel overwrite primitive while still making retries idempotent.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_workflow(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<()> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO workflows
+            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+        ON CONFLICT (community_id, id) DO UPDATE
+        SET name = EXCLUDED.name,
+            definition = EXCLUDED.definition,
+            definition_hash = EXCLUDED.definition_hash,
+            updated_at = NOW()
+        WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
+          AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
+        RETURNING id
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(name)
+    .bind(owner_pubkey)
+    .bind(channel_id)
+    .bind(definition_json)
+    .bind(definition_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    if row.is_none() {
+        return Err(DbError::AccessDenied(format!(
+            "workflow {id} belongs to a different owner or channel"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Fetch a single workflow by ID, scoped to its community.
 ///
 /// `workflows` is keyed `(community_id, id)`; the same workflow UUID can exist

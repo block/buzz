@@ -20,6 +20,7 @@ use uuid::Uuid;
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
+use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
 
 use crate::state::AppState;
@@ -80,15 +81,12 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, create_workflow, etc.) execute on the
+/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
 /// connection pool, NOT inside this transaction. The pattern is idempotent but
 /// not strictly atomic: if a mutation succeeds but commit fails, the mutation
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval) but may create duplicates
-/// for non-idempotent ones (create_workflow). This is acceptable for the
-/// current command set where create_workflow uses a client-generated d-tag
-/// as the natural dedup key.
+/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
 async fn persist_command_event(
     state: &Arc<AppState>,
     tenant: &TenantContext,
@@ -116,18 +114,82 @@ async fn persist_command_event(
     })?;
     let received_at = chrono::Utc::now();
 
-    // Extract d_tag for parameterized replaceable kinds (NIP-33)
-    let d_tag: Option<String> = if is_parameterized_replaceable(event.kind.as_u16() as u32) {
-        event.tags.iter().find_map(|t| {
-            if t.kind().to_string() == "d" {
-                t.content().map(|s| s.to_string())
-            } else {
-                None
+    // Extract d_tag for parameterized replaceable kinds (NIP-33).
+    let d_tag = buzz_db::event::extract_d_tag(event);
+    if let Some(ref d_tag) = d_tag {
+        if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
+            return Err(IngestError::Rejected(format!(
+                "invalid: d tag too long ({} bytes, max {})",
+                d_tag.len(),
+                buzz_db::event::D_TAG_MAX_LEN,
+            )));
+        }
+
+        // Command kinds normally use plain insert semantics, but workflow
+        // definitions are NIP-33 events. Serialize writers for the same
+        // coordinate and reject stale writes before executing the domain
+        // mutation, otherwise old updates can overwrite newer workflow state.
+        let lock_key = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in tenant.community().as_uuid().as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
             }
-        })
-    } else {
-        None
-    };
+            for b in kind_i32.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in pubkey_bytes.as_slice() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in d_tag.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h as i64
+        };
+
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: lock event coordinate: {e}")))?;
+
+        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
+            "SELECT created_at, id FROM events \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .bind(d_tag)
+        .fetch_optional(tx.as_mut())
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: query event coordinate: {e}")))?;
+
+        let incoming_id = event.id.as_bytes().as_slice();
+        if let Some((existing_ts, existing_id)) = existing {
+            let dominated = created_at < existing_ts
+                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
+            if dominated {
+                return Ok(PersistResult::Duplicate);
+            }
+
+            sqlx::query(
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: replace old event: {e}")))?;
+        }
+    }
 
     let result = sqlx::query(
         r#"
@@ -572,17 +634,16 @@ async fn handle_workflow_def(
 ) -> Result<IngestResult, IngestError> {
     let self_bytes = auth.pubkey().to_bytes().to_vec();
 
-    // 1. Extract channel from `h` tag, workflow name from `name` tag or d-tag
+    // 1. Extract channel and the canonical workflow UUID from the NIP-33 d-tag.
     let channel_id_str = extract_h_tag(event)
         .ok_or_else(|| IngestError::Rejected("invalid: missing h tag (channel_id)".into()))?;
     let channel_id = Uuid::parse_str(&channel_id_str)
         .map_err(|_| IngestError::Rejected("invalid: bad channel_id format".into()))?;
 
-    let workflow_name = extract_tag(event, "name")
-        .or_else(|| extract_d_tag(event))
-        .ok_or_else(|| {
-            IngestError::Rejected("invalid: missing workflow name (name or d tag)".into())
-        })?;
+    let workflow_id_str = extract_d_tag(event)
+        .ok_or_else(|| IngestError::Rejected("invalid: missing d tag (workflow_id)".into()))?;
+    let workflow_id = Uuid::parse_str(&workflow_id_str)
+        .map_err(|_| IngestError::Rejected("invalid: bad workflow_id format".into()))?;
 
     // 2. Validate caller has channel access (minimum: is a member)
     let is_member = state
@@ -598,15 +659,45 @@ async fn handle_workflow_def(
     // 3. Parse YAML from event.content
     let (def, definition_json_str) = buzz_workflow::WorkflowEngine::parse_yaml(&event.content)
         .map_err(|e| IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}")))?;
+    let workflow_name = extract_tag(event, "name").unwrap_or_else(|| def.name.clone());
 
     let mut definition_json: serde_json::Value = serde_json::from_str(&definition_json_str)
         .map_err(|e| IngestError::Internal(format!("error: json parse of definition: {e}")))?;
 
-    // Generate webhook secret if this workflow uses a Webhook trigger
+    let existing_workflow = match state.db.get_workflow(tenant.community(), workflow_id).await {
+        Ok(workflow) => {
+            if workflow.owner_pubkey != self_bytes || workflow.channel_id != Some(channel_id) {
+                return Err(IngestError::Rejected(
+                    "forbidden: workflow belongs to a different owner or channel".into(),
+                ));
+            }
+            Some(workflow)
+        }
+        Err(DbError::NotFound(_)) => None,
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: db get_workflow: {e}"
+            )));
+        }
+    };
+
+    // Preserve the existing webhook secret across updates. A new secret is
+    // returned only when the workflow first gains a webhook trigger.
     let webhook_secret = if matches!(def.trigger, buzz_workflow::TriggerDef::Webhook) {
-        let secret = webhook_secret::generate_webhook_secret();
+        let existing_secret = existing_workflow
+            .as_ref()
+            .and_then(|workflow| webhook_secret::extract_secret(&workflow.definition));
+        let secret = existing_secret.unwrap_or_else(webhook_secret::generate_webhook_secret);
         webhook_secret::inject_secret(&mut definition_json, &secret);
-        Some(secret)
+        if existing_workflow
+            .as_ref()
+            .and_then(|workflow| webhook_secret::extract_secret(&workflow.definition))
+            .is_none()
+        {
+            Some(secret)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -628,7 +719,9 @@ async fn handle_workflow_def(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 4. Execute: create_workflow. The workflow's community is the request's
+    // 4. Execute: upsert by the NIP-33 d-tag UUID. A retry updates the same
+    // row instead of creating another enabled workflow that would fan out on
+    // every matching event. The workflow's community is the request's
     // server-bound tenant — never re-derived from the (client-supplied) channel
     // id. `community_of_channel(channel_id)` is ambiguous when the same channel
     // UUID exists in two communities and could mint the workflow under the wrong
@@ -644,10 +737,11 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
-    let workflow_id = state
+    state
         .db
-        .create_workflow(
+        .upsert_workflow(
             community_id,
+            workflow_id,
             Some(channel_id),
             &self_bytes,
             &workflow_name,
@@ -655,9 +749,14 @@ async fn handle_workflow_def(
             &hash,
         )
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db create_workflow: {e}")))?;
+        .map_err(|e| match e {
+            DbError::AccessDenied(_) => IngestError::Rejected(
+                "forbidden: workflow belongs to a different owner or channel".into(),
+            ),
+            other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
+        })?;
 
-    // Commit: event + workflow creation succeeded atomically.
+    // Commit the event transaction after the idempotent workflow upsert succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
