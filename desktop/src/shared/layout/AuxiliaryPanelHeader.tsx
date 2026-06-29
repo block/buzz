@@ -132,7 +132,7 @@ export function AuxiliaryPanelHeader({
                   getAuxiliaryPanelSurfaceClass(effectiveSurface),
                 )
               : resizeBorder
-                ? "absolute inset-x-0 top-0 z-50 min-h-13 gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80"
+                ? "absolute inset-x-0 top-0 z-50 min-h-13 gap-3 bg-transparent px-3 py-2 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/auxiliary-panel-resize:after:bg-border/80 peer-focus-visible/auxiliary-panel-resize:after:bg-border/80"
                 : cn(
                     "relative z-50 shrink-0 gap-3",
                     density === "compact"

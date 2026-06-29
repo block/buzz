@@ -139,3 +139,37 @@ test("AuxiliaryPanelHeaderGroup derives overlay button styling from context", ()
   assert.match(html, /ml-0/);
   assert.doesNotMatch(html, /-ml-2/);
 });
+
+test("AuxiliaryPanel applies className in standalone layout", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        className: "custom-panel-class",
+        onClose: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, /custom-panel-class/);
+});
+
+test("AuxiliaryPanel resize handle uses a generic namespace", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        onClose: () => {},
+        onResizeStart: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, /peer\/auxiliary-panel-resize/);
+  assert.match(html, /group\/auxiliary-panel-resize/);
+  assert.doesNotMatch(html, /profile-resize/);
+});

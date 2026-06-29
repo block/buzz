@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/hooks/useThreadPanelWidth";
+import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/auxiliaryPanelLayout";
 
 const MOBILE_BREAKPOINT = 768;
 
@@ -86,6 +86,10 @@ export function useIsMobile() {
   return useMediaBreakpoint(MOBILE_BREAKPOINT);
 }
 
+export function useIsAuxiliaryPanelOverlay() {
+  return useMediaBreakpoint(AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX);
+}
+
 export function useIsThreadPanelOverlay() {
-  return useMediaBreakpoint(THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX);
+  return useIsAuxiliaryPanelOverlay();
 }

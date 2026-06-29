@@ -1,7 +1,7 @@
 import * as React from "react";
 
-import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
+import { useIsAuxiliaryPanelOverlay } from "@/shared/hooks/use-mobile";
+import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/auxiliaryPanelLayout";
 import {
   AuxiliaryPanelContext,
   type AuxiliaryPanelLayout,
@@ -61,7 +61,7 @@ export function AuxiliaryPanel({
   transparentChrome = false,
   widthPx,
 }: AuxiliaryPanelProps) {
-  const isOverlay = useIsThreadPanelOverlay();
+  const isOverlay = useIsAuxiliaryPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
   const mode = getAuxiliaryPanelMode(isSplitLayout, isFloatingOverlay);
@@ -94,7 +94,7 @@ export function AuxiliaryPanel({
   const panelWidth = isSinglePanelView
     ? "100%"
     : splitPaneClamp
-      ? `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`
+      ? `min(${widthPx}px, calc(100% - ${AUXILIARY_PANEL_MIN_WIDTH_PX}px))`
       : `${widthPx}px`;
 
   const resizeHandle =
@@ -104,7 +104,7 @@ export function AuxiliaryPanel({
     onResizeStart != null ? (
       <button
         aria-label={resizeHandleAriaLabel}
-        className="peer/profile-resize group/profile-resize absolute inset-y-0 left-0 z-40 w-3 -translate-x-1/2 cursor-col-resize"
+        className="peer/auxiliary-panel-resize group/auxiliary-panel-resize absolute inset-y-0 left-0 z-40 w-3 -translate-x-1/2 cursor-col-resize"
         data-testid={resizeHandleTestId}
         onDoubleClick={canResetWidth ? onResetWidth : undefined}
         onPointerDown={onResizeStart}
@@ -115,7 +115,7 @@ export function AuxiliaryPanel({
         }
         type="button"
       >
-        <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/profile-resize:bg-border/80 group-focus-visible/profile-resize:bg-border/80" />
+        <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/auxiliary-panel-resize:bg-border/80 group-focus-visible/auxiliary-panel-resize:bg-border/80" />
       </button>
     ) : null;
 
@@ -140,6 +140,7 @@ export function AuxiliaryPanel({
           PANEL_ENTER_BASE_CLASS,
           isSinglePanelView && "border-l-0",
           isFloatingOverlay && PANEL_OVERLAY_CLASS,
+          className,
         )}
         data-testid={testId}
         style={{ width: panelWidth }}
