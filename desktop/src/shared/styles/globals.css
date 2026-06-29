@@ -2159,8 +2159,7 @@
   }
 }
 
-/* ── Image lightbox zoom slider (shared/ui/markdown) ───────────────────
-   Matches the white-on-glass media control track used by the video player. */
+/* ── Image lightbox zoom slider (shared/ui/markdown) ─────────────────── */
 .image-zoom-slider {
   appearance: none;
   background: transparent;
@@ -2169,7 +2168,7 @@
 .image-zoom-slider:focus-visible {
   outline: none;
   border-radius: 9999px;
-  box-shadow: 0 0 0 2px rgb(255 255 255 / 0.7);
+  box-shadow: 0 0 0 2px hsl(var(--ring) / 0.7);
 }
 
 .image-zoom-slider::-webkit-slider-runnable-track {
@@ -2177,8 +2176,8 @@
   border-radius: 9999px;
   background: linear-gradient(
     to right,
-    white var(--image-zoom-fill, 0%),
-    rgb(255 255 255 / 0.3) var(--image-zoom-fill, 0%)
+    currentColor var(--image-zoom-fill, 0%),
+    color-mix(in srgb, currentColor 30%, transparent) var(--image-zoom-fill, 0%)
   );
 }
 
@@ -2189,26 +2188,26 @@
   height: 12px;
   width: 12px;
   border-radius: 9999px;
-  background: white;
+  background: currentColor;
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
 }
 
 .image-zoom-slider:focus-visible::-webkit-slider-thumb {
   box-shadow:
-    0 0 0 3px rgb(255 255 255 / 0.25),
+    0 0 0 3px hsl(var(--ring) / 0.25),
     0 1px 3px rgb(0 0 0 / 0.3);
 }
 
 .image-zoom-slider::-moz-range-track {
   height: 4px;
   border-radius: 9999px;
-  background: rgb(255 255 255 / 0.3);
+  background: color-mix(in srgb, currentColor 30%, transparent);
 }
 
 .image-zoom-slider::-moz-range-progress {
   height: 4px;
   border-radius: 9999px;
-  background: white;
+  background: currentColor;
 }
 
 .image-zoom-slider::-moz-range-thumb {
@@ -2216,13 +2215,13 @@
   height: 12px;
   width: 12px;
   border-radius: 9999px;
-  background: white;
+  background: currentColor;
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
 }
 
 .image-zoom-slider:focus-visible::-moz-range-thumb {
   box-shadow:
-    0 0 0 3px rgb(255 255 255 / 0.25),
+    0 0 0 3px hsl(var(--ring) / 0.25),
     0 1px 3px rgb(0 0 0 / 0.3);
 }
 

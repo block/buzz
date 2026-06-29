@@ -34,6 +34,7 @@ export default defineConfig({
         "**/active-turn-resilience.spec.ts",
         "**/profile-active-turn.spec.ts",
         "**/file-attachment.spec.ts",
+        "**/image-attachment-gallery.spec.ts",
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",
         "**/mentions.spec.ts",
