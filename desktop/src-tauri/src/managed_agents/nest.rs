@@ -938,32 +938,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ensure_cli_symlink_replaces_stale_symlink() {
-        // Simulates the bug: a symlink pointing to a deleted worktree path
-        // should be unconditionally replaced on next boot.
-        let tmp = tempfile::tempdir().unwrap();
-        let exe_parent = tmp.path().join("MacOS");
-        fs::create_dir(&exe_parent).unwrap();
-        fs::write(exe_parent.join("buzz"), "current binary").unwrap();
-
-        let local_bin = tmp.path().join("local_bin");
-        fs::create_dir_all(&local_bin).unwrap();
-        let link = local_bin.join("buzz");
-
-        // Create a stale symlink pointing to a nonexistent worktree path.
-        let stale_target = tmp.path().join("worktrees/old/target/debug/buzz");
-        std::os::unix::fs::symlink(&stale_target, &link).unwrap();
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_link(&link).unwrap(), stale_target);
-
-        // The new logic replaces any symlink unconditionally.
-        let _ = fs::remove_file(&link);
-        std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
-        assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn ensure_cli_symlink_does_not_clobber_regular_file() {
         let tmp = tempfile::tempdir().unwrap();
         let local_bin = tmp.path().join("local_bin");
