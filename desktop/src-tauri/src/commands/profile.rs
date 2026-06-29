@@ -195,14 +195,14 @@ pub async fn search_users(
     }
 
     // NIP-50 full-text search on kind:0 profiles. The relay's HTTP bridge
-    // intercepts the `search` field on POST /query and routes to Typesense
+    // intercepts the `search` field on POST /query and routes to Postgres FTS
     // (see `crates/buzz-relay/src/api/bridge.rs::handle_bridge_search`),
     // so we get indexed, server-side search instead of fetching every kind:0
     // and scanning client-side. The old path was capped at 2000 kind:0 events
     // by the relay's HTTP bridge limit, which silently hid users on busy relays.
     //
     // We over-fetch (limit=50, which the bridge accepts up to 500) and re-rank
-    // locally because Typesense scores BM25 against the whole kind:0 JSON
+    // locally because the relay scores FTS rank against the whole kind:0 JSON
     // `content` blob, where a hit in `display_name` is not weighted any higher
     // than a substring hit in `about`. Re-ranking ≤50 results client-side is
     // cheap and keeps display ordering predictable for autocomplete.

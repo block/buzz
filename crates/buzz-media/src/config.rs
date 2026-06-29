@@ -31,12 +31,6 @@ pub struct MediaConfig {
     pub max_file_bytes: u64,
     /// Public base URL for media URLs in BlobDescriptor (must include `/media` path).
     pub public_base_url: String,
-    /// Server authority for BUD-11 server tag validation.
-    /// Format: `host` for default ports, `host:port` for non-default ports.
-    /// Examples: "buzz.example.com", "localhost:3000", "relay.example.com:8080".
-    /// If None, auth events carrying `server` tags are rejected (fail-closed).
-    /// Must match the authority the desktop signer derives from the relay URL.
-    pub server_domain: Option<String>,
 }
 
 impl MediaConfig {

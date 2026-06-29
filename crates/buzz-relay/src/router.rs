@@ -160,9 +160,33 @@ async fn nip11_or_ws_handler(
         return Json(info).into_response();
     }
 
+    // Row zero: bind the connection to its community from the request host
+    // BEFORE the WebSocket upgrade, so no frame is ever read on an unbound
+    // connection. The host is the authoritative selector; an unmapped host or a
+    // lookup failure fails closed with a generic rejection — never a default
+    // tenant. NIP-11 above is intentionally host-agnostic (static facts only),
+    // so it is served before binding and cannot leak which hosts are mapped.
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+        Ok(ctx) => ctx,
+        Err(_) => {
+            // Generic rejection: do not distinguish "unmapped" from "lookup
+            // error", and never echo the host, so an unauthenticated caller
+            // cannot probe which communities exist on this deployment.
+            return (
+                StatusCode::NOT_FOUND,
+                "relay: no community is configured for this host",
+            )
+                .into_response();
+        }
+    };
+
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => ws
-            .on_upgrade(move |socket| handle_connection(socket, state, addr))
+            .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
             .into_response(),
         Err(_) => {
             // Browser requesting HTML and web UI is configured → serve SPA.

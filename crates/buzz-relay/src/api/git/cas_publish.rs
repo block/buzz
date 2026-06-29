@@ -70,6 +70,7 @@ use tracing::{debug, warn};
 
 use crate::api::git::manifest::{pointer_key, Manifest, ManifestError, MANIFEST_VERSION};
 use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
+use buzz_core::TenantContext;
 
 /// Errors `cas_publish` surfaces. Distinguished so `finalize_push` can map
 /// each to the right HTTP status (the spec's 412 → 409 mapping is here).
@@ -443,7 +444,7 @@ fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
 ///
 /// **Caller contract — `Inv_RefDerivedFromParent` is structural.** The
 /// `parent_state` you pass in must be the same one the workspace was
-/// hydrated from. Concretely: `hydrate::hydrate_for_write(store, owner,
+/// hydrated from. Concretely: `hydrate::hydrate_for_write(store, ctx, owner,
 /// repo)` returns `(HydratedRepo, ParentState)` from a single pointer
 /// observation → `install_hook(repo.path())` → run `receive-pack`
 /// against the workspace → call this with the **same `parent_state`**.
@@ -458,12 +459,13 @@ fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
 /// model proves safe.
 pub async fn cas_publish(
     store: &GitStore,
+    ctx: &TenantContext,
     repo_path: &Path,
     owner: &str,
     repo: &str,
     parent_state: &ParentState,
 ) -> Result<CasSuccess, CasError> {
-    let pkey = pointer_key(owner, repo);
+    let pkey = pointer_key(ctx.community(), owner, repo);
 
     // Snapshot post-receive-pack state from disk. `parent_state.parent.refs`
     // are the refs the workspace was hydrated from — `pack-objects --revs`

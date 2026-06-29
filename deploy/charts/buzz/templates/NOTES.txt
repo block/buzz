@@ -26,19 +26,18 @@
 ──────────────────────────────────────────────────────────────────────────────
   Profile
 ──────────────────────────────────────────────────────────────────────────────
-{{ if or .Values.postgresql.enabled .Values.redis.enabled .Values.minio.enabled .Values.typesense.enabled }}
+{{ if or .Values.postgresql.enabled .Values.redis.enabled .Values.minio.enabled }}
 ⚠ QUICKSTART / EVALUATION PROFILE
   {{ if .Values.postgresql.enabled }}- In-cluster Postgres subchart (CloudPirates){{ end }}
   {{ if .Values.redis.enabled }}- In-cluster Redis subchart (CloudPirates){{ end }}
   {{ if .Values.minio.enabled }}- In-cluster MinIO (eval-only, single replica; bucket "{{ .Values.s3.bucket }}" created by post-install Job){{ end }}
-  {{ if .Values.typesense.enabled }}- In-cluster Typesense (eval-only, single replica){{ end }}
   - Chart auto-generates secrets via the `lookup` pattern. This is NOT
     GitOps-safe — secrets will silently rotate under ArgoCD/Flux. For
     production, see examples/argocd-app.yaml or examples/flux-helmrelease.yaml.
 
 {{ else }}
 ✓ PRODUCTION PROFILE
-  External Postgres, Redis (if enabled), Typesense, S3.
+  External Postgres, Redis (if enabled), S3.
   {{ if .Values.secrets.existingSecret }}- Secrets sourced from: {{ .Values.secrets.existingSecret }}{{ end }}
 {{ end }}
 

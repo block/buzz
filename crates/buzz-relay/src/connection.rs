@@ -14,11 +14,13 @@ use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
 use buzz_auth::{generate_challenge, AuthContext};
+use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::AppState;
+use buzz_pubsub::EventTopic;
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
@@ -44,6 +46,10 @@ pub enum AuthState {
 pub struct ConnectionState {
     /// Unique identifier for this connection.
     pub conn_id: Uuid,
+    /// The community this connection is bound to, resolved from the connection
+    /// host at row zero (before any frame is read) and never overridable by
+    /// client-supplied input. Every handler reads tenant scope from here.
+    pub tenant: TenantContext,
     /// Remote socket address of the client.
     pub remote_addr: SocketAddr,
     /// Current NIP-42 authentication state.
@@ -102,7 +108,12 @@ impl ConnectionState {
 ///
 /// Acquires a connection semaphore permit, sends the NIP-42 AUTH challenge,
 /// then drives the send, heartbeat, and receive loops until the connection closes.
-pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: SocketAddr) {
+pub async fn handle_connection(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    tenant: TenantContext,
+) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -125,6 +136,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
 
     let conn = Arc::new(ConnectionState {
         conn_id,
+        tenant,
         remote_addr: addr,
         auth_state: RwLock::new(AuthState::Pending {
             challenge: challenge.clone(),
@@ -159,6 +171,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
         conn_id,
         tx.clone(),
         cancel.clone(),
+        conn.tenant.community(),
         Arc::clone(&backpressure_count),
         subscriptions,
         state.config.slow_client_grace_limit,
@@ -190,14 +203,22 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
     let _ = send_task.await;
     let _ = heartbeat_task.await;
 
-    state.sub_registry.remove_connection(conn.conn_id);
+    for removed in state.sub_registry.remove_connection(conn.conn_id) {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(removed.channel_id))
+            .await;
+    }
     state.conn_manager.deregister(conn.conn_id);
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
         let remaining = state
             .conn_manager
             .connection_ids_for_pubkey(auth_ctx.pubkey.to_bytes().as_slice());
         if remaining.is_empty() {
-            let _ = state.pubsub.clear_presence(&auth_ctx.pubkey).await;
+            let _ = state
+                .pubsub
+                .clear_presence(&conn.tenant, &auth_ctx.pubkey)
+                .await;
         }
     }
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
@@ -431,5 +452,12 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
         }
+    }
+}
+
+fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
+    match channel_id {
+        Some(channel_id) => EventTopic::Channel(channel_id),
+        None => EventTopic::Global,
     }
 }

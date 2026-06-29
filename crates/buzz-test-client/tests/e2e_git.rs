@@ -43,7 +43,7 @@ fn credential_helper() -> PathBuf {
     p
 }
 
-/// Submit a signed event to the relay's REST bridge (`POST /api/events`).
+/// Submit a signed event to the relay's HTTP bridge (`POST /events`).
 async fn post_event(event: &nostr::Event) {
     let client = reqwest::Client::new();
     let resp = client
@@ -143,6 +143,9 @@ impl GitS3Probe {
 
     fn pointer_key(owner: &str, repo: &str) -> String {
         let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        if let Ok(community) = std::env::var("BUZZ_E2E_GIT_COMMUNITY_ID") {
+            return format!("repos/{community}/{owner}/{repo}/pointer");
+        }
         format!("repos/{owner}/{repo}/pointer")
     }
 

@@ -1,5 +1,6 @@
 //! imeta tag validation helpers — shared between ingest pipeline and bridge.
 
+use buzz_core::tenant::TenantContext;
 use buzz_media::validation::mime_to_ext;
 
 /// Validate imeta tags for correctness and safety.
@@ -206,6 +207,7 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
 /// Verify that every imeta tag references a blob that actually exists in storage
 /// and that the claimed metadata (size, MIME) matches the sidecar.
 pub async fn verify_imeta_blobs(
+    ctx: &TenantContext,
     tags: &[Vec<String>],
     storage: &buzz_media::MediaStorage,
 ) -> Result<(), String> {
@@ -238,7 +240,7 @@ pub async fn verify_imeta_blobs(
 
         // 1. Sidecar must exist
         let sidecar = storage
-            .get_sidecar(&x_value)
+            .get_sidecar(ctx, &x_value)
             .await
             .map_err(|_| format!("imeta references nonexistent blob: {x_value}"))?;
 
@@ -293,7 +295,7 @@ pub async fn verify_imeta_blobs(
                 .ok_or_else(|| format!("imeta image URL has no extractable hash: {image_value}"))?;
 
             let img_sidecar = storage
-                .get_sidecar(img_hash)
+                .get_sidecar(ctx, img_hash)
                 .await
                 .map_err(|_| format!("imeta image references nonexistent poster: {img_hash}"))?;
 
@@ -430,6 +432,19 @@ mod tests {
     #[test]
     fn test_local_media_url_absolute() {
         assert!(is_local_media_url(&format!("{BASE}/{HASH}.jpg"), BASE));
+    }
+
+    #[test]
+    fn imeta_accepts_tenant_host_url_when_base_matches_tenant() {
+        const TENANT_BASE: &str = "https://b.localhost:3100/media";
+        let tag = vec![
+            "imeta".into(),
+            format!("url {TENANT_BASE}/{HASH}.jpg"),
+            "m image/jpeg".into(),
+            format!("x {HASH}"),
+            "size 100".into(),
+        ];
+        assert!(validate_imeta_tags(&[tag], TENANT_BASE).is_ok());
     }
 
     #[test]

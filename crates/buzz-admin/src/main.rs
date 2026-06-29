@@ -24,8 +24,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
+use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
-use buzz_pubsub::PubSubManager;
+use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use tracing::warn;
@@ -144,7 +145,11 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
 
     let (db, pubsub, relay_keypair) = connect_member_services().await?;
 
-    match db.add_relay_member(&pubkey_hex, &role, None).await {
+    let tenant = resolve_admin_tenant(&db).await?;
+    match db
+        .add_relay_member(tenant.community(), &pubkey_hex, &role, None)
+        .await
+    {
         Ok(true) => println!("added {pubkey_hex} as {role}"),
         Ok(false) => println!("already a member: {pubkey_hex} (no change)"),
         Err(e) => {
@@ -153,7 +158,7 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
         }
     }
 
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair).await {
+    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
         eprintln!("warning: member added to DB but list publish failed: {e}");
     }
 
@@ -178,11 +183,14 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
 
     let (db, pubsub, relay_keypair) = connect_member_services().await?;
 
+    let tenant = resolve_admin_tenant(&db).await?;
     use buzz_db::relay_members::RemoveResult;
     let result = if let Some(ref role) = role_filter {
-        db.remove_relay_member_if_role(&pubkey_hex, role).await
+        db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role)
+            .await
     } else {
-        db.remove_relay_member(&pubkey_hex).await
+        db.remove_relay_member(tenant.community(), &pubkey_hex)
+            .await
     };
 
     match result {
@@ -209,7 +217,7 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         }
     }
 
-    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair).await {
+    if let Err(e) = publish_membership_list_with_bump(&db, &pubsub, &relay_keypair, &tenant).await {
         eprintln!("warning: member removed from DB but list publish failed: {e}");
     }
 
@@ -218,7 +226,8 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
 
 async fn cmd_list_members() -> Result<i32> {
     let db = connect_db().await?;
-    let members = db.list_relay_members().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let members = db.list_relay_members(tenant.community()).await?;
 
     if members.is_empty() {
         println!("(no relay members)");
@@ -274,6 +283,7 @@ async fn publish_membership_list_with_bump(
     db: &Db,
     pubsub: &Arc<PubSubManager>,
     relay_keypair: &Keys,
+    tenant: &TenantContext,
 ) -> Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -285,7 +295,11 @@ async fn publish_membership_list_with_bump(
 
     // Query the newest existing kind:13534 for this relay's pubkey (channel_id=None).
     let newest_ts = db
-        .get_latest_global_replaceable(KIND_NIP43_MEMBERSHIP_LIST as i32, &relay_pubkey_bytes)
+        .get_latest_global_replaceable(
+            tenant.community(),
+            KIND_NIP43_MEMBERSHIP_LIST as i32,
+            &relay_pubkey_bytes,
+        )
         .await?
         .map(|e| e.event.created_at.as_secs());
 
@@ -295,7 +309,7 @@ async fn publish_membership_list_with_bump(
         None => now,
     };
 
-    let members = db.list_relay_members().await?;
+    let members = db.list_relay_members(tenant.community()).await?;
 
     let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
     // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
@@ -313,12 +327,17 @@ async fn publish_membership_list_with_bump(
         .sign_with_keys(relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
 
-    let (stored, was_inserted) = db.replace_addressable_event(&event, None).await?;
+    let (stored, was_inserted) = db
+        .replace_addressable_event(tenant.community(), &event, None)
+        .await?;
     if was_inserted {
         // Publish to Redis so live clients receive the updated roster.
-        // Uses channel_id=Nil (global scope) matching the relay's own publish path.
-        let pubsub_channel = uuid::Uuid::nil();
-        if let Err(e) = pubsub.publish_event(pubsub_channel, &stored.event).await {
+        // Community-global scope (EventTopic::Global) matches the relay's own
+        // membership-list publish path; the tenant fixes the community.
+        if let Err(e) = pubsub
+            .publish_event(tenant, EventTopic::Global, &stored.event)
+            .await
+        {
             warn!("Redis publish of kind:13534 failed: {e}");
         }
     }
@@ -376,6 +395,36 @@ async fn connect_db() -> Result<Db> {
     Ok(db)
 }
 
+/// Resolve the deployment's tenant from the configured `RELAY_URL` host.
+///
+/// `buzz-admin` runs inside the relay container (`compose exec relay
+/// buzz-admin …`), so it shares the relay's `RELAY_URL` and resolves the same
+/// single community against the durable `communities` host map. This is
+/// deliberately NOT a default tenant: an unmapped host fails closed with an
+/// error, mirroring the relay's own `bind_community` row-zero seam. The CLI is
+/// single-community per invocation — there is no cross-community sweep.
+async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
+    let relay_url =
+        std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
+    // Derive the authority the *same* way startup seeding and live request
+    // resolution do (`buzz_core::tenant::relay_url_authority`): host plus an
+    // explicit non-default port, IPv6 brackets preserved. A plain
+    // `Url::host_str()` drops the port/brackets, so for `ws://localhost:3000`
+    // the admin would look up `localhost` while startup seeded `localhost:3000`
+    // — and `wss://relay.example:8443` would resolve `relay.example`. Sharing
+    // the helper keeps buzz-admin byte-identical to the community startup seeds.
+    let host = relay_url_authority(&relay_url);
+    let record = db.lookup_community_by_host(&host).await?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "RELAY_URL host '{host}' is not mapped to a community.\n\
+             buzz-admin operates on the configured relay's community; ensure the \
+             relay has started and seeded its community (or set RELAY_URL to a \
+             mapped host)."
+        )
+    })?;
+    Ok(TenantContext::resolved(record.id, record.host))
+}
+
 async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
@@ -399,7 +448,8 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         }
     };
 
-    let channels = db.list_channels(None).await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let channels = db.list_channels(tenant.community(), None).await?;
     if channels.is_empty() {
         println!("No channels in database.");
         return Ok(());
@@ -417,7 +467,7 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
                 kinds: Some(vec![39000]),
                 d_tag: Some(channel_id_str.clone()),
                 limit: Some(1),
-                ..Default::default()
+                ..EventQuery::for_community(tenant.community())
             })
             .await
             .unwrap_or_default();
@@ -427,7 +477,7 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
             continue;
         }
 
-        let members = db.get_members(channel.id).await?;
+        let members = db.get_members(tenant.community(), channel.id).await?;
 
         // kind:39000 — channel metadata
         {
@@ -453,7 +503,7 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39000: {e}"))?;
-            db.replace_addressable_event(&event, Some(channel.id))
+            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
                 .await?;
         }
 
@@ -471,7 +521,7 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39001: {e}"))?;
-            db.replace_addressable_event(&event, Some(channel.id))
+            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
                 .await?;
         }
 
@@ -486,7 +536,7 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
                 .map_err(|e| anyhow::anyhow!("sign kind:39002: {e}"))?;
-            db.replace_addressable_event(&event, Some(channel.id))
+            db.replace_addressable_event(tenant.community(), &event, Some(channel.id))
                 .await?;
         }
 

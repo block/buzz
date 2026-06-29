@@ -11,7 +11,6 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
 use crate::managed_agents::ManagedAgentProcess;
-
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
@@ -84,6 +83,7 @@ pub fn build_app_state() -> AppState {
     AppState {
         keys: Mutex::new(keys),
         http_client: reqwest::Client::builder()
+            .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))
             .pool_max_idle_per_host(1)
             .build()

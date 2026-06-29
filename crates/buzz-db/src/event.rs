@@ -12,13 +12,15 @@ use uuid::Uuid;
 use buzz_core::kind::{
     event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_EVENT_REMINDER,
 };
-use buzz_core::StoredEvent;
+use buzz_core::{CommunityId, StoredEvent};
 
 use crate::error::{DbError, Result};
 
 /// Optional filters for [`query_events`].
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct EventQuery {
+    /// Server-resolved community scope.
+    pub community_id: CommunityId,
     /// Restrict results to this channel.
     pub channel_id: Option<Uuid>,
     /// Restrict results to these kind values (stored as `i32` in Postgres).
@@ -67,6 +69,36 @@ pub struct EventQuery {
     /// which needs to fetch all matching events for post-filter counting.
     /// When None, the default clamp of 1000 applies.
     pub max_limit: Option<i64>,
+}
+
+impl EventQuery {
+    /// Construct an unconstrained query inside a server-resolved community.
+    ///
+    /// `community_id` has no safe default. This keeps call sites concise while
+    /// making tenant provenance explicit at construction.
+    #[must_use]
+    pub const fn for_community(community_id: CommunityId) -> Self {
+        Self {
+            community_id,
+            channel_id: None,
+            kinds: None,
+            pubkey: None,
+            since: None,
+            until: None,
+            limit: None,
+            offset: None,
+            p_tag_hex: None,
+            d_tag: None,
+            d_tags: None,
+            before_id: None,
+            global_only: false,
+            authors: None,
+            ids: None,
+            e_tags: None,
+            channel_ids: None,
+            max_limit: None,
+        }
+    }
 }
 
 /// Maximum length for a `d_tag` value (bytes). NIP-33 d-tags are short identifiers;
@@ -123,6 +155,7 @@ pub fn extract_not_before(event: &Event) -> Option<i64> {
 /// Returns `(StoredEvent, was_inserted)` — `was_inserted` is `false` on duplicate.
 pub async fn insert_event(
     pool: &PgPool,
+    community_id: CommunityId,
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
@@ -150,11 +183,12 @@ pub async fn insert_event(
     let not_before = extract_not_before(event);
     let result = sqlx::query(
         r#"
-        INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT DO NOTHING
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(id_bytes.as_slice())
     .bind(pubkey_bytes.as_slice())
     .bind(created_at)
@@ -220,16 +254,24 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
             "SELECT e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, \
              e.sig, e.received_at, e.channel_id \
              FROM events e \
-             INNER JOIN event_mentions m ON e.id = m.event_id \
-             WHERE e.deleted_at IS NULL AND m.pubkey_hex = ",
+             INNER JOIN event_mentions m \
+                ON e.community_id = m.community_id AND e.id = m.event_id \
+             WHERE e.community_id = ",
         );
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND m.community_id = ");
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND e.deleted_at IS NULL AND m.pubkey_hex = ");
         b.push_bind(p_hex.to_ascii_lowercase());
         b
     } else {
-        QueryBuilder::new(
+        let mut b = QueryBuilder::new(
             "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-             FROM events WHERE deleted_at IS NULL",
-        )
+             FROM events WHERE community_id = ",
+        );
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND deleted_at IS NULL");
+        b
     };
 
     // Use unqualified column names when no join, qualified when joined.
@@ -444,13 +486,21 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
     let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
         let mut b = QueryBuilder::new(
             "SELECT COUNT(*) as cnt FROM events e \
-             INNER JOIN event_mentions m ON e.id = m.event_id \
-             WHERE e.deleted_at IS NULL AND m.pubkey_hex = ",
+             INNER JOIN event_mentions m \
+                ON e.community_id = m.community_id AND e.id = m.event_id \
+             WHERE e.community_id = ",
         );
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND m.community_id = ");
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND e.deleted_at IS NULL AND m.pubkey_hex = ");
         b.push_bind(p_hex.to_ascii_lowercase());
         b
     } else {
-        QueryBuilder::new("SELECT COUNT(*) as cnt FROM events WHERE deleted_at IS NULL")
+        let mut b = QueryBuilder::new("SELECT COUNT(*) as cnt FROM events WHERE community_id = ");
+        b.push_bind(q.community_id.as_uuid());
+        b.push(" AND deleted_at IS NULL");
+        b
     };
 
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
@@ -564,9 +614,15 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
 /// Returns `Ok(true)` if the event was deleted, `Ok(false)` if already deleted
 /// or not found. Callers are responsible for decrementing thread reply counts
 /// when the deleted event is a thread reply.
-pub async fn soft_delete_event(pool: &PgPool, event_id: &[u8]) -> Result<bool> {
-    let result =
-        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
+pub async fn soft_delete_event(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+            .bind(community_id.as_uuid())
             .bind(event_id)
             .execute(pool)
             .await?;
@@ -587,14 +643,16 @@ pub async fn soft_delete_event(pool: &PgPool, event_id: &[u8]) -> Result<bool> {
 /// (already deleted, or never existed).
 pub async fn soft_delete_by_coordinate(
     pool: &PgPool,
+    community_id: CommunityId,
     kind: i32,
     pubkey: &[u8],
     d_tag: &str,
 ) -> Result<bool> {
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
-         WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL",
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
     )
+    .bind(community_id.as_uuid())
     .bind(kind)
     .bind(pubkey)
     .bind(d_tag)
@@ -611,17 +669,20 @@ pub async fn soft_delete_by_coordinate(
 /// event was deleted this call.
 pub async fn soft_delete_event_and_update_thread(
     pool: &PgPool,
+    community_id: CommunityId,
     event_id: &[u8],
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
 
-    let result =
-        sqlx::query("UPDATE events SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
-            .bind(event_id)
-            .execute(&mut *tx)
-            .await?;
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .execute(&mut *tx)
+    .await?;
 
     let deleted = result.rows_affected() > 0;
 
@@ -630,8 +691,9 @@ pub async fn soft_delete_event_and_update_thread(
             sqlx::query(
                 "UPDATE thread_metadata \
                  SET reply_count = GREATEST(reply_count - 1, 0) \
-                 WHERE event_id = $1",
+                 WHERE community_id = $1 AND event_id = $2",
             )
+            .bind(community_id.as_uuid())
             .bind(pid)
             .execute(&mut *tx)
             .await?;
@@ -640,8 +702,9 @@ pub async fn soft_delete_event_and_update_thread(
                 sqlx::query(
                     "UPDATE thread_metadata \
                      SET descendant_count = GREATEST(descendant_count - 1, 0) \
-                     WHERE event_id = $1",
+                     WHERE community_id = $1 AND event_id = $2",
                 )
+                .bind(community_id.as_uuid())
                 .bind(root_id)
                 .execute(&mut *tx)
                 .await?;
@@ -656,13 +719,15 @@ pub async fn soft_delete_event_and_update_thread(
 /// Returns the `created_at` timestamp of the most recent non-deleted event in a channel.
 pub async fn get_last_message_at(
     pool: &PgPool,
+    community_id: CommunityId,
     channel_id: uuid::Uuid,
 ) -> Result<Option<DateTime<Utc>>> {
     let row = sqlx::query(
         "SELECT created_at FROM events \
-         WHERE channel_id = $1 AND deleted_at IS NULL \
+         WHERE community_id = $1 AND channel_id = $2 AND deleted_at IS NULL \
          ORDER BY created_at DESC LIMIT 1",
     )
+    .bind(community_id.as_uuid())
     .bind(channel_id)
     .fetch_optional(pool)
     .await?;
@@ -679,6 +744,7 @@ pub async fn get_last_message_at(
 /// Single query regardless of input size.
 pub async fn get_last_message_at_bulk(
     pool: &PgPool,
+    community_id: CommunityId,
     channel_ids: &[uuid::Uuid],
 ) -> Result<std::collections::HashMap<uuid::Uuid, DateTime<Utc>>> {
     if channel_ids.is_empty() {
@@ -687,8 +753,10 @@ pub async fn get_last_message_at_bulk(
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT channel_id, MAX(created_at) as last_at FROM events \
-         WHERE deleted_at IS NULL AND channel_id IN (",
+         WHERE community_id = ",
     );
+    qb.push_bind(community_id.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND channel_id IN (");
     let mut sep = qb.separated(", ");
     for id in channel_ids {
         sep.push_bind(*id);
@@ -711,11 +779,16 @@ pub async fn get_last_message_at_bulk(
 /// Returns `None` if the event does not exist or has been soft-deleted.
 /// Use [`get_event_by_id_including_deleted`] when you need to inspect
 /// tombstoned rows (e.g. audit, undelete).
-pub async fn get_event_by_id(pool: &PgPool, id_bytes: &[u8]) -> Result<Option<StoredEvent>> {
+pub async fn get_event_by_id(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id_bytes: &[u8],
+) -> Result<Option<StoredEvent>> {
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
     )
+    .bind(community_id.as_uuid())
     .bind(id_bytes)
     .fetch_optional(pool)
     .await?;
@@ -734,16 +807,18 @@ pub async fn get_event_by_id(pool: &PgPool, id_bytes: &[u8]) -> Result<Option<St
 /// duplicate survivors where multiple live rows share the same timestamp.
 pub async fn get_latest_global_replaceable(
     pool: &PgPool,
+    community_id: CommunityId,
     kind: i32,
     pubkey_bytes: &[u8],
 ) -> Result<Option<StoredEvent>> {
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
          FROM events \
-         WHERE kind = $1 AND pubkey = $2 AND channel_id IS NULL AND deleted_at IS NULL \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id IS NULL AND deleted_at IS NULL \
          ORDER BY created_at DESC, id ASC \
          LIMIT 1",
     )
+    .bind(community_id.as_uuid())
     .bind(kind)
     .bind(pubkey_bytes)
     .fetch_optional(pool)
@@ -762,12 +837,14 @@ pub async fn get_latest_global_replaceable(
 /// audit trails, compliance queries).
 pub async fn get_event_by_id_including_deleted(
     pool: &PgPool,
+    community_id: CommunityId,
     id_bytes: &[u8],
 ) -> Result<Option<StoredEvent>> {
     let row = sqlx::query(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE id = $1 ORDER BY created_at DESC LIMIT 1",
+         FROM events WHERE community_id = $1 AND id = $2 ORDER BY created_at DESC LIMIT 1",
     )
+    .bind(community_id.as_uuid())
     .bind(id_bytes)
     .fetch_optional(pool)
     .await?;
@@ -782,7 +859,11 @@ pub async fn get_event_by_id_including_deleted(
 ///
 /// Returns events in arbitrary order — callers reorder as needed.
 /// Uses a single `WHERE id IN (...)` query regardless of input size.
-pub async fn get_events_by_ids(pool: &PgPool, ids: &[&[u8]]) -> Result<Vec<StoredEvent>> {
+pub async fn get_events_by_ids(
+    pool: &PgPool,
+    community_id: CommunityId,
+    ids: &[&[u8]],
+) -> Result<Vec<StoredEvent>> {
     if ids.is_empty() {
         return Ok(vec![]);
     }
@@ -790,8 +871,10 @@ pub async fn get_events_by_ids(pool: &PgPool, ids: &[&[u8]]) -> Result<Vec<Store
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-         FROM events WHERE deleted_at IS NULL AND id IN (",
+         FROM events WHERE community_id = ",
     );
+    qb.push_bind(community_id.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND id IN (");
     let mut sep = qb.separated(", ");
     for id in ids {
         sep.push_bind(id.to_vec());
@@ -842,6 +925,7 @@ pub struct ThreadMetadataParams<'a> {
 /// Returns `(StoredEvent, was_inserted)`.
 pub async fn insert_event_with_thread_metadata(
     pool: &PgPool,
+    community_id: CommunityId,
     event: &Event,
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
@@ -871,11 +955,12 @@ pub async fn insert_event_with_thread_metadata(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT DO NOTHING
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(id_bytes.as_slice())
     .bind(pubkey_bytes.as_slice())
     .bind(created_at)
@@ -899,14 +984,15 @@ pub async fn insert_event_with_thread_metadata(
             let tm_result = sqlx::query(
                 r#"
                 INSERT INTO thread_metadata
-                    (event_created_at, event_id, channel_id,
+                    (community_id, event_created_at, event_id, channel_id,
                      parent_event_id, parent_event_created_at,
                      root_event_id, root_event_created_at,
                      depth, broadcast)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT DO NOTHING
                 "#,
             )
+            .bind(community_id.as_uuid())
             .bind(meta.event_created_at)
             .bind(meta.event_id)
             .bind(meta.channel_id)
@@ -931,14 +1017,15 @@ pub async fn insert_event_with_thread_metadata(
                     sqlx::query(
                         r#"
                         INSERT INTO thread_metadata
-                            (event_created_at, event_id, channel_id,
+                            (community_id, event_created_at, event_id, channel_id,
                              parent_event_id, parent_event_created_at,
                              root_event_id, root_event_created_at,
                              depth, broadcast)
-                        VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 0, false)
+                        VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
                         ON CONFLICT DO NOTHING
                         "#,
                     )
+                    .bind(community_id.as_uuid())
                     .bind(parent_ts)
                     .bind(pid)
                     .bind(meta.channel_id)
@@ -953,14 +1040,15 @@ pub async fn insert_event_with_thread_metadata(
                             sqlx::query(
                                 r#"
                                 INSERT INTO thread_metadata
-                                    (event_created_at, event_id, channel_id,
+                                    (community_id, event_created_at, event_id, channel_id,
                                      parent_event_id, parent_event_created_at,
                                      root_event_id, root_event_created_at,
                                      depth, broadcast)
-                                VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 0, false)
+                                VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
                                 ON CONFLICT DO NOTHING
                                 "#,
                             )
+                            .bind(community_id.as_uuid())
                             .bind(root_ts)
                             .bind(root_id)
                             .bind(meta.channel_id)
@@ -973,9 +1061,10 @@ pub async fn insert_event_with_thread_metadata(
                         r#"
                         UPDATE thread_metadata
                         SET reply_count = reply_count + 1, last_reply_at = NOW()
-                        WHERE event_id = $1
+                        WHERE community_id = $1 AND event_id = $2
                         "#,
                     )
+                    .bind(community_id.as_uuid())
                     .bind(pid)
                     .execute(&mut *tx)
                     .await?;
@@ -985,9 +1074,10 @@ pub async fn insert_event_with_thread_metadata(
                             r#"
                             UPDATE thread_metadata
                             SET descendant_count = descendant_count + 1
-                            WHERE event_id = $1
+                            WHERE community_id = $1 AND event_id = $2
                             "#,
                         )
+                        .bind(community_id.as_uuid())
                         .bind(root_id)
                         .execute(&mut *tx)
                         .await?;
@@ -1008,6 +1098,10 @@ pub async fn insert_event_with_thread_metadata(
 /// A due reminder row returned by [`query_due_reminders`].
 #[derive(Debug)]
 pub struct DueReminder {
+    /// Server-resolved community this reminder row belongs to.
+    pub community_id: CommunityId,
+    /// Normalized host mapped to that community.
+    pub host: String,
     /// The event's raw ID bytes.
     pub id: Vec<u8>,
     /// The event's pubkey bytes.
@@ -1039,15 +1133,16 @@ pub async fn query_due_reminders(
     let kind_i32 = KIND_EVENT_REMINDER as i32;
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT ON (pubkey, d_tag)
-            id, pubkey, created_at, kind, tags, content, sig, channel_id
-        FROM events
-        WHERE kind = $1
-          AND not_before IS NOT NULL
-          AND not_before <= $2
-          AND deleted_at IS NULL
-          AND delivered_at IS NULL
-        ORDER BY pubkey, d_tag, created_at DESC, id ASC
+        SELECT DISTINCT ON (e.community_id, e.pubkey, e.d_tag)
+            e.community_id, c.host, e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.channel_id
+        FROM events AS e
+        JOIN communities AS c ON c.id = e.community_id
+        WHERE e.kind = $1
+          AND e.not_before IS NOT NULL
+          AND e.not_before <= $2
+          AND e.deleted_at IS NULL
+          AND e.delivered_at IS NULL
+        ORDER BY e.community_id, e.pubkey, e.d_tag, e.created_at DESC, e.id ASC
         LIMIT $3
         "#,
     )
@@ -1060,6 +1155,8 @@ pub async fn query_due_reminders(
     let results = rows
         .into_iter()
         .map(|row| DueReminder {
+            community_id: CommunityId::from_uuid(row.get("community_id")),
+            host: row.get("host"),
             id: row.get("id"),
             pubkey: row.get("pubkey"),
             created_at: row.get("created_at"),
@@ -1080,18 +1177,46 @@ pub async fn query_due_reminders(
 /// idempotency.
 pub async fn claim_due_reminder(
     pool: &PgPool,
+    community_id: CommunityId,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
 ) -> Result<bool> {
-    let now_epoch = Utc::now().timestamp();
+    claim_due_reminder_with_stamp(
+        pool,
+        community_id,
+        event_id,
+        event_created_at,
+        Utc::now().timestamp(),
+    )
+    .await
+}
+
+/// Atomically claim a due reminder using a caller-supplied delivery stamp.
+///
+/// The same stamp should be passed to [`release_due_reminder`] if the publish
+/// side effect fails, so rollback can compare-and-clear only this pod's claim.
+///
+/// Scoped by `community_id`: `events` is keyed `(community_id, created_at, id)`,
+/// and the same Nostr event id (hence the same `id`/`created_at` pair) is
+/// allowed across communities. Without the community predicate a claim for
+/// `A/X` would also mark `B/X` delivered. The caller already holds the owning
+/// community on the `DueReminder` row.
+pub async fn claim_due_reminder_with_stamp(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+    event_created_at: DateTime<Utc>,
+    delivery_stamp: i64,
+) -> Result<bool> {
     let result = sqlx::query(
         r#"
         UPDATE events
         SET delivered_at = $1
-        WHERE created_at = $2 AND id = $3 AND delivered_at IS NULL
+        WHERE community_id = $2 AND created_at = $3 AND id = $4 AND delivered_at IS NULL
         "#,
     )
-    .bind(now_epoch)
+    .bind(delivery_stamp)
+    .bind(community_id.as_uuid())
     .bind(event_created_at)
     .bind(event_id)
     .execute(pool)
@@ -1100,10 +1225,115 @@ pub async fn claim_due_reminder(
     Ok(result.rows_affected() > 0)
 }
 
+/// Release a previously claimed reminder when publish fails.
+///
+/// The `delivery_stamp` must be the exact value written by the claiming pod;
+/// that compare-and-clear prevents one pod from rolling back another pod's
+/// later claim after a retry/race.
+///
+/// Scoped by `community_id` for the same reason as the claim: a release for
+/// `A/X` must not clear `B/X` even when their `id`/`created_at`/stamp coincide.
+pub async fn release_due_reminder(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+    event_created_at: DateTime<Utc>,
+    delivery_stamp: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE events
+        SET delivered_at = NULL
+        WHERE community_id = $1
+          AND created_at = $2
+          AND id = $3
+          AND delivered_at = $4
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_created_at)
+    .bind(event_id)
+    .bind(delivery_stamp)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    async fn make_test_community(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        let host = format!("event-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_event_by_id_is_scoped_when_event_id_collides_across_communities() {
+        let pool = setup_pool().await;
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "same signed event")
+            .sign_with_keys(&keys)
+            .expect("sign event");
+
+        insert_event(&pool, community_a, &event, None)
+            .await
+            .expect("insert in community A");
+        insert_event(&pool, community_b, &event, None)
+            .await
+            .expect("insert same event in community B");
+
+        sqlx::query("UPDATE events SET content = $1 WHERE community_id = $2 AND id = $3")
+            .bind("community-a-copy")
+            .bind(community_a.as_uuid())
+            .bind(event.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("mark community A row");
+        sqlx::query("UPDATE events SET content = $1 WHERE community_id = $2 AND id = $3")
+            .bind("community-b-copy")
+            .bind(community_b.as_uuid())
+            .bind(event.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("mark community B row");
+
+        let a = get_event_by_id(&pool, community_a, event.id.as_bytes())
+            .await
+            .expect("lookup community A")
+            .expect("community A row exists");
+        let b = get_event_by_id(&pool, community_b, event.id.as_bytes())
+            .await
+            .expect("lookup community B")
+            .expect("community B row exists");
+
+        assert_eq!(a.event.content, "community-a-copy");
+        assert_eq!(b.event.content, "community-b-copy");
+    }
 
     fn make_event_with_kind_and_tags(kind: u16, tags: Vec<Tag>) -> nostr::Event {
         let keys = Keys::generate();
@@ -1239,5 +1469,244 @@ mod tests {
             vec![Tag::parse(["not_before", "not-a-number"]).unwrap()],
         );
         assert_eq!(extract_not_before(&event), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn query_due_reminders_returns_row_community_and_host_per_tenant() {
+        let pool = setup_pool().await;
+        let community_a_uuid = make_test_community(&pool).await;
+        let community_b_uuid = make_test_community(&pool).await;
+        let community_a = CommunityId::from_uuid(community_a_uuid);
+        let community_b = CommunityId::from_uuid(community_b_uuid);
+        let host_a: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community_a_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("load host A");
+        let host_b: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
+            .bind(community_b_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("load host B");
+
+        let not_before = Utc::now().timestamp() - 1;
+        let keys_a = Keys::generate();
+        let keys_b = Keys::generate();
+        let event_a = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "a")
+            .tags([
+                Tag::parse(["d", "due-reminder-scope-a"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys_a)
+            .expect("sign A");
+        let event_b = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "b")
+            .tags([
+                Tag::parse(["d", "due-reminder-scope-b"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys_b)
+            .expect("sign B");
+
+        insert_event(&pool, community_a, &event_a, None)
+            .await
+            .expect("insert A");
+        insert_event(&pool, community_b, &event_b, None)
+            .await
+            .expect("insert B");
+
+        let due = query_due_reminders(&pool, Utc::now().timestamp(), 100)
+            .await
+            .expect("query due reminders");
+
+        assert!(due.iter().any(|row| {
+            row.id == event_a.id.as_bytes() && row.community_id == community_a && row.host == host_a
+        }));
+        assert!(due.iter().any(|row| {
+            row.id == event_b.id.as_bytes() && row.community_id == community_b && row.host == host_b
+        }));
+    }
+
+    /// Two pods race to claim the same due reminder: exactly one wins. The
+    /// scheduler publishes only on a winning claim (`Ok(true)`) and `continue`s
+    /// on the loser (`Ok(false)`), so a single winning claim *is* the proof of
+    /// exactly one publish side effect across N pods.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_due_reminder_is_won_by_exactly_one_of_two_racing_pods() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let not_before = Utc::now().timestamp() - 1;
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "due")
+            .tags([
+                Tag::parse(["d", "due-reminder-claim-race"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign reminder");
+        insert_event(&pool, community, &event, None)
+            .await
+            .expect("insert reminder");
+
+        let id = event.id.as_bytes().to_vec();
+        let created_at = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at, 0).expect("created_at");
+
+        // Two pods, two distinct per-attempt stamps, same reminder.
+        let stamp_p1: i64 = 0x1111_1111_1111_1111;
+        let stamp_p2: i64 = 0x2222_2222_2222_2222;
+        let won_p1 = claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp_p1)
+            .await
+            .expect("p1 claim");
+        let won_p2 = claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp_p2)
+            .await
+            .expect("p2 claim");
+
+        assert!(
+            won_p1 ^ won_p2,
+            "exactly one pod must win the claim (p1={won_p1}, p2={won_p2}) — \
+             the loser never reaches the publish side effect"
+        );
+    }
+
+    /// A failed publish releases the claim so the reminder is redeliverable,
+    /// and the compare-and-clear stamp guard prevents one pod from rolling back
+    /// another pod's claim.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn release_due_reminder_rolls_back_only_the_matching_stamp() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let not_before = Utc::now().timestamp() - 1;
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "due")
+            .tags([
+                Tag::parse(["d", "due-reminder-release"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign reminder");
+        insert_event(&pool, community, &event, None)
+            .await
+            .expect("insert reminder");
+
+        let id = event.id.as_bytes().to_vec();
+        let created_at = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at, 0).expect("created_at");
+        let stamp: i64 = 0x3333_3333_3333_3333;
+
+        assert!(
+            claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp)
+                .await
+                .expect("claim"),
+            "first claim wins"
+        );
+
+        // A release with the *wrong* stamp must be a no-op (does not clear
+        // another pod's claim).
+        assert!(
+            !release_due_reminder(&pool, community, &id, created_at, stamp ^ 0xFFFF)
+                .await
+                .expect("wrong-stamp release"),
+            "release with a non-matching stamp must not clear the claim"
+        );
+        assert!(
+            !claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp)
+                .await
+                .expect("re-claim after no-op release"),
+            "reminder must still be claimed after a no-op release"
+        );
+
+        // The matching-stamp release rolls the claim back; the reminder is
+        // redeliverable and a subsequent claim wins again.
+        assert!(
+            release_due_reminder(&pool, community, &id, created_at, stamp)
+                .await
+                .expect("matching-stamp release"),
+            "release with the claiming stamp must clear the claim"
+        );
+        assert!(
+            claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp)
+                .await
+                .expect("re-claim after release"),
+            "released reminder must be reclaimable for retry"
+        );
+    }
+
+    /// Cross-community confinement: the same Nostr reminder event (identical
+    /// `id` and `created_at`) inserted into communities A and B must claim and
+    /// release independently. A claim/release for `A/X` must never touch `B/X`.
+    ///
+    /// This is the primitive the scheduler's exactly-once-publish proof rests
+    /// on: `events` is keyed `(community_id, created_at, id)`, so without the
+    /// community predicate a claim for A would mark B delivered (suppressing
+    /// B's reminder) and a matching-stamp release for A would clear B.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reminder_claim_and_release_are_confined_to_their_community() {
+        let pool = setup_pool().await;
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+
+        // One signed event, inserted into both communities — same id/created_at.
+        let not_before = Utc::now().timestamp() - 1;
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "due")
+            .tags([
+                Tag::parse(["d", "due-reminder-cross-community"]).unwrap(),
+                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign reminder");
+        insert_event(&pool, community_a, &event, None)
+            .await
+            .expect("insert A/X");
+        insert_event(&pool, community_b, &event, None)
+            .await
+            .expect("insert B/X");
+
+        let id = event.id.as_bytes().to_vec();
+        let created_at = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at, 0).expect("created_at");
+        let stamp: i64 = 0x4444_4444_4444_4444;
+
+        // Claim A/X. B/X must remain claimable — A's claim did not mark B.
+        assert!(
+            claim_due_reminder_with_stamp(&pool, community_a, &id, created_at, stamp)
+                .await
+                .expect("claim A"),
+            "A/X claim wins"
+        );
+        assert!(
+            claim_due_reminder_with_stamp(&pool, community_b, &id, created_at, stamp)
+                .await
+                .expect("claim B"),
+            "B/X must still be claimable after A/X is claimed — \
+             a claim for A must not mark B delivered"
+        );
+
+        // Both are now claimed under the same stamp. A matching-stamp release
+        // for A/X must clear only A/X; B/X must stay claimed.
+        assert!(
+            release_due_reminder(&pool, community_a, &id, created_at, stamp)
+                .await
+                .expect("release A"),
+            "A/X release with the claiming stamp clears A/X"
+        );
+        assert!(
+            !claim_due_reminder_with_stamp(&pool, community_b, &id, created_at, stamp)
+                .await
+                .expect("re-claim B after A release"),
+            "B/X must remain claimed after A/X is released — \
+             a release for A must not clear B"
+        );
+        // And A/X is genuinely redeliverable (the release was real, not a no-op).
+        assert!(
+            claim_due_reminder_with_stamp(&pool, community_a, &id, created_at, stamp)
+                .await
+                .expect("re-claim A after release"),
+            "A/X must be reclaimable after its own release"
+        );
     }
 }

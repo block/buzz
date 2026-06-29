@@ -1,5 +1,6 @@
 //! Upload pipeline — validate, store, thumbnail, sidecar.
 
+use buzz_core::tenant::TenantContext;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -33,6 +34,7 @@ use crate::validation::{
 async fn process_buffered_upload<V, M, Fut>(
     storage: &MediaStorage,
     config: &MediaConfig,
+    ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
     validate: V,
@@ -47,25 +49,29 @@ where
     let auth = auth_event.clone();
     let bytes = body.clone();
     let cfg = config.clone();
+    // Validate the Blossom `server` tag against the host this request was bound
+    // to (the per-request tenant), not a process-global domain — a relay serves
+    // many tenant hosts.
+    let bound_host = ctx.host().to_string();
     let (mime, sha256, ext) = tokio::task::spawn_blocking(move || -> Result<_, MediaError> {
         let (mime, ext) = validate(&bytes, &cfg)?;
         let sha256 = hex::encode(Sha256::digest(&bytes));
         // Buffered uploads (image + file): 10-minute auth window is plenty.
-        verify_blossom_upload_auth(&auth, &sha256, cfg.server_domain.as_deref(), 600)?;
+        verify_blossom_upload_auth(&auth, &sha256, Some(bound_host.as_str()), 600)?;
         Ok((mime, sha256, ext))
     })
     .await
     .map_err(|_| MediaError::Internal)??;
 
     let key = format!("{sha256}.{ext}");
-    let meta_key = format!("_meta/{sha256}.json");
+    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256);
 
     // Idempotent: short-circuit only if BOTH sidecar and blob exist. If the
     // sidecar exists but the blob is missing, fall through to re-upload.
     let sidecar_exists = storage.head(&meta_key).await?;
     let blob_exists = storage.head(&key).await?;
     if sidecar_exists && blob_exists {
-        let meta = storage.get_sidecar(&sha256).await?;
+        let meta = storage.get_sidecar(ctx, &sha256).await?;
         return Ok(build_descriptor(
             config,
             &sha256,
@@ -134,12 +140,14 @@ struct MetadataInput {
 pub async fn process_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
+    ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         storage,
         config,
+        ctx,
         auth_event,
         body,
         |bytes, cfg| {
@@ -147,18 +155,7 @@ pub async fn process_upload(
             let ext = mime_to_ext(&mime).to_string();
             Ok((mime, ext))
         },
-        |input| async move {
-            generate_and_store_metadata(
-                storage,
-                config,
-                &input.sha256,
-                &input.ext,
-                &input.mime,
-                &input.body,
-                input.uploaded_at,
-            )
-            .await
-        },
+        |input| async move { generate_and_store_metadata(storage, config, ctx, input).await },
     )
     .await
 }
@@ -176,12 +173,14 @@ pub async fn process_upload(
 pub async fn process_file_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
+    ctx: &TenantContext,
     auth_event: &nostr::Event,
     body: Bytes,
 ) -> Result<BlobDescriptor, MediaError> {
     process_buffered_upload(
         storage,
         config,
+        ctx,
         auth_event,
         body,
         |bytes, cfg| validate_file_content(bytes, cfg),
@@ -197,11 +196,7 @@ pub async fn process_file_upload(
                 uploaded_at: input.uploaded_at,
                 duration_secs: None,
             };
-            let meta_key = format!("_meta/{}.json", input.sha256);
-            let meta_json = serde_json::to_vec(&meta)?;
-            storage
-                .put(&meta_key, &meta_json, "application/json")
-                .await?;
+            storage.put_sidecar(ctx, &input.sha256, &meta).await?;
             Ok(meta)
         },
     )
@@ -222,6 +217,7 @@ pub async fn process_file_upload(
 pub async fn process_video_upload(
     storage: &MediaStorage,
     config: &MediaConfig,
+    ctx: &TenantContext,
     auth_event: &nostr::Event,
     body_stream: impl futures_core::Stream<Item = Result<Bytes, axum::Error>> + Send + 'static,
     content_length: Option<u64>,
@@ -334,10 +330,12 @@ pub async fn process_video_upload(
     // --- 3. Verify Blossom auth: x tag must match computed SHA-256 ---
     let auth = auth_event.clone();
     let sha256_for_auth = sha256_hex.clone();
-    let server_domain = config.server_domain.clone();
+    // Validate the Blossom `server` tag against the bound tenant host (not a
+    // process-global domain) — a relay serves many tenant hosts.
+    let bound_host = ctx.host().to_string();
     tokio::task::spawn_blocking(move || {
         // Videos: 1-hour window — large uploads on slow connections need headroom.
-        verify_blossom_upload_auth(&auth, &sha256_for_auth, server_domain.as_deref(), 3600)
+        verify_blossom_upload_auth(&auth, &sha256_for_auth, Some(bound_host.as_str()), 3600)
     })
     .await
     .map_err(|_| MediaError::Internal)??;
@@ -352,13 +350,13 @@ pub async fn process_video_upload(
 
     let ext = "mp4";
     let key = format!("{sha256_hex}.{ext}");
-    let meta_key = format!("_meta/{sha256_hex}.json");
+    let meta_key = MediaStorage::ctx_sidecar_key(ctx, &sha256_hex);
 
     // --- 5. Idempotency check ---
     let sidecar_exists = storage.head(&meta_key).await?;
     let blob_exists = storage.head(&key).await?;
     if sidecar_exists && blob_exists {
-        let meta = storage.get_sidecar(&sha256_hex).await?;
+        let meta = storage.get_sidecar(ctx, &sha256_hex).await?;
         return Ok(build_descriptor(
             config,
             &sha256_hex,
@@ -387,10 +385,7 @@ pub async fn process_video_upload(
         uploaded_at,
         duration_secs: Some(video_meta.duration_secs),
     };
-    let meta_json = serde_json::to_vec(&meta)?;
-    storage
-        .put(&meta_key, &meta_json, "application/json")
-        .await?;
+    storage.put_sidecar(ctx, &sha256_hex, &meta).await?;
 
     Ok(build_descriptor(
         config,
@@ -408,16 +403,13 @@ pub async fn process_video_upload(
 async fn generate_and_store_metadata(
     storage: &MediaStorage,
     config: &MediaConfig,
-    sha256: &str,
-    ext: &str,
-    mime: &str,
-    body: &Bytes,
-    uploaded_at: i64,
+    ctx: &TenantContext,
+    input: MetadataInput,
 ) -> Result<BlobMeta, MediaError> {
-    let body_ref = body.clone();
-    let mime_ref = mime.to_string();
-    let ext_ref = ext.to_string();
-    let sha256_ref = sha256.to_string();
+    let body_ref = input.body.clone();
+    let mime_ref = input.mime.clone();
+    let ext_ref = input.ext.clone();
+    let sha256_ref = input.sha256.clone();
     let cfg_ref = config.clone();
     let (mut meta, thumb_bytes) = tokio::task::spawn_blocking(move || {
         generate_image_metadata_sync(&cfg_ref, &sha256_ref, &body_ref, &mime_ref, &ext_ref)
@@ -425,18 +417,14 @@ async fn generate_and_store_metadata(
     .await
     .map_err(|_| MediaError::Internal)??;
 
-    meta.uploaded_at = uploaded_at;
+    meta.uploaded_at = input.uploaded_at;
 
     if let Some(ref tb) = thumb_bytes {
-        let thumb_key = format!("{sha256}.thumb.jpg");
+        let thumb_key = format!("{}.thumb.jpg", input.sha256);
         storage.put(&thumb_key, tb, "image/jpeg").await?;
     }
 
-    let meta_key = format!("_meta/{sha256}.json");
-    let meta_json = serde_json::to_vec(&meta)?;
-    storage
-        .put(&meta_key, &meta_json, "application/json")
-        .await?;
+    storage.put_sidecar(ctx, &input.sha256, &meta).await?;
     Ok(meta)
 }
 
@@ -478,7 +466,6 @@ mod tests {
             max_video_bytes: 524_288_000,
             max_file_bytes: 104_857_600,
             public_base_url: "https://media.example.com".to_string(),
-            server_domain: None,
         }
     }
 

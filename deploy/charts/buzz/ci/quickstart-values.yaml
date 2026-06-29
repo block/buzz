@@ -1,6 +1,6 @@
 # Quickstart / eval: subcharts on, autogen secrets, single replica.
 # This is the scenario `ct install` exercises against a kind cluster — it
-# spins up postgres + redis + minio + typesense in-cluster so the relay can
+# spins up postgres + redis + minio in-cluster so the relay can
 # actually start and pass its S3 conformance probe.
 quickstart: true
 postgresql:
@@ -8,8 +8,6 @@ postgresql:
 redis:
   enabled: true
 minio:
-  enabled: true
-typesense:
   enabled: true
 relayUrl: wss://buzz.test.local
 ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000001"

@@ -48,7 +48,7 @@ type MessageQueryContext = {
   queryKey: ReturnType<typeof channelMessagesKey>;
 };
 
-const CHANNEL_HISTORY_LIMIT = 300;
+const CHANNEL_HISTORY_LIMIT = 60;
 
 function getLocalRenderKey(message: RelayEvent) {
   return message.localKey ?? message.id;
@@ -304,7 +304,7 @@ export function useChannelSubscription(channel: Channel | null) {
 
         cleanup = dispose;
         // No post-subscribe history refetch: useChannelMessagesQuery already
-        // loaded the latest CHANNEL_HISTORY_LIMIT (300) events, and the live
+        // loaded the latest CHANNEL_HISTORY_LIMIT events, and the live
         // subscription itself backfills up to 50 most-recent events via its
         // initial REQ (buildChannelFilter(id, 50)). Both write into the same
         // channelMessagesKey cache, so any window between the two REQs is

@@ -8,14 +8,12 @@ templates:
   - templates/service.yaml
   - templates/pvc-git.yaml
 tests:
-  - it: renders cleanly in production profile (external pg/redis/typesense)
+  - it: renders cleanly in production profile (external pg/redis)
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
       externalRedis.url: redis://h:6379
-      typesense.url: http://ts:8108
-      typesense.apiKey: k
       s3.endpoint: http://minio:9000
       s3.accessKey: a
       s3.secretKey: s
@@ -32,6 +30,50 @@ tests:
           path: kind
           value: Service
         template: templates/service.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "true"
+        template: templates/deployment.yaml
+
+  - it: lets an explicit value disable huddle audio in a single-replica render
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      relay.huddleAudioAvailable: false
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "false"
+        template: templates/deployment.yaml
+
+  - it: lets an explicit value enable huddle audio in HA when the operator owns external audio behavior
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 3
+      persistence.git.accessMode: ReadWriteMany
+      relay.huddleAudioAvailable: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "true"
+        template: templates/deployment.yaml
 
   - it: renders HA cleanly with replicaCount=3 + RWX + Redis
     set:
@@ -39,8 +81,6 @@ tests:
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
       externalPostgresql.url: postgres://u:p@h:5432/d
       externalRedis.url: redis://h:6379
-      typesense.url: http://ts:8108
-      typesense.apiKey: k
       s3.endpoint: http://minio:9000
       s3.accessKey: a
       s3.secretKey: s
@@ -55,3 +95,9 @@ tests:
           path: spec.accessModes[0]
           value: ReadWriteMany
         template: templates/pvc-git.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_HUDDLE_AUDIO_AVAILABLE
+            value: "false"
+        template: templates/deployment.yaml

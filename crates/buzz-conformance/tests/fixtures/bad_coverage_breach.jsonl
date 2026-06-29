@@ -1,0 +1,1 @@
+{"schema_version":1,"action":{"type":"impl_bug","kind":"ingest_exited_without_trace"},"state_after":{"resolved_community":"aaaa0000-0000-0000-0000-000000000001","bound_host":"a.example.test","actor":"0123456789abcdef"}}

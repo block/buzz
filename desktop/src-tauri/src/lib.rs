@@ -34,8 +34,8 @@ use huddle::audio_output::{
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
     end_huddle, get_huddle_agent_pubkeys, get_huddle_state, get_model_status, get_voice_input_mode,
-    join_huddle, leave_huddle, push_audio_pcm, set_tts_enabled, set_voice_input_mode,
-    speak_agent_message, start_huddle, start_stt_pipeline,
+    join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
+    set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
     backfill_persona_snapshots, ensure_nest, restore_managed_agents_on_launch, try_regenerate_nest,
@@ -570,6 +570,7 @@ pub fn run() {
             get_huddle_state,
             push_audio_pcm,
             start_stt_pipeline,
+            set_huddle_transcription_enabled,
             download_voice_models,
             get_model_status,
             set_tts_enabled,

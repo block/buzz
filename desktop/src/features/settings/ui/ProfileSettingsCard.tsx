@@ -12,6 +12,7 @@ import {
   useProfileQuery,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
+import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   ProfileAvatarEditor,
@@ -166,7 +167,6 @@ export function ProfileSettingsCard({
   const isEditingProfileMetadataRef = React.useRef(false);
   const avatarEditorOpenFrameRef = React.useRef<number | null>(null);
   const avatarEditorFinishTimeoutRef = React.useRef<number | null>(null);
-  const avatarEditClipId = React.useId().replace(/:/g, "");
   isEditingProfileMetadataRef.current = isEditingProfileMetadata;
 
   React.useEffect(() => {
@@ -308,23 +308,13 @@ export function ProfileSettingsCard({
     ? { duration: 0 }
     : AVATAR_EDITOR_LAYOUT_TRANSITION;
   const avatarEditShellClassName = cn(
-    "absolute right-0 bottom-0 z-10 flex h-[54px] w-[54px] items-center justify-center rounded-full bg-background opacity-100 transition-[opacity,scale,transform] duration-150 ease-out",
+    "flex h-[54px] w-[54px] items-center justify-center rounded-full opacity-100 transition-[opacity,scale,transform] duration-150 ease-out",
     isAvatarEditorOpen
       ? "pointer-events-none scale-[0.94] opacity-0"
       : "scale-100 opacity-100",
   );
   const avatarEditButtonClassName = cn(
-    "flex h-11 w-11 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground shadow-lg transition-[background-color,opacity,scale,transform] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100",
-  );
-  const avatarClipStyle = React.useMemo<React.CSSProperties | undefined>(
-    () =>
-      !isAvatarEditorOpen
-        ? {
-            clipPath: `url(#${avatarEditClipId})`,
-            transform: "translateZ(0)",
-          }
-        : undefined,
-    [avatarEditClipId, isAvatarEditorOpen],
+    "flex h-11 w-11 items-center justify-center rounded-full bg-sidebar-active text-sidebar-active-foreground transition-[background-color,opacity,scale,transform] duration-150 ease-out hover:scale-[1.04] hover:bg-sidebar-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-default disabled:opacity-90 disabled:hover:scale-100",
   );
   const clearAvatarEditorFinishTimeout = React.useCallback(() => {
     if (avatarEditorFinishTimeoutRef.current === null) {
@@ -525,102 +515,92 @@ export function ProfileSettingsCard({
                       className="relative h-48 w-48"
                       data-testid="profile-avatar-clip-frame"
                     >
-                      <svg
-                        aria-hidden="true"
-                        className="pointer-events-none absolute inset-0 h-full w-full"
-                        fill="none"
-                        height="192"
-                        viewBox="0 0 192 192"
-                        width="192"
-                        xmlns="http://www.w3.org/2000/svg"
-                      >
-                        <clipPath
-                          clipPathUnits="userSpaceOnUse"
-                          id={avatarEditClipId}
-                        >
-                          <path
-                            clipRule="evenodd"
-                            d="M100.734 83.3298C102.415 84.1574 104.616 83.8757 105.495 82.2207C109.647 74.3981 112 65.4738 112 56C112 25.0721 86.9279 0 56 0C25.0721 0 0 25.0721 0 56C0 86.9279 25.0721 112 56 112C65.4738 112 74.3981 109.647 82.2207 105.495C83.8757 104.616 84.1574 102.415 83.3298 100.734C82.4783 99.0047 82 97.0582 82 95C82 87.8203 87.8203 82 95 82C97.0582 82 99.0047 82.4783 100.734 83.3298Z"
-                            fillRule="evenodd"
-                            transform="translate(-34.5 -34.5) scale(2.1)"
-                          />
-                        </clipPath>
-                      </svg>
-
-                      <div
-                        className="relative h-full w-full"
-                        data-testid="profile-avatar-preview-clip"
-                        style={avatarClipStyle}
-                      >
-                        <div
-                          className="pointer-events-none absolute inset-0 z-10"
-                          data-testid="profile-avatar-animated-preview-slot"
-                          ref={setAnimatedPreviewEl}
-                        />
-                        {shouldShowAnimatedPreview ? null : emojiAvatarPreview ? (
-                          <div
-                            aria-label={`${resolvedName} avatar`}
-                            className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs"
-                            data-testid="profile-avatar-preview"
-                            role="img"
-                            style={{
-                              backgroundColor: emojiAvatarPreview.color,
-                            }}
-                          >
-                            <span
-                              className={cn(
-                                "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[6.25rem]",
-                                avatarSquishKey > 0 && "buzz-avatar-squish",
-                              )}
-                              data-testid="profile-avatar-preview-emoji"
-                              key={avatarSquishKey}
+                      <MaskedAvatarBadgeFrame
+                        badge={
+                          isAvatarEditorOpen ? null : (
+                            <div
+                              className={avatarEditShellClassName}
+                              data-testid="profile-avatar-edit-shell"
                             >
-                              {emojiAvatarPreview.emoji}
-                            </span>
-                          </div>
-                        ) : (
-                          <ProfileAvatar
-                            avatarUrl={avatarUrlDraft || null}
-                            className="h-full w-full rounded-full text-5xl"
-                            iconClassName="h-14 w-14"
-                            label={resolvedName}
-                            testId="profile-avatar-preview"
-                          />
-                        )}
-                      </div>
-
-                      <div
-                        className={avatarEditShellClassName}
-                        data-testid="profile-avatar-edit-shell"
+                              <button
+                                aria-expanded={isAvatarEditorOpen}
+                                aria-label={
+                                  isAvatarEditorSaving
+                                    ? "Saving profile photo"
+                                    : "Edit profile photo"
+                                }
+                                className={avatarEditButtonClassName}
+                                data-testid="profile-avatar-edit"
+                                disabled={isAvatarEditorSaving}
+                                onClick={openAvatarEditor}
+                                title={
+                                  isAvatarEditorSaving
+                                    ? "Saving profile photo"
+                                    : "Edit profile photo"
+                                }
+                                type="button"
+                              >
+                                {isAvatarEditorSaving && !isAvatarEditorOpen ? (
+                                  <Spinner
+                                    aria-label="Saving avatar"
+                                    className="h-4 w-4 border-2"
+                                  />
+                                ) : (
+                                  <Pencil className="h-4 w-4" />
+                                )}
+                              </button>
+                            </div>
+                          )
+                        }
+                        badgeBox={{
+                          bottom: 0,
+                          height: 54,
+                          right: 0,
+                          width: 54,
+                        }}
+                        className="h-48 w-48"
+                        clipTestId="profile-avatar-preview-clip"
+                        cutout={{ cx: 165, cy: 165, r: 30 }}
+                        size={192}
                       >
-                        <button
-                          aria-expanded={isAvatarEditorOpen}
-                          aria-label={
-                            isAvatarEditorSaving
-                              ? "Saving profile photo"
-                              : "Edit profile photo"
-                          }
-                          className={avatarEditButtonClassName}
-                          data-testid="profile-avatar-edit"
-                          disabled={isAvatarEditorSaving}
-                          onClick={openAvatarEditor}
-                          title={
-                            isAvatarEditorSaving
-                              ? "Saving profile photo"
-                              : "Edit profile photo"
-                          }
-                          type="button"
-                        >
-                          {isAvatarEditorSaving && !isAvatarEditorOpen ? (
-                            <Spinner
-                              aria-label="Saving avatar"
-                              className="h-4 w-4 border-2"
-                            />
+                        <div className="relative h-full w-full">
+                          <div
+                            className="pointer-events-none absolute inset-0 z-10"
+                            data-testid="profile-avatar-animated-preview-slot"
+                            ref={setAnimatedPreviewEl}
+                          />
+                          {shouldShowAnimatedPreview ? null : emojiAvatarPreview ? (
+                            <div
+                              aria-label={`${resolvedName} avatar`}
+                              className="relative flex h-full w-full shrink-0 items-center justify-center overflow-hidden rounded-full shadow-xs"
+                              data-testid="profile-avatar-preview"
+                              role="img"
+                              style={{
+                                backgroundColor: emojiAvatarPreview.color,
+                              }}
+                            >
+                              <span
+                                className={cn(
+                                  "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[6.25rem]",
+                                  avatarSquishKey > 0 && "buzz-avatar-squish",
+                                )}
+                                data-testid="profile-avatar-preview-emoji"
+                                key={avatarSquishKey}
+                              >
+                                {emojiAvatarPreview.emoji}
+                              </span>
+                            </div>
                           ) : (
-                            <Pencil className="h-4 w-4" />
+                            <ProfileAvatar
+                              avatarUrl={avatarUrlDraft || null}
+                              className="h-full w-full rounded-full text-5xl"
+                              iconClassName="h-14 w-14"
+                              label={resolvedName}
+                              testId="profile-avatar-preview"
+                            />
                           )}
-                        </button>
-                      </div>
+                        </div>
+                      </MaskedAvatarBadgeFrame>
                     </div>
 
                     <AnimatePresence initial={false} mode="wait">

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { SearchHit } from "@/shared/api/types";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 const MIN_QUERY_LENGTH = 2;
@@ -10,9 +11,14 @@ const DEBOUNCE_MS = 300;
 type UseChannelFindOptions = {
   channelId: string | null;
   messages: TimelineMessage[];
+  onSearchHit?: (hit: SearchHit) => void;
 };
 
-export function useChannelFind({ channelId, messages }: UseChannelFindOptions) {
+export function useChannelFind({
+  channelId,
+  messages,
+  onSearchHit,
+}: UseChannelFindOptions) {
   const [isOpen, setIsOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [debouncedQuery, setDebouncedQuery] = React.useState("");
@@ -57,29 +63,24 @@ export function useChannelFind({ channelId, messages }: UseChannelFindOptions) {
     return found;
   }, [messages, query]);
 
-  // Relay-backed search: full history via Typesense.
+  // Relay-backed search: full history via Postgres FTS.
   const relaySearch = useSearchMessagesQuery(debouncedQuery, {
     channelId: channelId ?? undefined,
     enabled: isOpen && debouncedQuery.length >= MIN_QUERY_LENGTH,
     limit: 100,
   });
 
-  // Merge: start with client-side matches, then supplement with relay hits
-  // that are loaded in the timeline but were missed by exact substring match
-  // (e.g. Typesense stemming). Only loaded messages are kept so the match
-  // count stays accurate relative to what's visible on screen.
-  const loadedMessageIds = React.useMemo(
-    () => new Set(messages.map((m) => m.id)),
-    [messages],
-  );
-
+  // Merge: start with client-side matches, then supplement with relay hits.
+  // Relay hits may refer to older messages outside the initial cold window;
+  // keep them in the match list and ask the route-target splice path to load
+  // the active hit so the DOM-based timeline scroll can land it.
   const matchedIds = React.useMemo<string[]>(() => {
     const merged = [...clientMatchIds];
     const seen = new Set(merged);
 
     if (relaySearch.data?.hits) {
       for (const hit of relaySearch.data.hits) {
-        if (!seen.has(hit.eventId) && loadedMessageIds.has(hit.eventId)) {
+        if (!seen.has(hit.eventId)) {
           merged.push(hit.eventId);
           seen.add(hit.eventId);
         }
@@ -87,7 +88,7 @@ export function useChannelFind({ channelId, messages }: UseChannelFindOptions) {
     }
 
     return merged;
-  }, [clientMatchIds, relaySearch.data?.hits, loadedMessageIds]);
+  }, [clientMatchIds, relaySearch.data?.hits]);
 
   // Clamp active index when results change.
   React.useEffect(() => {
@@ -99,6 +100,20 @@ export function useChannelFind({ channelId, messages }: UseChannelFindOptions) {
 
   const activeMatch =
     matchedIds.length > 0 ? { messageId: matchedIds[activeIndex] } : null;
+
+  const relayHitById = React.useMemo(() => {
+    const hits = new Map<string, SearchHit>();
+    for (const hit of relaySearch.data?.hits ?? []) {
+      hits.set(hit.eventId, hit);
+    }
+    return hits;
+  }, [relaySearch.data?.hits]);
+
+  React.useEffect(() => {
+    if (!activeMatch) return;
+    const hit = relayHitById.get(activeMatch.messageId);
+    if (hit) onSearchHit?.(hit);
+  }, [activeMatch, onSearchHit, relayHitById]);
 
   const matchingMessageIds = React.useMemo(() => {
     return new Set(matchedIds);

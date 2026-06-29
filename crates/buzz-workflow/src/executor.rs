@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use buzz_core::tenant::CommunityId;
 use evalexpr::HashMapContext;
 use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
@@ -533,6 +534,7 @@ pub async fn dispatch_action(
     step_id: &str,
     action: &ActionDef,
     engine: &WorkflowEngine,
+    community_id: CommunityId,
     run_id: Uuid,
     trigger_ctx: &TriggerContext,
 ) -> Result<StepResult, WorkflowError> {
@@ -540,15 +542,22 @@ pub async fn dispatch_action(
 
     match action {
         SendMessage { text, channel } => {
-            // Look up workflow metadata for destination validation and attribution.
-            let wf_run = engine.db.get_workflow_run(run_id).await.map_err(|e| {
-                WorkflowError::WebhookError(format!(
-                    "SendMessage: failed to load workflow run {run_id}: {e}"
-                ))
-            })?;
+            // Look up workflow metadata for destination validation and
+            // attribution, scoped to the run's community — the same run/workflow
+            // UUID may exist in another community, so a bare-id lookup could
+            // load the wrong row and drive a side effect under it.
+            let wf_run = engine
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendMessage: failed to load workflow run {run_id}: {e}"
+                    ))
+                })?;
             let workflow = engine
                 .db
-                .get_workflow(wf_run.workflow_id)
+                .get_workflow(community_id, wf_run.workflow_id)
                 .await
                 .map_err(|e| {
                     WorkflowError::WebhookError(format!(
@@ -572,7 +581,7 @@ pub async fn dispatch_action(
 
             let event_id = engine
                 .action_sink()?
-                .send_message(&channel_id, text, &owner_pubkey_hex)
+                .send_message(community_id, &channel_id, text, &owner_pubkey_hex)
                 .await
                 .map_err(WorkflowError::from)?;
 
@@ -971,6 +980,7 @@ pub struct ExecutionResult {
 /// Transitions the run to `Running` after acquiring a permit.
 pub async fn execute_run(
     engine: &WorkflowEngine,
+    community_id: CommunityId,
     run_id: Uuid,
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
@@ -986,6 +996,7 @@ pub async fn execute_run(
     engine
         .db
         .update_workflow_run(
+            community_id,
             run_id,
             buzz_db::workflow::RunStatus::Running,
             0,
@@ -1000,7 +1011,7 @@ pub async fn execute_run(
             )
         })?;
 
-    execute_steps(engine, run_id, def, trigger_ctx, 0, None).await
+    execute_steps(engine, community_id, run_id, def, trigger_ctx, 0, None).await
 }
 
 /// Resume execution from a specific step index (used for approval resume).
@@ -1017,6 +1028,7 @@ pub async fn execute_run(
 /// reference `{{steps.PREV_STEP.output.X}}` correctly.
 pub async fn execute_from_step(
     engine: &WorkflowEngine,
+    community_id: CommunityId,
     run_id: Uuid,
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
@@ -1033,7 +1045,7 @@ pub async fn execute_from_step(
 
     // Mark run as Running now that we have a permit (resume from approval).
     // Preserve the existing execution trace from pre-approval steps.
-    let existing_trace = match engine.db.get_workflow_run(run_id).await {
+    let existing_trace = match engine.db.get_workflow_run(community_id, run_id).await {
         Ok(r) => r.execution_trace,
         Err(e) => {
             warn!(
@@ -1046,6 +1058,7 @@ pub async fn execute_from_step(
     engine
         .db
         .update_workflow_run(
+            community_id,
             run_id,
             buzz_db::workflow::RunStatus::Running,
             start_index as i32,
@@ -1062,6 +1075,7 @@ pub async fn execute_from_step(
 
     execute_steps(
         engine,
+        community_id,
         run_id,
         def,
         trigger_ctx,
@@ -1079,6 +1093,7 @@ pub async fn execute_from_step(
 /// the trace of steps completed before the failure.
 async fn execute_steps(
     engine: &WorkflowEngine,
+    community_id: CommunityId,
     run_id: Uuid,
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
@@ -1134,7 +1149,14 @@ async fn execute_steps(
             .unwrap_or(engine.config.default_timeout_secs);
         let dispatch_result = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            dispatch_action(&step.id, &resolved_action, engine, run_id, trigger_ctx),
+            dispatch_action(
+                &step.id,
+                &resolved_action,
+                engine,
+                community_id,
+                run_id,
+                trigger_ctx,
+            ),
         )
         .await;
 

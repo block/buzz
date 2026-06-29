@@ -1,5 +1,6 @@
 import type { TimelineMessage } from "@/features/messages/types";
 import { isBroadcastReply } from "@/features/messages/lib/threading";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 
 type ThreadPanelData = {
   threadHead: TimelineMessage | null;
@@ -397,10 +398,13 @@ export function buildMainTimelineEntries(
     .map((message) => {
       return {
         message,
-        summary: buildSummaryForDirectReplies(
-          message.id,
-          descendantStatsByMessageId,
-        ),
+        summary:
+          message.kind === KIND_HUDDLE_STARTED
+            ? null
+            : buildSummaryForDirectReplies(
+                message.id,
+                descendantStatsByMessageId,
+              ),
       };
     });
 }

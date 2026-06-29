@@ -63,7 +63,7 @@ pub enum TriggerDef {
         #[serde(default)]
         interval: Option<String>,
     },
-    /// Fires when HTTP POST arrives at `/api/workflows/:id/webhook`.
+    /// Fires when HTTP POST arrives at `/hooks/{id}`.
     Webhook,
 }
 

@@ -6,11 +6,10 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
-use buzz_core::kind::{
-    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_DM_VISIBILITY,
-    KIND_GIFT_WRAP, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-};
+use buzz_core::kind::{AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_DM_VISIBILITY, P_GATED_KINDS};
+use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
+use buzz_pubsub::EventTopic;
 use hex;
 use nostr::Filter;
 
@@ -22,13 +21,6 @@ use crate::state::AppState;
 
 const MAX_HISTORICAL_LIMIT: i64 = 2_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
-const P_GATED_KINDS: [u32; 5] = [
-    KIND_AGENT_OBSERVER_FRAME,
-    KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_GIFT_WRAP,
-    KIND_DM_VISIBILITY,
-];
 
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
@@ -76,7 +68,9 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = match state.get_accessible_channel_ids_cached(&pubkey_bytes).await
+    let mut accessible_channels = match state
+        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+        .await
     {
         Ok(ids) => ids,
         Err(e) => {
@@ -90,6 +84,14 @@ pub async fn handle_req(
     }
 
     let channel_id = extract_channel_id_from_filters(&filters);
+
+    // Build the conformance `AbstractState` once at request entry. The
+    // `Option` only goes `None` on malformed pubkey bytes (already a
+    // separate failure path elsewhere); on the hot read path this is
+    // always `Some` and shared by every emit below.
+    let trace_state = buzz_core::PublicKey::from_slice(&pubkey_bytes)
+        .ok()
+        .map(|pk| crate::conformance::state_for_request(&conn.tenant, &pk));
 
     // Confirm channel access up front so the repaired `accessible_channels`
     // vector reaches every downstream consumer: the NIP-50 search branch
@@ -108,8 +110,22 @@ pub async fn handle_req(
         let db_is_member = if !token_allows || accessible_channels.contains(&ch_id) {
             None
         } else {
-            match state.db.is_member(ch_id, &pubkey_bytes).await {
-                Ok(member) => Some(member),
+            match state
+                .db
+                .is_member(conn.tenant.community(), ch_id, &pubkey_bytes)
+                .await
+            {
+                Ok(member) => {
+                    if let Some(state_snap) = trace_state.as_ref() {
+                        crate::conformance::record_req_authcheck(
+                            &state.tracer,
+                            state_snap,
+                            ch_id,
+                            member,
+                        );
+                    }
+                    Some(member)
+                }
                 Err(e) => {
                     warn!(conn_id = %conn_id, "Channel membership confirmation failed: {e}");
                     conn.send(RelayMessage::closed(&sub_id, "error: database error"));
@@ -164,7 +180,7 @@ pub async fn handle_req(
         }
     }
 
-    // Search filters hit Typesense and return historical hits, then EOSE.
+    // Search filters hit Postgres FTS and return historical hits, then EOSE.
     // They are not registered for fan-out. The sensitive-kind gates above
     // already ran, so an authed member cannot use search to bypass author/#p
     // rules for kind:30174 or other globally-stored gated kinds.
@@ -182,10 +198,12 @@ pub async fn handle_req(
             &filters,
             &accessible_channels,
             token_channel_ids.is_none(),
+            &conn.tenant,
             &hex::encode(&pubkey_bytes),
             &pubkey_bytes,
             &conn,
             &state,
+            trace_state.as_ref(),
         )
         .await;
         return;
@@ -196,9 +214,23 @@ pub async fn handle_req(
         subs.insert(sub_id.clone(), filters.clone());
     }
 
+    let replaced = state.sub_registry.register_scoped(
+        conn.tenant.community(),
+        conn_id,
+        sub_id.clone(),
+        filters.clone(),
+        channel_id,
+    );
+    if let Some(replaced) = replaced {
+        state
+            .pubsub
+            .release_topic(&conn.tenant, topic_for_subscription(replaced.channel_id))
+            .await;
+    }
     state
-        .sub_registry
-        .register(conn_id, sub_id.clone(), filters.clone(), channel_id);
+        .pubsub
+        .retain_topic(&conn.tenant, topic_for_subscription(channel_id))
+        .await;
 
     debug!(conn_id = %conn_id, sub_id = %sub_id, "Subscription registered");
 
@@ -229,7 +261,7 @@ pub async fn handle_req(
                 })
                 .or(channel_id)
         };
-        let params = filter_to_query_params(filter, per_filter_channel);
+        let params = filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
 
         let filter_events = state.db.query_events(&params).await;
 
@@ -241,6 +273,42 @@ pub async fn handle_req(
                 return;
             }
         };
+
+        // Conformance read-seam emit (non-search lane). Project each row's
+        // true community label via a per-channel lookup independent of the
+        // query's WHERE clause — see `record_read_message_rows` for the
+        // (B) projection strategy and the missing-lookup ImplBug
+        // guard-rail. Skipped silently if `trace_state` is `None` (only
+        // happens on malformed pubkey, a separate failure path).
+        if let Some(state_snap) = trace_state.as_ref() {
+            let row_channels: Vec<Option<uuid::Uuid>> =
+                events.iter().map(|e| e.channel_id).collect();
+            let distinct: Vec<uuid::Uuid> = {
+                let mut s: std::collections::BTreeSet<uuid::Uuid> =
+                    std::collections::BTreeSet::new();
+                for c in row_channels.iter().flatten() {
+                    s.insert(*c);
+                }
+                s.into_iter().collect()
+            };
+            let channel_communities = match state.db.communities_of_channels(&distinct).await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!(
+                        conn_id = %conn_id, sub_id = %sub_id,
+                        "conformance row-community lookup failed: {e}"
+                    );
+                    std::collections::HashMap::new()
+                }
+            };
+            crate::conformance::record_read_message_rows(
+                &state.tracer,
+                state_snap,
+                per_filter_channel,
+                &row_channels,
+                &channel_communities,
+            );
+        }
 
         for stored in &events {
             // Per-filter NIP-01 matching — use the current filter only, not the
@@ -296,9 +364,9 @@ pub async fn handle_req(
     );
 }
 
-/// Handle a NIP-50 search REQ: query Typesense, fetch full events, deliver results, EOSE.
+/// Handle a NIP-50 search REQ: query Postgres FTS, fetch full events, deliver results, EOSE.
 /// Search subscriptions are one-shot — no persistent subscription is registered.
-/// Maximum Typesense pages to fetch per filter (prevents unbounded loops).
+/// Maximum FTS pages to fetch per filter (prevents unbounded loops).
 const MAX_SEARCH_PAGES: u32 = 10;
 
 /// Resolve request-local channel access, repairing a stale cache-negative.
@@ -347,29 +415,37 @@ pub(crate) fn resolve_request_local_access(
     }
 }
 
+/// Map the legacy `(accessible_channels, include_global)` pair onto the
+/// [`buzz_search::ChannelScope`] enum that the Postgres-FTS search layer takes.
+///
+/// `None` means "don't call search at all" — the empty-accessible &&
+/// !include_global case, where the caller short-circuits to EOSE exactly as the
+/// old `build_search_channel_scope_filter` returned `None`. The four cases are
+/// 1-to-1 with the table in [`buzz_search::ChannelScope`]'s docs:
+///
+/// | accessible | include_global | `ChannelScope` |
+/// |---|---|---|
+/// | non-empty | true  | `ChannelsOrChannelLess(accessible)` |
+/// | non-empty | false | `Channels(accessible)` |
+/// | empty     | true  | `ChannelLessOnly` |
+/// | empty     | false | `None` (caller EOSEs) |
 pub(crate) fn build_search_channel_scope_filter(
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
-) -> Option<String> {
+) -> Option<buzz_search::ChannelScope> {
+    use buzz_search::ChannelScope;
     if accessible_channels.is_empty() {
         return if include_global {
-            Some("channel_id:=__global__".to_string())
+            Some(ChannelScope::ChannelLessOnly)
         } else {
             None
         };
     }
-
-    let ids: Vec<String> = accessible_channels
-        .iter()
-        .map(|id| id.to_string())
-        .collect();
+    let ids = accessible_channels.to_vec();
     Some(if include_global {
-        format!(
-            "(channel_id:=[{}] || channel_id:=__global__)",
-            ids.join(",")
-        )
+        ChannelScope::ChannelsOrChannelLess(ids)
     } else {
-        format!("channel_id:=[{}]", ids.join(","))
+        ChannelScope::Channels(ids)
     })
 }
 
@@ -379,14 +455,19 @@ async fn handle_search_req(
     filters: &[Filter],
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
+    tenant: &TenantContext,
     reader_pubkey_hex: &str,
     reader_pubkey_bytes: &[u8],
     conn: &ConnectionState,
     state: &AppState,
+    trace_state: Option<&crate::conformance::AbstractState>,
 ) {
-    let all_channels_filter =
+    // The community-wide channel scope (no #h tag on the filter). `None` means
+    // "no accessible channels and no global access" → EOSE, exactly as the
+    // legacy string-filter helper short-circuited.
+    let all_channels_scope =
         match build_search_channel_scope_filter(accessible_channels, include_global) {
-            Some(filter) => filter,
+            Some(scope) => scope,
             None => {
                 conn.send(RelayMessage::eose(sub_id));
                 return;
@@ -410,52 +491,46 @@ async fn handle_search_req(
             continue; // NIP-01: limit 0 means "no results from this filter"
         }
 
-        // Push as many NIP-01 constraints into Typesense as possible so
+        // Push as many NIP-01 constraints into the FTS query as possible so
         // post-filtering is a correction step, not the primary filter.
         //
-        // If the filter has a #h tag, push the specific channel(s) into Typesense
-        // instead of the full accessible set. This prevents cross-channel hits from
-        // consuming pagination budget and causing under-fetch.
-        // If the filter has #h, intersect with accessible channels. If all #h
-        // values are invalid/inaccessible, skip the filter entirely (match nothing)
-        // rather than broadening to all channels.
+        // If the filter has a #h tag, scope to the specific channel(s) instead
+        // of the full accessible set. This prevents cross-channel hits from
+        // consuming pagination budget and causing under-fetch. Intersect the #h
+        // values with accessible channels; if all are invalid/inaccessible,
+        // skip the filter entirely (match nothing) rather than broadening.
         let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
         let channel_scope =
             if let Some(vs) = filter.generic_tags.get(&h_tag).filter(|vs| !vs.is_empty()) {
-                let valid: Vec<String> = vs
+                let valid: Vec<uuid::Uuid> = vs
                     .iter()
                     .filter_map(|v| v.parse::<uuid::Uuid>().ok())
                     .filter(|id| accessible_channels.contains(id))
-                    .map(|id| id.to_string())
                     .collect();
                 if valid.is_empty() {
                     continue; // all #h values invalid/inaccessible — skip filter
                 }
-                format!("channel_id:=[{}]", valid.join(","))
+                buzz_search::ChannelScope::Channels(valid)
             } else {
-                all_channels_filter.clone()
+                all_channels_scope.clone()
             };
-        let mut filter_parts = vec![channel_scope];
-        if let Some(ref kinds) = filter.kinds {
-            if !kinds.is_empty() {
-                let kind_vals: Vec<String> = kinds.iter().map(|k| k.as_u16().to_string()).collect();
-                filter_parts.push(format!("kind:=[{}]", kind_vals.join(",")));
-            }
-        }
-        if let Some(ref authors) = filter.authors {
-            if !authors.is_empty() {
-                let author_vals: Vec<String> = authors.iter().map(|a| a.to_hex()).collect();
-                filter_parts.push(format!("pubkey:=[{}]", author_vals.join(",")));
-            }
-        }
-        if let Some(since) = filter.since {
-            filter_parts.push(format!("created_at:>={}", since.as_secs()));
-        }
-        if let Some(until) = filter.until {
-            filter_parts.push(format!("created_at:<={}", until.as_secs()));
-        }
 
-        let filter_by = filter_parts.join(" && ");
+        let kinds = filter.kinds.as_ref().and_then(|ks| {
+            if ks.is_empty() {
+                None
+            } else {
+                Some(ks.iter().map(|k| k.as_u16() as i32).collect::<Vec<_>>())
+            }
+        });
+        let authors = filter.authors.as_ref().and_then(|au| {
+            if au.is_empty() {
+                None
+            } else {
+                Some(au.iter().map(|a| a.to_bytes().to_vec()).collect::<Vec<_>>())
+            }
+        });
+        let since = filter.since.map(|s| s.as_secs() as i64);
+        let until = filter.until.map(|u| u.as_secs() as i64);
 
         // Paginate: keep fetching pages until we've emitted `limit` results
         // or exhausted the search result set. This ensures post-filtering
@@ -471,11 +546,16 @@ async fn handle_search_req(
             }
 
             let search_query = buzz_search::SearchQuery {
+                community: tenant.community(),
                 q: search_text.clone(),
-                filter_by: Some(filter_by.clone()),
-                sort_by: None, // Typesense default = relevance (text_match score)
+                channel_scope: channel_scope.clone(),
+                kinds: kinds.clone(),
+                authors: authors.clone(),
+                since,
+                until,
                 page,
                 per_page,
+                mode: buzz_search::SearchMode::FullText,
             };
 
             let search_result = match state.search.search(&search_query).await {
@@ -486,19 +566,21 @@ async fn handle_search_req(
                 }
             };
 
+            // A short page is the last page: FTS returns up to `per_page` hits,
+            // so fewer than that means the result set is exhausted.
+            let exhausted = search_result.hits.len() < per_page as usize;
             let page_empty = search_result.hits.is_empty();
-            let exhausted = (page as u64) * (per_page as u64) >= search_result.found;
 
-            let hit_ids: Vec<Vec<u8>> = search_result
-                .hits
-                .into_iter()
-                .filter_map(|h| hex::decode(&h.event_id).ok())
-                .filter(|bytes| bytes.len() == 32)
-                .collect();
+            let hit_ids: Vec<[u8; 32]> =
+                search_result.hits.into_iter().map(|h| h.event_id).collect();
 
             if !hit_ids.is_empty() {
                 let id_refs: Vec<&[u8]> = hit_ids.iter().map(|b| b.as_slice()).collect();
-                let events = match state.db.get_events_by_ids(&id_refs).await {
+                let events = match state
+                    .db
+                    .get_events_by_ids(tenant.community(), &id_refs)
+                    .await
+                {
                     Ok(evs) => evs,
                     Err(e) => {
                         warn!(sub_id = %sub_id, "NIP-50 batch fetch failed: {e}");
@@ -506,21 +588,55 @@ async fn handle_search_req(
                     }
                 };
 
+                // Conformance read-seam emit (search lane). Same (B)
+                // projection + missing-lookup guard-rail as the
+                // non-search path — see `record_read_by_id_rows`. The
+                // `filter_channel` is `None`: search at the abstract
+                // level isn't bound to a single channel filter, the
+                // per-row `channel_id` carries the channel identity
+                // honestly.
+                if let Some(state_snap) = trace_state {
+                    let row_channels: Vec<Option<uuid::Uuid>> =
+                        events.iter().map(|e| e.channel_id).collect();
+                    let distinct: Vec<uuid::Uuid> = {
+                        let mut s: std::collections::BTreeSet<uuid::Uuid> =
+                            std::collections::BTreeSet::new();
+                        for c in row_channels.iter().flatten() {
+                            s.insert(*c);
+                        }
+                        s.into_iter().collect()
+                    };
+                    let channel_communities =
+                        match state.db.communities_of_channels(&distinct).await {
+                            Ok(m) => m,
+                            Err(e) => {
+                                warn!(
+                                    sub_id = %sub_id,
+                                    "conformance row-community lookup failed: {e}"
+                                );
+                                std::collections::HashMap::new()
+                            }
+                        };
+                    crate::conformance::record_read_by_id_rows(
+                        &state.tracer,
+                        state_snap,
+                        None,
+                        &row_channels,
+                        &channel_communities,
+                    );
+                }
+
                 let event_map: std::collections::HashMap<[u8; 32], &buzz_core::StoredEvent> =
                     events
                         .iter()
                         .map(|ev| (ev.event.id.to_bytes(), ev))
                         .collect();
 
-                for hit_id in &hit_ids {
+                for id_array in &hit_ids {
                     if emitted >= limit {
                         break;
                     }
-                    let id_array: [u8; 32] = match hit_id.as_slice().try_into() {
-                        Ok(a) => a,
-                        Err(_) => continue,
-                    };
-                    let stored = match event_map.get(&id_array) {
+                    let stored = match event_map.get(id_array) {
                         Some(ev) => ev,
                         None => continue,
                     };
@@ -571,9 +687,10 @@ pub async fn build_event_query_from_filter(
     filter: &Filter,
     _pubkey_bytes: &[u8],
     _state: &AppState,
+    community: buzz_core::tenant::CommunityId,
 ) -> EventQuery {
     let channel_id = extract_channel_id_from_filter(filter);
-    filter_to_query_params(filter, channel_id)
+    filter_to_query_params(filter, channel_id, community)
 }
 
 /// Returns `true` if all constraints in this filter can be fully represented
@@ -654,7 +771,11 @@ fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
 ///
 /// Each filter is queried independently so that per-filter `limit` and time
 /// windows are respected. Results are deduplicated by event ID in the caller.
-fn filter_to_query_params(filter: &Filter, channel_id: Option<uuid::Uuid>) -> EventQuery {
+fn filter_to_query_params(
+    filter: &Filter,
+    channel_id: Option<uuid::Uuid>,
+    community: buzz_core::tenant::CommunityId,
+) -> EventQuery {
     let kinds: Option<Vec<i32>> = filter.kinds.as_ref().map(|ks| {
         if ks.is_empty() {
             // kinds:[] means "match no kinds" — skip this filter entirely by
@@ -775,7 +896,7 @@ fn filter_to_query_params(filter: &Filter, channel_id: Option<uuid::Uuid>) -> Ev
         authors,
         ids,
         e_tags,
-        ..Default::default()
+        ..EventQuery::for_community(community)
     }
 }
 
@@ -955,6 +1076,13 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
                     .all(|a| a.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
         })
     })
+}
+
+fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
+    match channel_id {
+        Some(channel_id) => EventTopic::Channel(channel_id),
+        None => EventTopic::Global,
+    }
 }
 
 #[cfg(test)]
@@ -1176,33 +1304,53 @@ mod tests {
         let nip33_filter = Filter::new()
             .kind(nostr::Kind::Custom(30023))
             .custom_tags(d_tag, ["my-slug"]);
-        let q = filter_to_query_params(&nip33_filter, None);
+        let q = filter_to_query_params(
+            &nip33_filter,
+            None,
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
         assert_eq!(q.d_tag, Some("my-slug".to_string()));
 
         // Non-NIP-33 kind with #d → pushdown NOT active (would miss rows with d_tag=NULL)
         let non_nip33_filter = Filter::new()
             .kind(nostr::Kind::Custom(1))
             .custom_tags(d_tag, ["some-value"]);
-        let q2 = filter_to_query_params(&non_nip33_filter, None);
+        let q2 = filter_to_query_params(
+            &non_nip33_filter,
+            None,
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
         assert_eq!(q2.d_tag, None);
 
         // Mixed kinds (one NIP-33, one not) → pushdown NOT active
         let mixed_filter = Filter::new()
             .kinds([nostr::Kind::Custom(30023), nostr::Kind::Custom(1)])
             .custom_tags(d_tag, ["slug"]);
-        let q3 = filter_to_query_params(&mixed_filter, None);
+        let q3 = filter_to_query_params(
+            &mixed_filter,
+            None,
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
         assert_eq!(q3.d_tag, None);
 
         // No kinds specified → pushdown NOT active
         let no_kinds_filter = Filter::new().custom_tags(d_tag, ["slug"]);
-        let q4 = filter_to_query_params(&no_kinds_filter, None);
+        let q4 = filter_to_query_params(
+            &no_kinds_filter,
+            None,
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
         assert_eq!(q4.d_tag, None);
 
         // Multi-value #d → pushdown NOT active (can't push OR into single column match)
         let multi_d_filter = Filter::new()
             .kind(nostr::Kind::Custom(30023))
             .custom_tags(d_tag, ["slug-a", "slug-b"]);
-        let q5 = filter_to_query_params(&multi_d_filter, None);
+        let q5 = filter_to_query_params(
+            &multi_d_filter,
+            None,
+            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()),
+        );
         assert_eq!(q5.d_tag, None);
     }
 
@@ -1213,7 +1361,12 @@ mod tests {
         let scope = build_search_channel_scope_filter(&[channel_id], false)
             .expect("restricted tokens with channel access should still search that channel");
 
-        assert_eq!(scope, format!("channel_id:=[{channel_id}]"));
+        // A scoped token with channel access but include_global=false must scope
+        // to exactly that channel — never broaden to channel-less/global events.
+        match scope {
+            buzz_search::ChannelScope::Channels(ids) => assert_eq!(ids, vec![channel_id]),
+            other => panic!("expected Channels([channel_id]), got {other:?}"),
+        }
     }
 
     #[test]

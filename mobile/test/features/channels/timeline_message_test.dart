@@ -141,6 +141,25 @@ NostrEvent _reaction({
   sig: '',
 );
 
+NostrEvent _huddleEvent({
+  required String id,
+  required int kind,
+  String pubkey = 'pk1',
+  int createdAt = 1000,
+}) => NostrEvent(
+  id: id,
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: kind,
+  tags: [
+    ['h', 'ch1'],
+  ],
+  content: jsonEncode({
+    'ephemeral_channel_id': '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+  }),
+  sig: '',
+);
+
 void main() {
   group('SystemEvent.fromContent', () {
     test('parses all known event types', () {
@@ -291,9 +310,37 @@ void main() {
       );
       expect(event.describe(resolve), 'Alice unarchived this channel');
     });
+
+    test('huddle_started', () {
+      final event = SystemEvent(
+        type: SystemEventType.huddleStarted,
+        actorPubkey: 'pk1',
+      );
+      expect(event.describe(resolve), 'Alice started a huddle');
+    });
+
+    test('huddle_ended', () {
+      final event = SystemEvent(
+        type: SystemEventType.huddleEnded,
+        actorPubkey: 'pk1',
+      );
+      expect(event.describe(resolve), 'Alice ended the huddle');
+    });
   });
 
   group('formatTimeline', () {
+    test('channel filters include desktop huddle lifecycle event kinds', () {
+      expect(
+        EventKind.channelEventKinds,
+        containsAll([
+          EventKind.huddleStarted,
+          EventKind.huddleParticipantJoined,
+          EventKind.huddleParticipantLeft,
+          EventKind.huddleEnded,
+        ]),
+      );
+    });
+
     test('passes through text messages', () {
       final events = [
         _textMsg(id: 'a', content: 'hello'),
@@ -456,6 +503,28 @@ void main() {
       expect(result[0].isSystem, true);
       expect(result[0].systemEvent, isNotNull);
       expect(result[0].systemEvent!.type, SystemEventType.channelCreated);
+    });
+
+    test('huddle start and end events render as system rows', () {
+      final result = formatTimeline([
+        _huddleEvent(id: 'h1', kind: EventKind.huddleStarted),
+        _huddleEvent(id: 'h2', kind: EventKind.huddleEnded, createdAt: 1100),
+      ]);
+
+      expect(result, hasLength(2));
+      expect(result[0].isSystem, isTrue);
+      expect(result[0].systemEvent!.type, SystemEventType.huddleStarted);
+      expect(result[1].isSystem, isTrue);
+      expect(result[1].systemEvent!.type, SystemEventType.huddleEnded);
+    });
+
+    test('huddle participant events are lifecycle metadata only', () {
+      final result = formatTimeline([
+        _huddleEvent(id: 'h1', kind: EventKind.huddleParticipantJoined),
+        _huddleEvent(id: 'h2', kind: EventKind.huddleParticipantLeft),
+      ]);
+
+      expect(result, isEmpty);
     });
 
     test('unknown system messages are dropped', () {

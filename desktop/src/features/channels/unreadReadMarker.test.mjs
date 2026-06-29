@@ -12,9 +12,16 @@ import {
 } from "./unreadChannelCounts.ts";
 import {
   addThreadActivityItems,
+  channelCatchUpEventKinds,
   resolveChannelReadMarker,
   resolveObservedUnreadRootId,
 } from "./useUnreadChannels.ts";
+import { isChannelUnreadTriggerKind } from "./useLiveChannelUpdates.ts";
+import {
+  KIND_HUDDLE_ENDED,
+  KIND_HUDDLE_STARTED,
+  KIND_STREAM_MESSAGE,
+} from "@/shared/constants/kinds";
 
 function topLevel(id, createdAt) {
   return { id, createdAt, author: "a", time: "", body: "", depth: 0 };
@@ -49,6 +56,34 @@ test("receiveThenReopen_frontierAtLatestArrival_clobbersDivider", () => {
 
   assert.equal(marker.firstUnreadMessageId, null);
   assert.equal(marker.unreadCount, 0);
+});
+
+test("dmHuddleStart_isDmOnlyUnreadTrigger", () => {
+  assert.equal(
+    isChannelUnreadTriggerKind(KIND_HUDDLE_STARTED, true),
+    true,
+    "inactive DM huddle start should bump unread",
+  );
+  assert.equal(
+    isChannelUnreadTriggerKind(KIND_HUDDLE_STARTED, false),
+    false,
+    "stream/forum huddle start should not become a generic unread trigger",
+  );
+  assert.equal(
+    isChannelUnreadTriggerKind(KIND_HUDDLE_ENDED, true),
+    false,
+    "huddle end lifecycle should stay quiet",
+  );
+});
+
+test("dmCatchUpFetch_includesOnlyHuddleStartInvite", () => {
+  const dmKinds = channelCatchUpEventKinds("dm");
+  const streamKinds = channelCatchUpEventKinds("stream");
+
+  assert.equal(dmKinds.includes(KIND_STREAM_MESSAGE), true);
+  assert.equal(dmKinds.includes(KIND_HUDDLE_STARTED), true);
+  assert.equal(dmKinds.includes(KIND_HUDDLE_ENDED), false);
+  assert.equal(streamKinds.includes(KIND_HUDDLE_STARTED), false);
 });
 
 // An explicit caller timeline position must still advance the read marker. This

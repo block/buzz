@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
 use crate::error::{DbError, Result};
+use buzz_core::CommunityId;
 
 // -- Public structs -----------------------------------------------------------
 
@@ -63,6 +64,7 @@ pub fn compute_participant_hash(pubkeys: &[&[u8]]) -> [u8; 32] {
 /// Returns `None` if no matching DM exists or if it has been deleted.
 pub async fn find_dm_by_participants(
     pool: &PgPool,
+    community_id: CommunityId,
     participant_hash: &[u8],
 ) -> Result<Option<ChannelRecord>> {
     let row = sqlx::query(
@@ -74,12 +76,14 @@ pub async fn find_dm_by_participants(
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at
         FROM channels
-        WHERE participant_hash = $1
+        WHERE community_id = $1
+          AND participant_hash = $2
           AND channel_type = 'dm'
           AND deleted_at IS NULL
         LIMIT 1
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(participant_hash)
     .fetch_optional(pool)
     .await?;
@@ -96,6 +100,7 @@ pub async fn find_dm_by_participants(
 /// - The operation is idempotent: same participant set -> same channel returned.
 pub async fn create_dm(
     pool: &PgPool,
+    community_id: CommunityId,
     participants: &[&[u8]],
     created_by: &[u8],
 ) -> Result<ChannelRecord> {
@@ -132,12 +137,14 @@ pub async fn create_dm(
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at
         FROM channels
-        WHERE participant_hash = $1
+        WHERE community_id = $1
+          AND participant_hash = $2
           AND channel_type = 'dm'
           AND deleted_at IS NULL
         LIMIT 1
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(hash.as_slice())
     .fetch_optional(&mut *tx)
     .await?;
@@ -159,11 +166,12 @@ pub async fn create_dm(
     sqlx::query(
         r#"
         INSERT INTO channels
-            (id, name, channel_type, visibility, created_by, participant_hash)
-        VALUES ($1, $2, 'dm', 'private', $3, $4)
+            (id, community_id, name, channel_type, visibility, created_by, participant_hash)
+        VALUES ($1, $2, $3, 'dm', 'private', $4, $5)
         "#,
     )
     .bind(id)
+    .bind(community_id.as_uuid())
     .bind(&name)
     .bind(created_by)
     .bind(hash.as_slice())
@@ -174,14 +182,15 @@ pub async fn create_dm(
     for pk in participants {
         sqlx::query(
             r#"
-            INSERT INTO channel_members (channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, 'member', $3)
-            ON CONFLICT (channel_id, pubkey) DO UPDATE SET
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
+            VALUES ($1, $2, $3, 'member', $4)
+            ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
                 removed_at = NULL,
                 removed_by = NULL,
                 role = EXCLUDED.role
             "#,
         )
+        .bind(community_id.as_uuid())
         .bind(id)
         .bind(*pk)
         .bind(created_by)
@@ -197,9 +206,10 @@ pub async fn create_dm(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at
-        FROM channels WHERE id = $1
+        FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
@@ -215,6 +225,7 @@ pub async fn create_dm(
 /// using `updated_at` ordering.
 pub async fn list_dms_for_user(
     pool: &PgPool,
+    community_id: CommunityId,
     pubkey: &[u8],
     limit: u32,
     cursor: Option<Uuid>,
@@ -223,10 +234,12 @@ pub async fn list_dms_for_user(
 
     // Resolve cursor to a timestamp for keyset pagination.
     let cursor_ts: Option<DateTime<Utc>> = if let Some(cid) = cursor {
-        let row = sqlx::query("SELECT updated_at FROM channels WHERE id = $1")
-            .bind(cid)
-            .fetch_optional(pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT updated_at FROM channels WHERE community_id = $1 AND id = $2")
+                .bind(community_id.as_uuid())
+                .bind(cid)
+                .fetch_optional(pool)
+                .await?;
         row.map(|r| r.try_get::<DateTime<Utc>, _>("updated_at"))
             .transpose()?
     } else {
@@ -240,17 +253,20 @@ pub async fn list_dms_for_user(
             SELECT c.id, c.created_at, c.updated_at
             FROM channels c
             JOIN channel_members cm
-                ON c.id = cm.channel_id
-               AND cm.pubkey = $1
+                ON c.community_id = cm.community_id
+               AND c.id = cm.channel_id
+               AND cm.pubkey = $2
                AND cm.removed_at IS NULL
                AND cm.hidden_at IS NULL
-            WHERE c.channel_type = 'dm'
+            WHERE c.community_id = $1
+              AND c.channel_type = 'dm'
               AND c.deleted_at IS NULL
-              AND c.updated_at < $2
+              AND c.updated_at < $3
             ORDER BY c.updated_at DESC
-            LIMIT $3
+            LIMIT $4
             "#,
         )
+        .bind(community_id.as_uuid())
         .bind(pubkey)
         .bind(ts)
         .bind(limit)
@@ -262,16 +278,19 @@ pub async fn list_dms_for_user(
             SELECT c.id, c.created_at, c.updated_at
             FROM channels c
             JOIN channel_members cm
-                ON c.id = cm.channel_id
-               AND cm.pubkey = $1
+                ON c.community_id = cm.community_id
+               AND c.id = cm.channel_id
+               AND cm.pubkey = $2
                AND cm.removed_at IS NULL
                AND cm.hidden_at IS NULL
-            WHERE c.channel_type = 'dm'
+            WHERE c.community_id = $1
+              AND c.channel_type = 'dm'
               AND c.deleted_at IS NULL
             ORDER BY c.updated_at DESC
-            LIMIT $2
+            LIMIT $3
             "#,
         )
+        .bind(community_id.as_uuid())
         .bind(pubkey)
         .bind(limit)
         .fetch_all(pool)
@@ -290,12 +309,16 @@ pub async fn list_dms_for_user(
             r#"
             SELECT cm.pubkey, cm.role::text AS role, u.display_name
             FROM channel_members cm
-            LEFT JOIN users u ON cm.pubkey = u.pubkey
-            WHERE cm.channel_id = $1
+            LEFT JOIN users u
+              ON u.community_id = cm.community_id
+             AND u.pubkey = cm.pubkey
+            WHERE cm.community_id = $1
+              AND cm.channel_id = $2
               AND cm.removed_at IS NULL
             ORDER BY cm.joined_at ASC
             "#,
         )
+        .bind(community_id.as_uuid())
         .bind(channel_id)
         .fetch_all(pool)
         .await?;
@@ -332,6 +355,7 @@ pub async fn list_dms_for_user(
 /// - `was_created = false` -- an existing DM was returned.
 pub async fn open_dm(
     pool: &PgPool,
+    community_id: CommunityId,
     pubkeys: &[&[u8]],
     created_by: &[u8],
 ) -> Result<(ChannelRecord, bool)> {
@@ -351,14 +375,14 @@ pub async fn open_dm(
     let hash = compute_participant_hash(&all);
 
     // Check for existing DM first (fast path, no transaction).
-    if let Some(existing) = find_dm_by_participants(pool, &hash).await? {
+    if let Some(existing) = find_dm_by_participants(pool, community_id, &hash).await? {
         // Clear hidden_at for the caller so the DM reappears in their sidebar.
-        unhide_dm(pool, existing.id, created_by).await?;
+        unhide_dm(pool, community_id, existing.id, created_by).await?;
         return Ok((existing, false));
     }
 
     // Create new DM.
-    let channel = create_dm(pool, &all, created_by).await?;
+    let channel = create_dm(pool, community_id, &all, created_by).await?;
 
     Ok((channel, true))
 }
@@ -370,14 +394,20 @@ pub async fn open_dm(
 /// The DM is not deleted — it can be restored by opening a new DM with the
 /// same participants (which clears `hidden_at`). Returns an error if the user
 /// is not an active member of the channel.
-pub async fn hide_dm(pool: &PgPool, channel_id: Uuid, pubkey: &[u8]) -> Result<()> {
+pub async fn hide_dm(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
     let result = sqlx::query(
         r#"
         UPDATE channel_members
         SET hidden_at = NOW()
-        WHERE channel_id = $1 AND pubkey = $2 AND removed_at IS NULL
+        WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
     .execute(pool)
@@ -396,14 +426,20 @@ pub async fn hide_dm(pool: &PgPool, channel_id: Uuid, pubkey: &[u8]) -> Result<(
 ///
 /// This is called automatically when a user re-opens a DM via [`open_dm`].
 /// It is a no-op if the membership is not currently hidden.
-pub async fn unhide_dm(pool: &PgPool, channel_id: Uuid, pubkey: &[u8]) -> Result<()> {
+pub async fn unhide_dm(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<()> {
     sqlx::query(
         r#"
         UPDATE channel_members
         SET hidden_at = NULL
-        WHERE channel_id = $1 AND pubkey = $2 AND removed_at IS NULL
+        WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(channel_id)
     .bind(pubkey)
     .execute(pool)
@@ -415,13 +451,20 @@ pub async fn unhide_dm(pool: &PgPool, channel_id: Uuid, pubkey: &[u8]) -> Result
 /// Return the channel IDs of all DMs the given user currently has hidden
 /// (`hidden_at IS NOT NULL`) while still being an active member. Used to build
 /// the relay-signed NIP-DV visibility snapshot.
-pub async fn list_hidden_dms(pool: &PgPool, pubkey: &[u8]) -> Result<Vec<Uuid>> {
+pub async fn list_hidden_dms(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Vec<Uuid>> {
     let rows = sqlx::query(
         r#"
         SELECT cm.channel_id
         FROM channel_members cm
-        JOIN channels c ON c.id = cm.channel_id
-        WHERE cm.pubkey = $1
+        JOIN channels c
+          ON c.community_id = cm.community_id
+         AND c.id = cm.channel_id
+        WHERE cm.community_id = $1
+          AND cm.pubkey = $2
           AND cm.removed_at IS NULL
           AND cm.hidden_at IS NOT NULL
           AND c.channel_type = 'dm'
@@ -429,6 +472,7 @@ pub async fn list_hidden_dms(pool: &PgPool, pubkey: &[u8]) -> Result<Vec<Uuid>> 
         ORDER BY cm.channel_id
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(pubkey)
     .fetch_all(pool)
     .await?;

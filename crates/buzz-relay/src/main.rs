@@ -8,7 +8,7 @@ use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_db::{Db, DbConfig};
 use buzz_pubsub::PubSubManager;
-use buzz_search::{SearchConfig, SearchService};
+use buzz_search::SearchService;
 
 use buzz_relay::config::Config;
 use buzz_relay::metrics as relay_metrics;
@@ -104,30 +104,80 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
+    // NIP-43 / multi-tenant: seed the deployment's *own* community before any
+    // membership backfill or owner bootstrap, so those writes are scoped to a
+    // real `(community_id, pubkey)` and not a global pubkey. The host is derived
+    // from `relay_url` with the *same* normalization request resolution uses
+    // (`relay_url_authority` → `normalize_host`), so the bootstrapped owner lands
+    // in exactly the community that live requests for this host will resolve to.
+    //
+    // `ensure_configured_community` is idempotent, so this is safe to run every
+    // startup. An empty authority (unparseable `relay_url`)
+    // is a misconfiguration — fail fast when membership is enforced rather than
+    // seeding an empty-host community that no request can ever resolve to.
+    let deployment_community = {
+        let host = buzz_relay::tenant::relay_url_authority(&config.relay_url);
+        if host.is_empty() {
+            if config.require_relay_membership {
+                return Err(anyhow::anyhow!(
+                    "Cannot derive a community host from BUZZ_RELAY_URL ({:?}); a resolvable host is required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true",
+                    config.relay_url
+                ));
+            }
+            error!(
+                relay_url = %config.relay_url,
+                "Could not derive a community host from relay_url; skipping membership backfill/bootstrap (non-fatal, membership not required)"
+            );
+            None
+        } else {
+            match db.ensure_configured_community(&host).await {
+                Ok(record) => {
+                    info!(host = %record.host, community = %record.id, "Deployment community ensured");
+                    Some(record.id)
+                }
+                Err(e) => {
+                    if config.require_relay_membership {
+                        error!("Fatal: failed to ensure deployment community with membership enforcement enabled: {e}");
+                        return Err(anyhow::anyhow!(
+                            "Failed to ensure deployment community (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
+                        ));
+                    }
+                    error!("Failed to ensure deployment community (non-fatal, membership not required): {e}");
+                    None
+                }
+            }
+        }
+    };
+
     // NIP-43: migrate any existing pubkey_allowlist entries to relay_members.
     // Idempotent — safe to run every startup. Must run before bootstrap_owner
     // so that existing allowlist users become relay members before the owner
     // is promoted (otherwise enabling membership locks everyone out).
-    match db.backfill_from_allowlist().await {
-        Ok(0) => {}
-        Ok(n) => info!("Backfilled {n} pubkey_allowlist entries into relay_members"),
-        Err(e) => {
-            if config.require_relay_membership {
-                error!(
-                    "Fatal: failed to backfill allowlist with membership enforcement enabled: {e}"
-                );
-                return Err(anyhow::anyhow!(
-                    "Failed to backfill pubkey_allowlist (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
-                ));
-            } else {
-                error!("Failed to backfill pubkey_allowlist (non-fatal): {e}");
+    if let Some(community) = deployment_community {
+        match db.backfill_from_allowlist(community).await {
+            Ok(0) => {}
+            Ok(n) => info!("Backfilled {n} pubkey_allowlist entries into relay_members"),
+            Err(e) => {
+                if config.require_relay_membership {
+                    error!(
+                        "Fatal: failed to backfill allowlist with membership enforcement enabled: {e}"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Failed to backfill pubkey_allowlist (required when BUZZ_REQUIRE_RELAY_MEMBERSHIP=true): {e}"
+                    ));
+                } else {
+                    error!("Failed to backfill pubkey_allowlist (non-fatal): {e}");
+                }
             }
         }
     }
 
-    // NIP-43: ensure the configured relay owner always holds the owner role.
-    if let Some(ref owner_pubkey) = config.relay_owner_pubkey {
-        match db.bootstrap_owner(owner_pubkey).await {
+    // NIP-43: ensure the configured relay owner always holds the owner role
+    // within the deployment community.
+    if let (Some(community), Some(owner_pubkey)) =
+        (deployment_community, config.relay_owner_pubkey.as_ref())
+    {
+        match db.bootstrap_owner(community, owner_pubkey).await {
             Ok(()) => info!(pubkey = %owner_pubkey, "Relay owner bootstrapped"),
             Err(e) => {
                 if config.require_relay_membership {
@@ -162,9 +212,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
     let audit = AuditService::new(audit_pool);
-    if let Err(e) = audit.ensure_schema().await {
-        error!("Failed to ensure audit schema: {e}");
-    }
+    // Audit schema is provisioned by the sqlx migrations at startup (the
+    // `audit_log` DDL is part of the migrated schema), so there is no runtime
+    // schema-ensure step.
     info!("Audit service ready");
 
     let redis_pool = {
@@ -194,15 +244,16 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = AuthService::new(config.auth.clone());
 
-    let search_config = SearchConfig {
-        url: config.typesense_url.clone(),
-        api_key: config.typesense_key.clone(),
-        collection: std::env::var("TYPESENSE_COLLECTION").unwrap_or_else(|_| "events".to_string()),
-    };
-    let search = SearchService::new(search_config);
-    if let Err(e) = search.ensure_collection().await {
-        error!("Typesense collection setup failed (non-fatal): {e}");
-    }
+    // Postgres FTS: the searchable row IS the persisted event row (its
+    // `tsvector` column is populated by the `insert_event` write), so there is
+    // no external collection to provision — the search service just queries the
+    // same Postgres over its own pool.
+    let search_pool = sqlx::postgres::PgPoolOptions::new()
+        .connect(&config.database_url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
+    let search = SearchService::new(search_pool);
+    info!("Search service ready (Postgres FTS)");
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
@@ -295,9 +346,30 @@ async fn main() -> anyhow::Result<()> {
     if config.require_relay_membership {
         let startup_state = Arc::clone(&state);
         tokio::spawn(async move {
-            if let Err(e) =
-                buzz_relay::handlers::side_effects::publish_nip43_membership_list(&startup_state)
-                    .await
+            // Resolve the deployment's community from the configured relay URL
+            // host (single-community per deployment), failing closed if the host
+            // isn't mapped — the membership list is community-scoped now, so the
+            // relay-signed startup publish must carry a resolved tenant.
+            let tenant = match buzz_relay::tenant::bind_deployment_community(
+                &startup_state.db,
+                &startup_state.config.relay_url,
+            )
+            .await
+            {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "initial NIP-43 membership list skipped: relay host is not mapped to a community"
+                    );
+                    return;
+                }
+            };
+            if let Err(e) = buzz_relay::handlers::side_effects::publish_nip43_membership_list(
+                &tenant,
+                &startup_state,
+            )
+            .await
             {
                 tracing::warn!(error = %e, "failed to publish initial NIP-43 membership list on startup");
             } else {
@@ -313,14 +385,36 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("BUZZ_RECONCILE_CHANNELS").is_ok() {
         let reconcile_state = Arc::clone(&state);
         tokio::spawn(async move {
+            // Resolve the deployment's community from the configured relay URL
+            // host (dev/CI runs single-community), failing closed if the host
+            // isn't mapped — the reconciler is community-scoped now, so there is
+            // no global "all channels" sweep.
+            let tenant = match buzz_relay::tenant::bind_deployment_community(
+                &reconcile_state.db,
+                &reconcile_state.config.relay_url,
+            )
+            .await
+            {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        "channel reconciliation skipped: relay host is not mapped to a community"
+                    );
+                    return;
+                }
+            };
             // Try immediately, then retry every 5s for up to 2 minutes.
             // Handles CI pattern: relay starts → seed script inserts data → reconciliation.
             for attempt in 0..24u32 {
                 if attempt > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
-                match buzz_relay::handlers::side_effects::reconcile_channel_events(&reconcile_state)
-                    .await
+                match buzz_relay::handlers::side_effects::reconcile_channel_events(
+                    &tenant,
+                    &reconcile_state,
+                )
+                .await
                 {
                     Ok(()) => {}
                     Err(e) => {
@@ -374,11 +468,21 @@ async fn main() -> anyhow::Result<()> {
 
                 info!(count = expired.len(), "Ephemeral reaper archived channels");
 
-                for channel_id in &expired {
+                for channel in &expired {
+                    // Per-row tenant: the reaper crosses communities, so each
+                    // archived channel carries its own server-resolved
+                    // `(community, host)` from the DB RETURNING. Build the
+                    // `TenantContext` from that row — never a default tenant.
+                    let tenant = buzz_core::tenant::TenantContext::resolved(
+                        channel.community_id,
+                        channel.host.clone(),
+                    );
+                    let channel_id = channel.channel_id;
                     // Emit a system message so members see why the channel was archived.
                     if let Err(e) = buzz_relay::handlers::side_effects::emit_system_message(
+                        &tenant,
                         &reaper_state,
-                        *channel_id,
+                        channel_id,
                         serde_json::json!({ "type": "channel_auto_archived" }),
                     )
                     .await
@@ -388,8 +492,9 @@ async fn main() -> anyhow::Result<()> {
 
                     // Update NIP-29 discovery events so clients see the archived state.
                     if let Err(e) = buzz_relay::handlers::side_effects::emit_group_discovery_events(
+                        &tenant,
                         &reaper_state,
-                        *channel_id,
+                        channel_id,
                     )
                     .await
                     {
@@ -401,8 +506,9 @@ async fn main() -> anyhow::Result<()> {
                     // drop-set → no reconnect storm). Offline clients are caught
                     // by the archived=true skip in discover_channels on reconnect.
                     buzz_relay::handlers::side_effects::evict_all_channel_subscriptions(
+                        &tenant,
                         &reaper_state,
-                        *channel_id,
+                        channel_id,
                     )
                     .await;
                 }
@@ -431,6 +537,11 @@ async fn main() -> anyhow::Result<()> {
                 batch_limit = scheduler_batch_limit,
                 "NIP-ER reminder scheduler started"
             );
+            // The scheduler is a background sweep with no inbound connection,
+            // so it cannot use a request Host header as tenant provenance. Each
+            // DueReminder row carries `(community_id, host)` from the DB row's
+            // community join (mirroring the ephemeral-channel reaper); publish
+            // each reminder to that row's community-global topic.
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(scheduler_interval_secs)).await;
 
@@ -454,34 +565,73 @@ async fn main() -> anyhow::Result<()> {
                 info!(count = due.len(), "Reminder scheduler: due reminders found");
 
                 for reminder in due {
-                    // Publish first, then claim. If publish fails the reminder
-                    // stays unclaimed and will be retried next tick. If claim
-                    // fails after a successful publish, duplicate fan-out on the
-                    // next tick is harmless (subscribers dedup by event ID).
+                    // Claim before side effect (§5c: claim-before-publish). A
+                    // unique per-attempt stamp lets a failed publish roll back
+                    // exactly this pod's claim via compare-and-clear, without a
+                    // racing pod's later claim being clobbered. `delivered_at`
+                    // is only ever read as a NULL/non-NULL sentinel (the
+                    // due-reminder query guard and the partial index), never as
+                    // a wall-clock value, so an opaque stamp is safe to store.
+                    let reminder_tenant = buzz_core::tenant::TenantContext::resolved(
+                        reminder.community_id,
+                        reminder.host.clone(),
+                    );
+                    let delivery_stamp = chrono::Utc::now()
+                        .timestamp_nanos_opt()
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                        ^ rand::random::<i64>();
+
+                    match scheduler_state
+                        .db
+                        .claim_due_reminder_with_stamp(
+                            reminder.community_id,
+                            &reminder.id,
+                            reminder.created_at,
+                            delivery_stamp,
+                        )
+                        .await
+                    {
+                        Ok(true) => {}         // We won the claim — proceed to publish.
+                        Ok(false) => continue, // Another pod claimed it; no side effect here.
+                        Err(e) => {
+                            warn!(
+                                event_id = hex::encode(&reminder.id),
+                                "Reminder scheduler: claim failed, skipping publish: {e}"
+                            );
+                            continue;
+                        }
+                    }
+
+                    // Publish the single side effect. On failure, release our
+                    // claim so the next tick (this pod or another) can retry —
+                    // the stamp guard ensures we only clear our own claim.
                     if let Err(e) = scheduler_state
                         .pubsub
-                        .publish_event(uuid::Uuid::nil(), &reminder_to_event(&reminder))
+                        .publish_event(
+                            &reminder_tenant,
+                            buzz_pubsub::EventTopic::Global,
+                            &reminder_to_event(&reminder),
+                        )
                         .await
                     {
                         error!(
                             event_id = hex::encode(&reminder.id),
-                            "Reminder scheduler: Redis publish failed, skipping claim: {e}"
+                            "Reminder scheduler: Redis publish failed after claim, releasing: {e}"
                         );
-                        continue;
-                    }
-
-                    // Atomic cross-pod claim — only the winner marks it delivered.
-                    match scheduler_state
-                        .db
-                        .claim_due_reminder(&reminder.id, reminder.created_at)
-                        .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => {} // Another pod claimed it; duplicate publish is harmless.
-                        Err(e) => {
+                        if let Err(release_err) = scheduler_state
+                            .db
+                            .release_due_reminder(
+                                reminder.community_id,
+                                &reminder.id,
+                                reminder.created_at,
+                                delivery_stamp,
+                            )
+                            .await
+                        {
                             warn!(
                                 event_id = hex::encode(&reminder.id),
-                                "Reminder scheduler: claim failed after publish (duplicate delivery possible): {e}"
+                                "Reminder scheduler: release after failed publish errored \
+                                 (reminder stays claimed, will not retry): {release_err}"
                             );
                         }
                     }
@@ -528,8 +678,13 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(invalidation) => {
-                        state_for_cache.apply_cache_invalidation(invalidation);
+                    Ok(scoped) => {
+                        // The local moka caches key on globally-unique UUIDs /
+                        // pubkeys, so applying the tenant-local op by key is
+                        // correct regardless of community; the `community_id`
+                        // scope rides the Redis topic, not the moka key.
+                        state_for_cache
+                            .apply_cache_invalidation(scoped.community_id, scoped.invalidation);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);

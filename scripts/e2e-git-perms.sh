@@ -5,7 +5,7 @@
 # Two bots collaborate on a simple web page via the Buzz relay's git server.
 #
 # Prerequisites:
-#   - Docker services running (postgres, redis, typesense)
+#   - Docker services running (postgres, redis, minio)
 #   - Relay built: cargo build --release --bin buzz-relay
 #   - Credential helper built: cargo build --release --bin git-credential-nostr
 #   - Signing program built: cargo build --release --bin git-sign-nostr
