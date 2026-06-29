@@ -24,6 +24,26 @@ const rules = [
     extensions: new Set([".ts", ".tsx"]),
     maxLines: MAX_LINES,
   },
+  {
+    root: "src/shared/context",
+    extensions: new Set([".ts", ".tsx"]),
+    maxLines: MAX_LINES,
+  },
+  {
+    root: "src/shared/lib",
+    extensions: new Set([".ts", ".tsx"]),
+    maxLines: MAX_LINES,
+  },
+  {
+    root: "src/shared/ui",
+    extensions: new Set([".ts", ".tsx"]),
+    maxLines: MAX_LINES,
+  },
+  {
+    root: "src/shared/styles",
+    extensions: new Set([".css"]),
+    maxLines: MAX_LINES,
+  },
 ];
 
 // TEMP — these files exceed the 1000-line limit and are queued to be split.
@@ -48,7 +68,6 @@ const overrides = new Map([
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup.
   ["src-tauri/src/managed_agents/runtime.rs", 2031],
-  ["src-tauri/src/managed_agents/personas.rs", 1080],
   // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
   // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
   // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
@@ -57,7 +76,6 @@ const overrides = new Map([
   // queued to split with the list. The two `agents-data-changed` emits (live
   // UI refresh on inbound reconcile + tombstone) add the latest growth.
   ["src-tauri/src/commands/personas.rs", 1279],
-  ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -69,10 +87,8 @@ const overrides = new Map([
   // (the effective_agent_command / divergent / create-time override matrix);
   // alias-preservation coverage extends that matrix so create-time persona
   // agents keep an installed runtime alias when the primary command is absent.
-  // types.rs adds the persona/instance harness fields. Load-bearing, not
-  // generic debt.
+  // Load-bearing, not generic debt.
   ["src-tauri/src/managed_agents/discovery.rs", 1085],
-  ["src-tauri/src/managed_agents/types.rs", 1037],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
@@ -86,10 +102,6 @@ const overrides = new Map([
   // overage from load-bearing per-message plumbing, not generic debt growth.
   // Approved override; still queued to split with the rest of this list.
   ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
-  // useDueReminderBadgeCount hook call + sum to wire due-reminder count into
-  // the Inbox nav badge — a small overage from load-bearing badge plumbing,
-  // not generic debt growth. Approved override; still queued to split.
-  ["src/app/AppShell.tsx", 1010],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
@@ -102,6 +114,11 @@ const overrides = new Map([
   // test. Load-bearing feature growth, queued to split publishSplitSlots path
   // into readStateManagerSplit.ts.
   ["src/features/channels/readState/readStateManager.ts", 1030],
+  // Shared UI was added to this guard after splitting globals/markdown so
+  // large shared renderers cannot grow further while follow-up splits land.
+  ["src/shared/ui/markdown.tsx", 2344],
+  ["src/shared/ui/VideoPlayer.tsx", 2199],
+  ["src/shared/ui/sidebar.tsx", 1042],
 ]);
 
 await runFileSizeCheck({
