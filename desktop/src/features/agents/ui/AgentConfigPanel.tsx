@@ -1,5 +1,16 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  Activity,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Cpu,
+  Hash,
+  Layers,
+  MessageSquare,
+  Server,
+} from "lucide-react";
 
 import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
@@ -60,57 +71,72 @@ const NORMALIZED_LABELS: Record<keyof NormalizedConfig, string> = {
   systemPrompt: "System Prompt",
 };
 
+const NORMALIZED_ICONS: Record<keyof NormalizedConfig, LucideIcon> = {
+  model: Cpu,
+  provider: Server,
+  mode: Activity,
+  thinkingEffort: Brain,
+  maxOutputTokens: Hash,
+  contextLimit: Layers,
+  systemPrompt: MessageSquare,
+};
+
 function NormalizedRow({
+  fieldKey,
   label,
   field,
   isPreSpawn,
   configFilePath,
 }: {
+  fieldKey: keyof NormalizedConfig;
   label: string;
   field: NormalizedField;
   isPreSpawn: boolean;
   configFilePath: string | null;
 }) {
+  const Icon = NORMALIZED_ICONS[fieldKey];
   // ACP-sourced origins only become meaningful post-spawn
   const isAcpOnly =
     field.origin === "acpNativeRead" || field.origin === "acpConfigOption";
 
   return (
-    <div className="py-2">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div
-        className="mt-0.5 truncate text-sm font-medium"
-        title={field.value ?? undefined}
-      >
-        {isPreSpawn && isAcpOnly ? (
-          <span className="font-normal text-muted-foreground text-xs">
-            Available after agent starts
+    <div className="flex items-center gap-3 px-4 py-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Icon className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-xs font-medium text-foreground">
+          {label}
+        </span>
+        <span
+          className="mt-0.5 block truncate text-sm text-muted-foreground"
+          title={field.value ?? undefined}
+        >
+          {isPreSpawn && isAcpOnly ? (
+            "Available after agent starts"
+          ) : (
+            <>
+              {field.value ?? "—"}
+              {field.overriddenValue && (
+                <span
+                  className={cn(
+                    "ml-2 text-xs text-muted-foreground/60",
+                    field.origin !== "runtimeOverride" && "line-through",
+                  )}
+                  title={field.overriddenValue ?? undefined}
+                >
+                  {field.overriddenValue}
+                </span>
+              )}
+            </>
+          )}
+        </span>
+        {field.value && (
+          <span className="mt-0.5 block text-2xs text-muted-foreground/70">
+            {provenanceSentence(field.origin, field.writeVia, configFilePath)}
           </span>
-        ) : (
-          <>
-            {field.value ?? <span className="text-muted-foreground">—</span>}
-            {field.overriddenValue && (
-              <span
-                className={cn(
-                  "ml-2 text-xs text-muted-foreground/60",
-                  // A runtime override rides over the persona baseline rather
-                  // than superseding an explicit pick — show the persona as a
-                  // secondary value, not struck through.
-                  field.origin !== "runtimeOverride" && "line-through",
-                )}
-                title={field.overriddenValue ?? undefined}
-              >
-                {field.overriddenValue}
-              </span>
-            )}
-          </>
         )}
-      </div>
-      {field.value && (
-        <div className="mt-0.5 text-2xs text-muted-foreground/70">
-          {provenanceSentence(field.origin, field.writeVia, configFilePath)}
-        </div>
-      )}
+      </span>
     </div>
   );
 }
@@ -197,6 +223,7 @@ export function AgentConfigPanel({ pubkey }: Props) {
           normalizedEntries.map(([key, field]) => (
             <NormalizedRow
               key={key}
+              fieldKey={key}
               label={NORMALIZED_LABELS[key]}
               field={field}
               isPreSpawn={isPreSpawn}

@@ -8,7 +8,6 @@ import {
   MessageSquare,
   Pencil,
   Play,
-  Settings,
   Square,
   UserMinus,
   UserPlus,
@@ -423,15 +422,7 @@ export function ProfileSummaryView({
                 showInstructionBlock={showInstructionBlock}
               />
               {isOwner === true && managedAgent !== undefined ? (
-                <div className="overflow-hidden rounded-2xl bg-muted/20 px-4 py-3">
-                  <div className="mb-2 flex items-center gap-3">
-                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-                      <Settings className="h-4 w-4 text-muted-foreground" />
-                    </span>
-                    <span className="text-xs font-medium text-foreground">
-                      Configuration
-                    </span>
-                  </div>
+                <div className="overflow-hidden rounded-2xl bg-muted/20">
                   <AgentConfigPanel pubkey={managedAgent.pubkey} />
                 </div>
               ) : null}

@@ -122,14 +122,13 @@ async function openAgentProfileFromChannel(
   // Click the Runtime tab to reveal the Configuration section.
   await panel.getByRole("tab", { name: "Runtime" }).click();
 
-  // Wait for the Configuration heading to appear.
-  await expect(panel.getByText("Configuration")).toBeVisible({
-    timeout: 10_000,
-  });
+  // Wait for the first normalized config field ("Model") to appear.
+  const configAnchor = panel.getByText("Model").first();
+  await expect(configAnchor).toBeVisible({ timeout: 10_000 });
 
   // Scroll the panel's internal scroll container to the bottom so the
-  // Configuration section content (not just the heading) is fully visible.
-  await panel.getByText("Configuration").scrollIntoViewIfNeeded();
+  // config section content is fully visible.
+  await configAnchor.scrollIntoViewIfNeeded();
   await panel.evaluate((el) => {
     // The scrollable container is the profileBody div with overflow-y-auto.
     // Find it by checking which child actually scrolls.
@@ -288,11 +287,11 @@ test.describe("config bridge screenshots", () => {
     // The Configuration section lives inside the Runtime tab — click it first.
     await panel.getByRole("tab", { name: "Runtime" }).click();
 
-    // Wait for the Configuration section to render and scroll it into view so
+    // Wait for the config section to render and scroll it into view so
     // it is fully visible before capture.
-    const configHeading = panel.getByText("Configuration");
-    await expect(configHeading).toBeVisible({ timeout: 10_000 });
-    await configHeading.scrollIntoViewIfNeeded();
+    const configAnchor = panel.getByText("Model").first();
+    await expect(configAnchor).toBeVisible({ timeout: 10_000 });
+    await configAnchor.scrollIntoViewIfNeeded();
     // Scroll the panel's internal scroll container to the bottom so config
     // fields are fully visible, not just the heading at the edge.
     await panel.evaluate((el) => {
