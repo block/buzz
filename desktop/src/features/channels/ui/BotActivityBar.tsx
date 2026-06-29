@@ -197,8 +197,16 @@ export function BotActivityComposerAction({
               +{typingAgents.length - 2}
             </span>
           ) : null}
-          <span className={cn(isInline ? "max-w-40 truncate" : "sr-only")}>
-            {isInline ? <Shimmer>{visibleStatusLabel}</Shimmer> : "working"}
+          <span
+            className={cn(
+              isInline ? "min-w-0 flex-1 overflow-hidden" : "sr-only",
+            )}
+          >
+            {isInline ? (
+              <Shimmer className="block truncate">{visibleStatusLabel}</Shimmer>
+            ) : (
+              "working"
+            )}
           </span>
           {isInline ? null : (
             <Loader2 className="h-4 w-4 shrink-0 animate-spin opacity-70" />
