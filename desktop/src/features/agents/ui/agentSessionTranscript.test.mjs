@@ -194,3 +194,190 @@ test("buildTranscript categorizes explicit Buzz tool calls for the activity bar"
   assert.deepEqual(item.args, { limit: 20 });
   assert.equal(item.status, "completed");
 });
+
+function sessionUpdate(seq, update, overrides = {}) {
+  return {
+    ...baseEvent,
+    ...overrides,
+    seq,
+    kind: "acp_read",
+    payload: {
+      method: "session/update",
+      params: {
+        sessionId: overrides.sessionId ?? baseEvent.sessionId,
+        update,
+      },
+    },
+  };
+}
+
+function assistantChunk(seq, messageId, text, overrides = {}) {
+  return sessionUpdate(
+    seq,
+    {
+      sessionUpdate: "agent_message_chunk",
+      messageId,
+      content: { type: "text", text },
+    },
+    overrides,
+  );
+}
+
+test("buildTranscript de-duplicates repeated tool updates into one canonical row", () => {
+  const items = toolItems([
+    acpToolUpdate(40, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-dupe",
+      status: "executing",
+      title: "shell",
+      kind: "shell",
+      rawInput: { command: "echo hi" },
+    }),
+    acpToolUpdate(41, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-dupe",
+      status: "completed",
+      title: "shell",
+      kind: "shell",
+      rawOutput: "hi",
+    }),
+    acpToolUpdate(42, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-dupe",
+      status: "completed",
+      title: "shell",
+      kind: "shell",
+      rawOutput: "hi",
+    }),
+  ]);
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, `tool:${baseEvent.channelId}:call-dupe`);
+  assert.equal(items[0].status, "completed");
+  assert.equal(items[0].result, "hi");
+});
+
+test("buildTranscript keeps a completed tool terminal when a late executing call arrives", () => {
+  const [item] = toolItems([
+    acpToolUpdate(50, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-regression",
+      status: "completed",
+      title: "shell",
+      kind: "shell",
+      rawOutput: "done",
+    }),
+    acpToolUpdate(51, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-regression",
+      status: "executing",
+      title: "shell",
+      kind: "shell",
+      rawInput: { command: "echo done" },
+    }),
+  ]);
+
+  assert.equal(item.status, "completed");
+  assert.equal(item.completedAt, baseEvent.timestamp);
+  assert.deepEqual(item.args, { command: "echo done" });
+  assert.equal(item.result, "done");
+});
+
+test("buildTranscript rebuilds out-of-order tool frames as one canonical row with retained ids", () => {
+  const [item] = toolItems([
+    sessionUpdate(
+      60,
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-out-of-order",
+        status: "completed",
+        title: "read_file",
+        kind: "read_file",
+        rawOutput: "file contents",
+      },
+      {
+        channelId: "22222222-2222-2222-2222-222222222222",
+        sessionId: "sess-2",
+        turnId: "turn-2",
+        timestamp: "2026-06-18T00:00:05Z",
+      },
+    ),
+    sessionUpdate(
+      61,
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "call-out-of-order",
+        status: "executing",
+        title: "read_file",
+        kind: "read_file",
+        rawInput: { path: "AGENTS.md" },
+      },
+      {
+        channelId: "22222222-2222-2222-2222-222222222222",
+        sessionId: "sess-2",
+        turnId: "turn-2",
+        timestamp: "2026-06-18T00:00:04Z",
+      },
+    ),
+  ]);
+
+  assert.equal(
+    item.id,
+    "tool:22222222-2222-2222-2222-222222222222:call-out-of-order",
+  );
+  assert.equal(item.status, "completed");
+  assert.deepEqual(item.args, { path: "AGENTS.md" });
+  assert.equal(item.channelId, "22222222-2222-2222-2222-222222222222");
+  assert.equal(item.turnId, "turn-2");
+  assert.equal(item.sessionId, "sess-2");
+});
+
+test("buildTranscript coalesces assistant chunks until the message is sealed", () => {
+  const messages = buildTranscript([
+    assistantChunk(70, "msg-1", "Hello "),
+    assistantChunk(71, "msg-1", "world"),
+  ]).filter((item) => item.type === "message" && item.role === "assistant");
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].text, "Hello world");
+  assert.equal(messages[0].id, `assistant:${baseEvent.channelId}:msg-1`);
+});
+
+test("buildTranscript starts a continuation for same-message chunks after sealing", () => {
+  const messages = buildTranscript([
+    assistantChunk(80, "msg-2", "First"),
+    acpToolUpdate(81, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-seal",
+      status: "executing",
+      title: "shell",
+      kind: "shell",
+    }),
+    assistantChunk(82, "msg-2", "Second"),
+  ]).filter((item) => item.type === "message" && item.role === "assistant");
+
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].text, "First");
+  assert.equal(messages[1].text, "Second");
+  assert.match(messages[1].id, /:c\d+$/);
+});
+
+test("buildTranscript preserves channel, turn, and session ids through message updates", () => {
+  const [message] = buildTranscript([
+    assistantChunk(90, "msg-identity", "One ", {
+      channelId: "33333333-3333-3333-3333-333333333333",
+      sessionId: "sess-identity",
+      turnId: "turn-identity",
+    }),
+    assistantChunk(91, "msg-identity", "Two", {
+      channelId: "33333333-3333-3333-3333-333333333333",
+      sessionId: null,
+      turnId: null,
+    }),
+  ]).filter((item) => item.type === "message" && item.role === "assistant");
+
+  assert.equal(message.text, "One Two");
+  assert.equal(message.channelId, "33333333-3333-3333-3333-333333333333");
+  assert.equal(message.turnId, "turn-identity");
+  assert.equal(message.sessionId, "sess-identity");
+});

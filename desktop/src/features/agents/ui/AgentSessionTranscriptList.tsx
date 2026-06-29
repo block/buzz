@@ -73,7 +73,6 @@ export function AgentSessionTranscriptList({
   profiles,
 }: AgentTranscriptIdentityProps & {
   emptyDescription: string;
-  isWorking?: boolean;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
 }) {

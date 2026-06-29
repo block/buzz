@@ -234,6 +234,18 @@ function upsertMetadata(
   });
 }
 
+function isTerminalToolStatus(status: ToolStatus) {
+  return status === "completed" || status === "failed";
+}
+
+function mergeToolStatus(existing: ToolStatus, next: ToolStatus): ToolStatus {
+  if (isTerminalToolStatus(existing) && !isTerminalToolStatus(next)) {
+    return existing;
+  }
+
+  return next;
+}
+
 function upsertTool(
   d: TranscriptDraft,
   id: string,
@@ -261,18 +273,18 @@ function upsertTool(
     } else if (!existing.buzzToolName && !isGenericToolTitle(toolName)) {
       updatedToolName = toolName;
     }
+    const mergedStatus = mergeToolStatus(existing.status, status);
     replaceItem(d, id, {
       ...existing,
       title: updatedTitle,
       toolName: updatedToolName,
       buzzToolName: updatedBuzzToolName,
-      status,
+      status: mergedStatus,
       args: Object.keys(args).length > 0 ? args : existing.args,
       result: result || existing.result,
       isError: isError || existing.isError,
       completedAt:
-        (status === "completed" || status === "failed") &&
-        existing.completedAt == null
+        isTerminalToolStatus(mergedStatus) && existing.completedAt == null
           ? timestamp
           : existing.completedAt,
       channelId: ctx.channelId,

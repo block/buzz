@@ -36,7 +36,6 @@ type ManagedAgentSessionPanelProps = {
   channelId?: string | null;
   className?: string;
   emptyDescription?: string;
-  isWorking?: boolean;
   rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
   showRaw?: boolean;
@@ -48,7 +47,6 @@ export function ManagedAgentSessionPanel({
   channelId = null,
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
-  isWorking = false,
   rawLayout = "responsive",
   showHeader = true,
   showRaw = true,
@@ -101,7 +99,6 @@ export function ManagedAgentSessionPanel({
         errorMessage={errorMessage}
         events={scopedEvents}
         hasObserver={hasObserver}
-        isWorking={isWorking}
         profiles={profiles}
         rawLayout={rawLayout}
         showRaw={showRaw}
@@ -155,7 +152,6 @@ function SessionBody({
   errorMessage,
   events,
   hasObserver,
-  isWorking,
   profiles,
   rawLayout,
   showRaw,
@@ -169,7 +165,6 @@ function SessionBody({
   errorMessage: string | null;
   events: ObserverEvent[];
   hasObserver: boolean;
-  isWorking: boolean;
   profiles?: UserProfileLookup;
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
@@ -211,7 +206,6 @@ function SessionBody({
             agentName={agentName}
             agentPubkey={agentPubkey}
             emptyDescription={emptyDescription}
-            isWorking={isWorking}
             items={transcript}
             profiles={profiles}
           />
