@@ -5,10 +5,12 @@ import {
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import type {
+  AgentModelsResponse,
   ManagedAgent,
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
+import { getAgentModels } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -17,12 +19,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { Input } from "@/shared/ui/input";
 import {
   CreateAgentBasicsFields,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
+
+const AUTO_MODEL_VALUE = "__auto_model__";
+const CUSTOM_MODEL_VALUE = "__custom_model__";
 
 export function EditAgentDialog({
   agent,
@@ -59,6 +65,11 @@ export function EditAgentDialog({
   const [systemPrompt, setSystemPrompt] = React.useState(
     agent.systemPrompt ?? "",
   );
+  const [model, setModel] = React.useState(agent.model ?? "");
+  const [modelsData, setModelsData] =
+    React.useState<AgentModelsResponse | null>(null);
+  const [modelsLoading, setModelsLoading] = React.useState(false);
+  const [modelsError, setModelsError] = React.useState<string | null>(null);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
@@ -96,11 +107,46 @@ export function EditAgentDialog({
       setTurnTimeoutSeconds(String(agent.turnTimeoutSeconds));
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
+      setModel(agent.model ?? "");
       setEnvVars(agent.envVars);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       updateMutation.reset();
     }
+  }, [open, agent.pubkey]);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    let cancelled = false;
+    setModelsData(null);
+    setModelsError(null);
+    setModelsLoading(true);
+
+    getAgentModels(agent.pubkey)
+      .then((data) => {
+        if (!cancelled) {
+          setModelsData(data);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setModelsError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setModelsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [open, agent.pubkey]);
 
   function handleOpenChange(next: boolean) {
@@ -138,6 +184,7 @@ export function EditAgentDialog({
         .split(",")
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
+      const normalizedModel = model.trim() || null;
 
       // Harness pin resolution. The backend treats an empty string as the
       // "inherit from persona" sentinel (clears the override) and any concrete
@@ -188,6 +235,10 @@ export function EditAgentDialog({
           (systemPrompt.trim() || null) !== agent.systemPrompt
             ? systemPrompt.trim() || null
             : undefined,
+        model:
+          normalizedModel !== (agent.model ?? null)
+            ? normalizedModel
+            : undefined,
         envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
@@ -235,6 +286,15 @@ export function EditAgentDialog({
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
+            />
+
+            <EditAgentModelField
+              disabled={updateMutation.isPending}
+              model={model}
+              modelsData={modelsData}
+              modelsError={modelsError}
+              modelsLoading={modelsLoading}
+              onModelChange={setModel}
             />
 
             {linkedPersona ? (
@@ -327,6 +387,98 @@ export function EditAgentDialog({
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function EditAgentModelField({
+  disabled,
+  model,
+  modelsData,
+  modelsError,
+  modelsLoading,
+  onModelChange,
+}: {
+  disabled: boolean;
+  model: string;
+  modelsData: AgentModelsResponse | null;
+  modelsError: string | null;
+  modelsLoading: boolean;
+  onModelChange: (value: string) => void;
+}) {
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
+  const trimmedModel = model.trim();
+  const modelOptions = modelsData?.models ?? [];
+  const selectedKnownModel = modelOptions.some(
+    (option) => option.id === trimmedModel,
+  );
+  const hasCustomModel = trimmedModel.length > 0 && !selectedKnownModel;
+  const showCustomModelInput = isCustomModelEditing || hasCustomModel;
+  const modelSelectValue = showCustomModelInput
+    ? CUSTOM_MODEL_VALUE
+    : trimmedModel.length === 0
+      ? AUTO_MODEL_VALUE
+      : selectedKnownModel
+        ? trimmedModel
+        : CUSTOM_MODEL_VALUE;
+  const supportsSwitching = modelsData?.supportsSwitching === true;
+  const selectDisabled = disabled || modelsLoading || !supportsSwitching;
+  const defaultModelLabel = modelsData?.agentDefaultModel
+    ? `Default model (${modelsData.agentDefaultModel})`
+    : "Default model";
+
+  return (
+    <div className="space-y-1.5">
+      <label className="text-sm font-medium" htmlFor="agent-model">
+        Model
+      </label>
+      <select
+        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={selectDisabled}
+        id="agent-model"
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          if (nextValue === AUTO_MODEL_VALUE) {
+            setIsCustomModelEditing(false);
+            onModelChange("");
+            return;
+          }
+          if (nextValue === CUSTOM_MODEL_VALUE) {
+            setIsCustomModelEditing(true);
+            return;
+          }
+          setIsCustomModelEditing(false);
+          onModelChange(nextValue);
+        }}
+        value={modelSelectValue}
+      >
+        <option value={AUTO_MODEL_VALUE}>{defaultModelLabel}</option>
+        {modelOptions.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.name ?? option.id}
+          </option>
+        ))}
+        <option value={CUSTOM_MODEL_VALUE}>Custom model...</option>
+      </select>
+      {showCustomModelInput && supportsSwitching ? (
+        <Input
+          aria-label="Custom model ID"
+          autoCorrect="off"
+          disabled={disabled}
+          onChange={(event) => onModelChange(event.target.value)}
+          placeholder="Custom model ID"
+          value={model}
+        />
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        {modelsLoading
+          ? "Loading models..."
+          : modelsError
+            ? `Could not load models: ${modelsError}`
+            : supportsSwitching
+              ? "Saved changes take effect on the next start."
+              : "This runtime does not report switchable models."}
+      </p>
+    </div>
   );
 }
 
