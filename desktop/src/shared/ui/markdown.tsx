@@ -1,9 +1,6 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import ReactMarkdown, {
-  type Components,
-  defaultUrlTransform,
-} from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import {
   ChevronLeft,
   ChevronRight,
@@ -29,14 +26,12 @@ import {
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
-  isMessageLink,
   parseMessageLink,
   resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
-import type { Channel } from "@/shared/api/types";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { copyCodeBlockToClipboard } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
@@ -50,9 +45,7 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
-import remarkCustomEmoji, {
-  type CustomEmoji,
-} from "@/shared/lib/remarkCustomEmoji";
+import remarkCustomEmoji from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
@@ -82,27 +75,20 @@ import {
   shallowArrayEqual,
 } from "./markdownUtils";
 import { resolveFileCard } from "./markdownFileCard";
+import type {
+  ImetaEntry,
+  MarkdownProps,
+  MarkdownRuntime,
+  MessageLinkPillProps,
+} from "./markdown/types";
+import {
+  aspectRatioFromDim,
+  dimensionsFromDim,
+  isInsideHiddenSpoiler,
+  messageLinkUrlTransform,
+  useStableArray,
+} from "./markdown/utils";
 import { VideoPlayer, type VideoReviewContext } from "./VideoPlayer";
-
-type ImetaEntry = {
-  dim?: string;
-  image?: string;
-  thumb?: string;
-  m?: string;
-  size?: number;
-  filename?: string;
-  duration?: number;
-};
-
-type ImetaLookup = Map<string, ImetaEntry>;
-
-type MessageLinkPillProps = {
-  channels: Channel[];
-  href: string;
-  interactive: boolean;
-  link: ParsedMessageLink;
-  onOpenMessageLink: (link: ParsedMessageLink) => void;
-};
 
 let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
   null;
@@ -146,62 +132,6 @@ function stripDiffMarker(tokens: ThemedToken[], marker: RegExp): ThemedToken[] {
   return [...tokens.slice(0, -1), { ...last, content: stripped }];
 }
 
-function useStableArray<T>(arr: T[]): T[] {
-  const ref = React.useRef(arr);
-  if (
-    arr.length !== ref.current.length ||
-    arr.some((item, i) => item !== ref.current[i])
-  ) {
-    ref.current = arr;
-  }
-  return ref.current;
-}
-
-function aspectRatioFromDim(dim?: string): number | undefined {
-  if (!dim) return undefined;
-  const match = dim.match(/^(\d+)x(\d+)$/i);
-  if (!match) return undefined;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
-    return undefined;
-  }
-  return width / height;
-}
-
-/**
- * Parse a NIP-92 `dim` value ("WxH") into intrinsic pixel dimensions. Used to
- * stamp explicit `width`/`height` attributes on inline images so the browser
- * reserves aspect-ratio-correct layout space *before* the image decodes. This
- * is what keeps the timeline from jumping when a tall image loads late — the
- * row's height is known at first paint instead of growing from ~0 on load.
- */
-function dimensionsFromDim(
-  dim?: string,
-): { width: number; height: number } | undefined {
-  if (!dim) return undefined;
-  const match = dim.match(/^(\d+)x(\d+)$/i);
-  if (!match) return undefined;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (
-    !Number.isFinite(width) ||
-    !Number.isFinite(height) ||
-    width <= 0 ||
-    height <= 0
-  ) {
-    return undefined;
-  }
-  return { width, height };
-}
-
-function isInsideHiddenSpoiler(element: Element): boolean {
-  return (
-    element.closest('.buzz-spoiler[data-spoiler][data-revealed="false"]') !==
-    null
-  );
-}
-
 /**
  * Video review context flows through React context instead of
  * `createMarkdownComponents` arguments. The component map must keep a stable
@@ -213,16 +143,6 @@ function isInsideHiddenSpoiler(element: Element): boolean {
 const VideoReviewMarkdownContext = React.createContext<
   VideoReviewContext | undefined
 >(undefined);
-
-type MarkdownRuntime = {
-  agentMentionPubkeysByName?: Record<string, string>;
-  channels: Channel[];
-  imetaByUrl?: ImetaLookup;
-  linkPreviewHrefs: ReadonlySet<string>;
-  mentionPubkeysByName?: Record<string, string>;
-  onOpenChannel: (channelId: string) => void;
-  onOpenMessageLink: (link: ParsedMessageLink) => void;
-};
 
 function useLatestRef<T>(value: T) {
   const ref = React.useRef(value);
@@ -269,33 +189,6 @@ function MarkdownVideoPlayer({
     />
   );
 }
-
-/**
- * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
- * links. The default transform strips unknown schemes (returns `""`) before
- * the `a` component override can see them, which would break copy → paste →
- * click end-to-end. Everything else delegates to `defaultUrlTransform`.
- */
-function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
-    return value;
-  }
-  return defaultUrlTransform(value);
-}
-
-type MarkdownProps = {
-  channelNames?: string[];
-  className?: string;
-  content: string;
-  customEmoji?: CustomEmoji[];
-  imetaByUrl?: ImetaLookup;
-  interactive?: boolean;
-  agentMentionPubkeysByName?: Record<string, string>;
-  mentionNames?: string[];
-  mentionPubkeysByName?: Record<string, string>;
-  searchQuery?: string;
-  videoReviewContext?: VideoReviewContext;
-};
 
 type ImageLightboxBox = {
   height: number;
