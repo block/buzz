@@ -74,12 +74,14 @@ function fromRawProjectRepoSnapshot(
 export async function getProjectRepoSnapshot(input: {
   cloneUrl: string;
   defaultBranch?: string | null;
+  baseBranch?: string | null;
 }): Promise<ProjectRepoSnapshot> {
   const snapshot = await invokeTauri<RawProjectRepoSnapshot>(
     "get_project_repo_snapshot",
     {
       cloneUrl: input.cloneUrl,
       defaultBranch: input.defaultBranch ?? null,
+      baseBranch: input.baseBranch ?? null,
     },
   );
   return fromRawProjectRepoSnapshot(snapshot);

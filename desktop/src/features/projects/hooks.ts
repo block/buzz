@@ -290,6 +290,7 @@ async function fetchProjectRepoSnapshot(
   return getProjectRepoSnapshot({
     cloneUrl,
     defaultBranch: branchName ?? project.defaultBranch,
+    baseBranch: project.defaultBranch,
   });
 }
 
