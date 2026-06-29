@@ -149,6 +149,21 @@ fn anthropic_model_normalization_uses_display_names() {
 }
 
 #[test]
+fn redaction_env_records_value_used_for_request() {
+    let env = BTreeMap::from([("OPENAI_COMPAT_API_KEY".to_string(), "   ".to_string())]);
+
+    let redaction_env =
+        redaction_env_with_value(&env, "OPENAI_COMPAT_API_KEY", "inherited-process-key");
+
+    assert_eq!(
+        redaction_env
+            .get("OPENAI_COMPAT_API_KEY")
+            .map(String::as_str),
+        Some("inherited-process-key")
+    );
+}
+
+#[test]
 fn saved_agent_model_discovery_uses_record_snapshot() {
     let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
         r#"{

@@ -276,9 +276,7 @@ fn redaction_env_with_value(
     value: &str,
 ) -> BTreeMap<String, String> {
     let mut redaction_env = env.clone();
-    redaction_env
-        .entry(key.to_string())
-        .or_insert_with(|| value.to_string());
+    redaction_env.insert(key.to_string(), value.to_string());
     redaction_env
 }
 
