@@ -307,8 +307,6 @@ type ImageGalleryItem = {
 type ImageBlockProps = {
   alt: string | undefined;
   dim?: string;
-  galleryIndex?: number;
-  galleryItems?: ImageGalleryItem[];
   resolvedSrc: string | undefined;
   src: string | undefined;
 };
@@ -478,28 +476,93 @@ function imageLightboxReturnBoxForItem(
   return fallbackBox;
 }
 
-function imageGalleryItemsFromImeta(
-  imetaByUrl?: ImetaLookup,
-): ImageGalleryItem[] | undefined {
-  if (!imetaByUrl) {
-    return undefined;
+function imageGalleryItemFromTrigger(
+  trigger: HTMLElement,
+): ImageGalleryItem | null {
+  const resolvedSrc = trigger.dataset.imageLightboxResolvedSrc;
+  if (!resolvedSrc) {
+    return null;
   }
 
-  const items: ImageGalleryItem[] = [];
-  for (const [url, entry] of imetaByUrl) {
-    if (!entry.m?.startsWith("image/")) {
+  return {
+    alt: trigger.dataset.imageLightboxAlt || undefined,
+    dim: trigger.dataset.imageLightboxDim || undefined,
+    resolvedSrc,
+    src: trigger.dataset.imageLightboxSrc || undefined,
+  };
+}
+
+function isVisibleImageLightboxTrigger(trigger: HTMLElement): boolean {
+  if (isInsideHiddenSpoiler(trigger)) {
+    return false;
+  }
+
+  const image = trigger.querySelector("img");
+  for (const element of [trigger, image]) {
+    if (!element) {
       continue;
     }
 
-    items.push({
-      alt: entry.filename ?? "image",
-      dim: entry.dim,
-      resolvedSrc: rewriteRelayUrl(url),
-      src: url,
-    });
+    const style = window.getComputedStyle(element);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      Number(style.opacity) === 0
+    ) {
+      return false;
+    }
   }
 
-  return items.length > 0 ? items : undefined;
+  return true;
+}
+
+function visibleImageGalleryForTrigger(
+  trigger: HTMLElement,
+  fallbackItem: ImageGalleryItem,
+  sourceScope: Element | null | undefined,
+): { galleryIndex: number; galleryItems?: ImageGalleryItem[] } {
+  const root = sourceScope?.isConnected ? sourceScope : null;
+  const triggers = root
+    ? Array.from(
+        root.querySelectorAll<HTMLElement>("[data-image-lightbox-trigger]"),
+      )
+    : [trigger];
+  const galleryItems: ImageGalleryItem[] = [];
+  let galleryIndex = 0;
+  let foundCurrentTrigger = false;
+
+  for (const candidate of triggers) {
+    if (!isVisibleImageLightboxTrigger(candidate)) {
+      continue;
+    }
+
+    const image = candidate.querySelector("img");
+    const rect = (image ?? candidate).getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      continue;
+    }
+
+    const item = imageGalleryItemFromTrigger(candidate);
+    if (!item) {
+      continue;
+    }
+
+    if (candidate === trigger) {
+      galleryIndex = galleryItems.length;
+      foundCurrentTrigger = true;
+    }
+    galleryItems.push(item);
+  }
+
+  if (!foundCurrentTrigger) {
+    galleryItems.unshift(fallbackItem);
+    galleryIndex = 0;
+  }
+
+  return {
+    galleryIndex,
+    galleryItems: galleryItems.length > 1 ? galleryItems : undefined,
+  };
 }
 
 type WebKitGestureLikeEvent = Event & {
@@ -1349,16 +1412,10 @@ function ImageZoomOverlay({
  * body on hover. Keeping the trigger stable and managing the lightbox via
  * React state avoids that repaint.
  */
-function ImageBlock({
-  alt,
-  dim,
-  galleryIndex,
-  galleryItems,
-  resolvedSrc,
-  src,
-}: ImageBlockProps) {
+function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
   const [lightboxState, setLightboxState] = React.useState<{
     galleryIndex: number;
+    galleryItems?: ImageGalleryItem[];
     sourceBox: ImageLightboxBox;
     sourceScope: Element | null;
   } | null>(null);
@@ -1468,14 +1525,23 @@ function ImageBlock({
       }
 
       setMenu(null);
+      const sourceScope =
+        triggerRef.current?.closest("[data-testid='message-row']") ?? null;
+      const gallery = triggerRef.current
+        ? visibleImageGalleryForTrigger(
+            triggerRef.current,
+            { alt, dim, resolvedSrc, src },
+            sourceScope,
+          )
+        : { galleryIndex: 0, galleryItems: undefined };
       setLightboxState({
-        galleryIndex: galleryIndex ?? 0,
+        galleryIndex: gallery.galleryIndex,
+        galleryItems: gallery.galleryItems,
         sourceBox: imageLightboxBoxFromRect(rect),
-        sourceScope:
-          triggerRef.current?.closest("[data-testid='message-row']") ?? null,
+        sourceScope,
       });
     },
-    [galleryIndex, resolvedSrc],
+    [alt, dim, resolvedSrc, src],
   );
 
   const handleImageTriggerClick = () => {
@@ -1508,6 +1574,8 @@ function ImageBlock({
           lightboxState && "opacity-0",
         )}
         data-image-lightbox-resolved-src={resolvedSrc}
+        data-image-lightbox-alt={alt}
+        data-image-lightbox-dim={dim}
         data-image-lightbox-src={src}
         data-image-lightbox-trigger=""
         data-testid="message-image-lightbox-trigger"
@@ -1539,7 +1607,7 @@ function ImageBlock({
         <ImageZoomOverlay
           alt={alt}
           galleryIndex={lightboxState.galleryIndex}
-          galleryItems={galleryItems}
+          galleryItems={lightboxState.galleryItems}
           onDownload={handleDownload}
           onClose={() => setLightboxState(null)}
           resolvedSrc={resolvedSrc}
@@ -1550,78 +1618,6 @@ function ImageBlock({
       ) : null}
     </>
   );
-}
-
-function isImageBlockElement(
-  node: React.ReactNode,
-): node is React.ReactElement<ImageBlockProps> {
-  return (
-    React.isValidElement<ImageBlockProps>(node) && node.type === ImageBlock
-  );
-}
-
-function collectImageGalleryItems(
-  children: React.ReactNode[],
-): ImageGalleryItem[] {
-  const items: ImageGalleryItem[] = [];
-
-  const visit = (node: React.ReactNode) => {
-    if (!React.isValidElement<{ children?: React.ReactNode }>(node)) {
-      return;
-    }
-
-    if (isImageBlockElement(node)) {
-      const { alt, dim, resolvedSrc, src } = node.props;
-      if (resolvedSrc) {
-        items.push({ alt, dim, resolvedSrc, src });
-      }
-      return;
-    }
-
-    React.Children.forEach(node.props.children, visit);
-  };
-
-  children.forEach(visit);
-  return items;
-}
-
-function attachImageGalleryProps(
-  children: React.ReactNode[],
-  galleryItems: ImageGalleryItem[],
-): React.ReactNode[] {
-  if (galleryItems.length <= 1) {
-    return children;
-  }
-
-  let nextGalleryIndex = 0;
-
-  const visit = (node: React.ReactNode): React.ReactNode => {
-    if (!React.isValidElement<{ children?: React.ReactNode }>(node)) {
-      return node;
-    }
-
-    if (isImageBlockElement(node)) {
-      if (!node.props.resolvedSrc) {
-        return node;
-      }
-
-      const galleryIndex = nextGalleryIndex;
-      nextGalleryIndex += 1;
-      return React.cloneElement(node, { galleryIndex, galleryItems });
-    }
-
-    if (node.props.children == null) {
-      return node;
-    }
-
-    return React.cloneElement(
-      node,
-      undefined,
-      React.Children.map(node.props.children, visit),
-    );
-  };
-
-  return children.map(visit);
 }
 
 function getReactNodeText(node: React.ReactNode): string {
@@ -2363,25 +2359,11 @@ function createMarkdownComponents(
         );
       }
       const entry = src ? imetaByUrl?.get(src) : undefined;
-      const imetaGalleryItems = imageGalleryItemsFromImeta(imetaByUrl);
-      const imetaGalleryIndex = src
-        ? imetaGalleryItems?.findIndex((item) => item.src === src)
-        : -1;
       return (
         <span data-block-media="" className="block min-w-0 max-w-full">
           <ImageBlock
             alt={alt}
             dim={entry?.dim}
-            galleryIndex={
-              imetaGalleryIndex != null && imetaGalleryIndex >= 0
-                ? imetaGalleryIndex
-                : undefined
-            }
-            galleryItems={
-              imetaGalleryIndex != null && imetaGalleryIndex >= 0
-                ? imetaGalleryItems
-                : undefined
-            }
             resolvedSrc={resolvedSrc}
             src={src}
           />
@@ -2401,15 +2383,9 @@ function createMarkdownComponents(
       const { imageChildren } = classifyChildren(childArray);
 
       if (isImageOnlyParagraph(childArray)) {
-        const galleryItems = collectImageGalleryItems(imageChildren);
-        const galleryChildren = attachImageGalleryProps(
-          imageChildren,
-          galleryItems,
-        );
-
         return (
           <div className="mt-1 grid w-full min-w-0 max-w-lg grid-cols-2 gap-1.5 [&_br]:hidden [&_[data-block-media]]:mt-0 [&_[data-block-media]]:max-w-none [&_img]:mt-0 [&_img]:w-full [&_img]:max-w-full">
-            {galleryChildren}
+            {imageChildren}
           </div>
         );
       }

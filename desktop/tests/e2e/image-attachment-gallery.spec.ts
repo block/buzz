@@ -1,8 +1,54 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
 const IMAGE_SHAS = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+const SPOILER_VISIBLE_SHA = "d".repeat(64);
+const SPOILER_HIDDEN_SHA = "e".repeat(64);
+const SPOILER_VISIBLE_URL = `http://localhost:3000/media/${SPOILER_VISIBLE_SHA}.png`;
+const SPOILER_HIDDEN_URL = `http://localhost:3000/media/${SPOILER_HIDDEN_SHA}.png`;
+
+async function waitForMockLiveSubscription(page: Page, channelName: string) {
+  await expect
+    .poll(async () => {
+      return page.evaluate((name) => {
+        return (
+          (
+            window as Window & {
+              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                channelName: string;
+              }) => boolean;
+            }
+          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: name,
+          }) ?? false
+        );
+      }, channelName);
+    })
+    .toBe(true);
+}
+
+function imageImetaTag({
+  dim,
+  filename,
+  sha,
+  url,
+}: {
+  dim: string;
+  filename: string;
+  sha: string;
+  url: string;
+}) {
+  return [
+    "imeta",
+    `url ${url}`,
+    "m image/png",
+    `x ${sha}`,
+    "size 1234",
+    `dim ${dim}`,
+    `filename ${filename}`,
+  ];
+}
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page, {
@@ -102,4 +148,75 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
   expect(
     Math.abs(closingFrameBox.height - currentThumbnailBox.height),
   ).toBeLessThan(2);
+});
+
+test("hidden spoiler images are excluded from gallery navigation until revealed", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await page.evaluate(
+    ({ content, extraTags }) => {
+      (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            extraTags?: string[][];
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content,
+        extraTags,
+      });
+    },
+    {
+      content: [
+        "spoiler gallery",
+        `![visible](${SPOILER_VISIBLE_URL})`,
+        `||![hidden](${SPOILER_HIDDEN_URL})||`,
+      ].join("\n"),
+      extraTags: [
+        imageImetaTag({
+          dim: "160x100",
+          filename: "visible.png",
+          sha: SPOILER_VISIBLE_SHA,
+          url: SPOILER_VISIBLE_URL,
+        }),
+        imageImetaTag({
+          dim: "100x160",
+          filename: "hidden.png",
+          sha: SPOILER_HIDDEN_SHA,
+          url: SPOILER_HIDDEN_URL,
+        }),
+      ],
+    },
+  );
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "spoiler gallery" })
+    .last();
+  await expect(row).toBeVisible();
+
+  await row.locator(`img[src*="${SPOILER_VISIBLE_SHA}"]`).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next image" })).toHaveCount(0);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  const spoiler = row.locator(".buzz-spoiler[data-spoiler]").first();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await spoiler.click();
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+
+  await row.locator(`img[src*="${SPOILER_VISIBLE_SHA}"]`).click();
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("button", { name: "Next image" })).toBeVisible();
 });
