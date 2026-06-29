@@ -49,6 +49,99 @@ use uuid::Uuid;
 
 use buzz_core::StoredEvent;
 
+/// Outcome of [`nip33_stale_write_guard`].
+pub enum StaleWrite {
+    /// An equal-or-newer event already exists for the coordinate; the incoming
+    /// event is stale and the caller must abandon the write.
+    Dominated,
+    /// The incoming event wins. Any older events for the coordinate have been
+    /// soft-deleted; the caller should proceed to insert.
+    Proceed,
+}
+
+/// Enforce NIP-33 parameterized-replaceable semantics for one event inside an
+/// already-open transaction.
+///
+/// Acquires the per-coordinate advisory lock (`pg_advisory_xact_lock`, released
+/// on commit/rollback), finds the current live event for `(kind, pubkey, d_tag)`,
+/// and compares it against the incoming `(created_at, id)`:
+///
+/// * newest `created_at` wins; same-second ties are broken by lowest `id`
+///   (byte order, which matches the lowercase-hex ordering NIP-01 specifies).
+/// * if the incoming event loses, returns [`StaleWrite::Dominated`] and makes no
+///   changes.
+/// * otherwise soft-deletes the older event(s) and returns [`StaleWrite::Proceed`].
+///
+/// Shared by [`Db::replace_parameterized_event`] (normal store path) and the
+/// relay's `persist_command_event` so both apply identical replacement rules to
+/// kind 30000–39999 events. Keep this the single source of truth — divergent
+/// NIP-33 replacement logic is a silent-correctness hazard.
+pub async fn nip33_stale_write_guard(
+    conn: &mut sqlx::PgConnection,
+    kind_i32: i32,
+    pubkey_bytes: &[u8],
+    d_tag: &str,
+    created_at: DateTime<Utc>,
+    incoming_id: &[u8],
+) -> Result<StaleWrite> {
+    // Stable advisory-lock key: FNV-1a over (kind, pubkey, d_tag) — deterministic
+    // across processes so concurrent inserts for the same coordinate serialize.
+    let lock_key = {
+        let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
+        for b in kind_i32.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        for b in pubkey_bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        for b in d_tag.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h as i64
+    };
+
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *conn)
+        .await?;
+
+    // Current live event for the coordinate (if any).
+    let existing: Option<(DateTime<Utc>, Vec<u8>)> = sqlx::query_as(
+        "SELECT created_at, id FROM events \
+         WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL \
+         ORDER BY created_at DESC, id ASC LIMIT 1",
+    )
+    .bind(kind_i32)
+    .bind(pubkey_bytes)
+    .bind(d_tag)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some((existing_ts, existing_id)) = existing {
+        let dominated = created_at < existing_ts
+            || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
+        if dominated {
+            return Ok(StaleWrite::Dominated);
+        }
+
+        // Incoming wins — retire the older event(s) for this coordinate.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL",
+        )
+        .bind(kind_i32)
+        .bind(pubkey_bytes)
+        .bind(d_tag)
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    Ok(StaleWrite::Proceed)
+}
+
 /// Extract p-tag mentions from an event and insert into the `event_mentions` table.
 ///
 /// Called after event insertion. Failures are logged but do not block event storage.
@@ -1088,6 +1181,7 @@ impl Db {
     /// Create a new workflow.
     pub async fn create_workflow(
         &self,
+        id: Uuid,
         channel_id: Option<Uuid>,
         owner_pubkey: &[u8],
         name: &str,
@@ -1096,6 +1190,7 @@ impl Db {
     ) -> Result<Uuid> {
         workflow::create_workflow(
             &self.pool,
+            id,
             channel_id,
             owner_pubkey,
             name,
@@ -1650,50 +1745,22 @@ impl Db {
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
             .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
 
-        // Stable advisory-lock key: FNV-1a over (kind, pubkey, d_tag).
-        // Same algorithm as replace_addressable_event — deterministic across processes.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
-
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut *tx)
-            .await?;
-
-        // Check for existing event with same (kind, pubkey, d_tag).
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events \
-             WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        // Stale-write protection: reject if incoming is not newer.
+        // Take the advisory lock and apply NIP-33 replacement (shared with the
+        // relay's command path via `nip33_stale_write_guard`).
         let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
+        match nip33_stale_write_guard(
+            tx.as_mut(),
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            d_tag,
+            created_at,
+            incoming_id,
+        )
+        .await?
+        {
+            StaleWrite::Dominated => {
                 tx.rollback().await?;
                 let received_at = chrono::Utc::now();
                 return Ok((
@@ -1701,17 +1768,7 @@ impl Db {
                     false,
                 ));
             }
-
-            // Soft-delete the older event(s).
-            sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL",
-            )
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .execute(&mut *tx)
-            .await?;
+            StaleWrite::Proceed => {}
         }
 
         // Insert the new event inside the transaction.

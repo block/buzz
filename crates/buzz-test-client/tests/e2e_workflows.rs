@@ -58,7 +58,7 @@ const CHANNEL_GENERAL: &str = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 ///
 /// If tests fail with 500 "FK constraint fails", run:
 /// ```
-/// DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+/// DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \ // sadscan:disable np.postgres.1
 ///   cargo run -p buzz-admin -- mint-token --name e2e-test --scopes messages:read \
 ///   --pubkey 0b5c83782cf123e698131ac976179f8366224e03db932c9da0074512aed2388d
 /// ```
@@ -502,90 +502,253 @@ steps:
 #[tokio::test]
 #[ignore]
 async fn test_workflow_update_and_delete() {
-    let client = http_client();
-    let pubkey_hex: &str = SEEDED_PUBKEY;
-    let base = relay_http_url();
+    use buzz_db::{Db, DbConfig};
+    use buzz_test_client::BuzzTestClient;
+    use uuid::Uuid;
 
+    let ws_url = relay_ws_url();
+    let keys = Keys::generate();
+    let pubkey_bytes = keys.public_key().to_bytes().to_vec();
+
+    // 1. Connect to relay via WebSocket
+    let mut ws = BuzzTestClient::connect(&ws_url, &keys)
+        .await
+        .expect("connect");
+
+    // 2. Connect to database for direct verification
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    let db = Db::new(&DbConfig {
+        database_url: db_url,
+        ..Default::default()
+    })
+    .await
+    .expect("DB connect failed");
+
+    let channel_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+
+    // Create the channel first so we are members of it
+    let create_ch_builder = buzz_sdk::build_create_channel(
+        channel_id,
+        "e2e-crud-test-channel",
+        Some(buzz_sdk::Visibility::Open),
+        Some(buzz_sdk::ChannelKind::Stream),
+        None,
+        None,
+    )
+    .expect("build create channel");
+    let create_ch_event = create_ch_builder
+        .sign_with_keys(&keys)
+        .expect("sign create channel");
+    let ch_resp = ws
+        .send_event(create_ch_event)
+        .await
+        .expect("send create channel");
+    assert!(
+        ch_resp.accepted,
+        "channel creation must be accepted, message: {}",
+        ch_resp.message
+    );
+
+    // 3. Create workflow V1
     let yaml_v1 = webhook_workflow_yaml("e2e-crud-original");
-    let created = create_workflow(&client, &base, pubkey_hex, CHANNEL_GENERAL, &yaml_v1).await;
-    let workflow_id = created["id"]
-        .as_str()
-        .expect("workflow must have 'id'")
-        .to_string();
+    let builder_v1 = buzz_sdk::build_workflow_def(channel_id, workflow_id, &yaml_v1)
+        .expect("build workflow def V1");
+    let event_v1 = builder_v1.sign_with_keys(&keys).expect("sign V1");
 
-    let get_url = format!("{base}/api/workflows/{workflow_id}");
-    let get_resp = client
-        .get(&get_url)
-        .header("X-Pubkey", pubkey_hex)
-        .send()
+    let ok_resp = ws.send_event(event_v1).await.expect("send event V1");
+    assert!(
+        ok_resp.accepted,
+        "V1 event must be accepted, message: {}",
+        ok_resp.message
+    );
+
+    // 4. Verify in DB: exactly 1 workflow exists with this ID and name matches the UUID, definition name matches YAML
+    let wf_record = db
+        .get_workflow(workflow_id)
         .await
-        .expect("GET workflow failed");
-    assert_eq!(get_resp.status(), 200, "GET workflow must return 200");
-    let fetched: serde_json::Value = get_resp.json().await.expect("GET response must be JSON");
+        .expect("workflow V1 not found in DB");
     assert_eq!(
-        fetched["name"].as_str().unwrap_or(""),
+        wf_record.name,
+        workflow_id.to_string(),
+        "V1 name in DB must match workflow UUID"
+    );
+    let def_v1 = &wf_record.definition;
+    assert_eq!(
+        def_v1["name"].as_str().unwrap_or(""),
         "e2e-crud-original",
-        "fetched workflow name must match original"
+        "V1 definition name mismatch in DB"
     );
-    assert_eq!(
-        fetched["id"].as_str().unwrap_or(""),
-        workflow_id,
-        "fetched workflow id must match"
+    assert_eq!(wf_record.owner_pubkey, pubkey_bytes, "owner mismatch in DB");
+
+    // Extract webhook secret to verify it is preserved later
+    let secret_v1 = def_v1["_webhook_secret"].as_str().map(|s| s.to_string());
+    assert!(
+        secret_v1.is_some(),
+        "V1 workflow must have a webhook secret generated"
     );
 
+    // Nostr `created_at` is second-granularity, and NIP-33 replacement rejects an
+    // incoming event whose (created_at, id) does not dominate the current one. If V1
+    // and V2 land in the same wall-clock second, V2 is accepted only when its event id
+    // sorts lower — a coin flip. Sleep 1s so V2 is unambiguously newer and the update
+    // is deterministic. (Real sub-second edits are subject to this same tie-break.)
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // 5. Update to workflow V2
     let yaml_v2 = webhook_workflow_yaml("e2e-crud-updated");
-    let put_url = format!("{base}/api/workflows/{workflow_id}");
-    let put_resp = client
-        .put(&put_url)
-        .header("X-Pubkey", pubkey_hex)
-        .json(&serde_json::json!({ "yaml_definition": yaml_v2 }))
-        .send()
+    let builder_v2 = buzz_sdk::build_workflow_def(channel_id, workflow_id, &yaml_v2)
+        .expect("build workflow def V2");
+    let event_v2 = builder_v2.sign_with_keys(&keys).expect("sign V2");
+
+    let ok_resp2 = ws.send_event(event_v2).await.expect("send event V2");
+    assert!(ok_resp2.accepted, "V2 event must be accepted");
+
+    // 6. Verify in DB: still exactly 1 workflow exists, definition name is updated to V2, no duplicate rows
+    let wf_record2 = db
+        .get_workflow(workflow_id)
         .await
-        .expect("PUT workflow failed");
-    assert_eq!(put_resp.status(), 200, "PUT workflow must return 200");
-    let updated: serde_json::Value = put_resp.json().await.expect("PUT response must be JSON");
+        .expect("workflow V2 not found in DB");
+    let def_v2 = &wf_record2.definition;
     assert_eq!(
-        updated["name"].as_str().unwrap_or(""),
+        def_v2["name"].as_str().unwrap_or(""),
         "e2e-crud-updated",
-        "updated workflow name must reflect new YAML"
-    );
-    assert_eq!(
-        updated["id"].as_str().unwrap_or(""),
-        workflow_id,
-        "PUT must return the same workflow id"
+        "V2 definition name not updated in DB"
     );
 
-    let get_resp2 = client
-        .get(&get_url)
-        .header("X-Pubkey", pubkey_hex)
-        .send()
+    // Verify webhook secret was preserved (did not change)
+    let secret_v2 = def_v2["_webhook_secret"].as_str().map(|s| s.to_string());
+    assert_eq!(
+        secret_v1, secret_v2,
+        "Webhook secret must be preserved across updates"
+    );
+
+    // Check that there is no duplicate row with a different database ID (e.g. query channel workflows)
+    let workflows = db
+        .list_channel_workflows(channel_id, None, None)
         .await
-        .expect("second GET workflow failed");
-    assert_eq!(get_resp2.status(), 200);
-    let refetched: serde_json::Value = get_resp2.json().await.expect("second GET must be JSON");
+        .expect("DB query failed");
+    // Filter to only workflows owned by our test pubkey to isolate from other concurrent test runs
+    let our_workflows: Vec<_> = workflows
+        .into_iter()
+        .filter(|w| w.owner_pubkey == pubkey_bytes)
+        .collect();
     assert_eq!(
-        refetched["name"].as_str().unwrap_or(""),
-        "e2e-crud-updated",
-        "re-fetched workflow must have updated name"
+        our_workflows.len(),
+        1,
+        "Expected exactly 1 workflow row in DB, found duplicate rows!"
     );
 
-    let del_status = delete_workflow(&client, &base, pubkey_hex, &workflow_id).await;
-    assert_eq!(del_status, 204, "DELETE must return 204 No Content");
-
-    let get_after_del = client
-        .get(&get_url)
-        .header("X-Pubkey", pubkey_hex)
-        .send()
+    // Enforce Channel Immutability: try to update with a different channel ID (after joining it)
+    let different_channel_id = Uuid::new_v4();
+    let create_ch2_builder = buzz_sdk::build_create_channel(
+        different_channel_id,
+        "e2e-crud-test-channel-2",
+        Some(buzz_sdk::Visibility::Open),
+        Some(buzz_sdk::ChannelKind::Stream),
+        None,
+        None,
+    )
+    .expect("build create channel 2");
+    let create_ch2_event = create_ch2_builder
+        .sign_with_keys(&keys)
+        .expect("sign create channel 2");
+    ws.send_event(create_ch2_event)
         .await
-        .expect("GET after DELETE failed");
-    assert_eq!(
-        get_after_del.status(),
-        404,
-        "GET after DELETE must return 404"
+        .expect("send create channel 2");
+
+    let builder_bad_chan =
+        buzz_sdk::build_workflow_def(different_channel_id, workflow_id, &yaml_v2)
+            .expect("build bad channel workflow def");
+    let event_bad_chan = builder_bad_chan
+        .sign_with_keys(&keys)
+        .expect("sign bad chan");
+    let bad_chan_resp = ws
+        .send_event(event_bad_chan)
+        .await
+        .expect("send bad chan event");
+    assert!(
+        !bad_chan_resp.accepted,
+        "Updating channel ID must be rejected"
+    );
+    assert!(
+        bad_chan_resp
+            .message
+            .contains("forbidden: cannot change the channel of an existing workflow"),
+        "Expected channel change forbidden message, got: {}",
+        bad_chan_resp.message
+    );
+
+    // Enforce Deletion Authorization: try to delete workflow from an unauthorized user key
+    let attacker_keys = Keys::generate();
+    let mut attacker_ws = BuzzTestClient::connect(&ws_url, &attacker_keys)
+        .await
+        .expect("attacker connect");
+    let builder_forged_del =
+        buzz_sdk::build_workflow_delete(&attacker_keys.public_key().to_hex(), workflow_id)
+            .expect("build forged workflow delete");
+    let event_forged_del = builder_forged_del
+        .sign_with_keys(&attacker_keys)
+        .expect("sign forged delete");
+    let forged_resp = attacker_ws
+        .send_event(event_forged_del)
+        .await
+        .expect("send forged delete event");
+
+    // The kind 5 event itself is accepted and stored, but the side effect must fail to delete the workflow row
+    assert!(
+        forged_resp.accepted,
+        "Forged deletion event itself must be accepted"
+    );
+
+    // Verify workflow is still in DB (not deleted by attacker)
+    let wf_still_there = db.get_workflow(workflow_id).await;
+    assert!(
+        wf_still_there.is_ok(),
+        "Workflow must not be deleted by unauthorized user"
+    );
+
+    // 7. Delete workflow (authorized)
+    let builder_del = buzz_sdk::build_workflow_delete(&keys.public_key().to_hex(), workflow_id)
+        .expect("build workflow delete");
+    let event_del = builder_del.sign_with_keys(&keys).expect("sign delete");
+
+    let ok_resp3 = ws.send_event(event_del).await.expect("send delete event");
+    assert!(ok_resp3.accepted, "delete event must be accepted");
+
+    // 8. Verify in DB: workflow is completely gone
+    let wf_after_del = db.get_workflow(workflow_id).await;
+    assert!(
+        matches!(wf_after_del, Err(buzz_db::DbError::NotFound(_))),
+        "workflow must be deleted from DB"
+    );
+
+    // 9. Verify via relay REQ: the live kind:30620 event must also be gone.
+    //    Clients (Desktop/CLI) read workflows from events, not the DB, so a
+    //    DB-only delete would leave the workflow visible.
+    let sub_id = "del-verify";
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_WORKFLOW_DEF as u16,
+        ))
+        .custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::D),
+            [workflow_id.to_string()],
+        );
+    ws.subscribe(sub_id, vec![filter])
+        .await
+        .expect("subscribe for deletion verification");
+    let events_after_del = ws
+        .collect_until_eose(sub_id, std::time::Duration::from_secs(5))
+        .await
+        .expect("collect events after deletion");
+    assert!(
+        events_after_del.is_empty(),
+        "deleted workflow kind:30620 event must not be returned by relay REQ (got {} events)",
+        events_after_del.len()
     );
 }
-
-/// Create a workflow with a `request_approval` step, trigger it, and verify
 /// the run fails with the "approval gates not yet implemented" message.
 ///
 /// This test documents the current stub behavior. When WF-08 is implemented,

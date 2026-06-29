@@ -121,6 +121,28 @@ async fn persist_command_event(
         None
     };
 
+    // NIP-33 stale-write protection for parameterized-replaceable command kinds
+    // (only KIND_WORKFLOW_DEF today). Shares the relay-wide replacement logic with
+    // Db::replace_parameterized_event so command and normal store paths can't drift.
+    // A dominated (older/retried) event is treated as an idempotent duplicate so
+    // the handler skips its mutation.
+    if let Some(ref d_tag) = d_tag {
+        match buzz_db::nip33_stale_write_guard(
+            tx.as_mut(),
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            d_tag,
+            created_at,
+            id_bytes.as_slice(),
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: nip33 stale-write guard: {e}")))?
+        {
+            buzz_db::StaleWrite::Dominated => return Ok(PersistResult::Duplicate),
+            buzz_db::StaleWrite::Proceed => {}
+        }
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
@@ -568,6 +590,13 @@ async fn handle_workflow_def(
             IngestError::Rejected("invalid: missing workflow name (name or d tag)".into())
         })?;
 
+    // Parse the d-tag as the workflow_id UUID
+    let d_tag = extract_d_tag(event)
+        .ok_or_else(|| IngestError::Rejected("invalid: missing d tag (workflow ID)".into()))?;
+    let workflow_id = Uuid::parse_str(&d_tag).map_err(|_| {
+        IngestError::Rejected("invalid: workflow ID in d tag must be a valid UUID".into())
+    })?;
+
     // 2. Validate caller has channel access (minimum: is a member)
     let is_member = state
         .is_member_cached(channel_id, &self_bytes)
@@ -579,6 +608,31 @@ async fn handle_workflow_def(
         ));
     }
 
+    // Check if workflow already exists to perform update or create checks
+    let existing = state.db.get_workflow(workflow_id).await;
+    let existing_record = match existing {
+        Ok(record) => {
+            if record.owner_pubkey != self_bytes {
+                return Err(IngestError::Rejected(
+                    "forbidden: cannot update a workflow owned by another user".into(),
+                ));
+            }
+            if record.channel_id != Some(channel_id) {
+                return Err(IngestError::Rejected(
+                    "forbidden: cannot change the channel of an existing workflow".into(),
+                ));
+            }
+            Some(record)
+        }
+        Err(buzz_db::DbError::NotFound(_)) => None,
+        Err(e) => {
+            return Err(IngestError::Internal(format!(
+                "error: db lookup workflow: {e}"
+            )));
+        }
+    };
+    let is_update = existing_record.is_some();
+
     // 3. Parse YAML from event.content
     let (def, definition_json_str) = buzz_workflow::WorkflowEngine::parse_yaml(&event.content)
         .map_err(|e| IngestError::Rejected(format!("invalid: workflow YAML parse error: {e}")))?;
@@ -588,9 +642,17 @@ async fn handle_workflow_def(
 
     // Generate webhook secret if this workflow uses a Webhook trigger
     let webhook_secret = if matches!(def.trigger, buzz_workflow::TriggerDef::Webhook) {
-        let secret = webhook_secret::generate_webhook_secret();
-        webhook_secret::inject_secret(&mut definition_json, &secret);
-        Some(secret)
+        let existing_secret = existing_record
+            .as_ref()
+            .and_then(|r| crate::webhook_secret::extract_secret(&r.definition));
+        if let Some(secret) = existing_secret {
+            webhook_secret::inject_secret(&mut definition_json, &secret);
+            None
+        } else {
+            let secret = webhook_secret::generate_webhook_secret();
+            webhook_secret::inject_secret(&mut definition_json, &secret);
+            Some(secret)
+        }
     } else {
         None
     };
@@ -612,20 +674,29 @@ async fn handle_workflow_def(
         PersistResult::Inserted(tx) => tx,
     };
 
-    // 4. Execute: create_workflow
-    let workflow_id = state
-        .db
-        .create_workflow(
-            Some(channel_id),
-            &self_bytes,
-            &workflow_name,
-            &definition_json_final,
-            &hash,
-        )
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: db create_workflow: {e}")))?;
+    // 4. Execute: update_workflow or create_workflow
+    if is_update {
+        state
+            .db
+            .update_workflow(workflow_id, &workflow_name, &definition_json_final, &hash)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: db update_workflow: {e}")))?;
+    } else {
+        state
+            .db
+            .create_workflow(
+                workflow_id,
+                Some(channel_id),
+                &self_bytes,
+                &workflow_name,
+                &definition_json_final,
+                &hash,
+            )
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: db create_workflow: {e}")))?;
+    }
 
-    // Commit: event + workflow creation succeeded atomically.
+    // Commit: event + workflow creation/update succeeded atomically.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
