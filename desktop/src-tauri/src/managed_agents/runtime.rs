@@ -2006,5 +2006,30 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
     vars
 }
 
+/// Resolve the effective (prompt, model, provider) triple for a persona-linked agent.
+///
+/// Given a persona_id, finds the persona in the list and returns its system_prompt,
+/// model, and provider as the authoritative values. Falls back to the record's own
+/// prompt/model and None for provider when no persona is linked or found.
+///
+/// Used by `agent_config.rs` to inject persona defaults into the config surface
+/// before running the reader, so BuzzExplicit-tagged fields can be re-tagged to
+/// PersonaDefault for fields the record did not independently set.
+pub(crate) fn resolve_effective_prompt_model_provider(
+    persona_id: Option<&str>,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+    record_prompt: Option<String>,
+    record_model: Option<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    match persona_id.and_then(|pid| personas.iter().find(|p| p.id == pid)) {
+        Some(p) => (
+            Some(p.system_prompt.clone()),
+            p.model.clone(),
+            p.provider.clone(),
+        ),
+        None => (record_prompt, record_model, None),
+    }
+}
+
 #[cfg(test)]
 mod tests;

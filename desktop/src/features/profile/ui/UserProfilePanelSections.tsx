@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  CircleAlert,
   Copy,
   Cpu,
   Fingerprint,
@@ -23,6 +24,7 @@ import {
 import { toast } from "sonner";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
+import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
@@ -36,6 +38,7 @@ import type {
   useUserProfileQuery,
 } from "@/features/profile/hooks";
 import { truncatePubkey as truncatePubkeyShort } from "@/features/profile/lib/identity";
+import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtils";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -43,8 +46,11 @@ import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
+import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+
+export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 
 const RUNTIME_LABELS: Record<string, string> = {
   goose: "Goose",
@@ -65,6 +71,7 @@ async function copyToClipboard(value: string, label?: string) {
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
+  // ── core props shared with main's ProfileSummaryView ──────────────────────
   canEditAgent: boolean;
   canViewActivity: boolean;
   channelCount: number;
@@ -74,7 +81,6 @@ export type ProfileSummaryViewProps = {
   followMutation: ReturnType<typeof useFollowMutation>;
   handleEditAgent: () => void;
   handleMessage: () => void;
-  handleOpenActivity: () => void;
   isBot: boolean;
   isFollowing: boolean;
   isOwner: boolean | undefined;
@@ -82,21 +88,47 @@ export type ProfileSummaryViewProps = {
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
-  ownerDisplayName: string | null;
-  ownerAvatarUrl: string | null;
-  ownerHandle: string | null;
-  ownerPubkey: string | null;
-  onOpenChannels: () => void;
-  onOpenOwner?: () => void;
-  onOpenMemories: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
-  presenceLoaded: boolean;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
-  pubkey: string;
+  pubkey: string | null;
   relayAgent: RelayAgent | undefined;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
+  // ── branch-specific additions (optional for caller compat) ─────────────────
+  handleOpenActivity?: () => void;
+  ownerDisplayName?: string | null;
+  ownerAvatarUrl?: string | null;
+  ownerHandle?: string | null;
+  ownerPubkey?: string | null;
+  onOpenChannels?: () => void;
+  onOpenOwner?: () => void;
+  onOpenMemories?: () => void;
+  presenceLoaded?: boolean;
+  // ── passed by caller (UserProfilePanel) but not used here ──────────────────
+  // These exist on main's ProfileSummaryView; kept optional for compatibility.
+  onOpenActivity?: () => void;
+  agentInfoFields?: ProfileField[];
+  agentInstruction?: string | null;
+  agentSettingsFields?: ProfileField[];
+  canAddToChannel?: boolean;
+  canInstantiateAgent?: boolean;
+  canOpenAgentLogs?: boolean;
+  channels?: ProfileChannelLink[];
+  diagnosticsFields?: ProfileField[];
+  handleAgentPrimaryAction?: () => void;
+  handleEditPersona?: () => void;
+  handleInstantiateAgent?: () => void;
+  isAgentActionPending?: boolean;
+  isArchived?: boolean;
+  isMessagePending?: boolean;
+  modelLabel?: string;
+  onAddToChannel?: () => void;
+  onOpenChannel?: (channelId: string) => void;
+  onOpenDiagnostics?: () => void;
+  onOpenInstructions?: () => void;
+  onTabChange?: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
+  tab?: ProfilePanelTab;
 };
 
 export function ProfileSummaryView({
@@ -117,15 +149,15 @@ export function ProfileSummaryView({
   managedAgent,
   memoriesLoading,
   memoryCount,
-  ownerDisplayName,
-  ownerAvatarUrl,
-  ownerHandle,
-  ownerPubkey,
+  ownerDisplayName = null,
+  ownerAvatarUrl = null,
+  ownerHandle = null,
+  ownerPubkey = null,
   onOpenChannels,
   onOpenOwner,
   onOpenMemories,
   onOpenDm,
-  presenceLoaded,
+  presenceLoaded = false,
   presenceStatus,
   profile,
   pubkey,
@@ -137,12 +169,14 @@ export function ProfileSummaryView({
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
 
   const metadataFields = [
-    ...buildPublicFields({
-      pubkey,
-      profile,
-      relayAgent,
-      isBot,
-    }),
+    ...(pubkey
+      ? buildPublicFields({
+          pubkey,
+          profile,
+          relayAgent,
+          isBot,
+        })
+      : []),
     ...(ownerDisplayName || isOwner === true
       ? buildOwnerFields({
           includeOperationalFields: isOwner === true,
@@ -173,7 +207,7 @@ export function ProfileSummaryView({
         userStatus={userStatus}
       />
 
-      {!isSelf ? (
+      {!isSelf && pubkey ? (
         <ProfilePrimaryActions
           canEditAgent={canEditAgent}
           followMutation={followMutation}
@@ -201,7 +235,7 @@ export function ProfileSummaryView({
 
       {showMemoriesIngress || showChannelsIngress || canViewActivity ? (
         <section className="space-y-2">
-          {showMemoriesIngress ? (
+          {showMemoriesIngress && onOpenMemories ? (
             <ProfileIngressRow
               icon={Brain}
               label="Memories"
@@ -216,7 +250,7 @@ export function ProfileSummaryView({
               }
             />
           ) : null}
-          {showChannelsIngress ? (
+          {showChannelsIngress && onOpenChannels ? (
             <ProfileIngressRow
               icon={Hash}
               label="Channels"
@@ -231,7 +265,7 @@ export function ProfileSummaryView({
               }
             />
           ) : null}
-          {canViewActivity ? (
+          {canViewActivity && handleOpenActivity ? (
             <ProfileIngressRow
               icon={Activity}
               label="Activity log"
@@ -887,12 +921,14 @@ function ProfileFieldRow({ field }: { field: ProfileField }) {
 // ── Ingress rows ─────────────────────────────────────────────────────────────
 
 function ProfileIngressRow({
+  disabled,
   icon: Icon,
   label,
   onClick,
   testId,
   trailing,
 }: {
+  disabled?: boolean;
   icon: LucideIcon;
   label: string;
   onClick: () => void;
@@ -901,8 +937,9 @@ function ProfileIngressRow({
 }) {
   return (
     <button
-      className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors hover:bg-muted/40"
+      className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
       data-testid={testId}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >
@@ -946,55 +983,157 @@ type ProfileChannelLink = {
 };
 
 export function ChannelsFocusedView({
+  canAddToChannel = false,
   channels,
+  isActionPending = false,
   isLoading,
+  onAddToChannel,
   onOpenChannel,
 }: {
+  canAddToChannel?: boolean;
   channels: ProfileChannelLink[];
+  isActionPending?: boolean;
   isLoading: boolean;
+  onAddToChannel?: () => void;
   onOpenChannel: (channelId: string) => void;
 }) {
-  if (isLoading) {
-    return (
-      <p className="pt-4 text-base leading-7 text-muted-foreground">
-        Loading channels…
-      </p>
-    );
-  }
+  return (
+    <div className="space-y-3 pt-4">
+      {canAddToChannel && onAddToChannel ? (
+        <ProfileIngressRow
+          disabled={isActionPending}
+          icon={UserPlus}
+          label="Add to channel"
+          onClick={onAddToChannel}
+          testId="user-profile-agent-add-channel"
+          trailing={isActionPending ? "Working…" : undefined}
+        />
+      ) : null}
+      {isLoading ? (
+        <p className="text-base leading-7 text-muted-foreground">
+          Loading channels…
+        </p>
+      ) : channels.length === 0 ? (
+        <div
+          className={cn(
+            "flex flex-col items-center justify-center px-6 text-center",
+            canAddToChannel ? "min-h-20 py-4" : "min-h-56 py-10",
+          )}
+          data-testid="user-profile-channels-empty"
+        >
+          <UserPlus className="mx-auto h-4 w-4 text-muted-foreground" />
+          <p className="mt-3 text-sm font-medium">
+            {canAddToChannel
+              ? "Add this agent to a channel"
+              : "Channels appear here"}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {canAddToChannel
+              ? "Choose a channel above so it can join the conversation."
+              : "Visible memberships appear as this agent joins channels."}
+          </p>
+        </div>
+      ) : (
+        <ul
+          className="overflow-hidden rounded-2xl bg-muted/20"
+          data-testid="user-profile-channels-list"
+        >
+          {channels.map((channel) => (
+            <li key={channel.id}>
+              <button
+                aria-label={`Open #${channel.name}`}
+                className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
+                data-testid={`user-profile-channel-link-${channel.name}`}
+                onClick={() => onOpenChannel(channel.id)}
+                type="button"
+              >
+                <span className="min-w-0 flex-1 truncate">#{channel.name}</span>
+                <ArrowUpRight
+                  aria-hidden="true"
+                  className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+                />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
-  if (channels.length === 0) {
-    return (
-      <p
-        className="pt-4 text-base leading-7 italic text-muted-foreground"
-        data-testid="user-profile-channels-empty"
-      >
-        No visible channel memberships.
-      </p>
-    );
+export function AgentInfoFocusedView({
+  metadataFields,
+}: {
+  metadataFields: ProfileField[];
+}) {
+  if (metadataFields.length === 0) {
+    return null;
   }
 
   return (
-    <ul
-      className="overflow-hidden rounded-2xl bg-muted/20"
-      data-testid="user-profile-channels-list"
-    >
-      {channels.map((channel) => (
-        <li key={channel.id}>
-          <button
-            aria-label={`Open #${channel.name}`}
-            className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
-            data-testid={`user-profile-channel-link-${channel.name}`}
-            onClick={() => onOpenChannel(channel.id)}
-            type="button"
-          >
-            <span className="min-w-0 flex-1 truncate">#{channel.name}</span>
-            <ArrowUpRight
-              aria-hidden="true"
-              className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-            />
-          </button>
-        </li>
-      ))}
-    </ul>
+    <div className="pt-4">
+      <ProfileFieldGroup fields={metadataFields} />
+    </div>
+  );
+}
+
+export function DiagnosticsFocusedView({
+  canOpenAgentLogs,
+  fields,
+  logContent,
+  logError,
+  logLoading,
+  managedAgent,
+}: {
+  canOpenAgentLogs: boolean;
+  fields: ProfileField[];
+  logContent: string | null;
+  logError: Error | null;
+  logLoading: boolean;
+  managedAgent: ManagedAgent | undefined;
+}) {
+  const hasLog = canOpenAgentLogs && managedAgent !== undefined;
+  const lastErrorField = fields.find((field) => field.label === "Last error");
+  const detailFields = fields.filter(
+    (field) => field.label !== "Last error" && field.label !== "Status",
+  );
+
+  if (!lastErrorField && detailFields.length === 0 && !hasLog) {
+    return null;
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 pt-4">
+      {lastErrorField ? (
+        <Alert
+          className="flex gap-3"
+          data-testid={lastErrorField.testId}
+          variant="destructive"
+        >
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+          <div className="min-w-0">
+            <AlertTitle>Last error</AlertTitle>
+            <AlertDescription className="wrap-break-word">
+              {lastErrorField.displayValue}
+            </AlertDescription>
+          </div>
+        </Alert>
+      ) : null}
+      {detailFields.length > 0 ? (
+        <ProfileFieldGroup fields={detailFields} />
+      ) : null}
+      {hasLog ? (
+        <div className="min-h-0 flex-1">
+          <ManagedAgentLogPanel
+            chrome="bare"
+            error={logError}
+            isLoading={logLoading}
+            logContent={logContent}
+            selectedAgent={managedAgent}
+            variant="inline"
+          />
+        </div>
+      ) : null}
+    </div>
   );
 }
