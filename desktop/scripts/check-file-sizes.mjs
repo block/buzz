@@ -72,7 +72,8 @@ const overrides = new Map([
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
   // re-introduced after 826d735fe removal (config-bridge caller still needs it).
-  ["src-tauri/src/managed_agents/runtime.rs", 2036],
+  // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
+  ["src-tauri/src/managed_agents/runtime.rs", 2150],
   // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
   // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
   // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
