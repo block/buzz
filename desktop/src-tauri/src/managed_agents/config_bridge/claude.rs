@@ -130,9 +130,7 @@ mod tests {
 
     #[test]
     fn enabled_plugins_flattened_in_extra() {
-        let cfg = parse_settings(
-            r#"{"enabledPlugins": {"plugin-a": true, "plugin-b": true}}"#,
-        );
+        let cfg = parse_settings(r#"{"enabledPlugins": {"plugin-a": true, "plugin-b": true}}"#);
         // Walker flattens one level: enabledPlugins.plugin-a = "true"
         assert!(
             cfg.extra.contains_key("enabledPlugins.plugin-a")

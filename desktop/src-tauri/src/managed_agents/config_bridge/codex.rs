@@ -93,9 +93,7 @@ fn toml_to_json(val: &toml::Value) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         toml::Value::Boolean(b) => serde_json::Value::Bool(*b),
         toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
-        toml::Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(toml_to_json).collect())
-        }
+        toml::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(toml_to_json).collect()),
         toml::Value::Table(tbl) => {
             let map = tbl
                 .iter()
@@ -263,9 +261,7 @@ fast_mode = true
         let toml = r#"model_reasoning_summary = "auto""#;
         let cfg = parse_codex_config(toml).unwrap();
         assert_eq!(
-            cfg.extra
-                .get("model_reasoning_summary")
-                .map(|s| s.as_str()),
+            cfg.extra.get("model_reasoning_summary").map(|s| s.as_str()),
             Some("auto"),
             "model_reasoning_summary should appear in extra"
         );
