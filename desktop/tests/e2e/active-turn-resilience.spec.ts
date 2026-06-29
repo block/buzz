@@ -59,6 +59,16 @@ async function seedTurns(
   }, turns);
 }
 
+async function openAgentProfile(
+  page: import("@playwright/test").Page,
+  pubkey: string,
+) {
+  await page.getByTestId(`managed-agent-${pubkey}`).click();
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 5_000 });
+  return panel;
+}
+
 test.describe("active turn badge resilience", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
@@ -107,23 +117,20 @@ test.describe("active turn badge resilience", () => {
       },
     ]);
 
-    const paulRuntimeBadge = page.getByTestId(
-      `agent-runtime-active-${AGENT_PAUL}`,
-    );
-    const duncanRuntimeBadge = page.getByTestId(
-      `agent-runtime-active-${AGENT_DUNCAN}`,
-    );
-    await expect(paulRuntimeBadge).toBeVisible({ timeout: 5_000 });
-    await expect(duncanRuntimeBadge).toBeVisible({ timeout: 5_000 });
+    const paulPanel = await openAgentProfile(page, AGENT_PAUL);
+    await expect(paulPanel).toContainText("Working in #general", {
+      timeout: 5_000,
+    });
+    await expect(paulPanel).toContainText("Working in #engineering");
 
     // Simulate the all-at-once relay drop: no further frames, advance the clock
     // past both thresholds. This fires several real prune ticks; shouldPausePrune
     // sees every turn's lastActivityAt stuck at T0 (gap > 20s) and pauses the
-    // prune, so the badges survive. Under the pre-fix code every badge would be
-    // gone after the first tick past 25s.
+    // prune, so the active-turn-driven working badges survive. Under the
+    // pre-fix code every badge would be gone after the first tick past 25s.
     await page.clock.fastForward(FRAME_GAP_MS);
 
-    await expect(paulRuntimeBadge).toBeVisible();
-    await expect(duncanRuntimeBadge).toBeVisible();
+    await expect(paulPanel).toContainText("Working in #general");
+    await expect(paulPanel).toContainText("Working in #engineering");
   });
 });

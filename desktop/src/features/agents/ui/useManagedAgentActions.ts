@@ -212,7 +212,7 @@ export function useManagedAgentActions() {
         spawnAfterCreate: true,
         startOnAppLaunch: true,
         backend: { type: "local" },
-        harnessOverride: persona.runtime === runtime.id,
+        harnessOverride: !persona.runtime || persona.runtime === runtime.id,
       };
 
       const created = await createAgentMutation.mutateAsync(input);
