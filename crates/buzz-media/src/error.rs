@@ -56,6 +56,10 @@ pub enum MediaError {
     TokenRevoked,
     #[error("pubkey mismatch")]
     PubkeyMismatch,
+    #[error("upload rate limit exceeded")]
+    UploadRateLimitExceeded,
+    #[error("upload concurrency limit reached")]
+    UploadConcurrencyLimitReached,
     /// Video codec is not H.264 (avc1).
     #[error("unsupported video codec: only H.264 (avc1) is accepted")]
     WrongCodec,
@@ -133,6 +137,9 @@ impl IntoResponse for MediaError {
             }
             Self::InsufficientScope => (StatusCode::FORBIDDEN, self.to_string()),
             Self::RelayMembershipRequired => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::UploadRateLimitExceeded | Self::UploadConcurrencyLimitReached => {
+                (StatusCode::TOO_MANY_REQUESTS, self.to_string())
+            }
             Self::UnsupportedContainer => (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string()),
             Self::WrongCodec
             | Self::DurationTooLong

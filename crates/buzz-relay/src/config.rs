@@ -114,6 +114,12 @@ pub struct Config {
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
+    /// Maximum concurrent media uploads handled by one relay process.
+    pub media_max_concurrent_uploads: usize,
+    /// Maximum concurrent media uploads accepted from one pubkey.
+    pub media_max_concurrent_uploads_per_pubkey: u32,
+    /// Maximum media upload starts accepted from one pubkey per minute.
+    pub media_uploads_per_minute: u32,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -309,6 +315,24 @@ impl Config {
             public_base_url: std::env::var("BUZZ_MEDIA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000/media".to_string()),
         };
+        let media_max_concurrent_uploads: usize =
+            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(8);
+        let media_max_concurrent_uploads_per_pubkey: u32 =
+            std::env::var("BUZZ_MEDIA_MAX_CONCURRENT_UPLOADS_PER_PUBKEY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(2)
+                .min(u32::try_from(media_max_concurrent_uploads).unwrap_or(u32::MAX));
+        let media_uploads_per_minute: u32 = std::env::var("BUZZ_MEDIA_UPLOADS_PER_MINUTE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(30);
 
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
@@ -398,6 +422,9 @@ impl Config {
             relay_owner_pubkey,
             allow_nip_oa_auth,
             media,
+            media_max_concurrent_uploads,
+            media_max_concurrent_uploads_per_pubkey,
+            media_uploads_per_minute,
             ephemeral_ttl_override,
             git_repo_path,
             git_max_pack_bytes,
