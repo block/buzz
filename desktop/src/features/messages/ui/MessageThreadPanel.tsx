@@ -12,23 +12,17 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
+import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
-  getAuxiliaryPanelBodyClass,
-  getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Button } from "@/shared/ui/button";
-import {
-  OverlayPanelBackdrop,
-  PANEL_ENTER_BASE_CLASS,
-  PANEL_OVERLAY_CLASS,
-} from "@/shared/ui/OverlayPanelBackdrop";
 import { Skeleton } from "@/shared/ui/skeleton";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageComposer } from "./MessageComposer";
@@ -234,12 +228,6 @@ export function MessageThreadPanelSkeleton({
   transparentChrome = false,
 }: MessageThreadPanelSkeletonProps) {
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const isSplitLayout = layout === "split";
-  const auxiliaryPanelMode = getAuxiliaryPanelMode(
-    isSplitLayout,
-    isFloatingOverlay,
-  );
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const threadHeaderContent = (
@@ -260,11 +248,8 @@ export function MessageThreadPanelSkeleton({
   );
 
   const threadBody = (
-    <div
-      className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
-        getAuxiliaryPanelBodyClass({ mode: auxiliaryPanelMode }),
-      )}
+    <AuxiliaryPanelBody
+      className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
       data-testid="message-thread-loading"
     >
       <div
@@ -287,48 +272,25 @@ export function MessageThreadPanelSkeleton({
           <Skeleton className="h-4 w-28 rounded-full" />
         </div>
       </div>
-    </div>
+    </AuxiliaryPanelBody>
   );
 
-  if (isSplitLayout) {
-    return (
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader
-          mode={auxiliaryPanelMode}
-          transparent={transparentChrome}
-        >
-          {threadHeaderContent}
-        </AuxiliaryPanelHeader>
-        {threadBody}
-        <ThreadComposerSkeleton />
-      </div>
-    );
-  }
-
   return (
-    <>
-      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
-      <aside
-        className={cn(
-          PANEL_ENTER_BASE_CLASS,
-          isSinglePanelView && "border-l-0",
-          isFloatingOverlay && PANEL_OVERLAY_CLASS,
-        )}
-        data-testid="message-thread-panel"
-        style={{
-          width: isSinglePanelView
-            ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
-        }}
-      >
-        <AuxiliaryPanelHeader mode={auxiliaryPanelMode}>
-          {threadHeaderContent}
-        </AuxiliaryPanelHeader>
-
-        {threadBody}
-        <ThreadComposerSkeleton />
-      </aside>
-    </>
+    <AuxiliaryPanel
+      className="relative"
+      footer={<ThreadComposerSkeleton />}
+      header={
+        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+      }
+      isSinglePanelView={isSinglePanelView}
+      layout={layout}
+      onClose={onClose}
+      testId="message-thread-panel"
+      transparentChrome={transparentChrome}
+      widthPx={widthPx}
+    >
+      {threadBody}
+    </AuxiliaryPanel>
   );
 }
 
@@ -387,12 +349,6 @@ export function MessageThreadPanel({
     string | null
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const isSplitLayout = layout === "split";
-  const auxiliaryPanelMode = getAuxiliaryPanelMode(
-    isSplitLayout,
-    isFloatingOverlay,
-  );
   const threadHeadId = threadHead?.id ?? null;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
   useComposerHeightPadding(
@@ -611,11 +567,8 @@ export function MessageThreadPanel({
   }
 
   const threadScrollRegion = (
-    <div
-      className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
-        getAuxiliaryPanelBodyClass({ mode: auxiliaryPanelMode }),
-      )}
+    <AuxiliaryPanelBody
+      className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
       data-testid="message-thread-body"
       onScroll={onScroll}
       ref={threadBodyRef}
@@ -837,7 +790,7 @@ export function MessageThreadPanel({
           null}
         </div>
       </div>
-    </div>
+    </AuxiliaryPanelBody>
   );
 
   const threadFooter = (
@@ -931,44 +884,21 @@ export function MessageThreadPanel({
     </>
   );
 
-  if (isSplitLayout) {
-    return (
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader
-          mode={auxiliaryPanelMode}
-          transparent={transparentChrome}
-        >
-          {threadHeaderContent}
-        </AuxiliaryPanelHeader>
-        {threadScrollRegion}
-        {threadFooter}
-      </div>
-    );
-  }
-
   return (
-    <>
-      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
-      <aside
-        className={cn(
-          PANEL_ENTER_BASE_CLASS,
-          isSinglePanelView && "border-l-0",
-          isFloatingOverlay && PANEL_OVERLAY_CLASS,
-        )}
-        data-testid="message-thread-panel"
-        style={{
-          width: isSinglePanelView
-            ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
-        }}
-      >
-        <AuxiliaryPanelHeader mode={auxiliaryPanelMode}>
-          {threadHeaderContent}
-        </AuxiliaryPanelHeader>
-
-        {threadScrollRegion}
-        {threadFooter}
-      </aside>
-    </>
+    <AuxiliaryPanel
+      className="relative"
+      footer={threadFooter}
+      header={
+        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+      }
+      isSinglePanelView={isSinglePanelView}
+      layout={layout}
+      onClose={onClose}
+      testId="message-thread-panel"
+      transparentChrome={transparentChrome}
+      widthPx={widthPx}
+    >
+      {threadScrollRegion}
+    </AuxiliaryPanel>
   );
 }

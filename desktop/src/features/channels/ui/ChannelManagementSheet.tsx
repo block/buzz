@@ -57,9 +57,9 @@ import {
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
   type AuxiliaryPanelMode,
-  getAuxiliaryPanelBodyClass,
   getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
 import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,
@@ -729,13 +729,13 @@ function ChannelManagementPanelContent({
         </DialogPrimitive.Description>
       </AuxiliaryPanelHeader>
 
-      <div
+      <AuxiliaryPanelBody
         className={cn(
-          "flex-1 overflow-y-auto overflow-x-hidden overscroll-contain bg-background px-4 [overflow-anchor:none]",
+          "overflow-y-auto overflow-x-hidden overscroll-contain bg-background px-4 [overflow-anchor:none]",
           showModerationActions ? "pb-20" : "pb-8",
-          getAuxiliaryPanelBodyClass({ mode }),
-          mode === "panel" && "pt-4",
         )}
+        mode={mode}
+        panelPadding
         ref={scrollRef}
       >
         {activeView === "summary" ? (
@@ -924,7 +924,7 @@ function ChannelManagementPanelContent({
             />
           </div>
         )}
-      </div>
+      </AuxiliaryPanelBody>
 
       {showModerationActions ? (
         <ChannelManagementModerationActions

@@ -1,7 +1,8 @@
-import type * as React from "react";
+import * as React from "react";
 import { ArrowLeft, X } from "lucide-react";
 
 import { channelChrome } from "@/shared/layout/chromeLayout";
+import { AuxiliaryPanelContext } from "@/shared/layout/auxiliaryPanelContext";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
@@ -101,15 +102,20 @@ export function AuxiliaryPanelHeader({
   children,
   density = "comfortable",
   inset = "default",
-  mode = "docked",
+  mode,
   resizeBorder = false,
   surface = "default",
-  transparent = false,
+  transparent,
   ...props
 }: AuxiliaryPanelHeaderProps) {
-  if (mode !== "docked") {
-    const isSinglePanel = mode === "single-panel";
-    const effectiveSurface = transparent ? "transparent" : surface;
+  const panelContext = React.useContext(AuxiliaryPanelContext);
+  const resolvedMode = mode ?? panelContext?.mode ?? "docked";
+  const resolvedTransparent =
+    transparent ?? panelContext?.transparentChrome ?? false;
+
+  if (resolvedMode !== "docked") {
+    const isSinglePanel = resolvedMode === "single-panel";
+    const effectiveSurface = resolvedTransparent ? "transparent" : surface;
 
     return (
       <>
@@ -150,7 +156,9 @@ export function AuxiliaryPanelHeader({
     <div
       className={cn(
         "pointer-events-none relative z-40 overflow-visible",
-        getAuxiliaryPanelSurfaceClass(transparent ? "transparent" : surface),
+        getAuxiliaryPanelSurfaceClass(
+          resolvedTransparent ? "transparent" : surface,
+        ),
         channelChrome.negativeMargin,
       )}
       {...props}

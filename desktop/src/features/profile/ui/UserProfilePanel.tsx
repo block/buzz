@@ -83,7 +83,7 @@ import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { getAuxiliaryPanelBodyClass } from "@/shared/layout/AuxiliaryPanelHeader";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
 import { cn } from "@/shared/lib/cn";
 import type {
   AgentPersona,
@@ -118,7 +118,6 @@ export function UserProfilePanel({
   transparentChrome = false,
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
@@ -811,13 +810,12 @@ export function UserProfilePanel({
   );
 
   const profileBody = (
-    <div
+    <AuxiliaryPanelBody
       className={cn(
-        "min-h-0 flex-1 px-4 pb-6",
+        "px-4 pb-6",
         isDiagnosticsLikeView
           ? "flex flex-col overflow-hidden"
           : "overflow-y-auto",
-        getAuxiliaryPanelBodyClass({ isFloatingOverlay, isSplitLayout }),
       )}
     >
       {view === "summary" ? (
@@ -926,7 +924,7 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
         />
       ) : null}
-    </div>
+    </AuxiliaryPanelBody>
   );
   const editAgentDialog =
     canEditAgent && managedAgent ? (
@@ -981,7 +979,6 @@ export function UserProfilePanel({
       editAgentDialog={editAgentDialog}
       headerActions={headerActions}
       headerLeftContent={headerLeftContent}
-      isFloatingOverlay={isFloatingOverlay}
       isOverlay={isOverlay}
       isSinglePanelView={isSinglePanelView}
       isSplitLayout={isSplitLayout}

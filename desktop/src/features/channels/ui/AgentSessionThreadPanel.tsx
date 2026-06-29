@@ -8,24 +8,17 @@ import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
-import { cn } from "@/shared/lib/cn";
+import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
-  getAuxiliaryPanelBodyClass,
-  getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import {
-  OverlayPanelBackdrop,
-  PANEL_ENTER_BASE_CLASS,
-  PANEL_OVERLAY_CLASS,
-} from "@/shared/ui/OverlayPanelBackdrop";
-import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -63,12 +56,6 @@ export function AgentSessionThreadPanel({
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const isSplitLayout = layout === "split";
-  const auxiliaryPanelMode = getAuxiliaryPanelMode(
-    isSplitLayout,
-    isFloatingOverlay,
-  );
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
@@ -171,73 +158,44 @@ export function AgentSessionThreadPanel({
     </>
   );
 
-  const agentBody = (
-    <div
-      ref={scrollRef}
-      onScroll={onScroll}
-      className={cn(
-        "min-h-0 flex-1 overflow-y-auto px-3 pb-4",
-        getAuxiliaryPanelBodyClass({ mode: auxiliaryPanelMode }),
-        auxiliaryPanelMode === "panel" && "pt-4",
-      )}
-    >
-      <ManagedAgentSessionPanel
-        agent={agent}
-        channelId={channel?.id ?? null}
-        className="border-0 bg-transparent p-0 shadow-none"
-        emptyDescription={
-          channel
-            ? `Mention ${agent.name} in the channel to see its work here.`
-            : `Mention ${agent.name} in any channel to see its work here.`
-        }
-        profiles={profiles}
-        showHeader={false}
-        showRaw={false}
-      />
-    </div>
-  );
-
-  if (isSplitLayout) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader
-          mode={auxiliaryPanelMode}
-          transparent={transparentChrome}
-        >
-          {agentHeaderContent}
-        </AuxiliaryPanelHeader>
-        {agentBody}
-      </div>
-    );
-  }
-
   return (
-    <>
-      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
-      <aside
-        className={cn(
-          PANEL_ENTER_BASE_CLASS,
-          isSinglePanelView && "border-l-0",
-          isFloatingOverlay && PANEL_OVERLAY_CLASS,
-        )}
-        data-testid="agent-session-thread-panel"
-        style={{
-          width: isSinglePanelView
-            ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
-        }}
-      >
+    <AuxiliaryPanel
+      isSinglePanelView={isSinglePanelView}
+      layout={layout}
+      onClose={onClose}
+      testId="agent-session-thread-panel"
+      transparentChrome={transparentChrome}
+      widthPx={widthPx}
+      header={
         <AuxiliaryPanelHeader
-          backdrop={!isOverlay}
+          backdrop={layout !== "split" && !isOverlay}
           backdropSurface="soft"
-          inset="wide"
-          mode={auxiliaryPanelMode}
+          inset={layout !== "split" ? "wide" : "default"}
         >
           {agentHeaderContent}
         </AuxiliaryPanelHeader>
-
-        {agentBody}
-      </aside>
-    </>
+      }
+    >
+      <AuxiliaryPanelBody
+        ref={scrollRef}
+        onScroll={onScroll}
+        className="overflow-y-auto px-3 pb-4"
+        panelPadding
+      >
+        <ManagedAgentSessionPanel
+          agent={agent}
+          channelId={channel?.id ?? null}
+          className="border-0 bg-transparent p-0 shadow-none"
+          emptyDescription={
+            channel
+              ? `Mention ${agent.name} in the channel to see its work here.`
+              : `Mention ${agent.name} in any channel to see its work here.`
+          }
+          profiles={profiles}
+          showHeader={false}
+          showRaw={false}
+        />
+      </AuxiliaryPanelBody>
+    </AuxiliaryPanel>
   );
 }
