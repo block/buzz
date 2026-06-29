@@ -5,6 +5,7 @@ import {
   mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
 } from "./messageQueryKeys.ts";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 
 const CHANNEL_ID = "timeline-window-test";
 const PUBKEY = "a".repeat(64);
@@ -137,6 +138,37 @@ test("normalizeTimelineMessages still caps old visible content", () => {
     normalized.some((item) => item.id === reactionDeletion),
     true,
   );
+});
+
+test("normalizeTimelineMessages counts huddle starts as visible content", () => {
+  const huddleId = `${"d".repeat(63)}1`;
+  const messages = [];
+
+  for (let index = 0; index < 2_000; index += 1) {
+    messages.push(event({ id: id("old", index), createdAt: 1_000 + index }));
+  }
+  messages.push(
+    event({
+      id: huddleId,
+      kind: KIND_HUDDLE_STARTED,
+      createdAt: 4_000,
+      content: JSON.stringify({
+        ephemeral_channel_id: "8d764100-fd8f-44cf-9c98-6d8fbd739b8c",
+      }),
+    }),
+  );
+
+  const normalized = normalizeTimelineMessages(messages);
+
+  assert.equal(
+    normalized.some((item) => item.id === id("old", 0)),
+    false,
+  );
+  assert.equal(
+    normalized.some((item) => item.id === huddleId),
+    true,
+  );
+  assert.equal(normalized.filter((item) => item.kind === 9).length, 1_999);
 });
 
 test("timeline history merge preserves freshly fetched older content roots", () => {

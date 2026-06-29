@@ -16,6 +16,7 @@ abstract final class EventKind {
   static const typingIndicator = 20002;
   static const auth = 22242;
   static const agentObserverFrame = 24200;
+  static const huddleReaction = 24810;
   static const readState = 30078;
   static const userStatus = 30315;
   static const dmVisibility = 30622;
@@ -25,6 +26,10 @@ abstract final class EventKind {
   static const systemMessage = 40099;
   static const forumPost = 45001;
   static const forumComment = 45003;
+  static const huddleStarted = 48100;
+  static const huddleParticipantJoined = 48101;
+  static const huddleParticipantLeft = 48102;
+  static const huddleEnded = 48103;
 
   /// Event kinds that represent user-visible channel messages.
   static const channelMessageEventKinds = [
@@ -45,6 +50,10 @@ abstract final class EventKind {
     streamMessageEdit, // 40003
     streamMessageDiff, // 40008
     systemMessage, // 40099
+    huddleStarted, // 48100 — visible huddle session row
+    huddleParticipantJoined, // 48101 — huddle lifecycle metadata
+    huddleParticipantLeft, // 48102 — huddle lifecycle metadata
+    huddleEnded, // 48103 — visible huddle ended row
   ];
 }
 

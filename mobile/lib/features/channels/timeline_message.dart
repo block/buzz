@@ -14,6 +14,8 @@ enum SystemEventType {
   channelCreated,
   channelArchived,
   channelUnarchived,
+  huddleStarted,
+  huddleEnded,
 }
 
 @immutable
@@ -69,6 +71,17 @@ class SystemEvent {
     );
   }
 
+  static SystemEvent? fromHuddleEvent(NostrEvent event) {
+    final type = switch (event.kind) {
+      EventKind.huddleStarted => SystemEventType.huddleStarted,
+      EventKind.huddleEnded => SystemEventType.huddleEnded,
+      _ => null,
+    };
+    if (type == null) return null;
+
+    return SystemEvent(type: type, actorPubkey: event.pubkey);
+  }
+
   /// Human-readable description. [resolveLabel] maps a pubkey to a display
   /// name — the caller provides it so this class stays free of provider deps.
   String describe(String Function(String? pubkey) resolveLabel) {
@@ -93,6 +106,8 @@ class SystemEvent {
       SystemEventType.channelCreated => '$actor created this channel',
       SystemEventType.channelArchived => '$actor archived this channel',
       SystemEventType.channelUnarchived => '$actor unarchived this channel',
+      SystemEventType.huddleStarted => '$actor started a huddle',
+      SystemEventType.huddleEnded => '$actor ended the huddle',
     };
   }
 }
@@ -257,6 +272,27 @@ List<TimelineMessage> formatTimeline(
 
   final normalizedCurrentPubkey = currentPubkey?.toLowerCase();
 
+  List<TimelineReaction> reactionsFor(String eventId) {
+    final emojiMap = reactionMap[eventId];
+    if (emojiMap == null) return const [];
+
+    return [
+      for (final entry in emojiMap.entries)
+        TimelineReaction(
+          emoji: entry.key,
+          count: entry.value.length,
+          reactedByCurrentUser:
+              normalizedCurrentPubkey != null &&
+              entry.value.containsKey(normalizedCurrentPubkey),
+          userPubkeys: entry.value.keys.toList(),
+          emojiUrl: reactionEmojiUrls[eventId]?[entry.key],
+          currentUserReactionId: normalizedCurrentPubkey != null
+              ? entry.value[normalizedCurrentPubkey]
+              : null,
+        ),
+    ];
+  }
+
   // 4. Filter to visible content events and build TimelineMessages.
   final result = <TimelineMessage>[];
   for (final event in events) {
@@ -265,24 +301,6 @@ List<TimelineMessage> formatTimeline(
     if (event.kind == EventKind.systemMessage) {
       final systemEvent = SystemEvent.fromContent(event.content);
       if (systemEvent != null) {
-        final emojiMap = reactionMap[event.id];
-        final reactions = <TimelineReaction>[
-          if (emojiMap != null)
-            for (final entry in emojiMap.entries)
-              TimelineReaction(
-                emoji: entry.key,
-                count: entry.value.length,
-                reactedByCurrentUser:
-                    normalizedCurrentPubkey != null &&
-                    entry.value.containsKey(normalizedCurrentPubkey),
-                userPubkeys: entry.value.keys.toList(),
-                emojiUrl: reactionEmojiUrls[event.id]?[entry.key],
-                currentUserReactionId: normalizedCurrentPubkey != null
-                    ? entry.value[normalizedCurrentPubkey]
-                    : null,
-              ),
-        ];
-
         result.add(
           TimelineMessage(
             id: event.id,
@@ -292,7 +310,27 @@ List<TimelineMessage> formatTimeline(
             tags: event.tags,
             isSystem: true,
             systemEvent: systemEvent,
-            reactions: reactions,
+            reactions: reactionsFor(event.id),
+          ),
+        );
+      }
+      continue;
+    }
+
+    if (event.kind == EventKind.huddleStarted ||
+        event.kind == EventKind.huddleEnded) {
+      final systemEvent = SystemEvent.fromHuddleEvent(event);
+      if (systemEvent != null) {
+        result.add(
+          TimelineMessage(
+            id: event.id,
+            pubkey: event.pubkey,
+            createdAt: event.createdAt,
+            content: event.content,
+            tags: event.tags,
+            isSystem: true,
+            systemEvent: systemEvent,
+            reactions: reactionsFor(event.id),
           ),
         );
       }
@@ -309,24 +347,6 @@ List<TimelineMessage> formatTimeline(
           if (tag.length >= 2 && tag[0] == 'p') tag[1],
       ];
 
-      final emojiMap = reactionMap[event.id];
-      final reactions = <TimelineReaction>[
-        if (emojiMap != null)
-          for (final entry in emojiMap.entries)
-            TimelineReaction(
-              emoji: entry.key,
-              count: entry.value.length,
-              reactedByCurrentUser:
-                  normalizedCurrentPubkey != null &&
-                  entry.value.containsKey(normalizedCurrentPubkey),
-              userPubkeys: entry.value.keys.toList(),
-              emojiUrl: reactionEmojiUrls[event.id]?[entry.key],
-              currentUserReactionId: normalizedCurrentPubkey != null
-                  ? entry.value[normalizedCurrentPubkey]
-                  : null,
-            ),
-      ];
-
       final threadRef = event.threadReference;
 
       result.add(
@@ -338,7 +358,7 @@ List<TimelineMessage> formatTimeline(
           tags: effectiveTags,
           edited: edit != null,
           mentionPubkeys: mentions,
-          reactions: reactions,
+          reactions: reactionsFor(event.id),
           parentId: threadRef.parentId,
           rootId: threadRef.rootId,
         ),

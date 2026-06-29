@@ -82,6 +82,12 @@ const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
 
 export const EMPTY_SET: ReadonlySet<string> = new Set();
 
+export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
+  return isDmChannel
+    ? isDmNotifiableKind(kind)
+    : UNREAD_TRIGGER_KINDS.has(kind);
+}
+
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (
     currentPubkey.length > 0 && event.pubkey.toLowerCase() !== currentPubkey
@@ -217,10 +223,16 @@ export function useLiveChannelUpdates(
       return;
     }
 
+    const isDmChannel = dmChannelMap.has(channelId);
+    const isUnreadTriggerKind = isChannelUnreadTriggerKind(
+      event.kind,
+      isDmChannel,
+    );
+
     // Let the caller observe self-authored trigger events (e.g. to track
     // thread participation) before the author-exclusion guard filters them.
     if (
-      UNREAD_TRIGGER_KINDS.has(event.kind) &&
+      isUnreadTriggerKind &&
       normalizedCurrentPubkey.length > 0 &&
       event.pubkey.toLowerCase() === normalizedCurrentPubkey
     ) {
@@ -232,7 +244,7 @@ export function useLiveChannelUpdates(
     // own outgoing messages should never make a channel unread, and
     // reactions / edits / system messages aren't "new content".
     const isExternalTriggerEvent =
-      UNREAD_TRIGGER_KINDS.has(event.kind) &&
+      isUnreadTriggerKind &&
       (normalizedCurrentPubkey.length === 0 ||
         event.pubkey.toLowerCase() !== normalizedCurrentPubkey);
     const isThreadedReply = isThreadReply(event.tags);

@@ -840,6 +840,12 @@ export function AppShell() {
                 <div className="absolute inset-x-0 bottom-0 z-0 h-(--buzz-huddle-drawer-height)">
                   <HuddleBar
                     className="h-full"
+                    onOpenThread={(channelId, messageId) => {
+                      void goChannel(channelId, {
+                        messageId,
+                        threadRootId: messageId,
+                      });
+                    }}
                     onVisibilityChange={setIsHuddleDrawerOpen}
                   />
                 </div>

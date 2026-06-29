@@ -6,6 +6,7 @@ import {
   KIND_JOB_PROGRESS,
   KIND_JOB_REQUEST,
   KIND_JOB_RESULT,
+  KIND_HUDDLE_STARTED,
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_DIFF,
   KIND_STREAM_MESSAGE_V2,
@@ -60,7 +61,8 @@ function isTimelineWindowContentEvent(event: RelayEvent) {
     event.kind === KIND_JOB_PROGRESS ||
     event.kind === KIND_JOB_RESULT ||
     event.kind === KIND_JOB_CANCEL ||
-    event.kind === KIND_JOB_ERROR
+    event.kind === KIND_JOB_ERROR ||
+    event.kind === KIND_HUDDLE_STARTED
   );
 }
 

@@ -17,6 +17,7 @@ import {
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import {
   type ListVirtualizer,
@@ -363,12 +364,19 @@ function MessageRowItem({
   videoReviewContext,
 }: MessageRowItemProps) {
   const { message, summary } = entry;
+  const isMutableMessage = message.kind !== KIND_HUDDLE_STARTED;
   const canDelete =
-    onDelete && currentPubkey && message.pubkey === currentPubkey
+    isMutableMessage &&
+    onDelete &&
+    currentPubkey &&
+    message.pubkey === currentPubkey
       ? onDelete
       : undefined;
   const canEdit =
-    onEdit && currentPubkey && message.pubkey === currentPubkey
+    isMutableMessage &&
+    onEdit &&
+    currentPubkey &&
+    message.pubkey === currentPubkey
       ? onEdit
       : undefined;
 
