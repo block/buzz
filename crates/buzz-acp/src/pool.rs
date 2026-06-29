@@ -226,17 +226,6 @@ pub enum ControlSignal {
     SwitchModel(String),
 }
 
-impl ControlSignal {
-    /// Whether this signal requeues its triggering batch (vs dropping it).
-    /// `Interrupt` and `SwitchModel` requeue; `Cancel`/`Rotate` drop.
-    fn requeues(&self) -> bool {
-        matches!(
-            self,
-            ControlSignal::Interrupt | ControlSignal::SwitchModel(_)
-        )
-    }
-}
-
 /// Goose-native non-cancelling steer request, sent from the main loop to an
 /// in-flight prompt task's read loop via a capacity-1 mpsc channel.
 ///
@@ -3376,18 +3365,6 @@ mod tests {
         // ch_b untouched — the switch is channel-scoped.
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-    }
-
-    #[test]
-    fn test_requeues_true_for_interrupt_and_switch_model() {
-        assert!(ControlSignal::Interrupt.requeues());
-        assert!(ControlSignal::SwitchModel("any".into()).requeues());
-    }
-
-    #[test]
-    fn test_requeues_false_for_cancel_and_rotate() {
-        assert!(!ControlSignal::Cancel.requeues());
-        assert!(!ControlSignal::Rotate.requeues());
     }
 
     // ── turn liveness emission ───────────────────────────────────────────────
