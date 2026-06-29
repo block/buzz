@@ -8,7 +8,6 @@ import {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import {
   AuxiliaryPanelHeaderActions,
-  AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelHeaderTitleBlock,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -19,7 +18,6 @@ export function getUserProfilePanelHeaderContent({
   logCopyValue,
   logSubtitle,
   onBack,
-  onClose,
   view,
   viewerIsOwner,
 }: {
@@ -28,7 +26,6 @@ export function getUserProfilePanelHeaderContent({
   logCopyValue?: string | null;
   logSubtitle?: string | null;
   onBack: () => void;
-  onClose: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
@@ -69,11 +66,6 @@ export function getUserProfilePanelHeaderContent({
           variant="ghost"
         />
       ) : null}
-      <AuxiliaryPanelHeaderCloseButton
-        ariaLabel="Close profile"
-        onClose={onClose}
-        testId="user-profile-panel-close"
-      />
     </AuxiliaryPanelHeaderActions>
   );
 

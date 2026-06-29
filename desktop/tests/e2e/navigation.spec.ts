@@ -164,7 +164,7 @@ test("back undoes closing a thread panel", async ({ page }) => {
   const threadPanel = page.getByTestId("message-thread-panel");
   await expect(threadPanel).toBeVisible();
 
-  await threadPanel.getByRole("button", { name: "Close thread" }).click();
+  await threadPanel.getByRole("button", { name: "Close panel" }).click();
   await expect(threadPanel).not.toBeVisible();
 
   await page.getByTestId("global-back").click();
@@ -332,7 +332,7 @@ test("message links reopen a closed thread when the same messageId is already in
     "Welcome to #general",
   );
 
-  await threadPanel.getByRole("button", { name: "Close thread" }).click();
+  await threadPanel.getByRole("button", { name: "Close panel" }).click();
   await expect(threadPanel).not.toBeVisible();
 
   const link =

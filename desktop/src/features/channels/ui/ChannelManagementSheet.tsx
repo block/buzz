@@ -51,15 +51,14 @@ import {
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import {
+  AuxiliaryPanelBody,
+  AuxiliaryPanelContext,
   AuxiliaryPanelHeader,
-  AuxiliaryPanelHeaderActions,
-  AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
   type AuxiliaryPanelMode,
   getAuxiliaryPanelMode,
 } from "@/shared/layout/AuxiliaryPanel";
-import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import { useScrollBoundaryLock } from "@/shared/hooks/useScrollBoundaryLock";
 import {
   OverlayPanelBackdrop,
@@ -689,7 +688,19 @@ function ChannelManagementPanelContent({
     canManageChannel &&
     resolvedChannel.channelType !== "dm";
   return (
-    <>
+    <AuxiliaryPanelContext.Provider
+      value={{
+        isFloatingOverlay: mode === "panel",
+        isOverlay: mode !== "docked",
+        isSinglePanelView: mode === "single-panel",
+        isSplitLayout: mode === "docked",
+        layout: mode === "docked" ? "split" : "standalone",
+        mode,
+        onClose: () => onOpenChange(false),
+        transparentChrome,
+        widthPx: 380,
+      }}
+    >
       <AuxiliaryPanelHeader
         bordered={mode === "panel"}
         density={mode === "panel" ? "compact" : "comfortable"}
@@ -710,18 +721,6 @@ function ChannelManagementPanelContent({
             </AuxiliaryPanelTitle>
           </DialogPrimitive.Title>
         </AuxiliaryPanelHeaderGroup>
-        <AuxiliaryPanelHeaderActions>
-          <AuxiliaryPanelHeaderCloseButton
-            ariaLabel="Close channel management"
-            onClose={() => onOpenChange(false)}
-            onPointerDown={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onOpenChange(false);
-            }}
-            testId="channel-management-close"
-          />
-        </AuxiliaryPanelHeaderActions>
         <DialogPrimitive.Description className="sr-only">
           Channel settings
         </DialogPrimitive.Description>
@@ -939,6 +938,6 @@ function ChannelManagementPanelContent({
           unarchiveChannelMutation={unarchiveChannelMutation}
         />
       ) : null}
-    </>
+    </AuxiliaryPanelContext.Provider>
   );
 }

@@ -803,7 +803,6 @@ export function UserProfilePanel({
       logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
       logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),
-      onClose,
       view,
       viewerIsOwner,
     },

@@ -156,6 +156,27 @@ test("AuxiliaryPanel applies className in standalone layout", () => {
   assert.match(html, /custom-panel-class/);
 });
 
+test("AuxiliaryPanelHeader renders a generic close action from context", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          null,
+          React.createElement(AuxiliaryPanelHeaderGroup, null, "Title"),
+        ),
+        onClose: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, /aria-label="Close panel"/);
+  assert.match(html, /data-testid="auxiliary-panel-close"/);
+});
+
 test("AuxiliaryPanel resize handle uses a generic namespace", () => {
   const html = render(
     React.createElement(

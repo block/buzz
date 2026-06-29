@@ -612,7 +612,7 @@ test("opens a single-level thread panel with inline expansion", async ({
     )
     .toBe(rootSummaryWidthBeforeHover);
 
-  await threadPanel.getByTestId("message-thread-close").click();
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
   await expect(threadPanel).toBeHidden();
 
   await rootSummaryRow.click();
@@ -764,7 +764,7 @@ test("thread panel width uses session storage and reset handle", async ({
     })
     .toBe(defaultWidthPx);
 
-  await threadPanel.getByTestId("message-thread-close").click();
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
   await expect(threadPanel).toBeHidden();
 
   await rootMessage.hover();

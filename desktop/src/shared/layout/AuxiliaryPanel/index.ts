@@ -3,7 +3,6 @@ export { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanelBody";
 export {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
-  AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelHeaderTitleBlock,
   AuxiliaryPanelTitle,

@@ -34,13 +34,8 @@ type AuxiliaryPanelHeaderGroupProps = Omit<
   onBack?: () => void;
 };
 type AuxiliaryPanelHeaderActionsProps = {
-  children: React.ReactNode;
-};
-type AuxiliaryPanelHeaderCloseButtonProps = {
-  ariaLabel: string;
-  onClose: () => void;
-  onPointerDown?: React.PointerEventHandler<HTMLButtonElement>;
-  testId?: string;
+  children?: React.ReactNode;
+  includeCloseAction?: boolean;
 };
 type AuxiliaryPanelHeaderTitleBlockProps = {
   subtitle?: React.ReactNode;
@@ -52,6 +47,8 @@ type AuxiliaryPanelTitleContentProps = React.ComponentProps<"h2">;
 type AuxiliaryPanelSurface = "default" | "soft" | "transparent";
 
 const AUXILIARY_PANEL_HEADER_HEIGHT_CLASS = "pt-13";
+const AUXILIARY_PANEL_CLOSE_LABEL = "Close panel";
+const AUXILIARY_PANEL_CLOSE_TEST_ID = "auxiliary-panel-close";
 
 export function getAuxiliaryPanelMode(
   isSplitLayout: boolean,
@@ -146,7 +143,7 @@ export function AuxiliaryPanelHeader({
           data-tauri-drag-region
           {...props}
         >
-          {children}
+          {renderAuxiliaryPanelHeaderContent(children)}
         </div>
       </>
     );
@@ -167,10 +164,60 @@ export function AuxiliaryPanelHeader({
         className="pointer-events-auto relative z-40 shrink-0 cursor-default select-none py-2 pl-5 pr-3"
         data-tauri-drag-region
       >
-        <div className="flex h-9 min-w-0 items-center gap-2.5">{children}</div>
+        <div className="flex h-9 min-w-0 items-center gap-2.5">
+          {renderAuxiliaryPanelHeaderContent(children)}
+        </div>
       </div>
     </div>
   );
+}
+
+function renderAuxiliaryPanelHeaderContent(children: React.ReactNode) {
+  const { foundActions, content } = attachCloseActionToHeaderActions(children);
+
+  if (foundActions) {
+    return content;
+  }
+
+  return (
+    <>
+      {children}
+      <AuxiliaryPanelHeaderActions includeCloseAction />
+    </>
+  );
+}
+
+function attachCloseActionToHeaderActions(children: React.ReactNode): {
+  content: React.ReactNode;
+  foundActions: boolean;
+} {
+  let foundActions = false;
+
+  const content = React.Children.map(children, (child) => {
+    if (!React.isValidElement<AuxiliaryPanelHeaderActionsProps>(child)) {
+      return child;
+    }
+
+    if (child.type === AuxiliaryPanelHeaderActions) {
+      foundActions = true;
+      return React.cloneElement(child, { includeCloseAction: true });
+    }
+
+    if (child.type === React.Fragment) {
+      const nested = attachCloseActionToHeaderActions(child.props.children);
+
+      if (!nested.foundActions) {
+        return child;
+      }
+
+      foundActions = true;
+      return React.cloneElement(child, undefined, nested.content);
+    }
+
+    return child;
+  });
+
+  return { content, foundActions };
 }
 
 export function getAuxiliaryPanelBodyClass({
@@ -235,24 +282,33 @@ export function AuxiliaryPanelHeaderGroup({
 
 export function AuxiliaryPanelHeaderActions({
   children,
+  includeCloseAction = false,
 }: AuxiliaryPanelHeaderActionsProps) {
+  if (!children && !includeCloseAction) {
+    return null;
+  }
+
   return (
-    <div className="ml-auto flex shrink-0 items-center gap-0.5">{children}</div>
+    <div className="ml-auto flex shrink-0 items-center gap-0.5">
+      {children}
+      {includeCloseAction ? <AuxiliaryPanelHeaderCloseAction /> : null}
+    </div>
   );
 }
 
-export function AuxiliaryPanelHeaderCloseButton({
-  ariaLabel,
-  onClose,
-  onPointerDown,
-  testId,
-}: AuxiliaryPanelHeaderCloseButtonProps) {
+function AuxiliaryPanelHeaderCloseAction() {
+  const panelContext = React.useContext(AuxiliaryPanelContext);
+
+  if (!panelContext?.onClose) {
+    return null;
+  }
+
   return (
     <Button
-      aria-label={ariaLabel}
-      data-testid={testId}
-      onClick={onClose}
-      onPointerDown={onPointerDown}
+      aria-label={AUXILIARY_PANEL_CLOSE_LABEL}
+      className="shrink-0"
+      data-testid={AUXILIARY_PANEL_CLOSE_TEST_ID}
+      onClick={panelContext.onClose}
       size="icon"
       type="button"
       variant="ghost"

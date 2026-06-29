@@ -13,7 +13,6 @@ import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
-  AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -137,11 +136,6 @@ export function AgentSessionThreadPanel({
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}
-      <AuxiliaryPanelHeaderCloseButton
-        ariaLabel="Close activity panel"
-        onClose={onClose}
-        testId="agent-session-close"
-      />
     </AuxiliaryPanelHeaderActions>
   );
 

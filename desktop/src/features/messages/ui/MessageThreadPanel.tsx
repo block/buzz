@@ -17,8 +17,6 @@ import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
-  AuxiliaryPanelHeaderActions,
-  AuxiliaryPanelHeaderCloseButton,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
@@ -238,12 +236,6 @@ export function MessageThreadPanelSkeleton({
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
-      <AuxiliaryPanelHeaderActions>
-        <AuxiliaryPanelHeaderCloseButton
-          ariaLabel="Close thread"
-          onClose={onClose}
-        />
-      </AuxiliaryPanelHeaderActions>
     </>
   );
 
@@ -874,13 +866,6 @@ export function MessageThreadPanel({
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
-      <AuxiliaryPanelHeaderActions>
-        <AuxiliaryPanelHeaderCloseButton
-          ariaLabel="Close thread"
-          onClose={onClose}
-          testId="message-thread-close"
-        />
-      </AuxiliaryPanelHeaderActions>
     </>
   );
 
