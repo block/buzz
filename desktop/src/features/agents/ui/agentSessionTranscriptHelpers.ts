@@ -19,7 +19,9 @@ export function parsePromptText(text: string): {
   userTitle: string;
   userPubkey: string | null;
 } {
-  const sections = parsePromptSections(text);
+  const sections = parsePromptSections(text).filter(
+    (s) => s.body.trim().length > 0,
+  );
   if (sections.length === 0) {
     return {
       sections: [],
