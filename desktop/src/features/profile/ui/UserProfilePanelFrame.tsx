@@ -27,6 +27,7 @@ type UserProfilePanelFrameProps = {
   profileBody: React.ReactNode;
   splitPaneClamp: boolean;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 export function UserProfilePanelFrame({
@@ -46,12 +47,13 @@ export function UserProfilePanelFrame({
   profileBody,
   splitPaneClamp,
   widthPx,
+  transparentChrome = false,
 }: UserProfilePanelFrameProps) {
   if (isSplitLayout) {
     return (
       <>
         <div className="flex min-h-0 flex-1 flex-col">
-          <AuxiliaryPanelHeader>
+          <AuxiliaryPanelHeader transparent={transparentChrome}>
             {headerLeftContent}
             {headerActions}
           </AuxiliaryPanelHeader>

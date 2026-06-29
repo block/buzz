@@ -8,10 +8,20 @@ import { getChannelDescription } from "@/features/channels/lib/channelDescriptio
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  ProfileAvatarWithStatus,
+  scaleProfileAvatarStatusGeometry,
+} from "@/features/profile/ui/ProfileAvatarWithStatus";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+
+const DM_HEADER_AVATAR_SIZE = 32;
+const DM_HEADER_AVATAR_STATUS_GEOMETRY = scaleProfileAvatarStatusGeometry(
+  DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
+  DM_HEADER_AVATAR_SIZE,
+);
 
 type ChannelScreenHeaderProps = {
   activeChannel: Channel | null;
@@ -26,6 +36,7 @@ type ChannelScreenHeaderProps = {
   isAddBotOpen?: boolean;
   isJoining?: boolean;
   showHeaderContent?: boolean;
+  transparentChrome?: boolean;
   onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
@@ -46,6 +57,7 @@ export function ChannelScreenHeader({
   isJoining = false,
   onAddBotOpenChange,
   showHeaderContent = true,
+  transparentChrome = false,
   onJoinChannel,
   onManageChannel,
   onToggleMembers,
@@ -102,11 +114,16 @@ export function ChannelScreenHeader({
               participants={activeDmHeaderParticipants}
             />
           ) : (
-            <ProfileAvatar
+            <ProfileAvatarWithStatus
+              avatarClassName="text-xs"
               avatarUrl={activeDmAvatarUrl}
-              className="h-6 w-6 rounded-full text-2xs"
-              iconClassName="h-3.5 w-3.5"
+              className="mr-1.5 h-8 w-8"
+              geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
+              iconClassName="h-4 w-4"
               label={activeChannelTitle}
+              size={DM_HEADER_AVATAR_SIZE}
+              status={activeDmPresenceStatus ?? "offline"}
+              statusTestId="chat-presence-badge"
               testId="chat-header-dm-avatar"
             />
           )
@@ -114,12 +131,11 @@ export function ChannelScreenHeader({
       }
       statusBadge={
         <ChannelHeaderStatusBadge
-          channelType={activeChannel?.channelType}
           ephemeralDisplay={activeChannelEphemeralDisplay}
-          presenceStatus={isGroupDm ? null : activeDmPresenceStatus}
         />
       }
       title={activeChannelTitle}
+      transparentChrome={transparentChrome}
       visibility={activeChannel?.visibility}
     />
   );
@@ -137,7 +153,7 @@ function DmHeaderParticipantStack({
   return (
     <div
       aria-hidden="true"
-      className="mr-1 flex shrink-0 items-center"
+      className="mr-1.5 flex shrink-0 items-center"
       data-testid="chat-header-dm-avatar-stack"
     >
       {visibleParticipants.map((participant, index) => (
@@ -148,15 +164,15 @@ function DmHeaderParticipantStack({
           style={{
             zIndex: index + 1,
             ...(index < stackItemCount - 1 && {
-              mask: "radial-gradient(circle 16px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
+              mask: "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
               WebkitMask:
-                "radial-gradient(circle 16px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
+                "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
             }),
           }}
         >
           <UserAvatar
             avatarUrl={participant.avatarUrl}
-            className="h-7 w-7 text-2xs"
+            className="h-8 w-8 text-xs"
             displayName={participant.displayName}
             size="sm"
           />
@@ -168,7 +184,7 @@ function DmHeaderParticipantStack({
           data-testid="chat-header-dm-avatar-stack-more"
           style={{ zIndex: stackItemCount }}
         >
-          <span className="flex h-7 w-7 items-center justify-center rounded-full bg-secondary font-semibold text-secondary-foreground shadow-xs">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-secondary font-semibold text-secondary-foreground shadow-xs">
             <span className="text-2xs leading-none">+{hiddenCount}</span>
           </span>
         </div>

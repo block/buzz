@@ -14,6 +14,10 @@ import {
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
 import {
+  getDmHuddleMemberPubkeys,
+  hasOtherDmParticipant,
+} from "@/features/channels/lib/dmHuddleMembers";
+import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewContextForMessage,
 } from "@/features/messages/lib/videoReviewContext";
@@ -69,6 +73,7 @@ type ChannelPaneProps = {
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];
   agentPubkeys?: ReadonlySet<string>;
+  agentPubkeysPending?: boolean;
   agentSessionAgents: ChannelAgentSessionAgent[];
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
@@ -180,6 +185,7 @@ type ChannelPaneProps = {
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
+  agentPubkeysPending = false,
   agentSessionAgents,
   activityAgents = agentSessionAgents,
   botTypingEntries,
@@ -274,6 +280,12 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.archivedAt;
   const hasMainComposerOverlay = !isNonMemberView;
   const activeChannelId = activeChannel?.id ?? null;
+  const huddleMemberPubkeys = React.useMemo(
+    () => getDmHuddleMemberPubkeys(activeChannel, agentPubkeys, currentPubkey),
+    [activeChannel, agentPubkeys, currentPubkey],
+  );
+  const huddleMemberPubkeysPending =
+    agentPubkeysPending && hasOtherDmParticipant(activeChannel, currentPubkey);
   const isActiveWelcomeChannel =
     activeChannel !== null && isWelcomeChannel(activeChannel);
   useComposerHeightPadding(
@@ -613,6 +625,13 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [agentSessionAgents, openAgentSessionPubkey, profilePanelPubkey, profiles],
   );
+  const hasSplitAuxiliaryPane =
+    useSplitAuxiliaryPane &&
+    (channelManagementOpen ||
+      Boolean(threadHeadMessage) ||
+      shouldShowThreadSkeleton ||
+      Boolean(activeChannel && selectedAgent) ||
+      Boolean(profilePanelPubkey));
   const wrapAux = (panel: React.ReactNode, testId: string) =>
     useSplitAuxiliaryPane ? (
       <RightAuxiliaryPane
@@ -628,7 +647,18 @@ export const ChannelPane = React.memo(function ChannelPane({
       panel
     );
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+      {!isSinglePanelView ? (
+        <div
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-x-0 top-0 z-30 bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+            channelChrome.headerHeight,
+          )}
+          data-testid="channel-shared-header-backdrop"
+        />
+      ) : null}
+
       {!isSinglePanelView ? (
         <section
           aria-label="Channel messages and composer"
@@ -677,6 +707,8 @@ export const ChannelPane = React.memo(function ChannelPane({
             followThreadById={followThreadById}
             hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
+            huddleMemberPubkeys={huddleMemberPubkeys}
+            huddleMemberPubkeysPending={huddleMemberPubkeysPending}
             isFetchingOlder={isFetchingOlder}
             isFollowingThreadById={isFollowingThreadById}
             isMessageUnreadById={isMessageUnreadById}
@@ -829,6 +861,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           onThreadPanelResizeStart={onThreadPanelResizeStart}
           threadPanelWidthPx={threadPanelWidthPx}
           useSplitAuxiliaryPane={useSplitAuxiliaryPane}
+          transparentChrome={hasSplitAuxiliaryPane}
         />
       ) : threadHeadMessage ? (
         (() => {
@@ -842,6 +875,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               disabled={isComposerDisabled}
               editTarget={threadEditTarget}
               firstUnreadReplyId={threadFirstUnreadReplyId}
+              huddleMemberPubkeys={huddleMemberPubkeys}
+              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
               isFollowingThread={isFollowingThread}
               isMessageUnreadById={isMessageUnreadById}
               isSending={isSending}
@@ -849,6 +884,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               onCancelEdit={onCancelEdit}
               onCancelReply={onCancelThreadReply}
               onClose={onCloseThread}
@@ -900,6 +936,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               onClose={onCloseThread}
               widthPx={threadPanelWidthPx}
             />
@@ -929,6 +966,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               profiles={profiles}
               onBackToProfile={() => onOpenProfilePanel(selectedAgent.pubkey)}
               onClose={onCloseAgentSession}
@@ -946,6 +984,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 useSplitAuxiliaryPane ? false : isSinglePanelView
               }
               layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+              transparentChrome={useSplitAuxiliaryPane}
               onClose={onCloseProfilePanel}
               onOpenDm={onOpenDm}
               onOpenProfile={onOpenProfilePanel}

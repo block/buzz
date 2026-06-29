@@ -35,6 +35,8 @@ type TimelineMessageListProps = {
   channelName?: string;
   channelType?: ChannelType | null;
   currentPubkey?: string;
+  huddleMemberPubkeys?: readonly string[];
+  huddleMemberPubkeysPending?: boolean;
   /** Event id of the oldest unread top-level message; renders a "New" divider above it. */
   firstUnreadMessageId?: string | null;
   followThreadById?: (rootId: string) => void;
@@ -94,6 +96,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   firstUnreadMessageId = null,
   followThreadById,
   highlightedMessageId = null,
+  huddleMemberPubkeys,
+  huddleMemberPubkeysPending = false,
   isFollowingThreadById,
   isMessageUnreadById,
   messageFooters,
@@ -206,6 +210,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               followThreadById={followThreadById}
               footer={messageFooters?.[item.entry.message.id] ?? null}
               highlightedMessageId={highlightedMessageId}
+              huddleMemberPubkeys={huddleMemberPubkeys}
+              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
               isFollowingThreadById={isFollowingThreadById}
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               onDelete={onDelete}
@@ -233,6 +239,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       currentPubkey,
       followThreadById,
       highlightedMessageId,
+      huddleMemberPubkeys,
+      huddleMemberPubkeysPending,
       isFollowingThreadById,
       isMessageUnreadById,
       messageFooters,
@@ -318,6 +326,8 @@ type MessageRowItemProps = Pick<
   | "currentPubkey"
   | "followThreadById"
   | "highlightedMessageId"
+  | "huddleMemberPubkeys"
+  | "huddleMemberPubkeysPending"
   | "isFollowingThreadById"
   | "onDelete"
   | "onEdit"
@@ -346,6 +356,8 @@ function MessageRowItem({
   followThreadById,
   footer,
   highlightedMessageId,
+  huddleMemberPubkeys,
+  huddleMemberPubkeysPending,
   isFollowingThreadById,
   isUnread,
   onDelete,
@@ -387,6 +399,8 @@ function MessageRowItem({
           channelId={channelId}
           highlighted={false}
           hoverBackground={false}
+          huddleMemberPubkeys={huddleMemberPubkeys}
+          huddleMemberPubkeysPending={huddleMemberPubkeysPending}
           isFollowingThread={
             isFollowingThreadById
               ? isFollowingThreadById(message.id)
@@ -434,6 +448,8 @@ function MessageRowItem({
         agentPubkeys={agentPubkeys}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
+        huddleMemberPubkeys={huddleMemberPubkeys}
+        huddleMemberPubkeysPending={huddleMemberPubkeysPending}
         isUnread={isUnread}
         message={message}
         onDelete={canDelete}

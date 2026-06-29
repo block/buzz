@@ -2,6 +2,9 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
+const DEFAULT_AGENT_ACTIVITY_PUBKEY =
+  "db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36";
+
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
@@ -78,6 +81,42 @@ async function selectHomeInboxFilter(
     })
     .click();
   await page.getByRole("menuitemradio", { name: label }).click();
+}
+
+async function readCommandPayloadLog(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    );
+  });
+}
+
+async function readStartHuddleMemberPubkeys(
+  page: import("@playwright/test").Page,
+) {
+  const commandLog = await readCommandPayloadLog(page);
+  return commandLog.flatMap((entry) => {
+    if (entry.command !== "start_huddle") {
+      return [];
+    }
+
+    const payload =
+      entry.payload && typeof entry.payload === "object"
+        ? (entry.payload as {
+            memberPubkeys?: unknown;
+            member_pubkeys?: unknown;
+          })
+        : null;
+    const memberPubkeys = payload?.memberPubkeys ?? payload?.member_pubkeys;
+    return Array.isArray(memberPubkeys) ? memberPubkeys.map(String) : [];
+  });
 }
 
 test.beforeEach(async ({ page }) => {
@@ -189,6 +228,29 @@ test("inbox feed shows channel and agent activity sections", async ({
   await expect(page.getByTestId("home-inbox-detail")).toContainText(
     "Agent progress: channel index complete.",
   );
+});
+
+test("inbox agent hover huddle passes the agent pubkey", async ({ page }) => {
+  await page.goto("/");
+
+  await selectHomeInboxFilter(page, "Agents");
+  const agentRow = page.getByTestId("home-inbox-item-mock-feed-agent");
+  await expect(agentRow).toContainText(
+    "Agent progress: channel index complete.",
+  );
+
+  await agentRow.getByTestId("home-inbox-avatar-mock-feed-agent").hover();
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await profilePopover
+    .getByTestId(`user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`)
+    .click();
+
+  await expect
+    .poll(() => readStartHuddleMemberPubkeys(page))
+    .toEqual(expect.arrayContaining([DEFAULT_AGENT_ACTIVITY_PUBKEY]));
 });
 
 test("opens a mocked forum activity item from the inbox feed", async ({

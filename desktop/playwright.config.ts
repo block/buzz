@@ -22,6 +22,7 @@ export default defineConfig({
         "**/smoke.spec.ts",
         "**/navigation.spec.ts",
         "**/channels.spec.ts",
+        "**/channel-shared-header-backdrop.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",
         "**/messaging.spec.ts",

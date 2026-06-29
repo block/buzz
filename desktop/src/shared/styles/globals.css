@@ -40,6 +40,43 @@
   }
 }
 
+.buzz-wave-hand {
+  display: inline-block;
+  transform-origin: 70% 70%;
+  will-change: transform;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .buzz-wave-hover-trigger:hover .buzz-wave-hand {
+    animation: buzz-wave-hand 1200ms ease-in-out both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .buzz-wave-hover-trigger:hover .buzz-wave-hand {
+    animation: none;
+  }
+}
+
+@keyframes buzz-wave-hand {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+
+  12%,
+  38%,
+  64% {
+    transform: rotate(15deg);
+  }
+
+  25%,
+  51%,
+  77% {
+    transform: rotate(-15deg);
+  }
+}
+
 .buzz-emoji-mart {
   align-items: stretch;
   display: flex;

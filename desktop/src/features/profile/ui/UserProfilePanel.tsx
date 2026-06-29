@@ -95,7 +95,6 @@ import type {
 } from "@/shared/api/types";
 import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFrame";
 import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProfilePanelHeaderContent";
-
 export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
@@ -116,6 +115,7 @@ export function UserProfilePanel({
   tab: controlledTab,
   view: controlledView,
   widthPx,
+  transparentChrome = false,
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
@@ -993,6 +993,7 @@ export function UserProfilePanel({
       profileBody={profileBody}
       splitPaneClamp={splitPaneClamp}
       widthPx={widthPx}
+      transparentChrome={transparentChrome}
     />
   );
 }

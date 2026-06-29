@@ -37,6 +37,8 @@ type MessageTimelineProps = {
   channelIntro?: ChannelIntro | null;
   channelName?: string;
   channelType?: ChannelType | null;
+  huddleMemberPubkeys?: readonly string[];
+  huddleMemberPubkeysPending?: boolean;
   messages: TimelineMessage[];
   mainEntries?: MainTimelineEntry[];
   directMessageIntro?: {
@@ -154,6 +156,8 @@ const MessageTimelineBase = React.forwardRef<
     hasOlderMessages = true,
     isFetchingOlder = false,
     followThreadById,
+    huddleMemberPubkeys,
+    huddleMemberPubkeysPending = false,
     isFollowingThreadById,
     isMessageUnreadById,
     messageFooters,
@@ -702,6 +706,8 @@ const MessageTimelineBase = React.forwardRef<
                     firstUnreadMessageId={firstUnreadMessageId}
                     followThreadById={followThreadById}
                     highlightedMessageId={highlightedMessageId}
+                    huddleMemberPubkeys={huddleMemberPubkeys}
+                    huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                     isFollowingThreadById={isFollowingThreadById}
                     isMessageUnreadById={isMessageUnreadById}
                     messageFooters={messageFooters}

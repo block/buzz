@@ -311,8 +311,21 @@ export function ChannelScreen({
     for (const agent of relayAgents) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
+    for (const [pubkey, profile] of Object.entries(
+      messageProfilesQuery.data?.profiles ?? {},
+    )) {
+      if (profile.isAgent) {
+        pubkeys.add(normalizePubkey(pubkey));
+      }
+    }
     return pubkeys;
-  }, [channelMembers, managedAgents, relayAgents]);
+  }, [channelMembers, managedAgents, messageProfilesQuery.data, relayAgents]);
+  const agentPubkeysPending =
+    activeChannel?.channelType === "dm" &&
+    (channelMembersQuery.isPending ||
+      managedAgentsQuery.isPending ||
+      relayAgentsQuery.isPending ||
+      (messageProfilePubkeys.length > 0 && messageProfilesQuery.isPending));
   const {
     agentSessionCandidates,
     botTypingEntries,
@@ -725,6 +738,7 @@ export function ChannelScreen({
       }}
       onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
       showHeaderContent={!isSinglePanelView}
+      transparentChrome={activeChannel?.channelType !== "forum"}
     />
   );
 
@@ -758,6 +772,7 @@ export function ChannelScreen({
                   activeChannel={activeChannel}
                   activityAgents={channelAgentSessionAgents}
                   agentPubkeys={agentPubkeys}
+                  agentPubkeysPending={agentPubkeysPending}
                   agentSessionAgents={agentSessionAgents}
                   botTypingEntries={botTypingEntries}
                   channelFind={channelFind}
