@@ -1460,6 +1460,67 @@ test("wave attachment huddle passes the bot DM pubkey", async ({ page }) => {
     .toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
 });
 
+test("wave attachment huddle waits for placeholder profile-only bot data", async ({
+  page,
+}) => {
+  await installMockBridge(page, { usersBatchDelayMs: 2_000 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ kind, targetPubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: targetPubkey,
+          target: targetPubkey,
+        }),
+        kind,
+      });
+    },
+    {
+      kind: SYSTEM_MESSAGE_KIND,
+      targetPubkey: PROFILE_ONLY_AGENT_PUBKEY,
+    },
+  );
+  await waitForTimelineSettled(page);
+
+  const joinedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "joined the channel" });
+  const agentChip = joinedRow.locator(
+    "[data-mention].agent-mention-highlight",
+    {
+      hasText: "mira",
+    },
+  );
+  await expect(agentChip).toBeVisible({ timeout: 5_000 });
+  await agentChip.hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await profilePopover
+    .getByTestId(`user-profile-popover-wave-${PROFILE_ONLY_AGENT_PUBKEY}`)
+    .click();
+
+  const startHuddleButton = page
+    .getByTestId("message-wave-attachment")
+    .getByRole("button", { name: "Start huddle" });
+  await expect(startHuddleButton).toBeDisabled();
+  await expect(startHuddleButton).toBeEnabled({ timeout: 5_000 });
+  await startHuddleButton.click();
+
+  await expect
+    .poll(() => readStartHuddleMemberPubkeys(page))
+    .toEqual(expect.arrayContaining([PROFILE_ONLY_AGENT_PUBKEY]));
+});
+
 test("wave attachment huddle waits for delayed bot DM pubkey", async ({
   page,
 }) => {

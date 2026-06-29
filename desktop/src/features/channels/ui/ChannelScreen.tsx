@@ -325,7 +325,9 @@ export function ChannelScreen({
     (channelMembersQuery.isPending ||
       managedAgentsQuery.isPending ||
       relayAgentsQuery.isPending ||
-      (messageProfilePubkeys.length > 0 && messageProfilesQuery.isPending));
+      (messageProfilePubkeys.length > 0 &&
+        (messageProfilesQuery.isPending ||
+          messageProfilesQuery.isPlaceholderData)));
   const {
     agentSessionCandidates,
     botTypingEntries,
