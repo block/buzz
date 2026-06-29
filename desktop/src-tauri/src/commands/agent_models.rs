@@ -355,9 +355,19 @@ fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> Strin
         .collect::<String>()
 }
 
-fn normalize_openai_compatible_models(response: OpenAiModelListResponse) -> Vec<AgentModelInfo> {
+fn normalize_openai_compatible_models(
+    response: OpenAiModelListResponse,
+    provider: Option<&str>,
+) -> Vec<AgentModelInfo> {
     let mut seen = HashSet::new();
     let mut items = response.data;
+    let filter_to_openai_text_models = matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("openai")
+    );
     let all_ids = items
         .iter()
         .map(|item| item.id.clone())
@@ -371,10 +381,10 @@ fn normalize_openai_compatible_models(response: OpenAiModelListResponse) -> Vec<
 
     items
         .into_iter()
-        .filter(|item| is_agent_text_model_id(&item.id))
+        .filter(|item| !filter_to_openai_text_models || is_agent_text_model_id(&item.id))
         .filter(|item| match openai_dated_snapshot_alias(&item.id) {
-            Some(alias) => !all_ids.contains(&alias),
-            None => true,
+            Some(alias) if filter_to_openai_text_models => !all_ids.contains(&alias),
+            Some(_) | None => true,
         })
         .filter(|item| seen.insert(item.id.clone()))
         .map(|item| AgentModelInfo {
@@ -416,7 +426,7 @@ async fn discover_openai_compatible_models(
         .json::<OpenAiModelListResponse>()
         .await
         .map_err(|error| format!("OpenAI model discovery response parse failed: {error}"))?;
-    let models = normalize_openai_compatible_models(response);
+    let models = normalize_openai_compatible_models(response, provider);
     if models.is_empty() {
         return Err("OpenAI model discovery returned no compatible text models".to_string());
     }

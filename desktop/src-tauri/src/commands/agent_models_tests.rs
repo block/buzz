@@ -2,38 +2,41 @@ use super::*;
 
 #[test]
 fn openai_model_normalization_keeps_agent_text_models() {
-    let models = normalize_openai_compatible_models(OpenAiModelListResponse {
-        data: vec![
-            OpenAiModelListItem {
-                id: "text-embedding-3-large".to_string(),
-                created: Some(4),
-            },
-            OpenAiModelListItem {
-                id: "gpt-image-2".to_string(),
-                created: Some(5),
-            },
-            OpenAiModelListItem {
-                id: "chatgpt-5.5-pro-2026-04-23".to_string(),
-                created: Some(7),
-            },
-            OpenAiModelListItem {
-                id: "chatgpt-5.5-pro".to_string(),
-                created: Some(6),
-            },
-            OpenAiModelListItem {
-                id: "gpt-5.4-mini".to_string(),
-                created: Some(2),
-            },
-            OpenAiModelListItem {
-                id: "o4-mini".to_string(),
-                created: Some(3),
-            },
-            OpenAiModelListItem {
-                id: "gpt-5.4-mini".to_string(),
-                created: Some(1),
-            },
-        ],
-    });
+    let models = normalize_openai_compatible_models(
+        OpenAiModelListResponse {
+            data: vec![
+                OpenAiModelListItem {
+                    id: "text-embedding-3-large".to_string(),
+                    created: Some(4),
+                },
+                OpenAiModelListItem {
+                    id: "gpt-image-2".to_string(),
+                    created: Some(5),
+                },
+                OpenAiModelListItem {
+                    id: "chatgpt-5.5-pro-2026-04-23".to_string(),
+                    created: Some(7),
+                },
+                OpenAiModelListItem {
+                    id: "chatgpt-5.5-pro".to_string(),
+                    created: Some(6),
+                },
+                OpenAiModelListItem {
+                    id: "gpt-5.4-mini".to_string(),
+                    created: Some(2),
+                },
+                OpenAiModelListItem {
+                    id: "o4-mini".to_string(),
+                    created: Some(3),
+                },
+                OpenAiModelListItem {
+                    id: "gpt-5.4-mini".to_string(),
+                    created: Some(1),
+                },
+            ],
+        },
+        Some("openai"),
+    );
 
     let ids_and_names = models
         .into_iter()
@@ -48,6 +51,48 @@ fn openai_model_normalization_keeps_agent_text_models() {
             ),
             ("o4-mini".to_string(), Some("o4-mini".to_string())),
             ("gpt-5.4-mini".to_string(), Some("GPT-5.4 mini".to_string()),),
+        ]
+    );
+}
+
+#[test]
+fn openai_compat_model_normalization_preserves_provider_specific_ids() {
+    let models = normalize_openai_compatible_models(
+        OpenAiModelListResponse {
+            data: vec![
+                OpenAiModelListItem {
+                    id: "meta-llama/Llama-3.3-70B-Instruct".to_string(),
+                    created: Some(5),
+                },
+                OpenAiModelListItem {
+                    id: "mistral-large-latest".to_string(),
+                    created: Some(4),
+                },
+                OpenAiModelListItem {
+                    id: "anthropic/claude-sonnet-4-6".to_string(),
+                    created: Some(3),
+                },
+                OpenAiModelListItem {
+                    id: "text-embedding-compatible".to_string(),
+                    created: Some(2),
+                },
+                OpenAiModelListItem {
+                    id: "meta-llama/Llama-3.3-70B-Instruct".to_string(),
+                    created: Some(1),
+                },
+            ],
+        },
+        Some("openai-compat"),
+    );
+
+    let ids = models.into_iter().map(|model| model.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            "meta-llama/Llama-3.3-70B-Instruct".to_string(),
+            "mistral-large-latest".to_string(),
+            "anthropic/claude-sonnet-4-6".to_string(),
+            "text-embedding-compatible".to_string(),
         ]
     );
 }
