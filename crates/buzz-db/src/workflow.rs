@@ -386,7 +386,7 @@ pub async fn update_workflow(
     let affected = sqlx::query(
         r#"
         UPDATE workflows
-        SET name = $1, definition = $2::jsonb, definition_hash = $3
+        SET name = $1, definition = $2::jsonb, definition_hash = $3, updated_at = NOW()
         WHERE id = $4
         "#,
     )
