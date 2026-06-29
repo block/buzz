@@ -73,12 +73,12 @@ import {
   shallowArrayEqual,
 } from "./markdownUtils";
 import { FileCard } from "./markdown/FileCard";
+import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { resolveFileCard } from "./markdownFileCard";
 import type {
   ImetaEntry,
   MarkdownProps,
   MarkdownRuntime,
-  MessageLinkPillProps,
 } from "./markdown/types";
 import { SpoilerInline } from "./markdown/SpoilerInline";
 import {
@@ -1567,46 +1567,6 @@ function getReactNodeText(node: React.ReactNode): string {
 
 function getCodeBlockText(children: React.ReactNode) {
   return getReactNodeText(children).replace(/\n$/, "");
-}
-
-function MessageLinkPill({
-  channels,
-  href,
-  interactive,
-  link,
-  onOpenMessageLink,
-}: MessageLinkPillProps) {
-  const channel = channels.find((c) => c.id === link.channelId);
-  const channelLabel = channel?.name ?? "channel";
-  const shortId = link.messageId.slice(0, 6);
-  const label = (
-    <>
-      #{channelLabel} · {shortId}
-    </>
-  );
-
-  if (!interactive) {
-    return <span data-message-link="">{label}</span>;
-  }
-
-  return (
-    <button
-      type="button"
-      data-message-link=""
-      aria-label={`Open message in ${channelLabel}`}
-      title={href}
-      className={cn(
-        "cursor-pointer",
-        MENTION_CHIP_BASE_CLASSES,
-        MENTION_CHIP_HOVER_CLASSES,
-      )}
-      onClick={() => {
-        onOpenMessageLink(link);
-      }}
-    >
-      {label}
-    </button>
-  );
 }
 
 function InlineEmojiPopover({
