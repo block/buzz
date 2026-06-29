@@ -5,10 +5,6 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
 import {
-  buildAgentConversationMarkers,
-  getHiddenAgentConversationMessageIds,
-} from "@/features/agents/agentConversations";
-import {
   useChannelMembersQuery,
   useJoinChannelMutation,
 } from "@/features/channels/hooks";
@@ -84,6 +80,7 @@ import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useAgentConversationTimelineState } from "./filterAgentConversationMessages";
 import { useResetChannelSurfaceTabOnRouteOpen } from "./useResetChannelSurfaceTabOnRouteOpen";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
@@ -490,23 +487,8 @@ export function ChannelScreen({
         : [...currentEvents, event],
     );
   }, []);
-  const agentConversationMarkers = React.useMemo(
-    () => buildAgentConversationMarkers(resolvedMessages),
-    [resolvedMessages],
-  );
-  const unreadTimelineMessages = React.useMemo(() => {
-    const hiddenMessageIds = getHiddenAgentConversationMessageIds(
-      timelineMessages,
-      agentConversationMarkers,
-    );
-    if (hiddenMessageIds.size === 0) {
-      return timelineMessages;
-    }
-
-    return timelineMessages.filter(
-      (message) => !hiddenMessageIds.has(message.id),
-    );
-  }, [agentConversationMarkers, timelineMessages]);
+  const { agentConversationMarkers, unreadTimelineMessages } =
+    useAgentConversationTimelineState(resolvedMessages, timelineMessages);
   const channelFind = useChannelFind({
     channelId: activeChannelId,
     messages: timelineMessages,
