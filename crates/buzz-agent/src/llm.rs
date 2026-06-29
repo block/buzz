@@ -243,10 +243,10 @@ impl Llm {
     async fn databricks_v2_request<F>(
         &self,
         cfg: &Config,
-        mut build: F,
+        build: F,
     ) -> Result<LlmResponse, AgentError>
     where
-        F: FnMut(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
+        F: FnOnce(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
     {
         let route = databricks_v2_route_for_model(&cfg.model);
         let (body, parse) = build(route);
@@ -598,6 +598,8 @@ fn is_responses_required_error(body: &str) -> bool {
 }
 
 fn databricks_v2_route_for_model(model: &str) -> DatabricksV2Route {
+    // Databricks v2 catalog names currently identify OpenAI-shaped GPT-5
+    // models and Anthropic-shaped Claude models by these substrings.
     let lower = model.to_ascii_lowercase();
     if lower.contains("gpt-5") || lower.contains("gpt5") {
         DatabricksV2Route::OpenAiResponses

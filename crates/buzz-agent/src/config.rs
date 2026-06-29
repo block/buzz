@@ -145,7 +145,7 @@ impl Config {
                 resolve_model(databricks_model.as_deref(), buzz_agent_model.as_deref())
                     .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
-                OpenAiApi::Chat, // unused by Databricks v2; legacy Databricks is chat-shaped
+                OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
