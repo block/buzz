@@ -413,6 +413,25 @@ impl Db {
         event::count_events(&self.pool, q).await
     }
 
+    /// Return whether a creator-signed huddle-start event links a parent
+    /// channel to an ephemeral huddle channel.
+    pub async fn huddle_started_link_exists(
+        &self,
+        community_id: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        event::huddle_started_link_exists(
+            &self.pool,
+            community_id,
+            parent_channel_id,
+            ephemeral_channel_id,
+            creator_pubkey,
+        )
+        .await
+    }
+
     /// Fetch the latest replaceable event for a (kind, pubkey) pair.
     ///
     /// Uses canonical NIP-16 ordering: `created_at DESC, id ASC`.
