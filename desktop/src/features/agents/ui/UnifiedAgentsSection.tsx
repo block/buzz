@@ -7,21 +7,14 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
-import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
-import { ModelPicker } from "@/features/agents/ui/ModelPicker";
 import { useUserProfileQuery } from "@/features/profile/hooks";
-import type {
-  AgentPersona,
-  ManagedAgent,
-  PresenceLookup,
-} from "@/shared/api/types";
+import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
+import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -32,6 +25,7 @@ import {
 } from "@/shared/ui/dropdown-menu";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
+import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
@@ -40,19 +34,21 @@ type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
-  channelIdToName: Record<string, string>;
-  channelsByPubkey: Record<string, { id: string; name: string }[]>;
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
-  personaLabelsById: Record<string, string>;
-  presenceLoaded: boolean;
-  presenceLookup: PresenceLookup;
+  startingAgentPubkey: string | null;
+  startingPersonaId: string | null;
   onBulkRemoveStopped: () => void;
   onBulkStopRunning: () => void;
   onCreateAgent: () => void;
-  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenAgentProfile: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
   onOpenPersonaProfile: (persona: AgentPersona) => void;
+  onStartAgent: (pubkey: string) => void;
+  onStartPersona: (persona: AgentPersona) => void;
   canChooseCatalog: boolean;
   personas: AgentPersona[];
   personasError: Error | null;
@@ -81,13 +77,15 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     agentsError,
     isActionPending,
     isAgentsLoading,
-    presenceLoaded,
-    presenceLookup,
+    startingAgentPubkey,
+    startingPersonaId,
     onBulkRemoveStopped,
     onBulkStopRunning,
     onCreateAgent,
     onOpenAgentProfile,
     onOpenPersonaProfile,
+    onStartAgent,
+    onStartPersona,
     canChooseCatalog,
     personas,
     personasError,
@@ -198,10 +196,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   agent={profileAgent}
                   key={group.persona.id}
                   persona={group.persona}
-                  presenceLoaded={presenceLoaded}
-                  presenceLookup={presenceLookup}
+                  startingAgentPubkey={startingAgentPubkey}
+                  startingPersonaId={startingPersonaId}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
+                  onStartAgent={onStartAgent}
+                  onStartPersona={onStartPersona}
                 />
               );
             })}
@@ -221,10 +221,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               groupKey="__additional_persona_agents__"
               label="Additional agent instances"
-              presenceLoaded={presenceLoaded}
-              presenceLookup={presenceLookup}
+              startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
+              onStartAgent={onStartAgent}
             />
           ) : null}
           {unknown.length > 0 ? (
@@ -233,10 +233,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               groupKey="__unknown__"
               label="Unknown Persona"
-              presenceLoaded={presenceLoaded}
-              presenceLookup={presenceLookup}
+              startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
+              onStartAgent={onStartAgent}
             />
           ) : null}
           {ungrouped.length > 0 ? (
@@ -245,32 +245,12 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               collapsed={collapsed}
               groupKey="__ungrouped__"
               label="Custom agents"
-              presenceLoaded={presenceLoaded}
-              presenceLookup={presenceLookup}
+              startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
+              onStartAgent={onStartAgent}
             />
           ) : null}
-        </div>
-      ) : null}
-
-      {!isLoading && stoppedCount > 0 ? (
-        <div
-          className={`${AGENT_CARD_COLUMN_CLASS} flex items-center justify-between rounded-xl border border-border/60 bg-muted/30 px-4 py-2.5`}
-        >
-          <p className="text-sm text-muted-foreground">
-            {stoppedCount} stopped {stoppedCount === 1 ? "agent" : "agents"}
-          </p>
-          <Button
-            className="text-destructive"
-            disabled={isActionPending}
-            onClick={onBulkRemoveStopped}
-            size="sm"
-            variant="ghost"
-          >
-            <Trash2 className="mr-1.5 h-4 w-4" />
-            Remove stopped
-          </Button>
         </div>
       ) : null}
 
@@ -296,21 +276,29 @@ function AgentPersonaCard({
   actions,
   agent,
   persona,
-  presenceLoaded,
-  presenceLookup,
+  startingAgentPubkey,
+  startingPersonaId,
   onOpenAgentProfile,
   onOpenPersonaProfile,
+  onStartAgent,
+  onStartPersona,
 }: {
   actions?: React.ReactNode;
   agent: ManagedAgent | undefined;
   persona: AgentPersona;
-  presenceLoaded: boolean;
-  presenceLookup: PresenceLookup;
-  onOpenAgentProfile: (pubkey: string) => void;
+  startingAgentPubkey: string | null;
+  startingPersonaId: string | null;
+  onOpenAgentProfile: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
   onOpenPersonaProfile: (persona: AgentPersona) => void;
+  onStartAgent: (pubkey: string) => void;
+  onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
   const modelLabel = formatAgentModelLabel(agent?.model ?? persona.model);
+  const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
     ? firstAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
@@ -318,93 +306,107 @@ function AgentPersonaCard({
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError)?.copy
     : null;
+  const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
 
   return (
     <AgentIdentityCard
       actions={actions}
       ariaLabel={`${title} agent profile`}
+      avatar={
+        agent ? (
+          <AgentRuntimeAvatarControl
+            activeTestId={`agent-runtime-active-${agent.pubkey}`}
+            avatarUrl={avatarUrl}
+            errorLabel={friendlyError}
+            errorTestId={`agent-runtime-error-${agent.pubkey}`}
+            isActive={isActive}
+            isStarting={startingAgentPubkey === agent.pubkey}
+            label={title}
+            startTestId={`agent-runtime-start-${agent.pubkey}`}
+            onOpenError={() => {
+              onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
+            }}
+            onStart={() => onStartAgent(agent.pubkey)}
+          />
+        ) : (
+          <AgentRuntimeAvatarControl
+            activeTestId={`persona-runtime-active-${persona.id}`}
+            avatarUrl={avatarUrl}
+            isActive={false}
+            isStarting={startingPersonaId === persona.id}
+            label={title}
+            startTestId={`persona-runtime-start-${persona.id}`}
+            onStart={() => onStartPersona(persona)}
+          />
+        )
+      }
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
-      errorLabel={friendlyError}
       label={title}
-      modelControl={agent ? <ModelPicker agent={agent} /> : undefined}
-      modelLabel={modelLabel}
+      modelLabel={agent && isActive ? modelLabel : null}
       onClick={() => {
         if (agent) {
-          onOpenAgentProfile(agent.pubkey);
+          onOpenAgentProfile(
+            agent.pubkey,
+            opensRuntimeTab ? { tab: "runtime" } : undefined,
+          );
           return;
         }
         onOpenPersonaProfile(persona);
       }}
-      status={
-        agent ? (
-          <AgentCardStatus
-            agent={agent}
-            presenceLoaded={presenceLoaded}
-            presenceLookup={presenceLookup}
-          />
-        ) : null
-      }
     />
   );
 }
 
 function StandaloneAgentCard({
   agent,
-  presenceLoaded,
-  presenceLookup,
+  startingAgentPubkey,
   onOpenAgentProfile,
+  onStartAgent,
 }: {
   agent: ManagedAgent;
-  presenceLoaded: boolean;
-  presenceLookup: PresenceLookup;
-  onOpenAgentProfile: (pubkey: string) => void;
+  startingAgentPubkey: string | null;
+  onOpenAgentProfile: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
+  onStartAgent: (pubkey: string) => void;
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
   const friendlyError = friendlyAgentLastError(agent.lastError)?.copy;
+  const isActive = isManagedAgentActive(agent);
+  const opensRuntimeTab = Boolean(friendlyError && !isActive);
 
   return (
     <AgentIdentityCard
       ariaLabel={`${title} agent profile`}
-      avatarUrl={profileQuery.data?.avatarUrl}
-      dataTestId={`managed-agent-${agent.pubkey}`}
-      errorLabel={friendlyError}
-      label={title}
-      modelControl={<ModelPicker agent={agent} />}
-      modelLabel={formatAgentModelLabel(agent.model)}
-      onClick={() => {
-        onOpenAgentProfile(agent.pubkey);
-      }}
-      status={
-        <AgentCardStatus
-          agent={agent}
-          presenceLoaded={presenceLoaded}
-          presenceLookup={presenceLookup}
+      avatar={
+        <AgentRuntimeAvatarControl
+          activeTestId={`agent-runtime-active-${agent.pubkey}`}
+          avatarUrl={profileQuery.data?.avatarUrl}
+          errorLabel={friendlyError}
+          errorTestId={`agent-runtime-error-${agent.pubkey}`}
+          isActive={isActive}
+          isStarting={startingAgentPubkey === agent.pubkey}
+          label={title}
+          startTestId={`agent-runtime-start-${agent.pubkey}`}
+          onOpenError={() => {
+            onOpenAgentProfile(agent.pubkey, { tab: "runtime" });
+          }}
+          onStart={() => onStartAgent(agent.pubkey)}
         />
       }
-    />
-  );
-}
-
-function AgentCardStatus({
-  agent,
-  presenceLoaded,
-  presenceLookup,
-}: {
-  agent: ManagedAgent;
-  presenceLoaded: boolean;
-  presenceLookup: PresenceLookup;
-}) {
-  const activeTurns = useActiveAgentTurns(agent.pubkey);
-  const presenceStatus = presenceLookup[normalizePubkey(agent.pubkey)];
-
-  return (
-    <AgentStatusBadge
-      isWorking={activeTurns.length > 0}
-      presenceLoaded={presenceLoaded}
-      presenceStatus={presenceStatus}
-      status={agent.status}
+      avatarUrl={profileQuery.data?.avatarUrl}
+      dataTestId={`managed-agent-${agent.pubkey}`}
+      label={title}
+      modelLabel={isActive ? formatAgentModelLabel(agent.model) : null}
+      onClick={() => {
+        onOpenAgentProfile(
+          agent.pubkey,
+          opensRuntimeTab ? { tab: "runtime" } : undefined,
+        );
+      }}
     />
   );
 }
@@ -443,7 +445,7 @@ function SectionHeader({
       className={`${AGENT_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
     >
       <div>
-        <h3 className="text-sm font-semibold tracking-tight">Your Agents</h3>
+        <h3 className="text-sm font-semibold tracking-tight">Agents</h3>
         <p className="text-sm text-secondary-foreground/75">
           Agents in this workspace.
         </p>
@@ -571,19 +573,22 @@ function CollapsibleAgentGroup({
   label,
   agents,
   collapsed,
-  presenceLoaded,
-  presenceLookup,
+  startingAgentPubkey,
   onToggle,
   onOpenAgentProfile,
+  onStartAgent,
 }: {
   groupKey: string;
   label: string;
   agents: ManagedAgent[];
   collapsed: ReadonlySet<string>;
-  presenceLoaded: boolean;
-  presenceLookup: PresenceLookup;
+  startingAgentPubkey: string | null;
   onToggle: (key: string) => void;
-  onOpenAgentProfile: (pubkey: string) => void;
+  onOpenAgentProfile: (
+    pubkey: string,
+    options?: ProfilePanelOpenOptions,
+  ) => void;
+  onStartAgent: (pubkey: string) => void;
 }) {
   const isCollapsed = collapsed.has(groupKey);
   return (
@@ -607,9 +612,9 @@ function CollapsibleAgentGroup({
             <StandaloneAgentCard
               agent={agent}
               key={agent.pubkey}
-              presenceLoaded={presenceLoaded}
-              presenceLookup={presenceLookup}
+              startingAgentPubkey={startingAgentPubkey}
               onOpenAgentProfile={onOpenAgentProfile}
+              onStartAgent={onStartAgent}
             />
           ))}
         </div>

@@ -44,6 +44,7 @@ type MockManagedAgentSeed = {
   channelNames?: string[];
   channelIds?: string[];
   backend?: RawManagedAgent["backend"];
+  lastError?: string | null;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
 };
@@ -99,6 +100,7 @@ type E2eConfig = {
     canvasReadError?: string;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    usersBatchDelayMs?: number;
     /** Delay (ms) applied to older-history (`history-` subId) fetches so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     historyDelayMs?: number;
@@ -461,6 +463,10 @@ type RawPersona = {
   display_name: string;
   avatar_url: string | null;
   system_prompt: string;
+  runtime?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
   source_team?: string | null;
@@ -1041,7 +1047,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     last_started_at: status === "running" ? now : null,
     last_stopped_at: status === "stopped" ? now : null,
     last_exit_code: null,
-    last_error: null,
+    last_error: seed.lastError ?? null,
     log_path: `/tmp/mock-agent-${seed.pubkey}.log`,
     start_on_app_launch: true,
     backend: seed.backend ?? { type: "local" },
@@ -1190,6 +1196,10 @@ function resetMockPersonas(config?: E2eConfig) {
     display_name: persona.display_name,
     avatar_url: persona.avatar_url,
     system_prompt: persona.system_prompt,
+    runtime: persona.id === "builtin:fizz" ? "goose" : null,
+    model: null,
+    provider: null,
+    name_pool: [],
     is_builtin: true,
     is_active: activePersonaIds.has(persona.id),
     source_team: null,
@@ -2612,6 +2622,11 @@ function emitMockHistory(
   const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
   const isVisibleOlderHistoryPage =
     subId.startsWith("history-") && filter.until !== undefined && !filter["#e"];
+  if (isVisibleOlderHistoryPage) {
+    const counter = window as unknown as { __HISTORY_FETCH_COUNT__?: number };
+    counter.__HISTORY_FETCH_COUNT__ =
+      (counter.__HISTORY_FETCH_COUNT__ ?? 0) + 1;
+  }
   if (delayMs > 0 && isVisibleOlderHistoryPage) {
     const probe = window as unknown as {
       __HISTORY_INFLIGHT__?: number;
@@ -3464,6 +3479,13 @@ async function handleGetUsersBatch(
   },
   config: E2eConfig | undefined,
 ) {
+  const usersBatchDelayMs = config?.mock?.usersBatchDelayMs ?? 0;
+  if (usersBatchDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, usersBatchDelayMs);
+    });
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const profiles: RawUsersBatchResponse["profiles"] = {};

@@ -33,6 +33,12 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(changed);
     assert_eq!(records.len(), BUILT_IN_PERSONAS.len());
     assert!(records.iter().all(|record| record.is_builtin));
+    assert!(records
+        .iter()
+        .any(|record| record.id == "builtin:fizz" && record.runtime.as_deref() == Some("goose")));
+    assert!(records
+        .iter()
+        .any(|record| record.id == "builtin:product-strategist" && !record.is_active));
     let display_names: Vec<&str> = records
         .iter()
         .map(|record| record.display_name.as_str())
