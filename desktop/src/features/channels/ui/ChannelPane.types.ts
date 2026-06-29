@@ -1,9 +1,4 @@
 import type * as React from "react";
-import type { useChannelFind } from "@/features/search/useChannelFind";
-import type {
-  ProfilePanelTab,
-  ProfilePanelView,
-} from "@/features/profile/ui/UserProfilePanel";
 import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
@@ -11,8 +6,12 @@ import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { useChannelFind } from "@/features/search/useChannelFind";
+import type {
+  ProfilePanelTab,
+  ProfilePanelView,
+} from "@/features/profile/ui/UserProfilePanel";
 import type { Channel } from "@/shared/api/types";
-
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];

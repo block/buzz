@@ -52,6 +52,7 @@ type MockManagedAgentSeed = {
   backend?:
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
+  lastError?: string | null;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
