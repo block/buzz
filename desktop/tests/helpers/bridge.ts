@@ -112,6 +112,7 @@ type MockBridgeOptions = {
   canvasReadError?: string;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  usersBatchDelayMs?: number;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   historyDelayMs?: number;
   profileReadDelayMs?: number;

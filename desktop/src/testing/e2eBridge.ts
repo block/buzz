@@ -88,6 +88,7 @@ type E2eConfig = {
     canvasReadError?: string;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    usersBatchDelayMs?: number;
     /** Delay (ms) applied to older-history (`history-` subId) fetches so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
     historyDelayMs?: number;
@@ -3373,6 +3374,13 @@ async function handleGetUsersBatch(
   },
   config: E2eConfig | undefined,
 ) {
+  const usersBatchDelayMs = config?.mock?.usersBatchDelayMs ?? 0;
+  if (usersBatchDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, usersBatchDelayMs);
+    });
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const profiles: RawUsersBatchResponse["profiles"] = {};
