@@ -1277,6 +1277,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        agent_command: config.agent_command.clone(),
     });
 
     if !config.memory_enabled {

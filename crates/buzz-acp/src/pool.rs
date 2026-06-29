@@ -32,7 +32,7 @@ use crate::acp::{
     extract_model_config_options, extract_model_state, resolve_model_switch_method, AcpClient,
     AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
-use crate::config::{DedupMode, PermissionMode};
+use crate::config::{normalize_agent_command_identity, DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
@@ -250,6 +250,9 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Agent command (binary name or path). Used to detect goose agents and
+    /// route `systemPrompt` via `_meta` rather than as a first-class field.
+    pub agent_command: String,
 }
 
 impl AgentPool {
@@ -438,14 +441,25 @@ async fn create_session_and_apply_model(
         None
     };
 
-    let resp = agent
-        .acp
-        .session_new_full(
-            &ctx.cwd,
-            ctx.mcp_servers.clone(),
-            combined_system_prompt.as_deref(),
-        )
-        .await?;
+    let resp = if normalize_agent_command_identity(&ctx.agent_command) == "goose" {
+        agent
+            .acp
+            .session_new_full_goose(
+                &ctx.cwd,
+                ctx.mcp_servers.clone(),
+                combined_system_prompt.as_deref(),
+            )
+            .await?
+    } else {
+        agent
+            .acp
+            .session_new_full(
+                &ctx.cwd,
+                ctx.mcp_servers.clone(),
+                combined_system_prompt.as_deref(),
+            )
+            .await?
+    };
 
     // Populate model capabilities on first session creation.
     if agent.model_capabilities.is_none() {

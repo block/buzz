@@ -503,7 +503,7 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
     Ok(validated)
 }
 
-fn normalize_agent_command_identity(command: &str) -> String {
+pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
     let normalized = command.trim().replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
     let basename = trimmed

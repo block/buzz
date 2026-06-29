@@ -321,6 +321,34 @@ impl AcpClient {
         })
     }
 
+    /// Send `session/new` for a goose agent, passing `systemPrompt` via `_meta`
+    /// per the ACP+ extensibility convention (goose reads it from `_meta["systemPrompt"]`
+    /// rather than as a first-class field).
+    pub async fn session_new_full_goose(
+        &mut self,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+        system_prompt: Option<&str>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        let mut params = serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": mcp_servers,
+        });
+        if let Some(sp) = system_prompt {
+            params["_meta"] = serde_json::json!({ "systemPrompt": sp });
+        }
+        let result = self.send_request("session/new", params).await?;
+        let session_id = result["sessionId"]
+            .as_str()
+            .ok_or_else(|| AcpError::Protocol("session/new response missing sessionId".into()))?
+            .to_owned();
+        tracing::info!(target: "acp::session", "session created: {session_id}");
+        Ok(SessionNewResponse {
+            session_id,
+            raw: result,
+        })
+    }
+
     /// Send `session/new` and return only the `sessionId` string.
     ///
     /// Convenience wrapper around [`session_new_full`].
@@ -2066,6 +2094,69 @@ mod tests {
         assert!(
             received["params"]["systemPrompt"].is_null(),
             "systemPrompt should NOT be in params when value is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_goose_includes_system_prompt_in_meta_when_some() {
+        // Goose path: systemPrompt must appear in _meta, NOT as a top-level field.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_goose","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full_goose("/tmp", vec![], Some("Be concise."))
+            .await
+            .expect("session_new_full_goose should succeed");
+
+        assert_eq!(resp.session_id, "ses_goose");
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(
+            received["params"]["_meta"]["systemPrompt"].as_str(),
+            Some("Be concise."),
+            "systemPrompt should be in _meta when Some"
+        );
+        assert!(
+            received["params"]["systemPrompt"].is_null(),
+            "systemPrompt should NOT appear as a top-level field"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_goose_omits_meta_when_none() {
+        // Goose path: when system_prompt is None, _meta should not appear in params.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_goose","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full_goose("/tmp", vec![], None)
+            .await
+            .expect("session_new_full_goose should succeed");
+
+        assert_eq!(resp.session_id, "ses_goose");
+        let received = &resp.raw["_receivedRequest"];
+        assert!(
+            received["params"]["_meta"].is_null(),
+            "_meta should NOT be in params when system_prompt is None"
         );
     }
 }
