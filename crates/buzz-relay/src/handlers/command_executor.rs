@@ -575,6 +575,17 @@ async fn handle_workflow_def(
         IngestError::Rejected("invalid: workflow ID in d tag must be a valid UUID".into())
     })?;
 
+    // 2. Validate caller has channel access (minimum: is a member)
+    let is_member = state
+        .is_member_cached(channel_id, &self_bytes)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
+    if !is_member {
+        return Err(IngestError::Rejected(
+            "forbidden: not a member of this channel".into(),
+        ));
+    }
+
     // Check if workflow already exists to perform update or create checks
     let existing = state.db.get_workflow(workflow_id).await;
     let existing_record = match existing {
@@ -584,12 +595,10 @@ async fn handle_workflow_def(
                     "forbidden: cannot update a workflow owned by another user".into(),
                 ));
             }
-            if let Some(existing_chan) = record.channel_id {
-                if existing_chan != channel_id {
-                    return Err(IngestError::Rejected(
-                        "forbidden: cannot change the channel of an existing workflow".into(),
-                    ));
-                }
+            if record.channel_id != Some(channel_id) {
+                return Err(IngestError::Rejected(
+                    "forbidden: cannot change the channel of an existing workflow".into(),
+                ));
             }
             Some(record)
         }
@@ -601,17 +610,6 @@ async fn handle_workflow_def(
         }
     };
     let is_update = existing_record.is_some();
-
-    // 2. Validate caller has channel access (minimum: is a member)
-    let is_member = state
-        .is_member_cached(channel_id, &self_bytes)
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: membership check: {e}")))?;
-    if !is_member {
-        return Err(IngestError::Rejected(
-            "forbidden: not a member of this channel".into(),
-        ));
-    }
 
     // 3. Parse YAML from event.content
     let (def, definition_json_str) = buzz_workflow::WorkflowEngine::parse_yaml(&event.content)
