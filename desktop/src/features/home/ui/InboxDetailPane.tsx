@@ -38,6 +38,7 @@ const MembersSidebar = React.lazy(async () => {
 });
 
 type InboxDetailPaneProps = {
+  agentPubkeys?: ReadonlySet<string>;
   canDelete: boolean;
   canOpenChannel: boolean;
   canReply: boolean;
@@ -69,6 +70,7 @@ type InboxDetailPaneProps = {
 };
 
 export function InboxDetailPane({
+  agentPubkeys,
   canDelete,
   canOpenChannel,
   canReply,
@@ -185,6 +187,7 @@ export function InboxDetailPane({
       : [
           {
             authorLabel: item.senderLabel,
+            authorPubkey: item.item.pubkey,
             avatarUrl: item.avatarUrl,
             content: item.preview,
             depth: 0,
@@ -323,6 +326,7 @@ export function InboxDetailPane({
                   <div className="mx-6 my-3 border-t border-border/60" />
                 ) : null}
                 <InboxMessageRow
+                  agentPubkeys={agentPubkeys}
                   canReply={canReply}
                   channelId={item.item.channelId}
                   isFocusHighlightVisible={isFocusHighlightVisible}

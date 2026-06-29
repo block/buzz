@@ -4,8 +4,16 @@ import ReactMarkdown, {
   type Components,
   defaultUrlTransform,
 } from "react-markdown";
-import { Copy, Download, FileText, ZoomIn, ZoomOut } from "lucide-react";
-import { useReducedMotion } from "motion/react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  Download,
+  FileText,
+  ZoomIn,
+  ZoomOut,
+} from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -32,6 +40,12 @@ import type { Channel } from "@/shared/api/types";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { copyCodeBlockToClipboard } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
+import {
+  extractSupportedLinkPreviews,
+  isSupportedLinkAutolinkLabel,
+  parseSupportedLinkPreview,
+} from "@/shared/lib/linkPreview";
+import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
@@ -43,6 +57,8 @@ import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { Button } from "@/shared/ui/button";
+import { AttachmentGroup } from "@/shared/ui/attachment";
+import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -202,6 +218,7 @@ type MarkdownRuntime = {
   agentMentionPubkeysByName?: Record<string, string>;
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
+  linkPreviewHrefs: ReadonlySet<string>;
   mentionPubkeysByName?: Record<string, string>;
   onOpenChannel: (channelId: string) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
@@ -287,10 +304,30 @@ type ImageLightboxBox = {
   width: number;
 };
 
+type ImageGalleryDirection = "forward" | "backward";
+
+type ImageGalleryItem = {
+  alt: string | undefined;
+  dim?: string;
+  resolvedSrc: string;
+  src: string | undefined;
+  thumbnailBox?: ImageLightboxBox;
+};
+
+type ImageBlockProps = {
+  alt: string | undefined;
+  dim?: string;
+  resolvedSrc: string | undefined;
+  src: string | undefined;
+};
+
 const IMAGE_LIGHTBOX_ENTER_MS = 260;
 const IMAGE_LIGHTBOX_EXIT_MS = 170;
 const IMAGE_LIGHTBOX_FADE_ENTER_MS = 180;
 const IMAGE_LIGHTBOX_FADE_EXIT_MS = 90;
+const IMAGE_LIGHTBOX_GALLERY_SLIDE_MS = 280;
+const IMAGE_LIGHTBOX_GALLERY_SLIDE_DISTANCE_PX = 48;
+const IMAGE_LIGHTBOX_GALLERY_BLUR_PX = 4;
 const IMAGE_LIGHTBOX_REDUCED_MOTION_MS = 100;
 const IMAGE_LIGHTBOX_ZOOM_TRANSITION_MS = 80;
 const IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO = 0.8;
@@ -303,6 +340,10 @@ const IMAGE_LIGHTBOX_MAX_ZOOM = 3;
 const IMAGE_LIGHTBOX_ZOOM_STEP = 0.05;
 const IMAGE_LIGHTBOX_EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
 const IMAGE_LIGHTBOX_EASE_IN_OUT = "cubic-bezier(0.77, 0, 0.175, 1)";
+const IMAGE_LIGHTBOX_GALLERY_EASE: [number, number, number, number] = [
+  0.22, 1, 0.36, 1,
+];
+const IMAGE_LIGHTBOX_MARKDOWN_SCOPE_SELECTOR = `.${MESSAGE_MARKDOWN_CLASS}`;
 
 function imageLightboxBoxFromRect(rect: DOMRect): ImageLightboxBox {
   return {
@@ -402,6 +443,162 @@ function imageLightboxZoomBox(
   };
 }
 
+function imageLightboxBasisBoxForItem(
+  item: ImageGalleryItem,
+  fallbackBox: ImageLightboxBox,
+): ImageLightboxBox {
+  const dimensions = dimensionsFromDim(item.dim);
+  if (!dimensions) {
+    return item.thumbnailBox ?? fallbackBox;
+  }
+
+  return {
+    ...fallbackBox,
+    height: dimensions.height,
+    width: dimensions.width,
+  };
+}
+
+function imageLightboxThumbnailBoxForItem(
+  item: ImageGalleryItem,
+  sourceScope: Element | null | undefined,
+): ImageLightboxBox | null {
+  const root = sourceScope?.isConnected ? sourceScope : document.body;
+  const triggers = Array.from(
+    root.querySelectorAll<HTMLElement>("[data-image-lightbox-trigger]"),
+  );
+
+  for (const trigger of triggers) {
+    const isCurrentItem =
+      trigger.dataset.imageLightboxResolvedSrc === item.resolvedSrc ||
+      (item.src != null && trigger.dataset.imageLightboxSrc === item.src);
+    if (!isCurrentItem) {
+      continue;
+    }
+
+    const image = trigger.querySelector("img");
+    const rect = (image ?? trigger).getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return imageLightboxBoxFromRect(rect);
+    }
+  }
+
+  return null;
+}
+
+function imageLightboxReturnBoxForItem(
+  item: ImageGalleryItem,
+  fallbackBox: ImageLightboxBox,
+  sourceScope: Element | null | undefined,
+): ImageLightboxBox {
+  return (
+    imageLightboxThumbnailBoxForItem(item, sourceScope) ??
+    item.thumbnailBox ??
+    fallbackBox
+  );
+}
+
+function imageLightboxSourceScopeForTrigger(
+  trigger: HTMLElement,
+): Element | null {
+  return (
+    trigger.closest(IMAGE_LIGHTBOX_MARKDOWN_SCOPE_SELECTOR) ??
+    trigger.closest("[data-testid='message-row']")
+  );
+}
+
+function imageGalleryItemFromTrigger(
+  trigger: HTMLElement,
+  thumbnailBox?: ImageLightboxBox,
+): ImageGalleryItem | null {
+  const resolvedSrc = trigger.dataset.imageLightboxResolvedSrc;
+  if (!resolvedSrc) {
+    return null;
+  }
+
+  return {
+    alt: trigger.dataset.imageLightboxAlt || undefined,
+    dim: trigger.dataset.imageLightboxDim || undefined,
+    resolvedSrc,
+    src: trigger.dataset.imageLightboxSrc || undefined,
+    thumbnailBox,
+  };
+}
+
+function isVisibleImageLightboxTrigger(trigger: HTMLElement): boolean {
+  if (isInsideHiddenSpoiler(trigger)) {
+    return false;
+  }
+
+  const image = trigger.querySelector("img");
+  for (const element of [trigger, image]) {
+    if (!element) {
+      continue;
+    }
+
+    const style = window.getComputedStyle(element);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      Number(style.opacity) === 0
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function visibleImageGalleryForTrigger(
+  trigger: HTMLElement,
+  fallbackItem: ImageGalleryItem,
+  sourceScope: Element | null | undefined,
+): { galleryIndex: number; galleryItems?: ImageGalleryItem[] } {
+  const root = sourceScope?.isConnected ? sourceScope : null;
+  const triggers = root
+    ? Array.from(
+        root.querySelectorAll<HTMLElement>("[data-image-lightbox-trigger]"),
+      )
+    : [trigger];
+  const galleryItems: ImageGalleryItem[] = [];
+  let galleryIndex = 0;
+  let foundCurrentTrigger = false;
+
+  for (const candidate of triggers) {
+    if (!isVisibleImageLightboxTrigger(candidate)) {
+      continue;
+    }
+
+    const image = candidate.querySelector("img");
+    const rect = (image ?? candidate).getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      continue;
+    }
+
+    const thumbnailBox = imageLightboxBoxFromRect(rect);
+    const item = imageGalleryItemFromTrigger(candidate, thumbnailBox);
+    if (!item) {
+      continue;
+    }
+
+    if (candidate === trigger) {
+      galleryIndex = galleryItems.length;
+      foundCurrentTrigger = true;
+    }
+    galleryItems.push(item);
+  }
+
+  if (!foundCurrentTrigger) {
+    galleryItems.unshift(fallbackItem);
+    galleryIndex = 0;
+  }
+
+  return {
+    galleryIndex,
+    galleryItems: galleryItems.length > 1 ? galleryItems : undefined,
+  };
+}
+
 type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
@@ -491,33 +688,60 @@ function ImageDownloadContextMenu({
 
 function ImageZoomOverlay({
   alt,
-  canDownload,
+  galleryIndex = 0,
+  galleryItems,
   onDownload,
   onClose,
   resolvedSrc,
   sourceBox,
+  sourceScope,
+  src,
 }: {
   alt: string | undefined;
-  canDownload: boolean;
-  onDownload: () => void;
+  galleryIndex?: number;
+  galleryItems?: ImageGalleryItem[];
+  onDownload: (src: string | undefined) => void;
   onClose: () => void;
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
+  sourceScope?: Element | null;
+  src: string | undefined;
 }) {
   const shouldReduceMotion = useReducedMotion();
   const prefersReducedMotion = shouldReduceMotion === true;
+  const fallbackGalleryItems = React.useMemo<ImageGalleryItem[]>(
+    () => [{ alt, resolvedSrc, src, thumbnailBox: sourceBox }],
+    [alt, resolvedSrc, sourceBox, src],
+  );
+  const items =
+    galleryItems && galleryItems.length > 0
+      ? galleryItems
+      : fallbackGalleryItems;
+  const safeInitialIndex =
+    galleryIndex >= 0 && galleryIndex < items.length ? galleryIndex : 0;
+  const [currentIndex, setCurrentIndex] = React.useState(safeInitialIndex);
+  const [galleryDirection, setGalleryDirection] =
+    React.useState<ImageGalleryDirection>("forward");
   const [phase, setPhase] = React.useState<
     "opening" | "open" | "closing" | "fading"
   >(() => (prefersReducedMotion ? "open" : "opening"));
   const [hasEntered, setHasEntered] = React.useState(prefersReducedMotion);
   const [isAdjustingZoom, setIsAdjustingZoom] = React.useState(false);
+  const [isGalleryNavigating, setIsGalleryNavigating] = React.useState(false);
   const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
-  const [targetBox, setTargetBox] = React.useState(() =>
-    imageLightboxTargetBox(sourceBox),
+  const currentItem = items[currentIndex] ?? items[0];
+  const basisBox = React.useMemo(
+    () => imageLightboxBasisBoxForItem(currentItem, sourceBox),
+    [currentItem, sourceBox],
   );
+  const [targetBox, setTargetBox] = React.useState(() =>
+    imageLightboxTargetBox(basisBox),
+  );
+  const [returnBox, setReturnBox] = React.useState(sourceBox);
   const [zoom, setZoom] = React.useState(IMAGE_LIGHTBOX_MIN_ZOOM);
   const controlPointerDownRef = React.useRef(false);
   const fadeTimerRef = React.useRef<number | null>(null);
+  const galleryTransitionTimerRef = React.useRef<number | null>(null);
   const closeTimerRef = React.useRef<number | null>(null);
   const dialogRef = React.useRef<HTMLDivElement | null>(null);
   const descriptionId = React.useId();
@@ -525,6 +749,37 @@ function ImageZoomOverlay({
   const previouslyFocusedElementRef = React.useRef<HTMLElement | null>(null);
   const suppressCloseUntilRef = React.useRef(0);
   const zoomIdleTimerRef = React.useRef<number | null>(null);
+  const hasPreviousImage = currentIndex > 0;
+  const hasNextImage = currentIndex < items.length - 1;
+  const canDownloadCurrentImage = Boolean(currentItem.src);
+  const galleryTransitionFilter =
+    !prefersReducedMotion && isGalleryNavigating
+      ? `blur(${IMAGE_LIGHTBOX_GALLERY_BLUR_PX}px)`
+      : "blur(0px)";
+  const galleryImageVariants = React.useMemo(
+    () => ({
+      center: { filter: "blur(0px)", opacity: 1, x: 0 },
+      enter: (direction: ImageGalleryDirection) => ({
+        filter: galleryTransitionFilter,
+        opacity: 0,
+        x: prefersReducedMotion
+          ? 0
+          : direction === "forward"
+            ? IMAGE_LIGHTBOX_GALLERY_SLIDE_DISTANCE_PX
+            : -IMAGE_LIGHTBOX_GALLERY_SLIDE_DISTANCE_PX,
+      }),
+      exit: (direction: ImageGalleryDirection) => ({
+        filter: galleryTransitionFilter,
+        opacity: 0,
+        x: prefersReducedMotion
+          ? 0
+          : direction === "forward"
+            ? -IMAGE_LIGHTBOX_GALLERY_SLIDE_DISTANCE_PX
+            : IMAGE_LIGHTBOX_GALLERY_SLIDE_DISTANCE_PX,
+      }),
+    }),
+    [galleryTransitionFilter, prefersReducedMotion],
+  );
 
   const markControlGesture = React.useCallback(() => {
     suppressCloseUntilRef.current =
@@ -553,6 +808,15 @@ function ImageZoomOverlay({
   const close = React.useCallback(() => {
     if (closeTimerRef.current != null) return;
 
+    if (galleryTransitionTimerRef.current != null) {
+      window.clearTimeout(galleryTransitionTimerRef.current);
+      galleryTransitionTimerRef.current = null;
+    }
+    setIsGalleryNavigating(false);
+    setReturnBox(
+      imageLightboxReturnBoxForItem(currentItem, sourceBox, sourceScope),
+    );
+
     if (prefersReducedMotion) {
       setPhase("fading");
       closeTimerRef.current = window.setTimeout(() => {
@@ -568,7 +832,43 @@ function ImageZoomOverlay({
     closeTimerRef.current = window.setTimeout(() => {
       onClose();
     }, IMAGE_LIGHTBOX_EXIT_MS + IMAGE_LIGHTBOX_FADE_EXIT_MS);
-  }, [onClose, prefersReducedMotion]);
+  }, [currentItem, onClose, prefersReducedMotion, sourceBox, sourceScope]);
+
+  const navigateGallery = React.useCallback(
+    (nextIndex: number) => {
+      if (
+        nextIndex < 0 ||
+        nextIndex >= items.length ||
+        nextIndex === currentIndex
+      ) {
+        return;
+      }
+
+      markControlGesture();
+      setMenu(null);
+      setGalleryDirection(nextIndex > currentIndex ? "forward" : "backward");
+      if (galleryTransitionTimerRef.current != null) {
+        window.clearTimeout(galleryTransitionTimerRef.current);
+      }
+      setIsGalleryNavigating(!prefersReducedMotion);
+      galleryTransitionTimerRef.current = window.setTimeout(() => {
+        setIsGalleryNavigating(false);
+        galleryTransitionTimerRef.current = null;
+      }, IMAGE_LIGHTBOX_GALLERY_SLIDE_MS);
+      setIsAdjustingZoom(false);
+      setZoom(IMAGE_LIGHTBOX_MIN_ZOOM);
+      setCurrentIndex(nextIndex);
+    },
+    [currentIndex, items.length, markControlGesture, prefersReducedMotion],
+  );
+
+  const goToPreviousImage = React.useCallback(() => {
+    navigateGallery(currentIndex - 1);
+  }, [currentIndex, navigateGallery]);
+
+  const goToNextImage = React.useCallback(() => {
+    navigateGallery(currentIndex + 1);
+  }, [currentIndex, navigateGallery]);
 
   useDismissImageContextMenu(Boolean(menu), closeMenu);
 
@@ -665,16 +965,34 @@ function ImageZoomOverlay({
   }, []);
 
   React.useEffect(() => {
-    const handleResize = () => setTargetBox(imageLightboxTargetBox(sourceBox));
+    const handleResize = () => setTargetBox(imageLightboxTargetBox(basisBox));
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [sourceBox]);
+  }, [basisBox]);
+
+  React.useEffect(() => {
+    setTargetBox(imageLightboxTargetBox(basisBox));
+  }, [basisBox]);
 
   React.useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         close();
+        return;
+      }
+
+      const target = event.target;
+      const isRangeInput =
+        target instanceof HTMLInputElement && target.type === "range";
+      if (!isRangeInput && event.key === "ArrowLeft" && hasPreviousImage) {
+        event.preventDefault();
+        goToPreviousImage();
+        return;
+      }
+      if (!isRangeInput && event.key === "ArrowRight" && hasNextImage) {
+        event.preventDefault();
+        goToNextImage();
         return;
       }
 
@@ -727,7 +1045,7 @@ function ImageZoomOverlay({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [close]);
+  }, [close, goToNextImage, goToPreviousImage, hasNextImage, hasPreviousImage]);
 
   React.useEffect(() => {
     const dialog = dialogRef.current;
@@ -810,6 +1128,9 @@ function ImageZoomOverlay({
       if (fadeTimerRef.current != null) {
         window.clearTimeout(fadeTimerRef.current);
       }
+      if (galleryTransitionTimerRef.current != null) {
+        window.clearTimeout(galleryTransitionTimerRef.current);
+      }
       if (closeTimerRef.current != null) {
         window.clearTimeout(closeTimerRef.current);
       }
@@ -822,7 +1143,9 @@ function ImageZoomOverlay({
   const isClosing = phase === "closing";
   const isOpen = phase === "open";
   const isFading = phase === "fading";
+  const isReturning = isClosing || isFading;
   const displayBox = imageLightboxZoomBox(targetBox, zoom);
+  const frameBox = isReturning ? returnBox : targetBox;
   // Once fully settled at 1x, drop the transform to `none` so the wrapper
   // leaves the GPU-composited path and the <img> repaints through WebKit's
   // high-quality paint rasterizer — matching inline-image sharpness. An
@@ -837,9 +1160,18 @@ function ImageZoomOverlay({
     !isAdjustingZoom;
   const transform = atRest
     ? "none"
-    : prefersReducedMotion || isOpen
-      ? imageLightboxTransform(targetBox, displayBox)
-      : imageLightboxTransform(targetBox, sourceBox);
+    : isReturning
+      ? "none"
+      : prefersReducedMotion || isOpen
+        ? imageLightboxTransform(targetBox, displayBox)
+        : imageLightboxTransform(targetBox, sourceBox);
+  const imageTransitionProperty = prefersReducedMotion
+    ? "opacity"
+    : isReturning
+      ? "height, left, opacity, top, transform, width"
+      : atRest
+        ? "opacity"
+        : "opacity, transform";
   const imageTransitionDuration = prefersReducedMotion
     ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
     : isClosing
@@ -858,31 +1190,31 @@ function ImageZoomOverlay({
     ((zoom - IMAGE_LIGHTBOX_MIN_ZOOM) /
       (IMAGE_LIGHTBOX_MAX_ZOOM - IMAGE_LIGHTBOX_MIN_ZOOM)) *
     100;
-  const label = alt?.trim() || "Image preview";
+  const label = currentItem.alt?.trim() || "Image preview";
   const handleImageContextMenu = React.useCallback(
     (event: React.MouseEvent<HTMLImageElement>) => {
       event.preventDefault();
       event.stopPropagation();
       event.nativeEvent.stopImmediatePropagation();
       markControlGesture();
-      if (canDownload) {
+      if (canDownloadCurrentImage) {
         setMenu({ x: event.clientX, y: event.clientY });
       }
     },
-    [canDownload, markControlGesture],
+    [canDownloadCurrentImage, markControlGesture],
   );
   const handleMenuDownload = React.useCallback(() => {
     setMenu(null);
     markControlGesture();
-    onDownload();
-  }, [markControlGesture, onDownload]);
+    onDownload(currentItem.src);
+  }, [currentItem.src, markControlGesture, onDownload]);
 
   return createPortal(
     <div
       aria-describedby={descriptionId}
       aria-label={label}
       aria-modal="true"
-      className="fixed inset-0 z-50 cursor-zoom-out outline-hidden"
+      className="dark video-review-theme fixed inset-0 z-50 cursor-zoom-out outline-hidden"
       onClick={(event) => {
         if (Date.now() < suppressCloseUntilRef.current) {
           return;
@@ -941,6 +1273,7 @@ function ImageZoomOverlay({
         }}
       />
       <div
+        data-image-lightbox-frame=""
         className={cn(
           "absolute z-10 origin-top-left overflow-visible transition-[opacity,transform]",
           // Only promote to a composited layer while animating; demoting at
@@ -948,27 +1281,80 @@ function ImageZoomOverlay({
           !atRest && "will-change-transform",
         )}
         style={{
-          ...imageLightboxStyle(targetBox),
-          opacity: prefersReducedMotion && isClosing ? 0 : 1,
+          ...imageLightboxStyle(frameBox),
+          opacity: prefersReducedMotion && isReturning ? 0 : 1,
           transform,
           transitionDuration: `${imageTransitionDuration}ms`,
           // At rest, exclude `transform` from the transition so the swap to
-          // `none` is instantaneous — a transitioned transform-to-`none` is
-          // browser-inconsistent and can flash at the settle.
-          transitionProperty:
-            prefersReducedMotion || atRest ? "opacity" : "opacity, transform",
+          // `none` is instantaneous. On close, animate the frame box instead
+          // of non-uniformly scaling the image back into the thumbnail.
+          transitionProperty: imageTransitionProperty,
           transitionTimingFunction: isClosing
             ? IMAGE_LIGHTBOX_EASE_IN_OUT
             : IMAGE_LIGHTBOX_EASE_OUT,
         }}
       >
-        <img
-          alt={alt}
-          className="h-full w-full rounded-lg object-contain shadow-2xl"
-          src={resolvedSrc}
-          onContextMenuCapture={handleImageContextMenu}
-        />
+        <div className="relative h-full w-full overflow-hidden rounded-lg shadow-2xl">
+          <AnimatePresence
+            custom={galleryDirection}
+            initial={false}
+            mode="popLayout"
+          >
+            <motion.img
+              alt={currentItem.alt}
+              animate="center"
+              className="absolute inset-0 h-full w-full object-contain"
+              custom={galleryDirection}
+              exit="exit"
+              initial="enter"
+              key={currentItem.resolvedSrc}
+              src={currentItem.resolvedSrc}
+              transition={{
+                duration: prefersReducedMotion
+                  ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS / 1000
+                  : IMAGE_LIGHTBOX_GALLERY_SLIDE_MS / 1000,
+                ease: IMAGE_LIGHTBOX_GALLERY_EASE,
+              }}
+              variants={galleryImageVariants}
+              onContextMenuCapture={handleImageContextMenu}
+            />
+          </AnimatePresence>
+        </div>
       </div>
+      {hasPreviousImage ? (
+        <button
+          aria-label="Previous image"
+          className={cn(
+            "absolute left-3 top-1/2 z-20 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-muted text-muted-foreground shadow-sm backdrop-blur-xl backdrop-saturate-150 transition-[background-color,color,opacity] duration-150 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/70 sm:left-6",
+            isOpen ? "opacity-100" : "pointer-events-none opacity-0",
+          )}
+          data-image-lightbox-controls=""
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            goToPreviousImage();
+          }}
+        >
+          <ChevronLeft className="h-6 w-6 -translate-x-[0.5px]" />
+        </button>
+      ) : null}
+      {hasNextImage ? (
+        <button
+          aria-label="Next image"
+          className={cn(
+            "absolute right-3 top-1/2 z-20 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full bg-muted text-muted-foreground shadow-sm backdrop-blur-xl backdrop-saturate-150 transition-[background-color,color,opacity] duration-150 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/70 sm:right-6",
+            isOpen ? "opacity-100" : "pointer-events-none opacity-0",
+          )}
+          data-image-lightbox-controls=""
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            goToNextImage();
+          }}
+        >
+          <ChevronRight className="h-6 w-6 translate-x-[0.5px]" />
+        </button>
+      ) : null}
       <div
         className={cn(
           "absolute inset-x-0 bottom-4 z-20 flex justify-center px-4 transition-[opacity,transform]",
@@ -981,27 +1367,30 @@ function ImageZoomOverlay({
       >
         <div
           aria-label="Image controls"
-          className="relative isolate flex min-h-11 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-xl px-2 py-1.5 text-white"
+          className="relative isolate flex min-h-11 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-xl px-2 py-1.5 text-muted-foreground"
           data-image-lightbox-controls=""
           role="toolbar"
         >
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-0 -z-10 rounded-[inherit] border border-white/10 bg-black/35 backdrop-blur-xl backdrop-saturate-150"
+            className="pointer-events-none absolute inset-0 -z-10 rounded-[inherit] bg-muted shadow-sm backdrop-blur-xl backdrop-saturate-150"
           />
           <button
             aria-label="Download image"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white transition-colors hover:bg-white/15 outline-hidden focus-visible:ring-2 focus-visible:ring-white/60 disabled:pointer-events-none disabled:opacity-45"
-            disabled={!canDownload}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-muted-foreground/10 hover:text-foreground outline-hidden focus-visible:ring-2 focus-visible:ring-ring/70 disabled:pointer-events-none disabled:opacity-45"
+            disabled={!canDownloadCurrentImage}
             type="button"
             onClick={(event) => {
               event.stopPropagation();
-              onDownload();
+              onDownload(currentItem.src);
             }}
           >
             <Download className="h-4 w-4" />
           </button>
-          <div aria-hidden="true" className="h-5 w-px shrink-0 bg-white/15" />
+          <div
+            aria-hidden="true"
+            className="h-5 w-px shrink-0 bg-muted-foreground/15"
+          />
           <ZoomOut aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
           <input
             aria-label="Image zoom"
@@ -1032,12 +1421,12 @@ function ImageZoomOverlay({
             }}
           />
           <ZoomIn aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
-          <span className="min-w-10 text-right text-xs font-medium tabular-nums text-white/90">
+          <span className="min-w-10 text-right text-xs font-medium tabular-nums text-muted-foreground">
             {Math.round(zoom * 100)}%
           </span>
         </div>
       </div>
-      {menu && canDownload ? (
+      {menu && canDownloadCurrentImage ? (
         <ImageDownloadContextMenu
           onDownload={handleMenuDownload}
           position={menu}
@@ -1057,20 +1446,13 @@ function ImageZoomOverlay({
  * body on hover. Keeping the trigger stable and managing the lightbox via
  * React state avoids that repaint.
  */
-function ImageBlock({
-  alt,
-  dim,
-  resolvedSrc,
-  src,
-}: {
-  alt: string | undefined;
-  dim?: string;
-  resolvedSrc: string | undefined;
-  src: string | undefined;
-}) {
-  const [lightboxBox, setLightboxBox] = React.useState<ImageLightboxBox | null>(
-    null,
-  );
+function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
+  const [lightboxState, setLightboxState] = React.useState<{
+    galleryIndex: number;
+    galleryItems?: ImageGalleryItem[];
+    sourceBox: ImageLightboxBox;
+    sourceScope: Element | null;
+  } | null>(null);
   const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
   const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
@@ -1177,9 +1559,25 @@ function ImageBlock({
       }
 
       setMenu(null);
-      setLightboxBox(imageLightboxBoxFromRect(rect));
+      const sourceBox = imageLightboxBoxFromRect(rect);
+      const sourceScope = triggerRef.current
+        ? imageLightboxSourceScopeForTrigger(triggerRef.current)
+        : null;
+      const gallery = triggerRef.current
+        ? visibleImageGalleryForTrigger(
+            triggerRef.current,
+            { alt, dim, resolvedSrc, src, thumbnailBox: sourceBox },
+            sourceScope,
+          )
+        : { galleryIndex: 0, galleryItems: undefined };
+      setLightboxState({
+        galleryIndex: gallery.galleryIndex,
+        galleryItems: gallery.galleryItems,
+        sourceBox,
+        sourceScope,
+      });
     },
-    [resolvedSrc],
+    [alt, dim, resolvedSrc, src],
   );
 
   const handleImageTriggerClick = () => {
@@ -1188,14 +1586,19 @@ function ImageBlock({
     }
   };
 
-  const handleDownload = () => {
-    setMenu(null);
-    if (!src) return;
-    invokeTauri("download_image", { url: src }).catch((err: unknown) => {
-      const msg = err instanceof Error ? err.message : "Download failed";
-      toast.error(msg);
-    });
-  };
+  const handleDownload = React.useCallback(
+    (downloadSrc: string | undefined) => {
+      setMenu(null);
+      if (!downloadSrc) return;
+      invokeTauri("download_image", { url: downloadSrc }).catch(
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : "Download failed";
+          toast.error(msg);
+        },
+      );
+    },
+    [],
+  );
 
   return (
     <>
@@ -1204,8 +1607,13 @@ function ImageBlock({
         aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
         className={cn(
           "mt-1 inline-block min-w-0 max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
-          lightboxBox && "opacity-0",
+          lightboxState && "opacity-0",
         )}
+        data-image-lightbox-resolved-src={resolvedSrc}
+        data-image-lightbox-alt={alt}
+        data-image-lightbox-dim={dim}
+        data-image-lightbox-src={src}
+        data-image-lightbox-trigger=""
         data-testid="message-image-lightbox-trigger"
         ref={triggerRef}
         tabIndex={isHiddenInSpoiler ? -1 : undefined}
@@ -1226,16 +1634,22 @@ function ImageBlock({
         />
       </button>
       {menu && src ? (
-        <ImageDownloadContextMenu onDownload={handleDownload} position={menu} />
+        <ImageDownloadContextMenu
+          onDownload={() => handleDownload(src)}
+          position={menu}
+        />
       ) : null}
-      {lightboxBox && resolvedSrc ? (
+      {lightboxState && resolvedSrc ? (
         <ImageZoomOverlay
           alt={alt}
-          canDownload={Boolean(src)}
+          galleryIndex={lightboxState.galleryIndex}
+          galleryItems={lightboxState.galleryItems}
           onDownload={handleDownload}
-          onClose={() => setLightboxBox(null)}
+          onClose={() => setLightboxState(null)}
           resolvedSrc={resolvedSrc}
-          sourceBox={lightboxBox}
+          sourceBox={lightboxState.sourceBox}
+          sourceScope={lightboxState.sourceScope}
+          src={src}
         />
       ) : null}
     </>
@@ -1806,7 +2220,8 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
-      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
+      const { imetaByUrl, linkPreviewHrefs, onOpenMessageLink } =
+        runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -1818,13 +2233,15 @@ function createMarkdownComponents(
         return <>{children}</>;
       }
 
+      const label = getReactNodeText(children);
+
       // Generic file attachment: a `[filename](url)` link whose href matches an
       // imeta entry with a non-image, non-video MIME. Render a download card
       // instead of a plain link. (Media uses the `img` renderer, not this path.)
       const card = resolveFileCard(
         href ? imetaByUrl?.get(href) : undefined,
         href,
-        getReactNodeText(children),
+        label,
       );
       if (card) {
         return (
@@ -1842,7 +2259,7 @@ function createMarkdownComponents(
       if (href) {
         const messageLinkTarget = resolveMessageLinkRenderTarget({
           href,
-          label: getReactNodeText(children),
+          label,
         });
         if (messageLinkTarget.kind !== "none") {
           if (messageLinkTarget.kind === "pill") {
@@ -1874,10 +2291,26 @@ function createMarkdownComponents(
         // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
       }
+
+      const supportedLinkPreview = href
+        ? parseSupportedLinkPreview(href)
+        : null;
+      const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
+      if (
+        supportedLinkPreview &&
+        linkPreviewHrefs.has(supportedLinkPreview.href) &&
+        isSupportedLinkAutolinkLabel(label, supportedLinkPreview)
+      ) {
+        return null;
+      }
+
       return (
         <a
           {...props}
-          className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80"
+          className={cn(
+            "font-medium underline underline-offset-4 transition-colors",
+            isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
+          )}
           href={href}
           rel="noreferrer"
           target="_blank"
@@ -2097,7 +2530,12 @@ function createMarkdownComponents(
       }
 
       return pubkey ? (
-        <UserProfilePopover pubkey={pubkey} triggerElement="span">
+        <UserProfilePopover
+          botIdenticonValue={mentionLabel}
+          pubkey={pubkey}
+          role={isAgentMention ? "bot" : undefined}
+          triggerElement="span"
+        >
           {mentionNode}
         </UserProfilePopover>
       ) : (
@@ -2211,10 +2649,19 @@ function MarkdownInner({
     },
     [goChannel],
   );
+  const linkPreviews = React.useMemo(
+    () => (interactive ? extractSupportedLinkPreviews(content) : []),
+    [content, interactive],
+  );
+  const linkPreviewHrefs = React.useMemo(
+    () => new Set(linkPreviews.map((preview) => preview.href)),
+    [linkPreviews],
+  );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
     imetaByUrl,
+    linkPreviewHrefs,
     mentionPubkeysByName,
     onOpenChannel,
     onOpenMessageLink,
@@ -2259,6 +2706,8 @@ function MarkdownInner({
     processedContent = `${processedContent}\u200B`;
   }
 
+  const resolvedLinkPreviews = useResolvedLinkPreviews(linkPreviews);
+
   const markdownNode = (
     <ReactMarkdown
       components={components}
@@ -2293,6 +2742,16 @@ function MarkdownInner({
     >
       <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
         {markdownNode}
+        {resolvedLinkPreviews.length > 0 ? (
+          <AttachmentGroup
+            className="max-w-full flex-wrap overflow-visible pb-0"
+            data-link-preview-list=""
+          >
+            {resolvedLinkPreviews.map((preview) => (
+              <LinkPreviewAttachment key={preview.href} preview={preview} />
+            ))}
+          </AttachmentGroup>
+        ) : null}
       </VideoReviewMarkdownContext.Provider>
     </div>
   );

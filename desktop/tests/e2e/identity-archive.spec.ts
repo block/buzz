@@ -36,12 +36,19 @@ async function openAliceProfile(page: import("@playwright/test").Page) {
   await expect(panel).toContainText(ALICE_PUBKEY.slice(0, 8));
 }
 
+async function openProfileSettingsMenu(page: import("@playwright/test").Page) {
+  const trigger = page.getByTestId("user-profile-settings-menu-trigger");
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+}
+
 test.describe("NIP-IA archive button gate", () => {
   test("case 1 — self viewer + self target: Archive visible, no flair", async ({
     page,
   }) => {
     await installMockBridge(page, { relayRole: null, oaOwnerIsMe: false });
     await openSelfProfile(page);
+    await openProfileSettingsMenu(page);
     const archiveButton = page.getByTestId("user-profile-archive-identity");
     await expect(archiveButton).toBeVisible();
     await expect(page.getByTestId("user-profile-archived-flair")).toHaveCount(
@@ -69,6 +76,7 @@ test.describe("NIP-IA archive button gate", () => {
       archivedIdentities: [],
     });
     await openAliceProfile(page);
+    await openProfileSettingsMenu(page);
     await expect(
       page.getByTestId("user-profile-archive-identity"),
     ).toBeVisible();
@@ -83,6 +91,7 @@ test.describe("NIP-IA archive button gate", () => {
       archivedIdentities: [],
     });
     await openAliceProfile(page);
+    await openProfileSettingsMenu(page);
     await expect(
       page.getByTestId("user-profile-archive-identity"),
     ).toBeVisible();
@@ -97,6 +106,9 @@ test.describe("NIP-IA archive button gate", () => {
       archivedIdentities: [],
     });
     await openAliceProfile(page);
+    await expect(
+      page.getByTestId("user-profile-settings-menu-trigger"),
+    ).toHaveCount(0);
     await expect(page.getByTestId("user-profile-archive-identity")).toHaveCount(
       0,
     );
@@ -115,6 +127,7 @@ test.describe("NIP-IA archive button gate", () => {
     });
     await openAliceProfile(page);
     await expect(page.getByTestId("user-profile-archived-flair")).toBeVisible();
+    await openProfileSettingsMenu(page);
     await expect(
       page.getByTestId("user-profile-unarchive-identity"),
     ).toBeVisible();

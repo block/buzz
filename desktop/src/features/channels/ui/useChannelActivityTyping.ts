@@ -85,6 +85,7 @@ export function useChannelActivityTyping({
   }, [channelAgentPubkeys, typingEntries]);
 
   return {
+    agentSessionCandidates: agentCandidates,
     botTypingEntries,
     channelAgentSessionAgents,
     humanTypingPubkeys,

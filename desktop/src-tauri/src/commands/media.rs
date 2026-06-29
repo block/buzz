@@ -10,7 +10,10 @@ use crate::relay::{
     relay_error_message,
 };
 
-use super::media_transcode::{is_video_file, transcode_and_extract_poster};
+use super::media_transcode::{
+    has_heic_extension, is_heic_file, is_video_file, transcode_and_extract_poster,
+    transcode_heic_path_to_jpeg_bytes,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobDescriptor {
@@ -305,6 +308,12 @@ async fn process_picked_path(
     // local attacker from swapping the file between dialog return and read.
     let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
 
+    // Extension hint for HEIC detection — some HEIC files from non-Apple
+    // tooling carry brands outside HEIC_BRANDS, but the `.heic`/`.heif`
+    // extension still tells us the webview can't render them. Computed before
+    // the closure since `path` isn't moved in.
+    let heic_by_ext = has_heic_extension(&path);
+
     // All sync I/O (sniff, transcode, read) runs off the async runtime to
     // avoid blocking Tokio worker threads during long ffmpeg transcodes.
     let (body, poster_bytes) =
@@ -324,6 +333,15 @@ async fn process_picked_path(
                 // the resolved path from becoming stale during the ffmpeg run.
                 let fd_path = fd_real_path(&file)?;
                 let result = transcode_and_extract_poster(&fd_path);
+                drop(file); // release fd only after ffmpeg is done
+                result
+            } else if heic_by_ext || is_heic_file(&header[..n]) {
+                // HEIC/HEIF still: Chromium/the webview can't decode it, so
+                // transcode to JPEG before upload (mirrors mobile). Resolve the
+                // fd's real path so ffmpeg reads the pinned inode, and keep
+                // `file` alive until the transcode finishes.
+                let fd_path = fd_real_path(&file)?;
+                let result = transcode_heic_path_to_jpeg_bytes(&fd_path).map(|jpeg| (jpeg, None));
                 drop(file); // release fd only after ffmpeg is done
                 result
             } else {
@@ -431,6 +449,24 @@ pub async fn upload_media_bytes(
                 std::fs::write(&tmp_input, &data)
                     .map_err(|e| format!("failed to write temp file: {e}"))?;
                 transcode_and_extract_poster(&tmp_input)
+            })();
+            let _ = std::fs::remove_file(&tmp_input);
+            result
+        })
+        .await
+        .map_err(|e| format!("transcode task failed: {e}"))??
+    } else if is_heic_file(&data) {
+        // HEIC/HEIF still pasted/dropped: no filename here, so detection is
+        // magic-bytes only. ffmpeg needs a path, so write to temp, transcode
+        // to JPEG, and clean up. (Mirrors mobile's pre-upload transcode.)
+        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
+            let tmp_input =
+                std::env::temp_dir().join(format!("buzz-drop-{}", uuid::Uuid::new_v4()));
+            // Cleanup guard: remove temp file on ALL exit paths (including write failure).
+            let result = (|| {
+                std::fs::write(&tmp_input, &data)
+                    .map_err(|e| format!("failed to write temp file: {e}"))?;
+                transcode_heic_path_to_jpeg_bytes(&tmp_input).map(|jpeg| (jpeg, None))
             })();
             let _ = std::fs::remove_file(&tmp_input);
             result

@@ -6,6 +6,14 @@ Buzz is a self-hosted team communication platform built on the Nostr protocol (N
 
 The relay is the single source of truth. All reads and writes flow through it. There is no peer-to-peer event exchange, no gossip, no replication — just clients connecting to one relay over WebSocket, and the relay enforcing auth, verifying signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
 
+A Buzz **community** is the tenant-visible workspace selected by the request host.
+The self-hosted default remains one host, one relay process, one implicit
+community. Multi-community deployments move that semantic boundary one level up:
+`req.community = resolve_host(connection.host)` is established before AUTH,
+EVENT, REQ, REST, media, git, search, workflow, or pub/sub handling. Unknown
+hosts fail closed, and NIP-98/API-token stamps must agree with the host-derived
+community rather than overriding it.
+
 Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---
@@ -87,7 +95,7 @@ buzz-admin          (operator CLI: relay membership + key generation)
 buzz-test-client    (integration test harness + manual CLI)
 ```
 
-**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. `buzz-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Buzz relay.
+**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. `buzz-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Buzz relay. In multi-community mode, the relay also owns propagation of `TenantContext`; service crates should receive community-scoped inputs rather than independently deriving tenancy from client-controlled event tags.
 
 ---
 
@@ -158,6 +166,16 @@ Max frame size: 65,536 bytes. Max subscriptions per connection: 1024. Max histor
 ## 3. Connection Lifecycle
 
 Every WebSocket connection follows this exact sequence:
+
+### Step 0: Community Binding
+
+The server resolves `TenantContext` from the request host before any handler can
+observe tenant data. The URL/domain is authoritative for the community, matching
+today's "the relay URL is the workspace" behavior. In single-community mode the
+configured host maps to the default community. In multi-community mode, an
+unknown or unmapped host rejects generically and never falls through to a default
+tenant. Client-supplied `#h` tags are still channel identifiers; they must resolve
+to a channel inside the host-derived community.
 
 ### Step 1: Semaphore Acquire
 
@@ -414,7 +432,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 
 ### buzz-pubsub — Redis Pub/Sub, Presence, Typing
 
-Manages Redis pub/sub fan-out, presence tracking, and typing indicators.
+Manages Redis pub/sub fan-out, presence tracking, and typing indicators. In multi-community mode all tenant-visible keys are prefixed or otherwise partitioned by community (`buzz:{community}:...`) so channel fan-out, presence, typing, and cache invalidation cannot cross hosts.
 
 **Architecture:**
 
@@ -446,7 +464,7 @@ EXPIRE buzz:typing:{channel_id} 60
 
 ### buzz-search — Typesense Integration
 
-Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-API-KEY`.
+Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-API-KEY`. In multi-community mode, indexed documents and every query filter include `community_id`; the shared Typesense collection is infrastructure, not a cross-community result space.
 
 **Collection schema (7 fields):** `id`, `content`, `kind` (int32), `pubkey` (facet), `channel_id` (facet, optional), `created_at` (int64, default sort), `tags_flat` (string[]).
 
@@ -466,7 +484,7 @@ Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-A
 
 Tamper-evident append-only log with SHA-256 hash chaining.
 
-**Hash chain:** each entry stores `prev_hash` (hash of the previous entry). `verify_chain()` walks entries and recomputes hashes to detect tampering. Genesis entry uses `GENESIS_HASH` (64 zeros).
+**Hash chain:** each entry stores `prev_hash` (hash of the previous entry). In multi-community mode audit heads/chains are per-community; operator metrics may aggregate, but tenant-readable audit verification walks one community chain. `verify_chain()` walks entries and recomputes hashes to detect tampering. Genesis entry uses `GENESIS_HASH` (64 zeros).
 
 **Hash covers:** seq (big-endian bytes), timestamp (RFC3339), event_id, event_kind (big-endian), actor_pubkey, action string, channel_id (16 bytes or 16 zero bytes if None), canonical metadata JSON (BTreeMap for deterministic key ordering), prev_hash.
 
@@ -480,7 +498,7 @@ Tamper-evident append-only log with SHA-256 hash chaining.
 
 ### buzz-workflow — YAML-as-Code Automation Engine
 
-Parses, validates, and executes channel-scoped workflow definitions.
+Parses, validates, and executes channel-scoped workflow definitions. In multi-community mode workflow definitions, runs, approvals, webhook routes, and schedules inherit the host-derived community and evaluate triggers only against events in that community.
 
 **Workflow definition structure:**
 ```yaml
@@ -824,26 +842,26 @@ Docker Compose provides the full local development stack. All services include h
 
 | Table | Purpose |
 |-------|---------|
-| `events` | All stored Nostr events; monthly range-partitioned by `PARTITION BY RANGE` on `created_at` |
-| `channels` | Channel records (type, visibility, canvas, topic) |
+| `events` | All stored Nostr events; monthly range-partitioned by `PARTITION BY RANGE` on `created_at`; multi-community mode keys every tenant-visible event by `community_id` |
+| `channels` | Channel records (type, visibility, canvas, topic); `community_id` is immutable after creation in multi-community mode |
 | `channel_members` | Membership with roles; soft-delete via `removed_at` |
-| `workflows` | Workflow definitions (YAML stored as canonical JSON) |
+| `workflows` | Workflow definitions (YAML stored as canonical JSON); scoped by community in multi-community mode |
 | `workflow_runs` | Execution records with trigger context and trace |
 | `workflow_approvals` | Approval gates (token stored as SHA-256 hash) |
-| `audit_log` | Hash-chain audit entries |
+| `audit_log` | Hash-chain audit entries; per-community chain/head in multi-community mode |
 | `delivery_log` | Delivery tracking (partitioned; Rust module pending) |
 
 ### Redis Key Patterns
 
 | Pattern | Type | TTL | Purpose |
 |---------|------|-----|---------|
-| `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out |
-| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status |
-| `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window) |
+| `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out (single-community form; shared multi-community Redis must use `buzz:{community}:channel:{uuid}` or equivalent) |
+| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status (single-community form; shared multi-community Redis must scope by community) |
+| `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window; shared multi-community Redis must scope by community) |
 
 ### Typesense Collection
 
-Single collection (`events` by default, configurable via `TYPESENSE_COLLECTION`). Schema: `id`, `content`, `kind` (int32), `pubkey` (facet), `channel_id` (facet, optional), `created_at` (int64, default sort), `tags_flat` (string[]).
+Single collection (`events` by default, configurable via `TYPESENSE_COLLECTION`). Schema today: `id`, `content`, `kind` (int32), `pubkey` (facet), `channel_id` (facet, optional), `created_at` (int64, default sort), `tags_flat` (string[]). Multi-community mode adds faceted `community_id` and either prefixes document IDs with community or makes all upsert/delete/refetch paths carry community context.
 
 ---
 

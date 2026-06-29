@@ -46,6 +46,8 @@ type MessageThreadPanelProps = {
   currentPubkey?: string;
   disabled?: boolean;
   firstUnreadReplyId?: string | null;
+  huddleMemberPubkeys?: readonly string[];
+  huddleMemberPubkeysPending?: boolean;
   layout?: "standalone" | "split";
   editTarget?: {
     author: string;
@@ -88,6 +90,7 @@ type MessageThreadPanelProps = {
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
+  transparentChrome?: boolean;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
@@ -103,6 +106,7 @@ type MessageThreadPanelSkeletonProps = {
   layout?: "standalone" | "split";
   onClose: () => void;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 function canManageMessage(
@@ -149,6 +153,10 @@ function getActiveContinuationDepths({
   const depths: number[] = [];
 
   for (const ancestor of ancestors) {
+    if (ancestor.message.depth === 0) {
+      continue;
+    }
+
     const childDepth = ancestor.message.depth + 1;
     const pathChild =
       message.depth === childDepth
@@ -221,6 +229,7 @@ export function MessageThreadPanelSkeleton({
   layout = "standalone",
   onClose,
   widthPx,
+  transparentChrome = false,
 }: MessageThreadPanelSkeletonProps) {
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
@@ -260,7 +269,7 @@ export function MessageThreadPanelSkeleton({
   const threadBody = (
     <div
       className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
+        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
@@ -292,7 +301,9 @@ export function MessageThreadPanelSkeleton({
   if (isSplitLayout) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
+          {threadHeaderContent}
+        </AuxiliaryPanelHeader>
         {threadBody}
         <ThreadComposerSkeleton />
       </div>
@@ -342,6 +353,8 @@ export function MessageThreadPanel({
   currentPubkey,
   disabled = false,
   firstUnreadReplyId,
+  huddleMemberPubkeys,
+  huddleMemberPubkeysPending = false,
   layout = "standalone",
   editTarget,
   isSending,
@@ -375,13 +388,10 @@ export function MessageThreadPanel({
   threadTypingPubkeys,
   toolbarExtraActions,
   widthPx,
+  transparentChrome = false,
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
-  // Threads don't paginate older history, so this sentinel is never observed
-  // (the hook's older-history effect bails without a `fetchOlder`). It exists
-  // only to satisfy the hook's required ref contract.
-  const threadTopSentinelRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
   const [hoveredCollapseBranchId, setHoveredCollapseBranchId] = React.useState<
     string | null
@@ -602,7 +612,6 @@ export function MessageThreadPanel({
       messages: threadMessages,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
-      sentinelRef: threadTopSentinelRef,
       targetMessageId: scrollTargetId,
     });
 
@@ -613,7 +622,7 @@ export function MessageThreadPanel({
   const threadScrollRegion = (
     <div
       className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
+        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[3.25rem]",
       )}
@@ -622,7 +631,6 @@ export function MessageThreadPanel({
       ref={threadBodyRef}
     >
       <div ref={threadContentRef}>
-        <div ref={threadTopSentinelRef} aria-hidden className="h-px" />
         <div
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
           data-testid="message-thread-head"
@@ -632,27 +640,12 @@ export function MessageThreadPanel({
               actionBarPlacement="inside"
               agentPubkeys={agentPubkeys}
               channelId={channelId}
-              collapseDescendantsLabel="Collapse thread"
-              connectDescendants={
-                shouldShowThreadBranchGuides &&
-                !isThreadHeadRepliesCollapsed &&
-                deferredThreadReplies.length > 0
-              }
-              highlightDescendantRail={
-                shouldShowThreadBranchGuides &&
-                !isThreadHeadRepliesCollapsed &&
-                highlightedBranch?.id === threadHead.id
-              }
+              huddleMemberPubkeys={huddleMemberPubkeys}
+              huddleMemberPubkeysPending={huddleMemberPubkeysPending}
               isFollowingThread={isFollowingThread}
               isUnread={isMessageUnreadById?.(threadHead.id)}
               layoutVariant="thread-reply"
               message={threadHead}
-              onCollapseDescendants={
-                isThreadHeadRepliesCollapsed
-                  ? undefined
-                  : collapseThreadHeadReplies
-              }
-              onCollapseDescendantsHoverChange={handleCollapseBranchHoverChange}
               onDelete={
                 onDelete && canManageMessage(threadHead, currentPubkey)
                   ? onDelete
@@ -736,7 +729,7 @@ export function MessageThreadPanel({
                   return (
                     <div
                       className={cn(
-                        "flex flex-col gap-0",
+                        "content-visibility-auto-interactive flex flex-col gap-0",
                         entry.summary &&
                           "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}
@@ -767,6 +760,8 @@ export function MessageThreadPanel({
                         }
                         highlightThreadLineDepths={highlightedLineDepths}
                         hoverBackground={!entry.summary}
+                        huddleMemberPubkeys={huddleMemberPubkeys}
+                        huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}
@@ -962,7 +957,9 @@ export function MessageThreadPanel({
   if (isSplitLayout) {
     return (
       <div className="relative flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
+          {threadHeaderContent}
+        </AuxiliaryPanelHeader>
         {threadScrollRegion}
         {threadFooter}
       </div>

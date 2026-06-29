@@ -44,6 +44,13 @@ export type ActiveTurnSummary = {
   anchorAt: number;
 };
 
+/** One channel with active agent work, aggregated across agents. */
+export type ActiveChannelTurnSummary = {
+  channelId: string;
+  anchorAt: number;
+  agentCount: number;
+};
+
 // Module-level state: agentPubkey → turnId → ActiveTurn
 const activeTurnsByAgent = new Map<string, Map<string, ActiveTurn>>();
 const listeners = new Set<() => void>();
@@ -68,6 +75,7 @@ const clockOffsetByAgent = new Map<string, number>();
 // Cached snapshots for useSyncExternalStore reference stability.
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
+let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
 
 // Composite watermark per agent: the newest observer event processed, by
 // (timestamp, seq) ordering. An event is processed only if it is strictly
@@ -87,6 +95,7 @@ let pruneInterval: ReturnType<typeof setInterval> | null = null;
 
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
+  cachedChannelTurnSummaries = null;
 }
 
 function notifyListeners() {
@@ -427,6 +436,53 @@ export function getActiveTurnsForAgent(
 }
 
 const EMPTY_TURNS: ActiveTurnSummary[] = [];
+const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
+
+/**
+ * Returns active working channels across all tracked agents, sorted by
+ * channelId and anchored to the earliest live turn in each channel.
+ */
+export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
+  if (cachedChannelTurnSummaries) return cachedChannelTurnSummaries;
+  if (activeTurnsByAgent.size === 0) return EMPTY_CHANNEL_TURNS;
+
+  const summaries = new Map<
+    string,
+    { anchorAt: number; agentPubkeys: Set<string> }
+  >();
+
+  for (const [agentKey, agentTurns] of activeTurnsByAgent) {
+    if (agentTurns.size === 0) continue;
+    const offset = clockOffsetByAgent.get(agentKey) ?? 0;
+
+    for (const turn of agentTurns.values()) {
+      const anchorAt = turn.startedAt + offset;
+      const summary = summaries.get(turn.channelId);
+      if (!summary) {
+        summaries.set(turn.channelId, {
+          anchorAt,
+          agentPubkeys: new Set([agentKey]),
+        });
+        continue;
+      }
+
+      summary.agentPubkeys.add(agentKey);
+      if (anchorAt < summary.anchorAt) {
+        summary.anchorAt = anchorAt;
+      }
+    }
+  }
+
+  const result = [...summaries.entries()]
+    .map(([channelId, summary]) => ({
+      channelId,
+      anchorAt: summary.anchorAt,
+      agentCount: summary.agentPubkeys.size,
+    }))
+    .sort((a, b) => a.channelId.localeCompare(b.channelId));
+  cachedChannelTurnSummaries = result;
+  return result;
+}
 
 /**
  * Synchronize the active-turns store with the latest observer events for a
@@ -458,6 +514,17 @@ export function useActiveAgentTurns(
 }
 
 /**
+ * Hook: returns channels with active agent work across all tracked agents.
+ * Re-renders when the channel set changes — not when the clock ticks.
+ */
+export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
+  return React.useSyncExternalStore(
+    subscribeActiveAgentTurns,
+    getActiveTurnsByChannel,
+  );
+}
+
+/**
  * Bridge hook: processes observer events into the active-turns store.
  * Should be called by a parent component that has access to the observer events.
  */
@@ -483,6 +550,7 @@ export function resetActiveAgentTurnsStore() {
   lastProcessed.clear();
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
+  cachedChannelTurnSummaries = null;
   terminalAtByAgent.clear();
   notifyListeners();
 }

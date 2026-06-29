@@ -34,6 +34,7 @@ pub mod preprocessing;
 pub mod relay_api;
 pub mod state;
 pub mod stt;
+pub mod transcription;
 pub mod tts;
 pub mod wire;
 
@@ -60,6 +61,7 @@ pub(super) fn drain_until_shutdown<T>(
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
 pub use state::{HuddleJoinInfo, HuddlePhase, HuddleState, VoiceInputMode};
+pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
 
 // ── Imports ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +76,22 @@ use relay_api::{
     count_human_members, fetch_channel_members, parse_channel_uuid, validate_pubkey_hex,
     MAX_HUDDLE_AGENTS,
 };
+
+fn normalize_huddle_channel_name(candidate: Option<String>, fallback: &str) -> String {
+    let normalized = candidate
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let name = if normalized.is_empty() {
+        fallback
+    } else {
+        normalized.as_str()
+    };
+
+    name.chars().take(80).collect()
+}
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
@@ -95,6 +113,7 @@ pub async fn set_voice_input_mode(
         old_mode != mode
             && matches!(hs.phase, HuddlePhase::Connected | HuddlePhase::Active)
             && hs.stt_pipeline.is_some()
+            && hs.transcription_enabled
     };
 
     if needs_restart {
@@ -110,6 +129,11 @@ pub async fn set_voice_input_mode(
             }
         }
     }
+
+    // A mode switch changes whether the global shortcut should be reserved but
+    // does not otherwise emit; emit here so the frontend sees the new mode and
+    // the shortcut registration is re-synced.
+    state.emit_huddle_state_changed();
 
     Ok(())
 }
@@ -136,6 +160,7 @@ pub fn get_voice_input_mode(state: State<'_, AppState>) -> Result<VoiceInputMode
 pub async fn start_huddle(
     parent_channel_id: String,
     member_pubkeys: Vec<String>,
+    channel_name: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<HuddleJoinInfo, String> {
     // Validate inputs at the Tauri boundary.
@@ -175,7 +200,8 @@ pub async fn start_huddle(
     let ephemeral_uuid = Uuid::new_v4();
     let ephemeral_channel_id = ephemeral_uuid.to_string();
     let short_id = &ephemeral_channel_id[..8];
-    let channel_name = format!("huddle-{short_id}");
+    let fallback_channel_name = format!("huddle-{short_id}");
+    let channel_name = normalize_huddle_channel_name(channel_name, &fallback_channel_name);
 
     // All steps wrapped so we can roll back on ANY failure, including step 1.
     // channel_was_created tracks whether we need to archive on rollback.
@@ -688,9 +714,13 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         }
     }
     // Re-read after potential cleanup.
-    let (has_stt, has_tts) = {
+    let (has_stt, has_tts, transcription_enabled) = {
         let hs = state.huddle()?;
-        (hs.stt_pipeline.is_some(), hs.tts_pipeline.is_some())
+        (
+            hs.stt_pipeline.is_some(),
+            hs.tts_pipeline.is_some(),
+            hs.transcription_enabled,
+        )
     };
 
     // Check if models just became ready (one-shot flags).
@@ -708,7 +738,7 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         }
     }
 
-    if !has_stt && (stt_ready || models::is_stt_ready()) {
+    if transcription_enabled && !has_stt && (stt_ready || models::is_stt_ready()) {
         if let Some(eph_id) = &ephemeral_channel_id {
             if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
                 eprintln!("buzz-desktop: STT hotstart failed: {e}");
@@ -764,27 +794,6 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
     }
 
     Ok(())
-}
-
-/// Start the STT pipeline for the active huddle.
-///
-/// Delegates to `maybe_start_stt_pipeline` — returns `Err` if models are not
-/// ready or no huddle is active. Safe to call multiple times: replaces the
-/// existing pipeline if already running.
-#[tauri::command]
-pub async fn start_stt_pipeline(state: State<'_, AppState>) -> Result<(), String> {
-    let ephemeral_channel_id = {
-        let hs = state.huddle()?;
-        hs.ephemeral_channel_id
-            .clone()
-            .ok_or("no active huddle — start or join a huddle first")?
-    };
-
-    match maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("STT model not ready".to_string()),
-        Err(e) => Err(e),
-    }
 }
 
 /// Trigger a background download of voice models (Parakeet STT + Pocket TTS).

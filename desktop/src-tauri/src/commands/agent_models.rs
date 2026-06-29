@@ -1,6 +1,10 @@
-use std::collections::HashSet;
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+};
 
 use nostr::Keys;
+use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -9,9 +13,9 @@ use crate::{
         build_managed_agent_summary, current_instance_id, default_agent_workdir,
         find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
         managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
-        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
-        UpdateManagedAgentResponse,
+        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
+        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -27,7 +31,7 @@ pub async fn get_agent_models(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
-    let (resolved_acp, agent_command, agent_args, persisted_model, merged_env) = {
+    let (resolved_acp, agent_command, agent_args, persisted_model, effective_provider, merged_env) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -65,26 +69,542 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| effective_command.clone());
 
-        // Same env layering as runtime spawn: persona env < agent env.
-        // Model discovery needs the user's credentials. Fail closed on
-        // persona-resolution errors so a corrupt personas.json doesn't
-        // produce a model list as if the persona had no credentials.
-        let persona_env =
-            crate::managed_agents::resolve_persona_env(&app, record.persona_id.as_deref())?;
-        let env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+        // ModelPicker can persist a selected model but not rewrite the saved
+        // provider/env snapshot, and runtime spawn reads that same snapshot.
+        // Discover models against the record snapshot so an out-of-date persona
+        // cannot offer models for a provider this agent will not launch with.
+        let discovery = saved_agent_model_discovery_config(record, &effective_command);
 
-        // Resolve the effective model from the linked persona so the ModelPicker
-        // dropdown shows the current persona model as selected.
-        let (_prompt, effective_model, _provider) = resolve_effective_prompt_model_provider(
-            record.persona_id.as_deref(),
-            &personas,
-            record.system_prompt.clone(),
-            record.model.clone(),
-        );
-
-        (resolved, resolved_agent, args, effective_model, env)
+        (
+            resolved,
+            resolved_agent,
+            args,
+            discovery.model,
+            discovery.provider,
+            discovery.env,
+        )
     }; // store lock released — subprocess runs without holding the lock
 
+    if let Some(models) = discover_openai_compatible_models(
+        &state.http_client,
+        effective_provider.as_deref(),
+        &merged_env,
+        persisted_model.clone(),
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
+    if let Some(models) = discover_anthropic_models(
+        &state.http_client,
+        effective_provider.as_deref(),
+        &merged_env,
+        persisted_model.clone(),
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
+    run_agent_models_command(
+        resolved_acp,
+        agent_command,
+        agent_args,
+        persisted_model,
+        merged_env,
+    )
+    .await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SavedAgentModelDiscoveryConfig {
+    model: Option<String>,
+    provider: Option<String>,
+    env: BTreeMap<String, String>,
+}
+
+fn saved_agent_model_discovery_config(
+    record: &crate::managed_agents::ManagedAgentRecord,
+    agent_command: &str,
+) -> SavedAgentModelDiscoveryConfig {
+    let mut derived_env = BTreeMap::new();
+    if let Some(meta) = known_acp_runtime(agent_command) {
+        for (key, value) in crate::managed_agents::runtime_metadata_env_vars(
+            meta.model_env_var,
+            meta.provider_env_var,
+            meta.provider_locked,
+            record.model.as_deref(),
+            record.provider.as_deref(),
+        ) {
+            derived_env.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    SavedAgentModelDiscoveryConfig {
+        model: record.model.clone(),
+        provider: record.provider.clone(),
+        env: crate::managed_agents::merged_user_env(&derived_env, &record.env_vars),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverAgentModelsInput {
+    #[serde(default)]
+    pub acp_command: Option<String>,
+    pub agent_command: String,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
+}
+
+/// Query available models from an unsaved agent configuration.
+///
+/// This powers the new-agent dialog before a persona/agent record exists. It
+/// mirrors the saved-agent discovery command, but derives runtime/provider/env
+/// from the current form state instead of loading a persisted record.
+#[tauri::command]
+pub async fn discover_agent_models(
+    input: DiscoverAgentModelsInput,
+    state: State<'_, AppState>,
+) -> Result<AgentModelsResponse, String> {
+    crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+
+    let acp_command = input
+        .acp_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ACP_COMMAND);
+    let resolved_acp = resolve_command(acp_command)
+        .ok_or_else(|| missing_command_message(acp_command, "ACP harness command"))?;
+
+    let agent_command = input.agent_command.trim();
+    if agent_command.is_empty() {
+        return Err("agent command is required for model discovery".to_string());
+    }
+    let agent_args = normalize_agent_args(agent_command, input.agent_args);
+    let resolved_agent = resolve_command(agent_command)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| agent_command.to_string());
+
+    let mut derived_env = BTreeMap::new();
+    if let Some(meta) = known_acp_runtime(agent_command) {
+        let provider = input
+            .provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if !meta.provider_locked {
+            if let (Some(env_key), Some(provider)) = (meta.provider_env_var, provider) {
+                derived_env.insert(env_key.to_string(), provider.to_string());
+            }
+        }
+    }
+    let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
+
+    if let Some(models) = discover_openai_compatible_models(
+        &state.http_client,
+        input.provider.as_deref(),
+        &merged_env,
+        None,
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
+    if let Some(models) = discover_anthropic_models(
+        &state.http_client,
+        input.provider.as_deref(),
+        &merged_env,
+        None,
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
+    run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelListResponse {
+    data: Vec<OpenAiModelListItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelListItem {
+    id: String,
+    #[serde(default)]
+    created: Option<i64>,
+}
+
+fn is_openai_compatible_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("openai" | "openai-compat")
+    )
+}
+
+#[cfg(test)]
+fn openai_compatible_models_url(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_value(env, "OPENAI_COMPAT_BASE_URL")
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn openai_compatible_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_or_process_value(env, "OPENAI_COMPAT_BASE_URL")
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    format!("{}/models", base_url.trim_end_matches('/'))
+}
+
+fn env_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env.get(key)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env_value(env, key).or_else(|| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn redaction_env_with_value(
+    env: &BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) -> BTreeMap<String, String> {
+    let mut redaction_env = env.clone();
+    redaction_env.insert(key.to_string(), value.to_string());
+    redaction_env
+}
+
+fn is_agent_text_model_id(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    if [
+        "audio",
+        "dall-e",
+        "embedding",
+        "image",
+        "moderation",
+        "realtime",
+        "speech",
+        "transcribe",
+        "tts",
+        "whisper",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return false;
+    }
+
+    lower.starts_with("gpt-") || lower.starts_with('o') || lower.starts_with("chatgpt-")
+}
+
+fn openai_dated_snapshot_alias(id: &str) -> Option<String> {
+    let (base, date) = id.rsplit_once('-')?;
+    if date.len() != 2 || !date.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let (base, month) = base.rsplit_once('-')?;
+    if month.len() != 2 || !month.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let (base, year) = base.rsplit_once('-')?;
+    if year.len() != 4 || !year.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(base.to_string())
+}
+
+fn openai_model_display_name(id: &str) -> String {
+    let canonical = openai_dated_snapshot_alias(id).unwrap_or_else(|| id.to_string());
+    if let Some(rest) = canonical.strip_prefix("chatgpt-") {
+        return format!("ChatGPT {}", title_case_model_suffix(rest, false));
+    }
+    if let Some(rest) = canonical.strip_prefix("gpt-") {
+        return format!("GPT-{}", title_case_model_suffix(rest, true));
+    }
+
+    canonical
+}
+
+fn title_case_model_suffix(value: &str, preserve_first_separator: bool) -> String {
+    value
+        .split('-')
+        .enumerate()
+        .map(|(index, part)| {
+            let part = if part.eq_ignore_ascii_case("pro") {
+                "Pro".to_string()
+            } else if part.eq_ignore_ascii_case("mini") {
+                "mini".to_string()
+            } else if part.eq_ignore_ascii_case("nano") {
+                "nano".to_string()
+            } else {
+                part.to_string()
+            };
+
+            if preserve_first_separator && index == 0 {
+                part
+            } else if index == 0 {
+                part
+            } else {
+                format!(" {part}")
+            }
+        })
+        .collect::<String>()
+}
+
+fn normalize_openai_compatible_models(
+    response: OpenAiModelListResponse,
+    provider: Option<&str>,
+) -> Vec<AgentModelInfo> {
+    let mut seen = HashSet::new();
+    let mut items = response.data;
+    let filter_to_openai_text_models = matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("openai")
+    );
+    let all_ids = items
+        .iter()
+        .map(|item| item.id.clone())
+        .collect::<HashSet<String>>();
+    items.sort_by(|left, right| {
+        right
+            .created
+            .cmp(&left.created)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    items
+        .into_iter()
+        .filter(|item| !filter_to_openai_text_models || is_agent_text_model_id(&item.id))
+        .filter(|item| match openai_dated_snapshot_alias(&item.id) {
+            Some(alias) if filter_to_openai_text_models => !all_ids.contains(&alias),
+            Some(_) | None => true,
+        })
+        .filter(|item| seen.insert(item.id.clone()))
+        .map(|item| AgentModelInfo {
+            name: Some(openai_model_display_name(&item.id)),
+            id: item.id,
+            description: None,
+        })
+        .collect()
+}
+
+async fn discover_openai_compatible_models(
+    client: &reqwest::Client,
+    provider: Option<&str>,
+    env: &BTreeMap<String, String>,
+    selected_model: Option<String>,
+) -> Result<Option<AgentModelsResponse>, String> {
+    if !is_openai_compatible_provider(provider) {
+        return Ok(None);
+    }
+
+    let api_key = env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
+        .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?;
+    let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
+    let url = openai_compatible_models_url_for_discovery(env);
+    let response = client
+        .get(&url)
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .map_err(|error| format!("OpenAI model discovery request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body = crate::managed_agents::redact_env_values_in(&body, &redaction_env);
+        return Err(format!("OpenAI model discovery HTTP {status}: {body}"));
+    }
+
+    let response = response
+        .json::<OpenAiModelListResponse>()
+        .await
+        .map_err(|error| format!("OpenAI model discovery response parse failed: {error}"))?;
+    let models = normalize_openai_compatible_models(response, provider);
+    if models.is_empty() {
+        return Err("OpenAI model discovery returned no compatible text models".to_string());
+    }
+
+    Ok(Some(AgentModelsResponse {
+        agent_name: provider.unwrap_or("openai").trim().to_string(),
+        agent_version: "models-api".to_string(),
+        models,
+        agent_default_model: None,
+        selected_model,
+        supports_switching: true,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelListResponse {
+    data: Vec<AnthropicModelListItem>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    last_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelListItem {
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+fn is_anthropic_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("anthropic")
+    )
+}
+
+#[cfg(test)]
+fn anthropic_models_url(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_value(env, "ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+    anthropic_models_url_from_base(&base_url)
+}
+
+fn anthropic_models_url_for_discovery(env: &BTreeMap<String, String>) -> String {
+    let base_url = env_or_process_value(env, "ANTHROPIC_BASE_URL")
+        .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+    anthropic_models_url_from_base(&base_url)
+}
+
+fn anthropic_models_url_from_base(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/v1") {
+        format!("{base_url}/models")
+    } else {
+        format!("{base_url}/v1/models")
+    }
+}
+
+fn normalize_anthropic_models(response: AnthropicModelListResponse) -> Vec<AgentModelInfo> {
+    let mut seen = HashSet::new();
+    response
+        .data
+        .into_iter()
+        .filter(|item| seen.insert(item.id.clone()))
+        .map(|item| AgentModelInfo {
+            id: item.id,
+            name: item.display_name,
+            description: None,
+        })
+        .collect()
+}
+
+async fn fetch_anthropic_model_page(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    after_id: Option<&str>,
+    env: &BTreeMap<String, String>,
+) -> Result<AnthropicModelListResponse, String> {
+    let mut request = client
+        .get(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01");
+    if let Some(after_id) = after_id {
+        request = request.query(&[("after_id", after_id)]);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("Anthropic model discovery request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body = crate::managed_agents::redact_env_values_in(&body, env);
+        return Err(format!("Anthropic model discovery HTTP {status}: {body}"));
+    }
+
+    response
+        .json::<AnthropicModelListResponse>()
+        .await
+        .map_err(|error| format!("Anthropic model discovery response parse failed: {error}"))
+}
+
+async fn discover_anthropic_models(
+    client: &reqwest::Client,
+    provider: Option<&str>,
+    env: &BTreeMap<String, String>,
+    selected_model: Option<String>,
+) -> Result<Option<AgentModelsResponse>, String> {
+    if !is_anthropic_provider(provider) {
+        return Ok(None);
+    }
+
+    let api_key = env_or_process_value(env, "ANTHROPIC_API_KEY")
+        .ok_or_else(|| "config: ANTHROPIC_API_KEY required".to_string())?;
+    let redaction_env = redaction_env_with_value(env, "ANTHROPIC_API_KEY", &api_key);
+    let url = anthropic_models_url_for_discovery(env);
+    let mut models = Vec::new();
+    let mut after_id: Option<String> = None;
+    for _ in 0..20 {
+        let response =
+            fetch_anthropic_model_page(client, &url, &api_key, after_id.as_deref(), &redaction_env)
+                .await?;
+        let has_more = response.has_more;
+        after_id = response.last_id.clone();
+        models.extend(normalize_anthropic_models(response));
+        if !has_more {
+            break;
+        }
+        if after_id.as_deref().unwrap_or_default().is_empty() {
+            return Err("Anthropic model discovery pagination did not return last_id".to_string());
+        }
+    }
+    let mut seen = HashSet::new();
+    models.retain(|model| seen.insert(model.id.clone()));
+    if models.is_empty() {
+        return Err("Anthropic model discovery returned no models".to_string());
+    }
+
+    Ok(Some(AgentModelsResponse {
+        agent_name: provider.unwrap_or("anthropic").trim().to_string(),
+        agent_version: "models-api".to_string(),
+        models,
+        agent_default_model: None,
+        selected_model,
+        supports_switching: true,
+    }))
+}
+
+async fn run_agent_models_command(
+    resolved_acp: PathBuf,
+    agent_command: String,
+    agent_args: Vec<String>,
+    persisted_model: Option<String>,
+    merged_env: BTreeMap<String, String>,
+) -> Result<AgentModelsResponse, String> {
     // Clone the env map for redaction below — `merged_env` is moved
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.
@@ -111,6 +631,11 @@ pub async fn get_agent_models(
                     cmd.env(key, value);
                 }
             }
+        }
+        // Mirror runtime spawn: internal builds may bake Databricks host/model
+        // defaults. User-provided env below still wins.
+        for (key, value) in crate::managed_agents::build_databricks_defaults() {
+            cmd.env(key, value);
         }
         // User env layering — written LAST so it overrides any Buzz-set env above.
         for (k, v) in &merged_env {
@@ -415,3 +940,7 @@ fn normalize_agent_models(
         supports_switching,
     }
 }
+
+#[cfg(test)]
+#[path = "agent_models_tests.rs"]
+mod tests;

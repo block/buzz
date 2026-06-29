@@ -67,9 +67,11 @@ const overrides = new Map([
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
+  // alias-preservation coverage extends that matrix so create-time persona
+  // agents keep an installed runtime alias when the primary command is absent.
   // types.rs adds the persona/instance harness fields. Load-bearing, not
   // generic debt.
-  ["src-tauri/src/managed_agents/discovery.rs", 1043],
+  ["src-tauri/src/managed_agents/discovery.rs", 1085],
   ["src-tauri/src/managed_agents/types.rs", 1037],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
@@ -79,11 +81,6 @@ const overrides = new Map([
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1449],
-  // persona-events rebase: boot-time event-sync wiring (run_boot_migrations
-  // syncs team-dir edits before all personas.json readers; run_event_sync
-  // signs the persona/team retention events post-identity) layered on top of
-  // main's growth. Load-bearing feature growth, queued to split with the list.
-  ["src-tauri/src/lib.rs", 1035],
   // Project git workflow exploration: branch/push UI and repository status
   // plumbing grew the panel slightly past the default ceiling. Keep this narrow
   // while the project surface is split into smaller components.

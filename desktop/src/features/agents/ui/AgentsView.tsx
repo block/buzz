@@ -22,8 +22,10 @@ import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
+import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 
 export function AgentsView() {
+  const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamActions = useTeamActions(
@@ -57,15 +59,13 @@ export function AgentsView() {
 
   return (
     <>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-4 pt-4 sm:px-6">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
-          <div className="flex flex-col gap-6">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
+          <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
-              channelIdToName={agents.channelIdToName}
-              channelsByPubkey={agents.channelsByPubkey}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error
@@ -73,21 +73,8 @@ export function AgentsView() {
               }
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
-              logContent={agents.managedAgentLogQuery.data?.content ?? null}
-              logError={
-                agents.managedAgentLogQuery.error instanceof Error
-                  ? agents.managedAgentLogQuery.error
-                  : null
-              }
-              logLoading={agents.managedAgentLogQuery.isLoading}
-              personaLabelsById={personas.personaLabelsById}
-              presenceLoaded={agents.managedPresenceQuery.isSuccess}
-              presenceLookup={agents.managedPresenceQuery.data ?? {}}
-              onAddToChannel={(agent) => {
-                agents.setActionNoticeMessage(null);
-                agents.setActionErrorMessage(null);
-                agents.setAgentToAddToChannel(agent);
-              }}
+              startingAgentPubkey={agents.startingAgentPubkey}
+              startingPersonaId={agents.startingPersonaId}
               onBulkRemoveStopped={() => {
                 void agents.handleBulkRemoveStopped();
               }}
@@ -97,23 +84,18 @@ export function AgentsView() {
               onCreateAgent={() => {
                 agents.setIsCreateOpen(true);
               }}
-              onDeleteAgent={(pubkey) => {
-                void agents.handleDelete(pubkey);
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
               }}
-              onSelectLogAgent={agents.setLogAgentPubkey}
+              onOpenPersonaProfile={(persona) => {
+                openPersonaProfilePanel?.(persona);
+              }}
               onStartAgent={(pubkey) => {
                 void agents.handleStart(pubkey);
               }}
-              onStopAgent={(pubkey) => {
-                void agents.handleStop(pubkey);
+              onStartPersona={(persona) => {
+                void agents.handleStartPersona(persona);
               }}
-              onToggleStartOnAppLaunch={(pubkey, startOnAppLaunch) => {
-                void agents.handleToggleStartOnAppLaunch(
-                  pubkey,
-                  startOnAppLaunch,
-                );
-              }}
-              selectedLogAgentPubkey={agents.logAgentPubkey}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
               personas={personas.libraryPersonas}
@@ -136,13 +118,6 @@ export function AgentsView() {
               isPersonasPending={personas.isPending}
               onCreatePersona={personas.openCreate}
               onChooseCatalog={personas.openCatalog}
-              onDuplicatePersona={personas.openDuplicate}
-              onEditPersona={personas.openEdit}
-              onExportPersona={personas.handleExport}
-              onDeactivatePersona={(persona) => {
-                void personas.handleSetActive(persona, false, "library");
-              }}
-              onDeletePersona={personas.openDelete}
               onImportPersonaFile={(fileBytes, fileName) => {
                 void personas.handleImportFile(fileBytes, fileName);
               }}
@@ -220,6 +195,16 @@ export function AgentsView() {
           }}
         />
       ) : null}
+      {personas.createdAgent ? (
+        <SecretRevealDialog
+          created={personas.createdAgent}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setCreatedAgent(null);
+            }
+          }}
+        />
+      ) : null}
       {personas.personaDialogState ? (
         <PersonaDialog
           description={personas.personaDialogState.description}
@@ -234,10 +219,7 @@ export function AgentsView() {
           isImportPending={
             personas.personaImportActions.isApplyingPersonaImportUpdate
           }
-          isPending={
-            personas.createPersonaMutation.isPending ||
-            personas.updatePersonaMutation.isPending
-          }
+          isPending={personas.isPending}
           runtimes={personas.acpRuntimesQuery.data ?? []}
           runtimesLoading={personas.acpRuntimesQuery.isLoading}
           onImportUpdateFile={

@@ -11,12 +11,14 @@ mod export_util;
 mod identity;
 mod identity_archive;
 mod legacy_storage;
+mod link_preview;
 mod media;
 mod media_download;
 mod media_transcode;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
 mod messages;
+mod notifications;
 pub mod pairing;
 mod personas;
 mod prevent_sleep;
@@ -41,11 +43,13 @@ pub use engrams::*;
 pub use identity::*;
 pub use identity_archive::*;
 pub use legacy_storage::*;
+pub use link_preview::*;
 pub use media::*;
 pub use media_download::*;
 #[cfg(feature = "mesh-llm")]
 pub use mesh_llm::*;
 pub use messages::*;
+pub use notifications::*;
 pub use pairing::*;
 pub use personas::*;
 pub use prevent_sleep::*;

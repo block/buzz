@@ -6,7 +6,6 @@ export type AgentGroupRowsProps = {
   agents: ManagedAgent[];
   channelIdToName: Record<string, string>;
   channelsByPubkey: Record<string, { id: string; name: string }[]>;
-  isActionPending: boolean;
   logContent: string | null;
   logError: Error | null;
   logLoading: boolean;
@@ -14,19 +13,14 @@ export type AgentGroupRowsProps = {
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
   selectedLogAgentPubkey: string | null;
-  onAddToChannel: (agent: ManagedAgent) => void;
-  onDelete: (pubkey: string) => void;
+  onOpenProfile: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
-  onStart: (pubkey: string) => void;
-  onStop: (pubkey: string) => void;
-  onToggleStartOnAppLaunch: (pubkey: string, startOnAppLaunch: boolean) => void;
 };
 
 export function AgentGroupRows({
   agents,
   channelIdToName,
   channelsByPubkey,
-  isActionPending,
   logContent,
   logError,
   logLoading,
@@ -34,12 +28,8 @@ export function AgentGroupRows({
   presenceLoaded,
   presenceLookup,
   selectedLogAgentPubkey,
-  onAddToChannel,
-  onDelete,
+  onOpenProfile,
   onSelectLogAgent,
-  onStart,
-  onStop,
-  onToggleStartOnAppLaunch,
 }: AgentGroupRowsProps) {
   return (
     <div className="divide-y divide-border/50 border-t border-border/50">
@@ -48,7 +38,6 @@ export function AgentGroupRows({
           agent={agent}
           channelIdToName={channelIdToName}
           channelNames={channelsByPubkey[normalizePubkey(agent.pubkey)] ?? []}
-          isActionPending={isActionPending}
           isLogSelected={selectedLogAgentPubkey === agent.pubkey}
           key={agent.pubkey}
           logContent={
@@ -59,12 +48,8 @@ export function AgentGroupRows({
           personaLabelsById={personaLabelsById}
           presenceLoaded={presenceLoaded}
           presenceLookup={presenceLookup}
-          onAddToChannel={onAddToChannel}
-          onDelete={onDelete}
+          onOpenProfile={onOpenProfile}
           onSelectLogAgent={onSelectLogAgent}
-          onStart={onStart}
-          onStop={onStop}
-          onToggleStartOnAppLaunch={onToggleStartOnAppLaunch}
         />
       ))}
     </div>

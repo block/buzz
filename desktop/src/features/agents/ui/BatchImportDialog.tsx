@@ -18,6 +18,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { buildBatchImportPersonaInput } from "./batchImportPersonaInput";
+import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
+import { importedAvatarUrl } from "./personaDialogState";
 
 type BatchImportDialogProps = {
   fileName: string;
@@ -91,13 +94,9 @@ export function BatchImportDialog({
       });
 
       try {
-        await createPersona({
-          displayName: persona.displayName,
-          avatarUrl: persona.avatarDataUrl ?? undefined,
-          systemPrompt: persona.systemPrompt,
-          runtime: persona.runtime ?? undefined,
-          model: persona.model ?? undefined,
-        });
+        const input = buildBatchImportPersonaInput(persona);
+        const avatarUrl = await resolveManagedAgentAvatarUrl(input.avatarUrl);
+        await createPersona({ ...input, avatarUrl });
         completed += 1;
         setImportedCount(completed);
         setItemStatuses((prev) => {
@@ -148,6 +147,7 @@ export function BatchImportDialog({
                   .trim()
                   .split("\n")
                   .find((line) => line.trim().length > 0);
+                const avatarUrl = importedAvatarUrl(persona);
 
                 return (
                   <div
@@ -178,7 +178,7 @@ export function BatchImportDialog({
                         onClick={(e: React.MouseEvent) => e.stopPropagation()}
                       />
                       <ProfileAvatar
-                        avatarUrl={persona.avatarDataUrl}
+                        avatarUrl={avatarUrl}
                         className="h-8 w-8 rounded-lg text-xs"
                         label={persona.displayName}
                       />

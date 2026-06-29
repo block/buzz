@@ -207,7 +207,7 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
-    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(2);
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(1);
 
     await screenshotThreadPanel(page, `${SHOTS}/01-baseline-depth-2.png`);
   });
@@ -344,7 +344,7 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
-    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(2);
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(1);
 
     await screenshotThreadPanel(page, `${SHOTS}/04-agent-only-nested.png`);
   });

@@ -20,9 +20,6 @@ type UseAnchoredScrollOptions = {
   /** Inner content element — must wrap every renderable row, including the
    *  sentinel and bottom anchor. Used to schedule layout work on resize. */
   contentRef: React.RefObject<HTMLDivElement | null>;
-  /** Small zero-height element near the very top of the content. When it
-   *  intersects the viewport (with some rootMargin) we trigger fetchOlder. */
-  sentinelRef: React.RefObject<HTMLDivElement | null>;
   /** Resets when changed; lets us drop anchor + scroll state across channels. */
   channelId?: string | null;
   /** Suppresses initial scroll-to-bottom while a skeleton is showing. */
@@ -30,16 +27,7 @@ type UseAnchoredScrollOptions = {
   /** Source of truth for the rendered list. Used to detect new-at-bottom
    *  arrivals and to seed/refresh the anchor pre-render. */
   messages: TimelineMessage[];
-  /** Optional callback to fetch older history. The hook handles intersection,
-   *  debouncing, and post-prepend scroll restoration via the anchor. */
-  fetchOlder?: () => Promise<void>;
-  hasOlderMessages?: boolean;
-  /** True while an older-history fetch is in flight. Threaded in as a
-   *  restoration re-run trigger so the anchor reasserts itself around the
-   *  prepend on the fetch-state toggle, not only on the `messages` change. */
-  isFetchingOlder?: boolean;
-  /** Re-runs restoration when surrounding chrome changes size without changing messages. */
-  layoutShiftKey?: string | number | null;
+
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
@@ -118,103 +106,13 @@ function computeAnchor(container: HTMLDivElement): AnchorState {
   return { kind: "at-bottom" };
 }
 
-/**
- * Find the rendered message id that is closest in chronological order to
- * the anchor, scanning forward in `messages`. Used as the fallback when the
- * anchor's row is gone post-render (e.g. message deleted).
- */
-function findNearestNewerMessageId(
-  container: HTMLDivElement,
-  messages: TimelineMessage[],
-  anchorId: string,
-): string | null {
-  const anchorIndex = messages.findIndex((m) => m.id === anchorId);
-  if (anchorIndex < 0) return null;
-
-  for (let i = anchorIndex + 1; i < messages.length; i++) {
-    const candidate = messages[i];
-    const el = container.querySelector(`[data-message-id="${candidate.id}"]`);
-    if (el) return candidate.id;
-  }
-  return null;
-}
-
-/**
- * Restore a message-kind anchor's on-screen offset after a layout shift.
- *
- * Finds the anchor row (or the nearest newer rendered row if the anchor
- * itself was removed), measures its current top-relative offset, and
- * `scrollBy(0, delta)` if the offset has drifted. Returns the new anchor
- * state the caller should write back:
- * - `{ kind: "message", ... }` — anchor (or its fallback) is in the DOM
- *   and now sits at its previous offset.
- * - `{ kind: "at-bottom" }` — anchor and all newer rendered rows are gone;
- *   caller should pin to the bottom and update at-bottom state.
- *
- * `scrollBy` is intentional over `scrollTop = ...`: relative adjustment
- * composes with the browser's own scroll anchoring and doesn't fight a
- * smooth-scroll in flight. Same rationale as the layout-effect restore.
- *
- * Used by both the post-commit layout effect (prepend / append / spinner
- * toggle / etc.) and the ResizeObserver (in-viewport reflow from image
- * decode, embed expansion, font load). Keeping them on one primitive
- * preserves the single-owner invariant of the hook.
- */
-function restoreAnchorToMessage(
-  container: HTMLDivElement,
-  messages: TimelineMessage[],
-  anchor: Extract<AnchorState, { kind: "message" }>,
-): AnchorState {
-  let anchorEl = container.querySelector<HTMLElement>(
-    `[data-message-id="${anchor.messageId}"]`,
-  );
-  let usedAnchor: AnchorState = anchor;
-  if (!anchorEl) {
-    const fallbackId = findNearestNewerMessageId(
-      container,
-      messages,
-      anchor.messageId,
-    );
-    if (fallbackId) {
-      anchorEl = container.querySelector<HTMLElement>(
-        `[data-message-id="${fallbackId}"]`,
-      );
-      if (anchorEl) {
-        usedAnchor = {
-          kind: "message",
-          messageId: fallbackId,
-          topOffset: anchor.topOffset,
-        };
-      }
-    }
-  }
-
-  if (!anchorEl) {
-    // Anchor message and all subsequent rendered messages are gone.
-    container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
-    return { kind: "at-bottom" };
-  }
-
-  const containerTop = container.getBoundingClientRect().top;
-  const currentTop = anchorEl.getBoundingClientRect().top - containerTop;
-  const delta = currentTop - usedAnchor.topOffset;
-  if (Math.abs(delta) > 0.5) {
-    container.scrollBy(0, delta);
-  }
-  return usedAnchor;
-}
-
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
-  sentinelRef,
   channelId,
   isLoading,
   messages,
-  fetchOlder,
-  hasOlderMessages = false,
-  isFetchingOlder = false,
-  layoutShiftKey = null,
+
   targetMessageId = null,
   onTargetReached,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
@@ -222,11 +120,6 @@ export function useAnchoredScroll({
   // both on scroll (commit-time read) and in the layout effect (post-render
   // restoration). useState would force re-renders we don't want.
   const anchorRef = React.useRef<AnchorState>({ kind: "at-bottom" });
-  // Latest `messages` mirrored to a ref so the ResizeObserver effect can read
-  // the current list without re-subscribing the observer on every commit
-  // (which would also drop any in-flight resize callbacks). Kept fresh by a
-  // layout effect below so the read is consistent with what's in the DOM.
-  const messagesRef = React.useRef<TimelineMessage[]>(messages);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
   const [newMessageCount, setNewMessageCount] = React.useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
@@ -235,10 +128,13 @@ export function useAnchoredScroll({
 
   const hasInitializedRef = React.useRef(false);
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
+  const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
-  const fetchingOlderRef = React.useRef(false);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
+  // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
+  // on channel switch (the channelId reset effect clears it).
+  const mountPinRafIdRef = React.useRef<number | null>(null);
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
   // appends, we snap to bottom even if they had scrolled up to read history.
@@ -256,13 +152,17 @@ export function useAnchoredScroll({
     setHighlightedMessageId(null);
     hasInitializedRef.current = false;
     prevLastMessageIdRef.current = undefined;
+    prevFirstMessageIdRef.current = undefined;
     prevMessageCountRef.current = 0;
-    fetchingOlderRef.current = false;
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
+    }
+    if (mountPinRafIdRef.current !== null) {
+      cancelAnimationFrame(mountPinRafIdRef.current);
+      mountPinRafIdRef.current = null;
     }
   }, [channelId]);
 
@@ -312,13 +212,12 @@ export function useAnchoredScroll({
       const targetTopOffset =
         currentTopOffset - (targetScrollTop - container.scrollTop);
 
-      el.scrollIntoView({
-        block: "center",
+      container.scrollTo({
+        top: targetScrollTop,
         behavior: options.behavior ?? "auto",
       });
 
-      // `scrollIntoView({ behavior: "smooth" })` starts an async animation, so
-      // measuring after the call can still return the pre-animation position.
+      // Smooth scrolling starts an async animation, so measuring after the call can still return the pre-animation position.
       // Save the clamped destination offset instead; otherwise a concurrent
       // render/ResizeObserver restore can fight the smooth scroll back toward
       // where it started.
@@ -361,26 +260,29 @@ export function useAnchoredScroll({
   }, [scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
-  // Anchor restoration: after every render, if the anchor was a message,
-  // realign so that message sits at the same top-relative offset it had
-  // before the render. This is the single mechanism for keeping scroll
-  // stable across prepends, appends, image loads, embed expansions, etc.
+  // Anchor restoration: after every render, stick to the bottom if the user is
+  // there. The reading position across prepend / in-viewport reflow is held by
+  // the browser's native scroll anchoring (overflow-anchor) now that every
+  // loaded row stays in the DOM, so there is no JS message-anchor restore.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `isFetchingOlder` and `layoutShiftKey` are intentional re-run triggers, not reads. They re-run restoration when fetch state or surrounding layout changes so the anchor reasserts itself; the correction is a no-op when nothing above the anchor moved.
+
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-
-    // Mirror the current messages list into the ref read by the
-    // ResizeObserver's restore path. Must happen before any early return so
-    // a non-React layout shift sees the same array the next restoration
-    // would use.
-    messagesRef.current = messages;
 
     // First render after a reset (channel switch or initial mount): jump
     // to the requested target message, or to the bottom by default.
     if (!hasInitializedRef.current) {
       if (isLoading) return;
+      // Defer the scroll out of the layout effect so the current paint commits
+      // first; cancelled on channel switch via the reset effect's rAF guard.
+      const pinToBottomOnMount = () => {
+        anchorRef.current = { kind: "at-bottom" };
+        mountPinRafIdRef.current = requestAnimationFrame(() => {
+          mountPinRafIdRef.current = null;
+          scrollToBottomImperative("auto");
+        });
+      };
       if (targetMessageId) {
         // A cold deep-link target may not be in the DOM on this first
         // commit — the route screen fetches it by id and splices it in a
@@ -389,27 +291,25 @@ export function useAnchoredScroll({
         // `messages`) retry once the row lands, rather than marking it handled.
         if (scrollToMessageImperative(targetMessageId, { highlight: true })) {
           handledTargetIdRef.current = targetMessageId;
-          // Consumers clear the route target (`messageId` URL param) on this
-          // callback. The post-mount target effect below also fires it, but
-          // for a target already in the DOM on first commit that effect bails
-          // (handled ref is set), so the initial path must fire it too — else
-          // the param sticks and re-clicking the same deep link is a no-op.
           onTargetReached?.(targetMessageId);
         } else {
-          scrollToBottomImperative("auto");
+          pinToBottomOnMount();
         }
       } else {
-        scrollToBottomImperative("auto");
+        pinToBottomOnMount();
       }
       hasInitializedRef.current = true;
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
+      prevFirstMessageIdRef.current = messages[0]?.id;
       prevMessageCountRef.current = messages.length;
       return;
     }
 
     const anchor = anchorRef.current;
     const lastMessage = messages[messages.length - 1];
+    const firstMessage = messages[0];
     const prevLastId = prevLastMessageIdRef.current;
+    const prevFirstId = prevFirstMessageIdRef.current;
     const prevCount = prevMessageCountRef.current;
     const newLatestArrived =
       lastMessage !== undefined && lastMessage.id !== prevLastId;
@@ -418,6 +318,11 @@ export function useAnchoredScroll({
     // same-second row, so the list grows without the *last* id changing —
     // `newLatestArrived` misses that case and the unread counter never bumps.
     const messagesArrived = messages.length - prevCount;
+    const frontChanged =
+      firstMessage !== undefined &&
+      prevFirstId !== undefined &&
+      firstMessage.id !== prevFirstId;
+    const isPrepend = frontChanged && !newLatestArrived;
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -430,36 +335,47 @@ export function useAnchoredScroll({
       setIsAtBottom(true);
       setNewMessageCount(0);
       prevLastMessageIdRef.current = lastMessage?.id;
+      prevFirstMessageIdRef.current = firstMessage?.id;
       prevMessageCountRef.current = messages.length;
       return;
     }
 
     if (anchor.kind === "at-bottom") {
-      // Stick to bottom. Use scrollTo to avoid relying on scroll anchoring.
+      // Stick to bottom across the append.
       container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       if (newLatestArrived) setNewMessageCount(0);
-    } else {
-      // Anchored to a specific message. The shared helper finds it (with a
-      // nearest-newer fallback if the row was removed) and corrects the
-      // offset via `scrollBy`. If both the anchor and all newer rendered
-      // rows are gone, it pins to the bottom and returns `at-bottom`.
-      const restored = restoreAnchorToMessage(container, messages, anchor);
-      anchorRef.current = restored;
-      if (restored.kind === "at-bottom") {
-        setIsAtBottom(true);
+    } else if (messagesArrived > 0) {
+      // Anchored mid-history. An older-history prepend grows the content above
+      // the reading row; the browser's native scroll anchoring does NOT correct
+      // this at the top edge (no anchor node above the viewport when scrollTop
+      // is ~0), so re-pin the anchored row to its saved offset by id. This is
+      // the single scroll writer for the prepend — the load-older observer only
+      // triggers the fetch. We run it in this post-commit layout effect (not the
+      // observer's promise callback) because the prepended rows commit on a
+      // deferred snapshot a few frames later, so the row's true position is only
+      // known here.
+      const row = container.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
+      );
+      if (row) {
+        const currentTopOffset =
+          row.getBoundingClientRect().top -
+          container.getBoundingClientRect().top;
+        const drift = currentTopOffset - anchor.topOffset;
+        if (Math.abs(drift) > 0.5) {
+          container.scrollBy(0, drift);
+        }
       }
-
-      if (messagesArrived > 0) {
+      if (!isPrepend) {
         setNewMessageCount((current) => current + messagesArrived);
       }
     }
 
     prevLastMessageIdRef.current = lastMessage?.id;
+    prevFirstMessageIdRef.current = firstMessage?.id;
     prevMessageCountRef.current = messages.length;
   }, [
-    isFetchingOlder,
     isLoading,
-    layoutShiftKey,
     messages,
     onTargetReached,
     scrollContainerRef,
@@ -469,139 +385,27 @@ export function useAnchoredScroll({
   ]);
 
   // ---------------------------------------------------------------------------
-  // Older-history loader. IntersectionObserver on the top sentinel; when it
-  // crosses into view (with a 200px rootMargin so we preload a bit early)
-  // we fire `fetchOlder`. The anchor restoration above handles the prepend
-  // — we don't need to compute or apply a scrollHeight delta ourselves.
+  // Content resize: while stuck to the bottom, an in-viewport reflow (image
+  // decode, embed expand, late font load) that React isn't driving grows
+  // `scrollHeight` without a `messages` change, so the layout effect doesn't
+  // fire — re-pin to the new floor here to stay glued. When anchored
+  // mid-history, native scroll anchoring (overflow-anchor) holds the reading
+  // row across the reflow, so there's nothing to do.
   // ---------------------------------------------------------------------------
-  React.useEffect(() => {
-    const sentinel = sentinelRef.current;
-    const container = scrollContainerRef.current;
-    if (
-      !sentinel ||
-      !container ||
-      !fetchOlder ||
-      isLoading ||
-      !hasOlderMessages
-    ) {
-      return;
-    }
-
-    let disposed = false;
-    let observer: IntersectionObserver | null = null;
-    let rearmFrame = 0;
-    // Once the timeline is scrollable, a parked sentinel must not keep
-    // re-firing: require it to actually leave and re-enter the preload band
-    // (a real scroll) before the next fetch. Without this, re-observing a
-    // still-intersecting sentinel synthesizes back-to-back fetches — the
-    // "spinner flashes a few times then a burst of rows" on reply-heavy
-    // channels. Auto-fill of a not-yet-scrollable page bypasses the gate.
-    let mustExitBandBeforeFetch = false;
-
-    const start = () => {
-      if (disposed) return;
-      observer = new IntersectionObserver(
-        ([entry]) => {
-          if (!entry?.isIntersecting) {
-            mustExitBandBeforeFetch = false;
-            return;
-          }
-          if (disposed || fetchingOlderRef.current || mustExitBandBeforeFetch) {
-            return;
-          }
-
-          // One older fetch at a time. While a scroll-up is in flight, drop
-          // further triggers outright rather than queueing retries — fast
-          // scrolling otherwise stacks several sequential page loads. The
-          // post-fetch re-arm fires the next page only when the sentinel is
-          // still (or again) in the preload band.
-          fetchingOlderRef.current = true;
-          observer?.disconnect();
-
-          // Before the fetch, capture the anchor from the current scroll
-          // position. The layout effect after re-render will use it.
-          anchorRef.current = computeAnchor(container);
-
-          void fetchOlder()
-            .catch(() => {
-              // Swallow; the next intersection will retry. We don't want
-              // to crash the observer chain on a transient relay error.
-            })
-            .finally(() => {
-              fetchingOlderRef.current = false;
-              // If the prepend made the timeline scrollable, require a real
-              // scroll (sentinel leaving the band) before the next fetch.
-              // A still-too-short page keeps auto-filling.
-              mustExitBandBeforeFetch =
-                container.scrollHeight - container.clientHeight >
-                AT_BOTTOM_THRESHOLD_PX;
-              // Re-observe next frame so the fresh observer's callback sees the
-              // post-prepend intersection state.
-              rearmFrame = window.requestAnimationFrame(() => {
-                rearmFrame = 0;
-                start();
-              });
-            });
-        },
-        { root: container, rootMargin: "200px 0px 0px 0px" },
-      );
-      observer.observe(sentinel);
-    };
-
-    start();
-    return () => {
-      disposed = true;
-      if (rearmFrame !== 0) {
-        window.cancelAnimationFrame(rearmFrame);
-      }
-      observer?.disconnect();
-    };
-  }, [
-    fetchOlder,
-    hasOlderMessages,
-    isLoading,
-    scrollContainerRef,
-    sentinelRef,
-  ]);
-
-  // ---------------------------------------------------------------------------
-  // Content resize: when fonts load late, an image decodes, an embed expands,
-  // or any in-viewport reflow happens that React isn't driving (so the
-  // layout-effect doesn't fire), the anchor row's on-screen offset drifts.
-  //
-  // When stuck-to-bottom we re-pin to bottom. When anchored to a message we
-  // call the same restore primitive the layout effect uses, so an in-viewport
-  // reflow above the reader's eye shifts back into place. Without this,
-  // anything that resizes without changing `messages` (link-card decode,
-  // async embed expand, late font load, markdown that expands) silently
-  // pushes the reading row around.
-  // ---------------------------------------------------------------------------
+  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on a channel switch the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous channel's detached node and re-observe the live one.
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       const container = scrollContainerRef.current;
       if (!container) return;
-      const anchor = anchorRef.current;
-      if (anchor.kind === "at-bottom") {
+      if (anchorRef.current.kind === "at-bottom") {
         container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
-        return;
-      }
-      // Use the same restore primitive as the layout effect so the
-      // single-owner model holds across non-React-driven layout shifts.
-      const restored = restoreAnchorToMessage(
-        container,
-        messagesRef.current,
-        anchor,
-      );
-      anchorRef.current = restored;
-      if (restored.kind === "at-bottom") {
-        setIsAtBottom(true);
       }
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [contentRef, scrollContainerRef]);
+  }, [channelId, contentRef, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from
@@ -629,7 +433,12 @@ export function useAnchoredScroll({
     const el = container.querySelector<HTMLElement>(
       `[data-message-id="${targetMessageId}"]`,
     );
-    if (!el) return; // Row not rendered yet; a later `messages` commit retries.
+    if (!el) {
+      // Row not in the DOM yet. A cold deep-link target is fetched by id and
+      // spliced into `messages` a render or two later; this effect re-runs on
+      // each `messages` commit and retries until the row exists.
+      return;
+    }
     handledTargetIdRef.current = targetMessageId;
     scrollToMessageImperative(targetMessageId, { highlight: true });
     onTargetReached?.(targetMessageId);

@@ -22,6 +22,10 @@ export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
 export const KIND_TYPING_INDICATOR = 20002;
 export const KIND_HUDDLE_REACTION = 24810;
+export const KIND_HUDDLE_STARTED = 48100;
+export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
+export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
+export const KIND_HUDDLE_ENDED = 48103;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes", "channel-stars").
 export const KIND_READ_STATE = 30078;
@@ -78,6 +82,10 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
+  KIND_HUDDLE_STARTED, // 48100 — visible huddle session card
+  KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
+  KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
+  KIND_HUDDLE_ENDED, // 48103 — huddle lifecycle overlay
 ] as const;
 
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
@@ -113,6 +121,7 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_JOB_RESULT, // 43004
   KIND_JOB_CANCEL, // 43005
   KIND_JOB_ERROR, // 43006
+  KIND_HUDDLE_STARTED, // 48100 — huddle session card
 ] as const;
 
 // Timeline kinds that are NOT conversational: relay-signed system rows
@@ -128,6 +137,10 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
   KIND_JOB_RESULT, // 43004
   KIND_JOB_CANCEL, // 43005
   KIND_JOB_ERROR, // 43006
+  KIND_HUDDLE_STARTED, // 48100 — huddle cards are visible but non-conversational
+  KIND_HUDDLE_PARTICIPANT_JOINED, // 48101
+  KIND_HUDDLE_PARTICIPANT_LEFT, // 48102
+  KIND_HUDDLE_ENDED, // 48103
 ]);
 
 // Whether a timeline message kind should count toward unread tallies. An

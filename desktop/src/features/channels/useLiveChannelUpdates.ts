@@ -15,8 +15,13 @@ import {
   CHANNEL_MESSAGE_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import {
+  createTrailingDebounce,
+  type TrailingDebounce,
+} from "@/shared/lib/trailingDebounce";
 
 import { isDmNotifiableKind } from "./isDmNotifiableKind";
+import { refreshChannelsWhenIdle } from "./refreshChannelsWhenIdle";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
@@ -66,11 +71,22 @@ export type UseLiveChannelUpdatesOptions = {
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 
+// get_channels is an expensive O(channels) relay fan-out. Incoming traffic for
+// non-active channels arrives in bursts, so coalesce the refetch into a single
+// trailing invalidation instead of one per event.
+const CHANNELS_INVALIDATE_DEBOUNCE_MS = 500;
+
 // Only "new content" kinds should bump unread state. Shared with the
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
 
 export const EMPTY_SET: ReadonlySet<string> = new Set();
+
+export function isChannelUnreadTriggerKind(kind: number, isDmChannel: boolean) {
+  return isDmChannel
+    ? isDmNotifiableKind(kind)
+    : UNREAD_TRIGGER_KINDS.has(kind);
+}
 
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (
@@ -103,6 +119,22 @@ export function useLiveChannelUpdates(
   const normalizedCurrentPubkey =
     options.currentPubkey?.trim().toLowerCase() ?? "";
   const seenMentionEventIdsRef = React.useRef(new Set<string>());
+  const channelsInvalidateRef = React.useRef<TrailingDebounce | null>(null);
+  if (channelsInvalidateRef.current === null) {
+    channelsInvalidateRef.current = createTrailingDebounce(() => {
+      refreshChannelsWhenIdle({
+        isFetching: () =>
+          queryClient.isFetching({ queryKey: channelsQueryKey }),
+        invalidate: () => {
+          void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        },
+        reArm: () => channelsInvalidateRef.current?.trigger(),
+      });
+    }, CHANNELS_INVALIDATE_DEBOUNCE_MS);
+  }
+  const invalidateChannelsDebounced = React.useCallback(() => {
+    channelsInvalidateRef.current?.trigger();
+  }, []);
   const liveChannelIds = React.useMemo(
     () => new Set(channels.map((channel) => channel.id)),
     [channels],
@@ -186,15 +218,21 @@ export function useLiveChannelUpdates(
 
     if (!liveChannelIds.has(channelId)) {
       if (channelId !== activeChannelId) {
-        void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+        invalidateChannelsDebounced();
       }
       return;
     }
 
+    const isDmChannel = dmChannelMap.has(channelId);
+    const isUnreadTriggerKind = isChannelUnreadTriggerKind(
+      event.kind,
+      isDmChannel,
+    );
+
     // Let the caller observe self-authored trigger events (e.g. to track
     // thread participation) before the author-exclusion guard filters them.
     if (
-      UNREAD_TRIGGER_KINDS.has(event.kind) &&
+      isUnreadTriggerKind &&
       normalizedCurrentPubkey.length > 0 &&
       event.pubkey.toLowerCase() === normalizedCurrentPubkey
     ) {
@@ -206,7 +244,7 @@ export function useLiveChannelUpdates(
     // own outgoing messages should never make a channel unread, and
     // reactions / edits / system messages aren't "new content".
     const isExternalTriggerEvent =
-      UNREAD_TRIGGER_KINDS.has(event.kind) &&
+      isUnreadTriggerKind &&
       (normalizedCurrentPubkey.length === 0 ||
         event.pubkey.toLowerCase() !== normalizedCurrentPubkey);
     const isThreadedReply = isThreadReply(event.tags);
@@ -470,6 +508,8 @@ export function useLiveChannelUpdates(
 
   React.useEffect(() => {
     return () => {
+      channelsInvalidateRef.current?.cancel();
+
       for (const dispose of liveSubsRef.current.values()) {
         void dispose().catch(() => {});
       }

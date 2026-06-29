@@ -71,7 +71,7 @@ class Channel {
         : null,
   );
 
-  bool get isEphemeral => ttlSeconds != null;
+  bool get isEphemeral => ttlSeconds != null || ttlDeadline != null;
 
   bool get isStream => channelType == 'stream';
   bool get isForum => channelType == 'forum';

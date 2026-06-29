@@ -88,7 +88,7 @@ export function MessageThreadSummaryRow({
     : `View thread with ${summary.replyCount} ${replyLabel}`;
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
-    : Array.from({ length: depth }, (_, index) => index);
+    : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
   const depthGuideItems = guideDepths.map((guideDepth) => ({
     depth: guideDepth,
     offset: getThreadReplyAvatarCenterRem(guideDepth),

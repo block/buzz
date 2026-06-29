@@ -21,6 +21,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
+import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
@@ -32,6 +33,8 @@ type MessageTimelineProps = {
   channelIntro?: ChannelIntro | null;
   channelName?: string;
   channelType?: ChannelType | null;
+  huddleMemberPubkeys?: readonly string[];
+  huddleMemberPubkeysPending?: boolean;
   messages: TimelineMessage[];
   mainEntries?: MainTimelineEntry[];
   directMessageIntro?: {
@@ -50,7 +53,6 @@ type MessageTimelineProps = {
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
   isFetchingOlder?: boolean;
-  layoutShiftKey?: string | number | null;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
@@ -149,8 +151,9 @@ const MessageTimelineBase = React.forwardRef<
     hasComposerOverlay = true,
     hasOlderMessages = true,
     isFetchingOlder = false,
-    layoutShiftKey = null,
     followThreadById,
+    huddleMemberPubkeys,
+    huddleMemberPubkeysPending = false,
     isFollowingThreadById,
     isMessageUnreadById,
     messageFooters,
@@ -240,15 +243,10 @@ const MessageTimelineBase = React.forwardRef<
   } = useAnchoredScroll({
     channelId,
     contentRef,
-    fetchOlder,
-    hasOlderMessages,
-    isFetchingOlder,
     isLoading: showTimelineSkeleton,
-    layoutShiftKey,
     messages: deferredMessages,
     onTargetReached,
     scrollContainerRef,
-    sentinelRef: topSentinelRef,
     targetMessageId,
   });
 
@@ -277,6 +275,15 @@ const MessageTimelineBase = React.forwardRef<
       scrollToBottomOnNextUpdate,
     }),
     [scrollToBottomOnNextUpdate],
+  );
+
+  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
+  // `scrollToMessage` always finds the target row. No virtualizer convergence.
+  const jumpToMessage = React.useCallback(
+    (messageId: string, options?: { behavior?: ScrollBehavior }) => {
+      return scrollToMessage(messageId, { highlight: true, ...options });
+    },
+    [scrollToMessage],
   );
 
   // The unread pill is a transient, per-open affordance: dismiss it once the
@@ -308,16 +315,21 @@ const MessageTimelineBase = React.forwardRef<
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
     if (firstUnreadMessageId) {
-      scrollToMessage(firstUnreadMessageId);
+      jumpToMessage(firstUnreadMessageId);
     }
-  }, [firstUnreadMessageId, scrollToMessage]);
+  }, [firstUnreadMessageId, jumpToMessage]);
 
-  // Scroll to the active search match when it changes. `scrollToMessage`
-  // updates the scroll anchor, so the post-commit restore won't yank the
-  // view back off the match.
+  // Scroll to the active search match when it changes. `jumpToMessage` updates
+  // the scroll anchor (so the post-commit restore won't yank the view back off
+  // the match) and, when virtualized, converges on the target through the index
+  // model — the row may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
+  const pendingSearchTargetRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (showTimelineSkeleton) return;
+    if (!searchActiveMessageId) {
+      pendingSearchTargetRef.current = null;
+    }
     if (
       !searchActiveMessageId ||
       searchActiveMessageId === prevSearchActiveRef.current
@@ -325,9 +337,29 @@ const MessageTimelineBase = React.forwardRef<
       prevSearchActiveRef.current = searchActiveMessageId;
       return;
     }
+    pendingSearchTargetRef.current = null;
     prevSearchActiveRef.current = searchActiveMessageId;
-    scrollToMessage(searchActiveMessageId, { behavior: "smooth" });
-  }, [scrollToMessage, searchActiveMessageId, showTimelineSkeleton]);
+    if (!jumpToMessage(searchActiveMessageId, { behavior: "smooth" })) {
+      pendingSearchTargetRef.current = searchActiveMessageId;
+    }
+  }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages is the intentional retry trigger — a search hit outside the initial window is spliced into messages asynchronously, and the DOM scroll should retry when that row commits.
+  React.useEffect(() => {
+    const target = pendingSearchTargetRef.current;
+    if (!target || showTimelineSkeleton) return;
+    if (jumpToMessage(target, { behavior: "auto" })) {
+      pendingSearchTargetRef.current = null;
+    }
+  }, [deferredMessages, jumpToMessage, showTimelineSkeleton]);
+
+  useLoadOlderOnScroll({
+    fetchOlder,
+    hasOlderMessages,
+    isLoading: showTimelineSkeleton,
+    scrollContainerRef,
+    sentinelRef: topSentinelRef,
+  });
 
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
@@ -371,7 +403,7 @@ const MessageTimelineBase = React.forwardRef<
         ) : null}
         <div
           className={cn(
-            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-none px-2 pt-1 [overflow-anchor:none]",
+            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-none px-2 pt-1",
             hasComposerOverlay ? "pb-24" : "pb-4",
           )}
           data-scroll-restoration-id={scrollRestorationId}
@@ -384,11 +416,19 @@ const MessageTimelineBase = React.forwardRef<
             className={cn(
               "flex w-full flex-col gap-2",
               channelChrome.contentPadding,
-              (showIntro || showGenericEmpty) && "min-h-full",
+              (showIntro || showGenericEmpty || showMessageList) &&
+                "min-h-full",
             )}
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
+
+            {/* Fixed-height slot: an always-mounted height keeps the virtual
+                spacer's offset stable across the load-older fetch toggle, so
+                `scrollMargin` doesn't shift mid-fetch and yank the restore. The
+                visible fetch spinner lives in the absolute overlay above, which
+                does not occupy inline flow. */}
+            <div aria-hidden className="h-8" />
 
             <div
               className={cn(
@@ -534,6 +574,7 @@ const MessageTimelineBase = React.forwardRef<
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
+                    key={scrollContainerDomKey}
                     agentPubkeys={agentPubkeys}
                     channelId={channelId}
                     channelName={channelName}
@@ -542,6 +583,8 @@ const MessageTimelineBase = React.forwardRef<
                     firstUnreadMessageId={firstUnreadMessageId}
                     followThreadById={followThreadById}
                     highlightedMessageId={highlightedMessageId}
+                    huddleMemberPubkeys={huddleMemberPubkeys}
+                    huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                     isFollowingThreadById={isFollowingThreadById}
                     isMessageUnreadById={isMessageUnreadById}
                     messageFooters={messageFooters}

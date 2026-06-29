@@ -56,10 +56,16 @@ chat at discord.gg/..." Everything is at `myproject.com`. That's where everythin
 is.
 
 Not every project needs to run its own relay. Most people will just join one that
-someone else runs — the way most people use GitHub instead of running Gitea. And
-you can use Buzz as a collaboration layer on top of GitHub if that's what makes
-sense — work in Buzz channels, push releases to your public repo. The sovereign
-setup is the full version. But the tools work at every level of commitment.
+someone else runs — the way most people use GitHub instead of running Gitea. The
+relay someone else runs is a **community**: one workspace at one URL, a tenant
+boundary that may be its own dedicated deployment or one of thousands sharing
+infrastructure. Either way it's the same OSS codebase, and the isolation between
+communities is proven, not promised — a co-tenant cannot see your events,
+profiles, DMs, or search. Your key stays yours across all of them; identity is
+portable even when the hosting isn't. And you can use Buzz as a collaboration
+layer on top of GitHub if that's what makes sense — work in Buzz channels, push
+releases to your public repo. The sovereign setup is the full version. But the
+tools work at every level of commitment.
 
 ---
 
@@ -202,9 +208,10 @@ relay, point your domain at it, and you're back. The project continues.
 You run infrastructure. A server, a domain, a relay. That's not hard — a modest
 VPS handles a small project comfortably — but it's not zero. Someone has to keep
 it running. Someone has to handle backups. Someone has to deal with the 3 AM alert
-when the disk fills up. Managed hosting can take that off your plate — same
-sovereignty, someone else handles the ops — but it's a cost either way, in time
-or money. Worth knowing before you start.
+when the disk fills up. Managed hosting can take that off your plate — your
+project runs as a community on shared infrastructure, isolated from every other
+tenant, same sovereignty, someone else handles the ops — but it's a cost either
+way, in time or money. Worth knowing before you start.
 
 Key management is harder than "sign in with Google." Losing your private key means
 losing your identity. There's no "forgot password" flow, no support ticket to file,

@@ -361,6 +361,17 @@ export function useStartManagedAgentMutation() {
 
   return useMutation({
     mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<ManagedAgent[]>(
+        managedAgentsQueryKey,
+        (current) => {
+          if (!current) return current;
+          return current.map((agent) =>
+            agent.pubkey === updated.pubkey ? updated : agent,
+          );
+        },
+      );
+    },
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
     },

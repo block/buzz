@@ -30,7 +30,7 @@ import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
-  channel: Channel;
+  channel: Channel | null;
   canInterruptTurn: boolean;
   isWorking: boolean;
   layout?: "standalone" | "split";
@@ -39,6 +39,7 @@ type AgentSessionThreadPanelProps = {
   onBackToProfile: () => void;
   onClose: () => void;
   widthPx: number;
+  transparentChrome?: boolean;
 };
 
 export function AgentSessionThreadPanel({
@@ -52,6 +53,7 @@ export function AgentSessionThreadPanel({
   onBackToProfile,
   onClose,
   widthPx,
+  transparentChrome = false,
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
@@ -62,6 +64,10 @@ export function AgentSessionThreadPanel({
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
 
   async function handleInterruptTurn() {
+    if (!channel) {
+      return;
+    }
+
     try {
       await cancelManagedAgentTurn(agent.pubkey, channel.id);
       toast.success(
@@ -155,9 +161,13 @@ export function AgentSessionThreadPanel({
     >
       <ManagedAgentSessionPanel
         agent={agent}
-        channelId={channel.id}
+        channelId={channel?.id ?? null}
         className="border-0 bg-transparent p-0 shadow-none"
-        emptyDescription={`Mention ${agent.name} in the channel to see its work here.`}
+        emptyDescription={
+          channel
+            ? `Mention ${agent.name} in the channel to see its work here.`
+            : `Mention ${agent.name} in any channel to see its work here.`
+        }
         profiles={profiles}
         showHeader={false}
         showRaw={false}
@@ -168,7 +178,9 @@ export function AgentSessionThreadPanel({
   if (isSplitLayout) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
-        <AuxiliaryPanelHeader>{agentHeaderContent}</AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader transparent={transparentChrome}>
+          {agentHeaderContent}
+        </AuxiliaryPanelHeader>
         {agentBody}
       </div>
     );
