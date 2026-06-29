@@ -243,11 +243,9 @@ pub fn default_agent_command() -> String {
         .to_string()
 }
 
-/// Resolve the agent command (harness) for a spawn/deploy/summary. Mirrors the
-/// model resolution in `resolve_effective_prompt_model_provider`: the linked
+/// Resolve the agent command (harness) for a spawn/deploy/summary. The linked
 /// persona wins so persona harness edits propagate on the next spawn. An
-/// explicit per-instance override (`agent_command_override`) takes precedence,
-/// matching the opt-in `record.model` override pattern.
+/// explicit per-instance override (`agent_command_override`) takes precedence.
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;

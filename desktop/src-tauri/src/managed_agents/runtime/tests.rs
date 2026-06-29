@@ -253,11 +253,7 @@ fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
     assert!(err.contains("at least one pubkey"));
 }
 
-// ── resolve_effective_prompt_model_provider tests ───────────────────
-
-fn persona(id: &str, prompt: &str, model: Option<&str>) -> crate::managed_agents::PersonaRecord {
-    persona_with_provider(id, prompt, model, None)
-}
+// ── persona fixture helpers ─────────────────────────────────────────
 
 fn persona_with_provider(
     id: &str,
@@ -282,66 +278,6 @@ fn persona_with_provider(
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }
-}
-
-#[test]
-fn linked_persona_wins_over_record_snapshot() {
-    let personas = vec![persona_with_provider(
-        "p1",
-        "fresh",
-        Some("m-fresh"),
-        Some("anthropic"),
-    )];
-    let (prompt, model, provider) = super::resolve_effective_prompt_model_provider(
-        Some("p1"),
-        &personas,
-        Some("stale".into()),
-        Some("m-stale".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("fresh"));
-    assert_eq!(model.as_deref(), Some("m-fresh"));
-    assert_eq!(provider.as_deref(), Some("anthropic"));
-}
-
-#[test]
-fn no_persona_id_falls_back_to_record() {
-    let personas = vec![persona("p1", "fresh", Some("m-fresh"))];
-    let (prompt, model, provider) = super::resolve_effective_prompt_model_provider(
-        None,
-        &personas,
-        Some("record".into()),
-        Some("m-record".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("record"));
-    assert_eq!(model.as_deref(), Some("m-record"));
-    assert_eq!(provider, None);
-}
-
-#[test]
-fn deleted_persona_falls_back_to_record() {
-    let personas = vec![persona("p1", "fresh", None)];
-    let (prompt, model, provider) = super::resolve_effective_prompt_model_provider(
-        Some("gone"),
-        &personas,
-        Some("record".into()),
-        Some("m-record".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("record"));
-    assert_eq!(model.as_deref(), Some("m-record"));
-    assert_eq!(provider, None);
-}
-
-#[test]
-fn persona_with_no_model_clears_stale_record_model() {
-    let personas = vec![persona("p1", "fresh", None)];
-    let (prompt, model, _provider) = super::resolve_effective_prompt_model_provider(
-        Some("p1"),
-        &personas,
-        Some("stale".into()),
-        Some("m-stale".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("fresh"));
-    assert_eq!(model, None);
 }
 
 // ── persona pin/refresh acceptance (Phase 4) ────────────────────────────

@@ -147,3 +147,44 @@ fn anthropic_model_normalization_uses_display_names() {
     assert_eq!(models[0].id, "claude-opus-4-6");
     assert_eq!(models[0].name.as_deref(), Some("Claude Opus 4.6"));
 }
+
+#[test]
+fn saved_agent_model_discovery_uses_record_snapshot() {
+    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "model": "record-model",
+            "provider": "databricks",
+            "env_vars": {
+                "OPENAI_API_KEY": "record-key",
+                "BUZZ_PRIVATE_KEY": "must-not-leak"
+            },
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("sample managed agent record");
+
+    let config = saved_agent_model_discovery_config(&record);
+
+    assert_eq!(config.model.as_deref(), Some("record-model"));
+    assert_eq!(config.provider.as_deref(), Some("databricks"));
+    assert_eq!(
+        config.env.get("OPENAI_API_KEY").map(String::as_str),
+        Some("record-key")
+    );
+    assert!(!config.env.contains_key("BUZZ_PRIVATE_KEY"));
+}

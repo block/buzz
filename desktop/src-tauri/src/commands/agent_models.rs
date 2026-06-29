@@ -13,9 +13,9 @@ use crate::{
         build_managed_agent_summary, current_instance_id, default_agent_workdir,
         find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
         managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
-        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
-        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
+        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
+        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -69,31 +69,19 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| effective_command.clone());
 
-        // Same env layering as runtime spawn: persona env < agent env.
-        // Model discovery needs the user's credentials. Fail closed on
-        // persona-resolution errors so a corrupt personas.json doesn't
-        // produce a model list as if the persona had no credentials.
-        let persona_env =
-            crate::managed_agents::resolve_persona_env(&app, record.persona_id.as_deref())?;
-        let env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
-
-        // Resolve the effective model from the linked persona so the ModelPicker
-        // dropdown shows the current persona model as selected.
-        let (_prompt, effective_model, effective_provider) =
-            resolve_effective_prompt_model_provider(
-                record.persona_id.as_deref(),
-                &personas,
-                record.system_prompt.clone(),
-                record.model.clone(),
-            );
+        // ModelPicker can persist a selected model but not rewrite the saved
+        // provider/env snapshot, and runtime spawn reads that same snapshot.
+        // Discover models against the record snapshot so an out-of-date persona
+        // cannot offer models for a provider this agent will not launch with.
+        let discovery = saved_agent_model_discovery_config(record);
 
         (
             resolved,
             resolved_agent,
             args,
-            effective_model,
-            effective_provider,
-            env,
+            discovery.model,
+            discovery.provider,
+            discovery.env,
         )
     }; // store lock released — subprocess runs without holding the lock
 
@@ -127,6 +115,23 @@ pub async fn get_agent_models(
         merged_env,
     )
     .await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SavedAgentModelDiscoveryConfig {
+    model: Option<String>,
+    provider: Option<String>,
+    env: BTreeMap<String, String>,
+}
+
+fn saved_agent_model_discovery_config(
+    record: &crate::managed_agents::ManagedAgentRecord,
+) -> SavedAgentModelDiscoveryConfig {
+    SavedAgentModelDiscoveryConfig {
+        model: record.model.clone(),
+        provider: record.provider.clone(),
+        env: crate::managed_agents::merged_user_env(&BTreeMap::new(), &record.env_vars),
+    }
 }
 
 #[derive(Debug, Deserialize)]
