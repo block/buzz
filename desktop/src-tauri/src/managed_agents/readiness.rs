@@ -310,10 +310,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
 fn goose_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     let mut missing = Vec::new();
 
-    let provider = effective
-        .env
-        .get("GOOSE_PROVIDER")
-        .map(String::as_str);
+    let provider = effective.env.get("GOOSE_PROVIDER").map(String::as_str);
     if provider.is_none() {
         missing.push(Requirement::NormalizedField {
             field: "provider".to_string(),
@@ -438,9 +435,11 @@ mod tests {
         );
         let result = agent_readiness(&env);
         assert!(!result.is_ready());
-        assert!(result.requirements().contains(&Requirement::NormalizedField {
-            field: "model".to_string()
-        }));
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }));
     }
 
     #[test]
@@ -531,7 +530,10 @@ mod tests {
             "buzz-agent",
             env_with(&[
                 ("BUZZ_AGENT_PROVIDER", "databricks_v2"),
-                ("BUZZ_AGENT_MODEL", "databricks/meta-llama-4-maverick-17b-instruct"),
+                (
+                    "BUZZ_AGENT_MODEL",
+                    "databricks/meta-llama-4-maverick-17b-instruct",
+                ),
             ]),
         );
         let result = agent_readiness(&env);
@@ -545,15 +547,14 @@ mod tests {
 
     #[test]
     fn goose_missing_provider_returns_not_ready() {
-        let env = make_env(
-            "goose",
-            env_with(&[("GOOSE_MODEL", "claude-opus-4-5")]),
-        );
+        let env = make_env("goose", env_with(&[("GOOSE_MODEL", "claude-opus-4-5")]));
         let result = agent_readiness(&env);
         assert!(!result.is_ready());
-        assert!(result.requirements().contains(&Requirement::NormalizedField {
-            field: "provider".to_string()
-        }));
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "provider".to_string()
+            }));
     }
 
     #[test]
@@ -650,7 +651,11 @@ mod tests {
     #[test]
     fn cli_login_requirement_serializes_correctly() {
         let r = Requirement::CliLogin {
-            probe_args: vec!["codex".to_string(), "login".to_string(), "status".to_string()],
+            probe_args: vec![
+                "codex".to_string(),
+                "login".to_string(),
+                "status".to_string(),
+            ],
             setup_copy: "run `codex login --with-api-key`".to_string(),
         };
         let json = serde_json::to_value(&r).unwrap();
@@ -668,7 +673,10 @@ mod tests {
         // this test validates the user-env layer is present in the output.
         let mut env_vars = BTreeMap::new();
         env_vars.insert("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string());
-        env_vars.insert("BUZZ_AGENT_MODEL".to_string(), "claude-opus-4-5".to_string());
+        env_vars.insert(
+            "BUZZ_AGENT_MODEL".to_string(),
+            "claude-opus-4-5".to_string(),
+        );
 
         // Minimal record: only the fields resolve_effective_agent_env reads.
         let record = crate::managed_agents::types::ManagedAgentRecord {
