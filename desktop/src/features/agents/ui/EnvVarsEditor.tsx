@@ -122,7 +122,10 @@ export function EnvVarsEditor({
                     "border-amber-500/40 bg-amber-50/30 dark:bg-amber-950/20",
                   )}
                 >
-                  <Lock className="h-3 w-3 shrink-0 text-muted-foreground/60" aria-hidden />
+                  <Lock
+                    className="h-3 w-3 shrink-0 text-muted-foreground/60"
+                    aria-hidden
+                  />
                   <span
                     className="font-mono text-sm leading-6 text-foreground/80"
                     data-testid="env-vars-required-key"

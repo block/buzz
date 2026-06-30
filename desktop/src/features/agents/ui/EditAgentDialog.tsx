@@ -66,7 +66,7 @@ function RequiredFieldLabel({
     <label className="text-sm font-medium" htmlFor={htmlFor}>
       {children}
       {isRequired ? (
-        <span className="ml-1 text-destructive" aria-label="required">
+        <span className="ml-1 text-destructive" aria-hidden="true">
           *
         </span>
       ) : null}
