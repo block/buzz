@@ -152,7 +152,7 @@ test.describe("channel controls", () => {
       page.getByRole("dialog", { name: "Edit channel" }),
     ).toHaveCount(0);
 
-    await page.getByTestId("channel-management-close").click();
+    await page.getByTestId("auxiliary-panel-close").click();
     await expect(
       page.getByTestId("channel-management-sheet"),
     ).not.toBeVisible();

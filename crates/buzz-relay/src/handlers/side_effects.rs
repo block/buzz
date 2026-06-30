@@ -1741,6 +1741,7 @@ async fn handle_a_tag_deletion(
         .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
     let pubkey_hex = parts[1];
     let d_tag = parts[2];
+    let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
         buzz_core::kind::KIND_WORKFLOW_DEF => {
@@ -1748,22 +1749,21 @@ async fn handle_a_tag_deletion(
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
                 state
                     .db
-                    .delete_workflow(tenant.community(), wf_id)
+                    .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
                     .await
                     .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
                 tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
             } else {
                 // Name-based lookup
-                let owner_bytes = hex::decode(pubkey_hex).unwrap_or_default();
                 match state
                     .db
-                    .find_workflow_by_owner_and_name(tenant.community(), &owner_bytes, d_tag)
+                    .find_workflow_by_owner_and_name(tenant.community(), &actor_bytes, d_tag)
                     .await
                 {
                     Ok(Some(wf)) => {
                         state
                             .db
-                            .delete_workflow(tenant.community(), wf.id)
+                            .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)

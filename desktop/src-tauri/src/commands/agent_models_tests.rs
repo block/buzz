@@ -211,3 +211,19 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
     );
     assert!(!config.env.contains_key("BUZZ_PRIVATE_KEY"));
 }
+
+// ---------------------------------------------------------------------------
+// Databricks provider detection
+// ---------------------------------------------------------------------------
+//
+// Parse/filter/pagination tests live in crates/buzz-agent/src/catalog.rs
+// (they moved there with the Option C refactor).
+
+#[test]
+fn is_databricks_provider_matches_both_variants() {
+    assert!(is_databricks_provider(Some("databricks")));
+    assert!(is_databricks_provider(Some("databricks_v2")));
+    assert!(is_databricks_provider(Some("  DATABRICKS  ")));
+    assert!(!is_databricks_provider(Some("anthropic")));
+    assert!(!is_databricks_provider(None));
+}

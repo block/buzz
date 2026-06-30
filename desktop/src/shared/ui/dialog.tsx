@@ -54,7 +54,7 @@ const DialogContent = React.forwardRef<
     <div className="fixed inset-0 z-50 grid place-items-center overflow-y-auto p-4 pointer-events-none">
       <DialogPrimitive.Content
         className={cn(
-          "pointer-events-auto relative grid w-[calc(100vw-2rem)] max-w-2xl gap-4 rounded-3xl bg-background p-6 shadow-2xl outline-hidden",
+          "pointer-events-auto relative grid w-[calc(100vw-2rem)] max-w-2xl gap-4 rounded-2xl bg-background p-6 shadow-2xl outline-hidden",
           MODAL_CONTENT_MOTION_CLASS,
           className,
         )}

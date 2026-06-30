@@ -296,5 +296,28 @@ pub(crate) fn merged_user_env(
     merged
 }
 
+/// Resolve live env_vars for a linked persona.
+///
+/// Returns the persona's `env_vars` map if a persona_id is provided and found;
+/// returns an empty map if no persona is linked or the persona is not found.
+/// Used by the provider deploy path so remote agents receive current credentials;
+/// local spawn uses only the pinned `record.env_vars` for determinism.
+pub(crate) fn resolve_persona_env(
+    app: &tauri::AppHandle,
+    persona_id: Option<&str>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let Some(pid) = persona_id else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let personas = super::load_personas(app).map_err(|e| {
+        format!("failed to load personas while resolving env for persona `{pid}`: {e}")
+    })?;
+    let persona = personas
+        .into_iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| format!("persona `{pid}` not found while resolving env"))?;
+    Ok(persona.env_vars)
+}
+
 #[cfg(test)]
 mod tests;

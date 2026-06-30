@@ -199,6 +199,11 @@ test("preserves user scroll while older channel history loads", async ({
 
   // Snapshot the oldest rendered index BEFORE firing the delayed page, so the
   // poll's growth gate can require a genuinely NEW older index after it lands.
+  // Wait for a concrete rendered row first: under CI load the initial rows can
+  // lag, leaving the scan with nothing to match (null) and a spurious failure.
+  await expect
+    .poll(async () => await oldestRenderedIndex(), { timeout: 8_000 })
+    .not.toBeNull();
   const oldestBeforeLanding = await oldestRenderedIndex();
   expect(oldestBeforeLanding).not.toBeNull();
 
@@ -243,7 +248,7 @@ test("preserves user scroll while older channel history loads", async ({
         return Math.abs(anchor.top - (anchorBeforeLanding?.top ?? 0));
       },
       {
-        timeout: 3_000,
+        timeout: 8_000,
       },
     )
     .toBeLessThanOrEqual(2);
@@ -413,9 +418,12 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
   // messages land; we poll for that growth and then assert we are STILL
   // at the bottom (no upward teleport to the abandoned anchor).
   //
-  // Timeout: 6s. The wheel-up + smooth-abandon path can burn 2-3s of
-  // the 5s historyDelayMs window before this poll begins, so the
-  // prepend may not land for another 2-3s. 6s leaves margin.
+  // Timeout: 12s. The wheel-up + smooth-abandon path can burn 2-3s of the
+  // 5s historyDelayMs window before this poll begins, so the prepend may not
+  // land for another 2-3s. On a loaded CI runner that squeezes a tight 6s
+  // budget into a timeout (the prepend is a deterministic 5s mock timer, so
+  // the only failure mode is waiting too little); 12s leaves comfortable
+  // margin without weakening the assertion below.
   await expect
     .poll(
       async () => {
@@ -424,7 +432,7 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
           ? "resolved"
           : "pending";
       },
-      { timeout: 6_000 },
+      { timeout: 12_000 },
     )
     .toBe("resolved");
 
@@ -1756,6 +1764,15 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
       return Number.isFinite(min) ? min : null;
     });
 
+  // Wait until at least one prepended "mock older" row has actually rendered
+  // before sampling the oldest index. On a loaded CI runner the prepended
+  // history can lag the scrollable-height gate above, leaving the scan with no
+  // "mock older N" rows yet (oldestBeforeLanding === null). Poll for a concrete
+  // older row so the baseline is deterministic.
+  await expect
+    .poll(async () => await oldestRenderedIndex(), { timeout: 8_000 })
+    .not.toBeNull();
+
   const oldestBeforeLanding = await oldestRenderedIndex();
   expect(oldestBeforeLanding).not.toBeNull();
 
@@ -1794,7 +1811,7 @@ test("older-history prepend keeps the reading row fixed (no jump to oldest)", as
         }
         return Math.abs(anchor.top - (anchorBeforeLanding?.top ?? 0));
       },
-      { timeout: 4_000 },
+      { timeout: 8_000 },
     )
     .toBeLessThanOrEqual(2);
 

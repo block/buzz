@@ -413,6 +413,25 @@ impl Db {
         event::count_events(&self.pool, q).await
     }
 
+    /// Return whether a creator-signed huddle-start event links a parent
+    /// channel to an ephemeral huddle channel.
+    pub async fn huddle_started_link_exists(
+        &self,
+        community_id: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        event::huddle_started_link_exists(
+            &self.pool,
+            community_id,
+            parent_channel_id,
+            ephemeral_channel_id,
+            creator_pubkey,
+        )
+        .await
+    }
+
     /// Fetch the latest replaceable event for a (kind, pubkey) pair.
     ///
     /// Uses canonical NIP-16 ordering: `created_at DESC, id ASC`.
@@ -1542,6 +1561,31 @@ impl Db {
         .await
     }
 
+    /// Insert or update a workflow using its NIP-33 `d`-tag UUID.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_workflow(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        channel_id: Option<Uuid>,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<()> {
+        workflow::upsert_workflow(
+            &self.pool,
+            community_id,
+            id,
+            channel_id,
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await
+    }
+
     /// Fetch a single workflow by ID, scoped to its community.
     pub async fn get_workflow(
         &self,
@@ -1677,6 +1721,16 @@ impl Db {
     /// Delete a workflow and all its runs/approvals.
     pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
         workflow::delete_workflow(&self.pool, community_id, id).await
+    }
+
+    /// Delete a workflow only when it belongs to the provided owner.
+    pub async fn delete_workflow_for_owner(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<()> {
+        workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
     }
 
     /// Find a workflow by owner pubkey and name within a community. Used for

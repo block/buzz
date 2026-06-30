@@ -1,26 +1,72 @@
 name: helm chart
 
+# Lints + unit-tests + render-checks the chart on every PR/main push, and
+# PUBLISHES it to GHCR as an OCI artifact on `chart-v*` tags.
+#
+# Publishing mirrors the relay image (see docker.yml): the chart is versioned
+# independently of the desktop app and the relay via its own `chart-v*` tags
+# (Chart.yaml `version`, cut by merging a `chart-release/<version>` PR). Only
+# `chart-v*` tags publish — `main` pushes and PRs stay lint/render-only so we
+# never overwrite a released chart version from an in-progress `main`.
+#
+# Why workflow_dispatch carries version/ref inputs (same reason as docker.yml):
+#   auto-tag-on-release-pr-merge.yml pushes `chart-v*` with the default
+#   GITHUB_TOKEN, which GitHub's recursion guard blocks from firing any
+#   `on: push` trigger. So the `push.tags` trigger below is dead for
+#   auto-pushed tags — auto-tag instead dispatches this workflow with the bare
+#   version + tag ref, and the publish job checks out inputs.ref and packages at
+#   inputs.version. On a real manual `git push` of a `chart-v*` tag the
+#   push.tags trigger fires and inputs are empty.
+
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Chart semver e.g. 0.1.0 (no chart-v prefix) — for chart-tag rescue dispatch"
+        required: false
+      ref:
+        description: "Chart tag ref to publish, e.g. chart-v0.1.0 (required when version is set)"
+        required: false
+        default: main
   push:
+    # No `paths` filter here: GitHub applies a push `paths` filter to tag
+    # pushes too, so a `chart-v*` tag whose commit didn't touch a chart file
+    # would be filtered out and never publish. docker.yml / release.yml / sprig
+    # all keep `paths` out of a tag-carrying `push` for exactly this reason —
+    # PR runs stay scoped via `pull_request.paths` below; main pushes lint
+    # unconditionally (cheap), and tag pushes always run so publish can fire.
     branches: [main]
-    paths:
-      - "deploy/charts/buzz/**"
-      - ".github/workflows/helm-chart.yml"
-      - "ct.yaml"
+    tags: ["chart-v[0-9]*"]
   pull_request:
     paths:
       - "deploy/charts/buzz/**"
       - ".github/workflows/helm-chart.yml"
       - "ct.yaml"
 
+# Match docker.yml: deny-by-default, each job grants only what it needs.
+permissions: {}
+
+env:
+  # Single source of truth for the OCI chart repository (helm appends the chart
+  # name `buzz`, yielding oci://ghcr.io/block/buzz/charts/buzz, which is exactly
+  # the install ref documented in deploy/charts/buzz/README.md). Set
+  # GHCR_CHART_REPO as a repo variable to override (e.g., forks pushing to their
+  # own namespace without editing this file) — mirrors docker.yml's GHCR_IMAGE.
+  CHART_REPO: ${{ vars.GHCR_CHART_REPO != '' && vars.GHCR_CHART_REPO || 'oci://ghcr.io/block/buzz/charts' }}
+
 jobs:
   lint-and-unittest:
     name: lint + unittest + render matrix
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
+          # On chart-tag rescue dispatch, lint/render the tagged commit that the
+          # publish job will package, not whatever `main` is when the dispatch
+          # runs. Empty string = default ref for push/PR events.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
           fetch-depth: 0
 
       - name: Set up Helm
@@ -62,10 +108,15 @@ jobs:
     # exist and to embed Max's startup migrations. Runs only after Sami's
     # image PR merges (`workflow_dispatch`) or on a schedule once main carries
     # both prerequisites. Render/lint above is the per-PR signal.
+    #
+    # `inputs.version == ''` excludes the chart-tag rescue dispatch (which
+    # carries a version): that path only packages+publishes, it does not install.
     name: install on kind (gated)
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.version == ''
     runs-on: ubuntu-latest
     needs: lint-and-unittest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,3 +146,110 @@ jobs:
 
       - name: ct install (quickstart profile)
         run: ct install --config ct.yaml --charts deploy/charts/buzz --helm-extra-args "--timeout 600s"
+
+  publish:
+    # Packages the chart and pushes it to GHCR as an OCI artifact. Fires only on
+    # a `chart-v*` tag push (manual) or the auto-tag rescue dispatch (which
+    # carries inputs.version) — never on `main` pushes or PRs, so an in-progress
+    # `main` can never overwrite a released chart version. Mirrors docker.yml's
+    # GHCR publish (login with GITHUB_TOKEN, packages: write, fork override var).
+    name: publish chart to GHCR
+    if: >
+      startsWith(github.ref, 'refs/tags/chart-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    runs-on: ubuntu-latest
+    needs: lint-and-unittest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write    # push the chart to GHCR
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # On the rescue dispatch, build the tagged commit (github.ref is
+          # `main` there); on a tag push, the default ref is already the tag.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Resolve chart version
+        id: ver
+        env:
+          # Bare on the rescue dispatch; empty on a tag push (derive from ref).
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            tag_ref="refs/tags/chart-v${version}"
+            tag_sha="$(git rev-parse -q --verify "${tag_ref}^{commit}" || true)"
+            head_sha="$(git rev-parse HEAD)"
+            if [ -z "$tag_sha" ] || [ "$head_sha" != "$tag_sha" ]; then
+              echo "::error::workflow_dispatch with version '$version' must check out matching tag 'chart-v${version}' (HEAD=$head_sha, tag=${tag_sha:-missing})"
+              exit 1
+            fi
+          else
+            # refs/tags/chart-v0.1.0 → github.ref_name is `chart-v0.1.0`.
+            version="${REF_NAME#chart-v}"
+          fi
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Resolved chart version '$version' is not valid semver"
+            exit 1
+          fi
+          # The tag is the source of truth, but the published artifact's version
+          # comes from Chart.yaml — they must agree or we'd publish a mislabeled
+          # chart. Fail loudly on drift rather than silently shipping a mismatch.
+          chart_version="$(helm show chart deploy/charts/buzz | awk '/^version:/ {print $2}')"
+          if [ "$chart_version" != "$version" ]; then
+            echo "::error::Tag version '$version' != Chart.yaml version '$chart_version'. Bump Chart.yaml to match the tag."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Publishing chart version $version"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build chart dependencies
+        run: helm dependency build deploy/charts/buzz
+
+      - name: Package chart
+        run: helm package deploy/charts/buzz --destination dist
+
+      - name: Push chart to GHCR
+        env:
+          CHART_REPO: ${{ env.CHART_REPO }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          helm push "dist/buzz-${VERSION}.tgz" "$CHART_REPO"
+
+      - name: Summary
+        env:
+          CHART_REPO: ${{ env.CHART_REPO }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # CHART_REPO is oci://ghcr.io/block/buzz/charts; helm push appends the
+          # chart name, so the install ref is .../charts/buzz.
+          INSTALL_REF="${CHART_REPO}/buzz"
+          {
+            echo "### Published chart \`buzz\` \`${VERSION}\`"
+            echo
+            echo "**OCI ref:** \`${INSTALL_REF}:${VERSION}\`"
+            echo
+            echo "Install:"
+            echo '```'
+            echo "helm install buzz ${INSTALL_REF} --version ${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

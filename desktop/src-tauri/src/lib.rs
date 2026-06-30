@@ -510,6 +510,8 @@ pub fn run() {
             get_managed_agent_log,
             get_agent_models,
             discover_agent_models,
+            get_agent_config_surface,
+            put_agent_session_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,

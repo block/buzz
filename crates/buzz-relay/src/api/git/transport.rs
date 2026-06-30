@@ -26,7 +26,7 @@ use tokio::process::Command;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
-use super::cas_publish::{cas_publish, CasError, ParentState};
+use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
 use super::hook::install_hook;
 use super::hydrate::{
     hydrate_for_read, hydrate_for_write, load_manifest_for_read, HydrateError, HydratedRepo,
@@ -39,6 +39,14 @@ use buzz_core::TenantContext;
 const INFO_REFS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 /// Timeout for pack operations (upload-pack, receive-pack) — large repos need time.
 const PACK_OPS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+/// Maximum buffered response bytes for receive-pack status output.
+///
+/// A receive-pack response is protocol status, not repository contents. One
+/// MiB is generous and prevents a malformed subprocess path from turning a
+/// push into an arbitrary in-memory response buffer.
+const RECEIVE_PACK_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+/// Maximum ref advertisement output after manifest ref-count validation.
+const INFO_REFS_MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// NIP-98 auth extractor for git routes.
 ///
@@ -307,6 +315,13 @@ fn acquire_git_permit(
 /// via `Ok(None)` from [`hydrate_for_read`] and never reaches this fn.
 fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Response {
     error!(error = %err, owner = %owner, repo = %repo, "hydrate failed");
+    if matches!(err, HydrateError::ResourceLimit(_)) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "repository exceeds relay resource limits",
+        )
+            .into_response();
+    }
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         "git backend hydration failed",
@@ -561,7 +576,16 @@ async fn info_refs_subprocess(
 ) -> Result<Response, Response> {
     let _permit = acquire_git_permit(state)?;
 
-    let repo = match hydrate_for_read(&state.git_store, tenant, &params.owner, &params.repo).await {
+    let repo = match hydrate_for_read(
+        &state.git_store,
+        tenant,
+        &params.owner,
+        &params.repo,
+        state.config.git_max_pack_bytes,
+        state.config.git_max_repo_bytes,
+    )
+    .await
+    {
         Ok(Some(repo)) => repo,
         Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
         Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
@@ -572,23 +596,39 @@ async fn info_refs_subprocess(
     // "receive-pack" (without the "git-" prefix).
     let git_subcmd = service.strip_prefix("git-").unwrap_or(service);
 
+    let stdout_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        error!(error = %e, "git info_refs stdout tempfile failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+    let stderr_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        error!(error = %e, "git info_refs stderr tempfile failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+    let stdout_file = stdout_tmp.reopen().map_err(|e| {
+        error!(error = %e, "git info_refs stdout tempfile reopen failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+    let stderr_file = stderr_tmp.reopen().map_err(|e| {
+        error!(error = %e, "git info_refs stderr tempfile reopen failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+
     let mut cmd = Command::new("git");
     cmd.arg(git_subcmd)
         .arg("--stateless-rpc")
         .arg("--advertise-refs")
         .arg(repo.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file))
         .kill_on_drop(true);
     harden_git_env(&mut cmd);
 
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         error!(error = %e, "git subprocess failed to spawn");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
 
-    // kill_on_drop requires a Child handle — .output() doesn't expose one.
-    let output = tokio::time::timeout(INFO_REFS_TIMEOUT, child.wait_with_output())
+    let status = tokio::time::timeout(INFO_REFS_TIMEOUT, child.wait())
         .await
         .map_err(|_| {
             warn!(
@@ -602,11 +642,34 @@ async fn info_refs_subprocess(
             (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
         })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let stderr = read_log_prefix(stderr_tmp.path(), 64 * 1024).await;
         error!(stderr = %stderr, "git --advertise-refs failed");
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response());
     }
+    let stdout_len = tokio::fs::metadata(stdout_tmp.path())
+        .await
+        .map_err(|e| {
+            error!(error = %e, "git info_refs stdout metadata failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+        })?
+        .len();
+    if stdout_len > INFO_REFS_MAX_OUTPUT_BYTES {
+        warn!(
+            bytes = stdout_len,
+            max = INFO_REFS_MAX_OUTPUT_BYTES,
+            "git info_refs output exceeded limit"
+        );
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "git ref advertisement exceeds relay limits",
+        )
+            .into_response());
+    }
+    let stdout = tokio::fs::read(stdout_tmp.path()).await.map_err(|e| {
+        error!(error = %e, "git info_refs stdout read failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
     // `repo` (the tempdir) must live until *after* the subprocess has read
     // its objects. Holding it until here is the structural lifetime that
     // guarantees that.
@@ -615,10 +678,10 @@ async fn info_refs_subprocess(
     // Build pkt-line response: service header + flush + git output.
     let svc_line = format!("# service={service}\n");
     let svc_pkt = format!("{:04x}{svc_line}", svc_line.len() + 4);
-    let mut body = Vec::with_capacity(svc_pkt.len() + 4 + output.stdout.len());
+    let mut body = Vec::with_capacity(svc_pkt.len() + 4 + stdout.len());
     body.extend_from_slice(svc_pkt.as_bytes());
     body.extend_from_slice(b"0000"); // flush packet
-    body.extend_from_slice(&output.stdout);
+    body.extend_from_slice(&stdout);
 
     let content_type = format!("application/x-{service}-advertisement");
     Ok(Response::builder()
@@ -644,12 +707,20 @@ pub async fn upload_pack(
     let _ = validate_repo_id(&params.owner, &params.repo)?;
     let _permit = acquire_git_permit(&state)?;
 
-    let repo =
-        match hydrate_for_read(&state.git_store, &auth.tenant, &params.owner, &params.repo).await {
-            Ok(Some(repo)) => repo,
-            Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
-            Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
-        };
+    let repo = match hydrate_for_read(
+        &state.git_store,
+        &auth.tenant,
+        &params.owner,
+        &params.repo,
+        state.config.git_max_pack_bytes,
+        state.config.git_max_repo_bytes,
+    )
+    .await
+    {
+        Ok(Some(repo)) => repo,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
+        Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
+    };
 
     // Track A: stream the subprocess stdout straight into the response body
     // instead of buffering the whole pack into RAM. `repo` (the hydrated
@@ -723,10 +794,16 @@ pub async fn receive_pack(
     // Hydrate parent state + workspace in one round-trip. ParentState
     // travels with the workspace into finalize_push so the CAS predicates
     // on the same pointer ETag the workspace was hydrated from.
-    let (repo, parent_state) =
-        hydrate_for_write(&state.git_store, &auth.tenant, &params.owner, &params.repo)
-            .await
-            .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
+    let (repo, parent_state) = hydrate_for_write(
+        &state.git_store,
+        &auth.tenant,
+        &params.owner,
+        &params.repo,
+        state.config.git_max_pack_bytes,
+        state.config.git_max_repo_bytes,
+    )
+    .await
+    .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
 
     // Install the pre-receive hook into the ephemeral workspace. The
     // hook script is fixed per-deployment; per-push state (callback URL,
@@ -766,7 +843,14 @@ pub async fn receive_pack(
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
     // fence in finalize_push can sequence the CAS before any 2xx exists.
-    let pack = run_git_at(repo.path(), "receive-pack", body, &hook_env).await?;
+    let pack = run_git_at(
+        repo.path(),
+        "receive-pack",
+        body,
+        &hook_env,
+        RECEIVE_PACK_MAX_OUTPUT_BYTES,
+    )
+    .await?;
 
     let ctx = PushContext {
         pack,
@@ -816,14 +900,32 @@ async fn run_git_at(
     service: &str,
     body: Body,
     extra_env: &[(&str, String)],
+    max_output_bytes: u64,
 ) -> Result<PackOutput, Response> {
+    let stdout_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        error!(error = %e, service = %service, "git stdout tempfile failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+    let stderr_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+        error!(error = %e, service = %service, "git stderr tempfile failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+    let stdout_file = stdout_tmp.reopen().map_err(|e| {
+        error!(error = %e, service = %service, "git stdout tempfile reopen failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+    let stderr_file = stderr_tmp.reopen().map_err(|e| {
+        error!(error = %e, service = %service, "git stderr tempfile reopen failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+
     let mut cmd = Command::new("git");
     cmd.arg(service)
         .arg("--stateless-rpc")
         .arg(repo_path)
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(stdout_file))
+        .stderr(std::process::Stdio::from(stderr_file))
         .kill_on_drop(true);
     harden_git_env(&mut cmd);
     for (key, value) in extra_env {
@@ -858,11 +960,11 @@ async fn run_git_at(
 
     let timeout_result = tokio::time::timeout(PACK_OPS_TIMEOUT, async {
         let _ = body_task.await;
-        child.wait_with_output().await
+        child.wait().await
     })
     .await;
 
-    let output = match timeout_result {
+    let status = match timeout_result {
         Err(_elapsed) => {
             body_abort.abort();
             warn!(service = %service, timeout_secs = PACK_OPS_TIMEOUT.as_secs(), "git subprocess timed out");
@@ -872,11 +974,32 @@ async fn run_git_at(
             error!(error = %e, service = %service, "git subprocess failed");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response());
         }
-        Ok(Ok(out)) => out,
+        Ok(Ok(status)) => status,
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout_len = tokio::fs::metadata(stdout_tmp.path())
+        .await
+        .map_err(|e| {
+            error!(error = %e, service = %service, "git stdout metadata failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+        })?
+        .len();
+    if stdout_len > max_output_bytes {
+        warn!(
+            service = %service,
+            bytes = stdout_len,
+            max = max_output_bytes,
+            "git subprocess output exceeded limit"
+        );
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "git output exceeds relay limits",
+        )
+            .into_response());
+    }
+
+    if !status.success() {
+        let stderr = read_log_prefix(stderr_tmp.path(), 64 * 1024).await;
         warn!(stderr = %stderr, service = %service, "git subprocess exited with error");
         // Still return output — git protocol errors are communicated in-band.
         // A non-zero exit feeds `PackOutput.ok` below, but it is NOT the signal
@@ -891,7 +1014,12 @@ async fn run_git_at(
     // decline, so the exit code alone is insufficient — the rejection lives in
     // the in-band report-status. Fold both signals into `ok` so `finalize_push`
     // skips CAS publish + kind:30618 on any rejected ref.
-    let report_rejected = service == "receive-pack" && receive_pack_report_rejected(&output.stdout);
+    let stdout = tokio::fs::read(stdout_tmp.path()).await.map_err(|e| {
+        error!(error = %e, service = %service, "git stdout read failed");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
+    })?;
+
+    let report_rejected = service == "receive-pack" && receive_pack_report_rejected(&stdout);
     if report_rejected {
         warn!(
             service = %service,
@@ -900,9 +1028,23 @@ async fn run_git_at(
     }
 
     Ok(PackOutput {
-        stdout: output.stdout,
-        ok: output.status.success() && !report_rejected,
+        stdout,
+        ok: status.success() && !report_rejected,
     })
+}
+
+async fn read_log_prefix(path: &Path, max_bytes: u64) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return "<stderr unavailable>".to_string();
+    };
+    let mut bytes = Vec::new();
+    let mut limited = file.take(max_bytes);
+    if limited.read_to_end(&mut bytes).await.is_err() {
+        return "<stderr unavailable>".to_string();
+    }
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 /// Returns true when a `git receive-pack` report-status stream contains an
@@ -1214,6 +1356,11 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
         &ctx.owner,
         &ctx.repo,
         &ctx.parent_state,
+        PublishLimits {
+            parent_hydrated_bytes: ctx.repo_handle.hydrated_bytes(),
+            max_pack_bytes: state.config.git_max_pack_bytes,
+            max_repo_bytes: state.config.git_max_repo_bytes,
+        },
     )
     .await
     {
@@ -1248,6 +1395,19 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             return (
                 StatusCode::BAD_REQUEST,
                 "push produced invalid manifest state",
+            )
+                .into_response();
+        }
+        Err(CasError::ResourceLimit(e)) => {
+            warn!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                error = %e,
+                "push rejected: repo exceeds relay resource limits"
+            );
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "repository exceeds relay resource limits",
             )
                 .into_response();
         }

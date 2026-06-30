@@ -32,6 +32,13 @@ use serde::{Deserialize, Serialize};
 
 /// Current manifest schema version. Bump on incompatible change.
 pub const MANIFEST_VERSION: u32 = 1;
+/// Maximum number of pack objects one manifest may reference.
+///
+/// Hydration indexes packs one at a time, but an unbounded pack list still
+/// turns one request into unbounded object-store and git subprocess work.
+pub const MAX_MANIFEST_PACKS: usize = 128;
+/// Maximum number of refs one manifest may advertise.
+pub const MAX_MANIFEST_REFS: usize = 10_000;
 
 /// A repository's published state.
 ///
@@ -95,6 +102,25 @@ pub enum ManifestError {
     /// (`Inv_RefDerivedFromParent`).
     #[error("manifest parent is not a bare 64-char hex digest: {0:?}")]
     MalformedParent(String),
+    /// Manifest names too many packs for one bounded hydration request.
+    #[error("manifest contains too many packs: {got} (max {max})")]
+    TooManyPacks {
+        /// Number of pack keys in the manifest.
+        got: usize,
+        /// Hard cap enforced by the relay.
+        max: usize,
+    },
+    /// Manifest names too many refs for one bounded advertisement request.
+    #[error("manifest contains too many refs: {got} (max {max})")]
+    TooManyRefs {
+        /// Number of refs in the manifest.
+        got: usize,
+        /// Hard cap enforced by the relay.
+        max: usize,
+    },
+    /// A pack key is not exactly `packs/<64 lowercase hex sha256>`.
+    #[error("manifest contains malformed pack key {0:?}")]
+    MalformedPackKey(String),
 }
 
 /// Conservative refname validation, used symmetrically on both the write side
@@ -131,7 +157,12 @@ pub fn is_hex_oid(s: &str) -> bool {
 /// manifest digests are *always* SHA-256, so this is the tighter predicate
 /// for the `Manifest::parent` field.
 fn is_manifest_digest(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+    s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// Content-addressed pack-key predicate.
+pub fn is_pack_key(s: &str) -> bool {
+    s.strip_prefix("packs/").is_some_and(is_manifest_digest)
 }
 
 /// The canonical pointer key for a repo: `repos/<community>/<owner>/<repo>/pointer`.
@@ -159,10 +190,24 @@ impl Manifest {
     /// - `head` is non-empty and passes `is_safe_refname`.
     /// - Every key in `refs` passes `is_safe_refname`.
     /// - Every value in `refs` is a hex OID per `is_hex_oid`.
+    /// - Pack/ref cardinality stays within bounded hydration limits.
+    /// - Every pack key is a canonical content-addressed key.
     /// - `parent`, if `Some`, is a bare 64-char hex digest (not a store key).
     ///
     /// Read-side `hydrate` runs the same predicates as defense-in-depth.
     pub fn validate(&self) -> Result<(), ManifestError> {
+        if self.packs.len() > MAX_MANIFEST_PACKS {
+            return Err(ManifestError::TooManyPacks {
+                got: self.packs.len(),
+                max: MAX_MANIFEST_PACKS,
+            });
+        }
+        if self.refs.len() > MAX_MANIFEST_REFS {
+            return Err(ManifestError::TooManyRefs {
+                got: self.refs.len(),
+                max: MAX_MANIFEST_REFS,
+            });
+        }
         if self.head.is_empty() {
             return Err(ManifestError::EmptyHead);
         }
@@ -178,6 +223,11 @@ impl Manifest {
                     refname: refname.clone(),
                     oid: oid.clone(),
                 });
+            }
+        }
+        for pack in &self.packs {
+            if !is_pack_key(pack) {
+                return Err(ManifestError::MalformedPackKey(pack.clone()));
             }
         }
         if let Some(p) = &self.parent {
@@ -220,6 +270,10 @@ impl Manifest {
 mod tests {
     use super::*;
 
+    fn pack_key(ch: char) -> String {
+        format!("packs/{}", ch.to_string().repeat(64))
+    }
+
     fn sample() -> Manifest {
         let mut refs = BTreeMap::new();
         refs.insert(
@@ -234,7 +288,7 @@ mod tests {
             version: MANIFEST_VERSION,
             head: "refs/heads/main".into(),
             refs,
-            packs: vec!["packs/cc".into(), "packs/dd".into()],
+            packs: vec![pack_key('c'), pack_key('d')],
             parent: Some("ee".repeat(32)),
         }
     }
@@ -265,10 +319,10 @@ mod tests {
     #[test]
     fn canonical_bytes_sorts_and_dedups_packs() {
         let mut m = sample();
-        m.packs = vec!["packs/dd".into(), "packs/cc".into(), "packs/dd".into()];
+        m.packs = vec![pack_key('d'), pack_key('c'), pack_key('d')];
         let bytes = m.canonical_bytes().unwrap();
         let back = Manifest::from_bytes(&bytes).unwrap();
-        assert_eq!(back.packs, vec!["packs/cc", "packs/dd"]);
+        assert_eq!(back.packs, vec![pack_key('c'), pack_key('d')]);
     }
 
     #[test]
@@ -386,6 +440,28 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_malformed_pack_key() {
+        let mut m = sample();
+        m.packs = vec!["packs/not-a-digest".into()];
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::MalformedPackKey(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_packs() {
+        let mut m = sample();
+        m.packs = (0..=MAX_MANIFEST_PACKS)
+            .map(|i| format!("packs/{i:064x}"))
+            .collect();
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::TooManyPacks { .. })
+        ));
+    }
+
+    #[test]
     fn validate_accepts_no_parent() {
         let mut m = sample();
         m.parent = None;
@@ -472,14 +548,17 @@ mod tests {
             version: 1,
             head: "refs/heads/main".into(),
             refs,
-            packs: vec!["packs/p1".into()],
+            packs: vec![pack_key('1')],
             parent: None,
         };
         let bytes = m.canonical_bytes().unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         assert_eq!(
             s,
-            r#"{"version":1,"head":"refs/heads/main","refs":{"refs/heads/main":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"packs":["packs/p1"],"parent":null}"#
+            format!(
+                r#"{{"version":1,"head":"refs/heads/main","refs":{{"refs/heads/main":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"packs":["{}"],"parent":null}}"#,
+                pack_key('1')
+            )
         );
     }
 }

@@ -1008,6 +1008,430 @@ function resetMockRelayMembers(config: E2eConfig | undefined) {
   ];
 }
 
+function buildMockConfigSurface(pubkey: string): {
+  runtimeId: string | null;
+  runtimeLabel: string | null;
+  isPreSpawn: boolean;
+  normalized: Record<string, unknown>;
+  advanced: unknown[];
+  sources: Record<string, unknown>;
+} {
+  // Goose running — mixed origins, override on model
+  const gooseSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "gpt-4o",
+        origin: "buzzExplicit",
+        overriddenValue: "gpt-4o-mini",
+        overriddenOrigin: "configFile",
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      provider: {
+        value: "openai",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+      },
+      thinkingEffort: {
+        value: "medium",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [
+      {
+        key: "extensions.developer",
+        label: "Extension: developer",
+        value: "enabled",
+        origin: "configFile",
+        schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.developer",
+        },
+      },
+      {
+        key: "extensions.web_search",
+        label: "Extension: web_search",
+        value: "enabled",
+        origin: "configFile",
+        schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.web_search",
+        },
+      },
+      {
+        key: "extensions.memory",
+        label: "Extension: memory",
+        value: "disabled",
+        origin: "configFile",
+        schemaType: { type: "enum", options: ["enabled", "disabled"] },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.extensions.memory",
+        },
+      },
+    ],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Claude Code — mostly ACP-sourced
+  const claudeSurface = {
+    runtimeId: "claude-code",
+    runtimeLabel: "Claude Code",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "claude-sonnet-4-20250514",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "model" },
+      },
+      provider: {
+        value: "anthropic",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "provider" },
+      },
+      mode: {
+        value: "code",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "mode" },
+      },
+      thinkingEffort: {
+        value: "high",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "thinkingEffort" },
+      },
+      maxOutputTokens: {
+        value: "16384",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "maxOutputTokens" },
+      },
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "notApplicable",
+      configFile: "available",
+      configFilePath: "~/.claude/settings.json",
+    },
+  };
+
+  // Pre-spawn — model from config file, ACP fields pending
+  const preSpawnSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: true,
+    normalized: {
+      model: {
+        value: "gpt-4o-mini",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.model" },
+      },
+      provider: {
+        value: "openai",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
+      },
+      mode: {
+        value: null,
+        origin: "acpNativeRead",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      thinkingEffort: {
+        value: null,
+        origin: "acpNativeRead",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "pending",
+      acpConfigOptions: "pending",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Codex — dual-axis mode
+  const codexSurface = {
+    runtimeId: "codex",
+    runtimeLabel: "Codex",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "codex-mini",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.model" },
+      },
+      provider: {
+        value: "openai",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.provider",
+        },
+      },
+      mode: {
+        value: "suggest / auto-edit",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "gooseNativeConfigWrite", configKey: "goose.mode" },
+      },
+      thinkingEffort: null,
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [
+      {
+        key: "approval_policy",
+        label: "Approval Policy",
+        value: "unless-allow-listed",
+        origin: "configFile",
+        schemaType: {
+          type: "enum",
+          options: ["suggest", "auto-edit", "full-auto", "unless-allow-listed"],
+        },
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.approval_policy",
+        },
+      },
+      {
+        key: "sandbox_mode",
+        label: "Sandbox Mode",
+        value: "container",
+        origin: "envVar",
+        schemaType: {
+          type: "enum",
+          options: ["container", "host", "none"],
+        },
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_SANDBOX_MODE" },
+      },
+    ],
+    sources: {
+      acpNative: "notApplicable",
+      acpConfigOptions: "notApplicable",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.codex/config.toml",
+    },
+  };
+
+  // Live runtime override — a persona-linked agent whose session model was
+  // switched at runtime. The live model rides over the persona baseline as a
+  // secondary value WITHOUT strikethrough (the headline runtimeOverride render).
+  const runtimeOverrideSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "claude-opus-4-20250514",
+        origin: "runtimeOverride",
+        overriddenValue: "gpt-4o",
+        overriddenOrigin: "personaDefault",
+        isRequired: false,
+        writeVia: { type: "acpSetSessionModel" },
+      },
+      provider: {
+        value: "anthropic",
+        origin: "acpConfigOption",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "acpSetConfigOption", configId: "provider" },
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+      },
+      thinkingEffort: {
+        value: "high",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Mixed-provenance showcase — every top-level row carries a DIFFERENT origin
+  // so the panel witnesses four distinct provenance sentences in one frame:
+  // "Set in Buzz", "Inherited from persona", "From config file (...)", and
+  // "From environment variable (...)".
+  const multiOriginSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "gpt-4o",
+        origin: "buzzExplicit",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      provider: {
+        value: "openai",
+        origin: "personaDefault",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "readOnly" },
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+      },
+      thinkingEffort: {
+        value: "medium",
+        origin: "configFile",
+        overriddenValue: null,
+        overriddenOrigin: null,
+        isRequired: false,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "goose.thinkingEffort",
+        },
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Map well-known test pubkeys to specific fixtures
+  // Synthetic agent for the multi-origin provenance showcase (not a TEST_IDENTITY).
+  const PUBKEY_MULTI_ORIGIN =
+    "abc1230000000000000000000000000000000000000000000000000000000def";
+
+  switch (pubkey) {
+    case ALICE_PUBKEY:
+      return claudeSurface;
+    case BOB_PUBKEY:
+      return preSpawnSurface;
+    case CHARLIE_PUBKEY:
+      return codexSurface;
+    case OUTSIDER_PUBKEY:
+      return runtimeOverrideSurface;
+    case PUBKEY_MULTI_ORIGIN:
+      return multiOriginSurface;
+    default:
+      return gooseSurface;
+  }
+}
+
 function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
   const now = new Date().toISOString();
   const status = seed.status ?? "stopped";
@@ -1085,6 +1509,17 @@ function resetMockManagedAgents(config?: E2eConfig) {
 
   for (const seed of config?.mock?.managedAgents ?? []) {
     mockManagedAgents.push(buildSeededManagedAgent(seed));
+    applyMockDisplayName(seed.pubkey, seed.name);
+    mockAgentPubkeys.add(seed.pubkey);
+    mockProfiles.set(seed.pubkey, {
+      pubkey: seed.pubkey,
+      display_name: seed.name,
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: MOCK_IDENTITY_PUBKEY,
+      is_agent: true,
+    });
     for (const channel of mockChannels) {
       const isSeedChannel =
         seed.channelIds?.includes(channel.id) ||
@@ -2414,6 +2849,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 content: "Indexing the channel catalog now.",
                 sig: "mocksig".repeat(20).slice(0, 128),
               },
+              // Seed one message per managed agent that is a member of #agents.
+              // This lets e2e specs open the profile panel by clicking the
+              // agent's avatar in a message-row (the same pattern as charlie).
+              ...mockManagedAgents
+                .filter((agent) =>
+                  mockChannels
+                    .find((ch) => ch.id === channelId)
+                    ?.members.some((m) => m.pubkey === agent.pubkey),
+                )
+                .map((agent, index) => ({
+                  id: `mock-agents-managed-${agent.pubkey.slice(0, 8)}`,
+                  pubkey: agent.pubkey,
+                  created_at: Math.floor(Date.now() / 1000) - 80 + index,
+                  kind: 9 as const,
+                  tags: [["h", channelId]],
+                  content: `${agent.name} reporting in.`,
+                  sig: "mocksig".repeat(20).slice(0, 128),
+                })),
             ]
           : channelId === "feedf00d-0000-4000-8000-000000000007"
             ? // 600 messages > CHANNEL_HISTORY_LIMIT (300): the initial load
@@ -6912,6 +7365,10 @@ export function maybeInstallE2eTauriMocks() {
           selectedModel: null,
           supportsSwitching: true,
         };
+      }
+      case "get_agent_config_surface": {
+        const configArgs = payload as { pubkey: string };
+        return buildMockConfigSurface(configArgs.pubkey);
       }
       case "update_managed_agent":
         return handleUpdateManagedAgent(

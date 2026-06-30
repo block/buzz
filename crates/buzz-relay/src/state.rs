@@ -220,6 +220,8 @@ pub struct AppState {
     /// serialization — that's the CAS at the manifest pointer (spec
     /// §Push step 7, `Inv_NoFork`).
     pub git_semaphore: Arc<Semaphore>,
+    /// Semaphore limiting concurrent media upload parsing/transcoding work.
+    pub media_upload_semaphore: Arc<Semaphore>,
 
     /// Workflow engine for background processing.
     pub workflow_engine: Arc<WorkflowEngine>,
@@ -283,6 +285,11 @@ pub struct AppState {
     /// trusted, but a buggy desktop loop shouldn't make the relay sign+fan
     /// unboundedly. 20/sec is far above any real interactive use.
     pub mesh_connect_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    /// Per-uploader sliding-window rate limiter for media upload starts.
+    /// Key: uploader pubkey bytes (32). Value: (count, window_start).
+    pub media_upload_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    /// Current in-flight media uploads per uploader pubkey.
+    pub media_uploads_in_flight: Arc<DashMap<[u8; 32], u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
     /// Key: (agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// agent_owner_pubkey is immutable so a long TTL (5 min) is safe.
@@ -357,6 +364,7 @@ impl AppState {
         });
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
+        let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
         let git_store = crate::api::git::store::GitStore::new(
             &config.media.s3_endpoint,
             &config.media.s3_access_key,
@@ -379,6 +387,7 @@ impl AppState {
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
+            media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,
             relay_keypair,
 
@@ -415,6 +424,8 @@ impl AppState {
             nip98_replay,
             observer_rate_limiter: Arc::new(DashMap::new()),
             mesh_connect_rate_limiter: Arc::new(DashMap::new()),
+            media_upload_rate_limiter: Arc::new(DashMap::new()),
+            media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(1_000)

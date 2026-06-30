@@ -26,6 +26,7 @@ class SettingsPage extends HookConsumerWidget {
     final config = ref.watch(relayConfigProvider);
     final selectedAccent = ref.watch(accentProvider);
     final selectedScheme = ref.watch(schemeProvider);
+    final colorScheme = Theme.of(context).colorScheme;
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
 
@@ -90,11 +91,7 @@ class SettingsPage extends HookConsumerWidget {
                             children: [
                               for (var i = 0; i < accentColors.length; i++)
                                 _AccentSwatch(
-                                  color:
-                                      context.colors.brightness ==
-                                          Brightness.light
-                                      ? accentColors[i].light
-                                      : accentColors[i].dark,
+                                  color: accentColorForScheme(colorScheme, i),
                                   label: accentColors[i].name,
                                   selected: selectedAccent == i,
                                   onTap: () => ref
