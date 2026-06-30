@@ -331,14 +331,16 @@ test("persona model options follow the selected LLM provider", async ({
 
   // Switch to Default (no explicit provider) — model resets to "Default model".
   await llmProvider.click();
-  const llmProviderMenu = page.getByRole("menu").filter({
-    has: page.getByRole("menuitemradio", { name: "OpenAI", exact: true }),
-  });
-  const defaultOption = llmProviderMenu
-    .last()
-    .getByRole("menuitemradio", { name: "Default", exact: true });
-  await expect(defaultOption).toBeVisible();
-  await defaultOption.click();
+  // Wait for Radix menu animations to settle before locating the menu item.
+  // The prior approach held a filtered locator across the open→animate boundary
+  // and clicked a node that Radix was still re-mounting, producing
+  // "element is not stable" / "element was detached from the DOM" failures.
+  // Matching the OpenAI/Anthropic steps above: wait for animations, then
+  // locate fresh at click-time so no stale reference crosses the re-render.
+  await waitForAnimations(page);
+  await page
+    .getByRole("menuitemradio", { name: "Default", exact: true })
+    .click();
   await expect(model).toBeVisible();
   await expect(model).toContainText("Default model");
 });
