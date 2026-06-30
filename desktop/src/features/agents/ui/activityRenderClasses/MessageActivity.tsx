@@ -84,8 +84,8 @@ function MessageItem({
           </span>
           <TranscriptTimestamp timestamp={item.timestamp} />
         </div>
-        <div className="w-full min-w-0 text-sm leading-relaxed">
-          <Markdown compact content={text || " "} />
+        <div className="w-full min-w-0 text-sm">
+          <Markdown content={text || " "} tight />
         </div>
       </div>
     </div>
