@@ -92,6 +92,28 @@ test("editAgent_providerOptions_includesCurrentIfCustom", () => {
 // for deciding whether to show options is sound: when discovery is null, we
 // fall back to staticModelOptions (length > 0), so we always have options.
 
+test("editAgent_requiredDropdownField_onlyMarksMissingKnownField", async () => {
+  const { isMissingRequiredDropdownField } = await import(
+    "./personaDialogPickers.tsx"
+  );
+
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
+    true,
+    "missing required dropdown value must be marked required",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, "configured"),
+    false,
+    "configured required dropdown value must not show the missing-required mark",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField(null, ""),
+    false,
+    "unknown normalized field names are ignored because they do not map to a dropdown",
+  );
+});
+
 test("editAgent_modelFallback_staticOptionsWhenDiscoveryNull", () => {
   const staticModelOptions = [{ id: "", label: "Default model" }];
   // Simulate: discoveredModelOptions === null → effectiveModelOptions is static fallback
