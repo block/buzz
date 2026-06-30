@@ -99,6 +99,28 @@ describe("getOwnedRelayWorkingAgents", () => {
       [],
     );
   });
+
+  it("drops relay agents with missing profiles or null owners", () => {
+    assert.deepEqual(
+      getOwnedRelayWorkingAgents(
+        [
+          { pubkey: OWNED_RELAY_AGENT_PUBKEY, name: "nadia" },
+          { pubkey: "ownerless-agent", name: "ralph" },
+        ],
+        {
+          "ownerless-agent": {
+            displayName: "ralph",
+            avatarUrl: null,
+            nip05Handle: null,
+            ownerPubkey: null,
+            isAgent: true,
+          },
+        },
+        VIEWER_PUBKEY,
+      ),
+      [],
+    );
+  });
 });
 
 describe("mergeWorkingAgents", () => {
