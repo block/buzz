@@ -128,6 +128,18 @@ pub fn run_event_sync(app: &tauri::AppHandle, owner_keys: &nostr::Keys) {
 /// so it runs pre-identity here ahead of all readers — reader-first loses a
 /// launch (stale harness/`mcp_command` until the next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
+    // Initialize the process-lifetime nest directory before any filesystem
+    // operation that calls nest_dir(). The discriminator matches the existing
+    // pattern used by reconcile_target_dir: dev instances have an app-data-dir
+    // name starting with CANONICAL_DEV_IDENTIFIER.
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let is_dev = data_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+        crate::managed_agents::init_nest_dir(is_dev);
+    }
+
     migrate_legacy_app_data_dir(app);
     sync_shared_agent_data(app);
     migrate_packs_to_teams(app);
@@ -197,7 +209,7 @@ const LEGACY_NEST_KNOWLEDGE: &[&str] = &[
     ".scratch",
 ];
 
-/// Migrate the legacy agent nest (`~/.sprout`) into the current nest (`~/.buzz`).
+/// Migrate the legacy agent nest (`~/.sprout`) into the current nest.
 ///
 /// PR #960 renamed the nest directory but shipped no migration, stranding the
 /// agent's accumulated knowledge in `~/.sprout` while `~/.buzz` booted empty —
@@ -220,7 +232,12 @@ pub fn migrate_legacy_nest() -> bool {
         eprintln!("buzz-desktop: nest-migration: cannot resolve home directory");
         return false;
     };
-    migrate_legacy_nest_at(&home.join(".sprout"), &home.join(".buzz"))
+    // Destination is the current build's nest dir (`.buzz` or `.buzz-dev`).
+    let Some(current_nest) = crate::managed_agents::nest_dir() else {
+        eprintln!("buzz-desktop: nest-migration: cannot resolve nest directory");
+        return false;
+    };
+    migrate_legacy_nest_at(&home.join(".sprout"), &current_nest)
 }
 
 /// Copy the [`LEGACY_NEST_KNOWLEDGE`] entries from `legacy` to `current`.
@@ -264,6 +281,49 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
         }
     }
     true
+}
+
+/// One-time migration of dev-build nest contents from `~/.buzz` → `~/.buzz-dev`.
+///
+/// When a dev build first boots after this change ships, it switches from the
+/// shared `~/.buzz` nest to a dedicated `~/.buzz-dev` nest. Without migration,
+/// all accumulated knowledge (RESEARCH/, PLANS/, GUIDES/, WORK_LOGS/, mem_*
+/// slugs, AGENTS.md, managed-agents.json) would be invisible to dev instances.
+///
+/// Migration is non-destructive: `copy_dir_all` skips files already at the
+/// destination, so a partially-migrated state is safe to re-run. The source
+/// `~/.buzz` is never deleted — prod builds continue to use it normally.
+///
+/// Only runs on dev builds (checked by the caller). Returns `true` when
+/// contents were copied (useful for a one-time log message, not required).
+pub fn migrate_dev_nest() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        eprintln!("buzz-desktop: dev-nest-migration: cannot resolve home directory");
+        return false;
+    };
+    let legacy = home.join(".buzz");
+    let current = home.join(".buzz-dev");
+    // If legacy doesn't exist, nothing to migrate.
+    if !legacy.exists() {
+        return false;
+    }
+    // If the destination RESEARCH/ directory already contains any files, assume
+    // migration already ran and skip. Using `ensure_nest()` creates an empty
+    // RESEARCH/ dir, so we check for files (not just directory existence) to
+    // avoid a false positive on a fresh first boot.
+    if dir_has_any_file(&current.join("RESEARCH")) || dir_has_any_file(&current.join("PLANS")) {
+        return false;
+    }
+    migrate_legacy_nest_at(&legacy, &current)
+}
+
+/// Returns `true` when `dir` exists AND contains at least one file entry
+/// (recursion depth 1 — does not descend into subdirectories).
+fn dir_has_any_file(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|mut rd| rd.next().is_some())
+        .unwrap_or(false)
 }
 
 /// Copy a single file only if the destination does not already exist, matching
