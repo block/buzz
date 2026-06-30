@@ -2,16 +2,35 @@ import type {
   AgentActivityDescriptor,
   TranscriptItem,
 } from "./agentSessionTypes";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 
 const sessionId = "debug-session-render-classes";
 const turnId = "debug-turn-render-classes";
 const channelId = "debug-channel-render-classes";
 const userPubkey = "debug-user-render-classes";
+const reviewerPubkey = "debug-reviewer-render-classes";
 const baseTimestamp = Date.parse("2026-06-30T00:00:00.000Z");
 const workspacePath = "/Users/tho/.buzz/REPOS/buzz-pr-3-activity-feed-rebuild";
+export const DEBUG_AGENT_ACTIVITY_AGENT_NAME = "Fixture Agent";
+export const DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL =
+  "https://picsum.photos/seed/activity-agent-placeholder/200";
+export const DEBUG_AGENT_ACTIVITY_PROFILES: UserProfileLookup = {
+  [userPubkey]: debugProfile("Taylor Ho", "activity-user-tho", "tho"),
+  [reviewerPubkey]: debugProfile("Avery", "activity-user-avery", "avery"),
+};
 
 function timestamp(seconds: number) {
   return new Date(baseTimestamp + seconds * 1000).toISOString();
+}
+
+function debugProfile(displayName: string, seed: string, handle: string) {
+  return {
+    displayName,
+    avatarUrl: `https://picsum.photos/seed/${seed}/200`,
+    nip05Handle: `${handle}@buzz.local`,
+    isAgent: false,
+    ownerPubkey: null,
+  };
 }
 
 function descriptor(
@@ -98,6 +117,26 @@ function toolItem({
 }
 
 function fileEditScenario(path: string): FileEditScenario {
+  if (path.endsWith("VISION_ACTIVITY.md")) {
+    return {
+      oldStr:
+        "## Principles\n\nThe activity feed should make agent work legible without turning every event into chat.\n",
+      newStr:
+        "## Principles\n\nThe activity feed should make agent work legible without turning every event into chat. The common path is agent text, stdout, user feedback, then another tool pass.\n",
+      diff: " ## Principles\n \n-The activity feed should make agent work legible without turning every event into chat.\n+The activity feed should make agent work legible without turning every event into chat. The common path is agent text, stdout, user feedback, then another tool pass.\n",
+    };
+  }
+
+  if (path.endsWith("activityRenderClasses/ActivityRow.tsx")) {
+    return {
+      oldStr:
+        "  const match = label.match(\n    /^(Captured|Edited|Ran|Read|Updated|Viewed)\\s+(.+)$/,\n  );\n",
+      newStr:
+        "  const match = label.match(\n    /^(Captured|Edited|Ran|Read|Updated|Viewed|Wrote)\\s+(.+)$/,\n  );\n",
+      diff: "   const match = label.match(\n-    /^(Captured|Edited|Ran|Read|Updated|Viewed)\\s+(.+)$/,\n+    /^(Captured|Edited|Ran|Read|Updated|Viewed|Wrote)\\s+(.+)$/,\n   );\n",
+    };
+  }
+
   if (path.endsWith("AgentSessionThreadPanel.tsx")) {
     return {
       oldStr:
@@ -284,6 +323,49 @@ function todoUpdateItem(
   });
 }
 
+function assistantMessage(
+  id: string,
+  text: string,
+  seconds: number,
+): Extract<TranscriptItem, { type: "message" }> {
+  return {
+    id,
+    type: "message",
+    renderClass: "message",
+    role: "assistant",
+    title: DEBUG_AGENT_ACTIVITY_AGENT_NAME,
+    text,
+    timestamp: timestamp(seconds),
+    acpSource: "agent_message_chunk",
+    turnId,
+    sessionId,
+    channelId,
+  };
+}
+
+function userMessage(
+  id: string,
+  authorPubkey: string,
+  title: string,
+  text: string,
+  seconds: number,
+): Extract<TranscriptItem, { type: "message" }> {
+  return {
+    id,
+    type: "message",
+    renderClass: "message",
+    role: "user",
+    title,
+    text,
+    timestamp: timestamp(seconds),
+    acpSource: "user_message_chunk",
+    authorPubkey,
+    turnId,
+    sessionId,
+    channelId,
+  };
+}
+
 /**
  * Temporary design-debug fixture: one coherent turn that exercises every
  * AgentActivityRenderClass and every TranscriptItem variant. Keep this isolated
@@ -361,6 +443,24 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     sessionId,
     channelId,
   },
+  assistantMessage(
+    "debug:assistant-shape",
+    "Let me think about the shape:\n\n1. Confirm how the current render classes group tool activity.\n2. Check the fixture against real ACP/MCP payloads.\n3. Keep the debug state noisy enough to resemble a normal agent turn.",
+    4.4,
+  ),
+  shellCommandItem(
+    "debug:shell-tool",
+    "git status --short",
+    4.8,
+    "## tho/activity-feed-rebuild...origin/main [ahead 4]\n",
+  ),
+  userMessage(
+    "debug:user-followup-location",
+    userPubkey,
+    "Taylor Ho",
+    "Yep, and make sure the fixture includes the boring chatter too — short status messages are most of what I see in real agent turns.",
+    5.4,
+  ),
   {
     id: "debug:plan",
     type: "plan",
@@ -373,6 +473,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     sessionId,
     channelId,
   },
+  assistantMessage(
+    "debug:assistant-ack-location",
+    "Makes sense. I’ll bias this toward the ordinary path: small observations, quick shell checks, file edits, and a final report instead of only taxonomy edge cases.",
+    5.8,
+  ),
   {
     id: "debug:status",
     type: "lifecycle",
@@ -385,11 +490,10 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     sessionId,
     channelId,
   },
-  shellCommandItem(
-    "debug:shell-tool",
-    "git status --short",
-    8,
-    "## tho/activity-feed-rebuild...origin/main [ahead 4]\n",
+  assistantMessage(
+    "debug:assistant-after-status",
+    "The branch already has the activity-feed work stacked, so I’m going to keep this as a fixture-only pass and avoid touching the live transcript renderer.",
+    8.8,
   ),
   {
     id: "debug:relay-op-tool",
@@ -435,11 +539,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     descriptor: descriptor(
       "message",
       "Send Message",
-      "@Ned picked it up — testing the full taxonomy now.",
+      "@Agent picked it up — testing the full taxonomy now.",
       "buzz-cli:messages.send",
       {
         operation: "messages.send",
-        object: "@Ned picked it up — testing the full taxonomy now.",
+        object: "@Agent picked it up — testing the full taxonomy now.",
         source: "shell",
         tone: "write",
       },
@@ -450,7 +554,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     status: "completed",
     args: {
       command:
-        'buzz messages send --channel buzz-agent-observability --content "@Ned picked it up — testing the full taxonomy now."',
+        'buzz messages send --channel buzz-agent-observability --content "@Agent picked it up — testing the full taxonomy now."',
       workdir: workspacePath,
       timeout_ms: 120000,
     },
@@ -464,6 +568,18 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     sessionId,
     channelId,
   },
+  userMessage(
+    "debug:user-followup-raw",
+    reviewerPubkey,
+    "Avery",
+    "Could you include one of the raw payload examples in the middle of the turn? That’s where I usually need to compare the compact row with the wire event.",
+    13.4,
+  ),
+  assistantMessage(
+    "debug:assistant-before-edits",
+    "Good call. I’ll leave a raw ACP sample in the fixture and make the surrounding messages look like a real debugging exchange.",
+    13.8,
+  ),
   {
     id: "debug:file-edit-tool",
     type: "tool",
@@ -577,6 +693,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     "4 files changed, 211 insertions(+), 38 deletions(-)\n",
     122,
   ),
+  assistantMessage(
+    "debug:assistant-mid-check",
+    "The grouped command burst is now doing the thing I wanted: it compresses repetitive shell checks, but each child still has distinct stdout and timing when expanded.",
+    20,
+  ),
   shellCommandItem(
     "debug:shell-burst-6",
     "git add desktop/src/features/agents/ui desktop/src/features/channels/ui",
@@ -605,6 +726,14 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       operation: "block-safe-github",
     },
   }),
+  userMessage(
+    "debug:user-followup-finish",
+    userPubkey,
+    "Taylor Ho",
+    "After the push check, include the exact branch and SHA in the channel message. That final report bubble is a common case.",
+    21.7,
+  ),
+  fileEditItem("debug:single-edit-vision-doc", "VISION_ACTIVITY.md", 21.9, 210),
   todoUpdateItem(
     "debug:todo-after-first-check",
     "Inspect transcript panel settings and debug activity fixture",
@@ -633,8 +762,19 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
   ),
   todoUpdateItem(
     "debug:todo-after-push",
-    "Report branch, SHA, and commit to Ned",
+    "Report branch, SHA, and commit to the requester",
     24.4,
+  ),
+  assistantMessage(
+    "debug:assistant-reporting",
+    "Everything is ready to report. I’m going to send a concise channel update with branch, SHA, and commit title, then stop.",
+    24.8,
+  ),
+  fileEditItem(
+    "debug:single-edit-activity-row",
+    "desktop/src/features/agents/ui/activityRenderClasses/ActivityRow.tsx",
+    25,
+    160,
   ),
   {
     id: "debug:message-tool-pushed-report",
@@ -643,11 +783,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     descriptor: descriptor(
       "message",
       "Send Message",
-      "@Ned Done and pushed.\n\nBranch: `tho/activity-feed-rebuild`\nSHA: `aa84200ad266d16f81da2f9c347518a7525a3ef4`\nCommit: `feat(desktop): add activity render-class debug fixture`",
+      "@Agent Done and pushed.\n\nBranch: `tho/activity-feed-rebuild`\nSHA: `aa84200ad266d16f81da2f9c347518a7525a3ef4`\nCommit: `feat(desktop): add activity render-class debug fixture`",
       "buzz-cli:messages.send",
       {
         operation: "messages.send",
-        object: "@Ned Done and pushed.",
+        object: "@Agent Done and pushed.",
         source: "shell",
         tone: "write",
       },
@@ -658,7 +798,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     status: "completed",
     args: {
       command:
-        'buzz messages send --channel agents --content "@Ned Done and pushed."',
+        'buzz messages send --channel agents --content "@Agent Done and pushed."',
       workdir: workspacePath,
       timeout_ms: 120000,
     },
@@ -692,35 +832,6 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       },
     ),
     acpSource: "permission_request",
-    turnId,
-    sessionId,
-    channelId,
-  },
-  {
-    id: "debug:generic-tool",
-    type: "tool",
-    renderClass: "generic",
-    descriptor: descriptor(
-      "generic",
-      "Ran tool",
-      "resolve-worktree-context",
-      "generic:resolve_worktree_context",
-      {
-        operation: "resolve_worktree_context",
-        source: "fallback",
-      },
-    ),
-    title: "resolve-worktree-context",
-    toolName: "resolve_worktree_context",
-    buzzToolName: null,
-    status: "completed",
-    args: { worktree: "~/.buzz/REPOS/buzz-pr-3-activity-feed-rebuild" },
-    result: "branch=tho/activity-feed-rebuild clean=true",
-    isError: false,
-    timestamp: timestamp(17),
-    startedAt: timestamp(17),
-    completedAt: timestamp(18),
-    acpSource: "tool_call_update",
     turnId,
     sessionId,
     channelId,
