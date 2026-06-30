@@ -48,8 +48,7 @@ use uuid::Uuid;
 use crate::{
     author_allowed,
     config::Config,
-    event_mentions_agent,
-    filter,
+    event_mentions_agent, filter,
     relay::{HarnessRelay, RelayEventPublisher},
 };
 
@@ -220,11 +219,12 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     // every message in a channel).
     let rules = build_setup_subscription_rules(&config);
 
-    let channel_filters =
-        crate::config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters = crate::config::resolve_channel_filters(&config, &channel_ids, &rules);
 
     if channel_filters.is_empty() {
-        tracing::warn!("setup-mode: no channel subscriptions resolved — nudge listener will sit idle");
+        tracing::warn!(
+            "setup-mode: no channel subscriptions resolved — nudge listener will sit idle"
+        );
     }
 
     for (channel_id, filter) in &channel_filters {
@@ -393,27 +393,23 @@ pub(crate) fn should_nudge_for_event(
 fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRule> {
     use crate::config::SubscribeMode;
 
-    let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-        vec![
-            KIND_STREAM_MESSAGE,
-            KIND_WORKFLOW_APPROVAL_REQUESTED,
-        ]
-    });
+    let kinds = config
+        .kinds_override
+        .clone()
+        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
         // the explicit event_mentions_agent check in the main loop anyway.
-        SubscribeMode::Config => {
-            match crate::config::load_rules(&config.config_path) {
-                Ok(rules) => rules,
-                Err(e) => {
-                    tracing::warn!(
-                        "setup-mode: could not load config rules ({e}); falling back to mentions"
-                    );
-                    vec![mentions_rule(kinds)]
-                }
+        SubscribeMode::Config => match crate::config::load_rules(&config.config_path) {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::warn!(
+                    "setup-mode: could not load config rules ({e}); falling back to mentions"
+                );
+                vec![mentions_rule(kinds)]
             }
-        }
+        },
         _ => vec![mentions_rule(kinds)],
     }
 }
@@ -584,10 +580,7 @@ mod tests {
             body.contains("ANTHROPIC_API_KEY"),
             "nudge body should mention the missing env key"
         );
-        assert!(
-            body.contains("Fizz"),
-            "nudge body should name the agent"
-        );
+        assert!(body.contains("Fizz"), "nudge body should name the agent");
     }
 
     #[test]
@@ -654,10 +647,7 @@ mod tests {
             Duration::from_secs(30),
         );
 
-        assert!(
-            !result,
-            "non-allowlisted author must not produce a nudge"
-        );
+        assert!(!result, "non-allowlisted author must not produce a nudge");
         // Dedup set must remain empty — no phantom insertion for blocked author.
         assert!(
             dedup.is_empty(),

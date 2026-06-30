@@ -94,10 +94,7 @@ export function requiredCredentialEnvKeys(
   const normalizedProvider = provider.trim().toLowerCase();
 
   // buzz-agent and goose both use provider-specific credentials.
-  if (
-    normalizedRuntime === "buzz-agent" ||
-    normalizedRuntime === "goose"
-  ) {
+  if (normalizedRuntime === "buzz-agent" || normalizedRuntime === "goose") {
     if (normalizedProvider === "anthropic") return ["ANTHROPIC_API_KEY"];
     if (normalizedProvider === "openai") return ["OPENAI_COMPAT_API_KEY"];
     if (
