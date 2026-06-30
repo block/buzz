@@ -186,6 +186,9 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
   if (segment.kind === "prompt") {
     return `turn:${turnId}:prompt`;
   }
+  if (segment.kind === "summary") {
+    return segment.summary.id;
+  }
   return segment.item.id;
 }
 
@@ -214,6 +217,10 @@ function TranscriptTurnSegmentView({
     return <TurnSetupStatus items={segment.items} />;
   }
 
+  if (segment.kind === "summary") {
+    return <SameKindSummaryItem summary={segment.summary} />;
+  }
+
   return (
     <TranscriptItemRow
       agentAvatarUrl={agentAvatarUrl}
@@ -222,6 +229,34 @@ function TranscriptTurnSegmentView({
       item={segment.item}
       profiles={profiles}
     />
+  );
+}
+
+function SameKindSummaryItem({
+  summary,
+}: {
+  summary: Extract<TranscriptTurnSegment, { kind: "summary" }>["summary"];
+}) {
+  return (
+    <details
+      className="group not-prose my-1 rounded-md border border-border/40 bg-muted/20 px-2 py-1"
+      data-testid="transcript-same-kind-summary"
+    >
+      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
+        <span className="truncate text-sm font-medium">{summary.label}</span>
+        <TranscriptTimestamp timestamp={summary.timestamp} />
+        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="space-y-1 py-2 pl-5">
+        {summary.items.map((item) => (
+          <p className="truncate text-xs text-muted-foreground" key={item.id}>
+            {item.type === "tool"
+              ? item.descriptor.preview || item.descriptor.label
+              : item.title}
+          </p>
+        ))}
+      </div>
+    </details>
   );
 }
 
@@ -491,6 +526,9 @@ function getTranscriptItemRowSpacing(item: TranscriptItem): string {
   if (item.type === "tool") {
     return "my-1";
   }
+  if (item.type === "plan" || item.type === "lifecycle") {
+    return "my-1.5";
+  }
   return "my-2";
 }
 
@@ -520,6 +558,9 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
   }
   if (item.type === "thought") {
     return <ThoughtItem item={item} />;
+  }
+  if (item.type === "plan") {
+    return <PlanItem item={item} />;
   }
   if (item.type === "metadata") {
     return <MetadataItem item={item} />;
@@ -638,6 +679,30 @@ function ThoughtItem({
       </summary>
       <div className="py-2 pl-5 text-sm leading-6 text-muted-foreground">
         <Markdown compact content={item.text.trim() || " "} />
+      </div>
+    </details>
+  );
+}
+
+function PlanItem({
+  item,
+}: {
+  item: Extract<TranscriptItem, { type: "plan" }>;
+}) {
+  return (
+    <details
+      className="group not-prose w-full rounded-md border border-primary/15 bg-primary/5 px-2 py-1"
+      data-testid="transcript-plan-item"
+      open
+    >
+      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px text-primary/90">
+        <CheckCheck className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate text-xs font-medium">{item.title}</span>
+        <TranscriptTimestamp timestamp={item.timestamp} />
+        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="py-2 pl-5 text-sm leading-6 text-muted-foreground">
+        <Markdown compact content={item.text.trim() || "No plan details."} />
       </div>
     </details>
   );

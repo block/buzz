@@ -73,7 +73,7 @@ export function ToolItem({
           hasArgs={hasArgs}
           hasResult={hasResult}
           imagePreview={
-            compactSummary.kind === "view_image" && isExpanded
+            compactSummary.thumbnailSrc != null && isExpanded
               ? {
                   src: compactSummary.thumbnailSrc,
                   title: compactSummary.preview,

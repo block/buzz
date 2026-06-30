@@ -230,7 +230,6 @@ export function AgentSessionThreadPanel({
               ? `Mention ${agent.name} in the channel to see its work here.`
               : `Mention ${agent.name} in any channel to see its work here.`
           }
-          isWorking={isWorking}
           profiles={profiles}
           rawLayout="exclusive"
           showHeader={false}

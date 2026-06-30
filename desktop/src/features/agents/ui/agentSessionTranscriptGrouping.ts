@@ -1,7 +1,9 @@
 import type { TranscriptItem } from "./agentSessionTypes";
+import { classifyToolItem } from "./agentSessionToolClassifier";
 
 export type TranscriptTurnSegment =
   | { kind: "item"; item: TranscriptItem }
+  | { kind: "summary"; summary: TranscriptSameKindSummary }
   | { kind: "setup"; items: Extract<TranscriptItem, { type: "lifecycle" }>[] }
   | {
       kind: "prompt";
@@ -13,6 +15,14 @@ export type TranscriptTurnSegment =
 export type TranscriptDisplayBlock =
   | { kind: "single"; item: TranscriptItem }
   | { kind: "turn"; turnId: string; segments: TranscriptTurnSegment[] };
+
+export type TranscriptSameKindSummary = {
+  id: string;
+  label: string;
+  count: number;
+  items: TranscriptItem[];
+  timestamp: string;
+};
 
 function isUserPrompt(
   item: TranscriptItem,
@@ -67,7 +77,9 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
   const activity = items.filter((item) => !consumed.has(item));
 
   if (!userPrompt) {
-    return activity.map((item) => ({ kind: "item", item }));
+    return groupSameKindSegments(
+      activity.map((item) => ({ kind: "item", item })),
+    );
   }
 
   const segments: TranscriptTurnSegment[] = [
@@ -87,7 +99,71 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
     segments.push({ kind: "item", item });
   }
 
-  return segments;
+  return groupSameKindSegments(segments);
+}
+
+function groupSameKindSegments(
+  segments: TranscriptTurnSegment[],
+): TranscriptTurnSegment[] {
+  const grouped: TranscriptTurnSegment[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i];
+    if (segment.kind !== "item") {
+      grouped.push(segment);
+      continue;
+    }
+    const key = sameKindKey(segment.item);
+    if (!key) {
+      grouped.push(segment);
+      continue;
+    }
+    const run = [segment.item];
+    let j = i + 1;
+    while (j < segments.length) {
+      const next = segments[j];
+      if (next.kind !== "item" || sameKindKey(next.item) !== key) break;
+      run.push(next.item);
+      j += 1;
+    }
+    if (run.length >= 3) {
+      grouped.push({
+        kind: "summary",
+        summary: {
+          id: `summary:${key}:${run[0].id}`,
+          label: sameKindLabel(run[0], run.length),
+          count: run.length,
+          items: run,
+          timestamp: run[0].timestamp,
+        },
+      });
+      i = j - 1;
+    } else {
+      grouped.push(...run.map((item) => ({ kind: "item" as const, item })));
+      i = j - 1;
+    }
+  }
+  return grouped;
+}
+
+function sameKindKey(item: TranscriptItem): string | null {
+  if (item.type !== "tool") return null;
+  const descriptor = item.descriptor ?? classifyToolItem(item);
+  const renderClass = item.renderClass ?? descriptor.renderClass;
+  if (renderClass === "message" || renderClass === "file-edit") {
+    return null;
+  }
+  return descriptor.groupKey ?? renderClass;
+}
+
+function sameKindLabel(item: TranscriptItem, count: number): string {
+  if (item.type !== "tool") return `${count} items`;
+  const descriptor = item.descriptor ?? classifyToolItem(item);
+  const renderClass = item.renderClass ?? descriptor.renderClass;
+  const label = descriptor.label;
+  if (label === "Read file") return `Read ${count} files`;
+  if (label === "Ran command") return `Ran ${count} commands`;
+  if (renderClass === "relay-op") return `${count} Buzz relay ops`;
+  return `${label} ×${count}`;
 }
 
 /**
@@ -165,6 +241,8 @@ export function flattenDisplayBlocks(
         if (segment.context) {
           result.push(segment.context);
         }
+      } else if (segment.kind === "summary") {
+        result.push(...segment.summary.items);
       } else {
         result.push(...segment.items);
       }

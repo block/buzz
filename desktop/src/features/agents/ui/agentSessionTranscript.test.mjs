@@ -381,3 +381,34 @@ test("buildTranscript preserves channel, turn, and session ids through message u
   assert.equal(message.turnId, "turn-identity");
   assert.equal(message.sessionId, "sess-identity");
 });
+
+test("buildTranscript promotes ACP plan updates to first-class plan items", () => {
+  const items = buildTranscript([
+    sessionUpdate(90, {
+      sessionUpdate: "plan",
+      content: { type: "text", text: "- [ ] Build registry" },
+    }),
+  ]);
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].type, "plan");
+  assert.equal(items[0].renderClass, "plan");
+  assert.match(items[0].text, /Build registry/);
+});
+
+test("buildTranscript stores first-class render class descriptors for tool items", () => {
+  const [item] = toolItems([
+    acpToolUpdate(91, {
+      sessionUpdate: "tool_call",
+      toolCallId: "call-edit",
+      status: "completed",
+      title: "str_replace",
+      kind: "str_replace",
+      rawInput: { path: "src/app.ts" },
+    }),
+  ]);
+
+  assert.equal(item.renderClass, "file-edit");
+  assert.equal(item.descriptor.label, "Edited file");
+  assert.equal(item.descriptor.preview, "src/app.ts");
+});

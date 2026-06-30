@@ -20,6 +20,34 @@ export type ConnectionState =
 
 export type ToolStatus = "executing" | "completed" | "failed" | "pending";
 
+export type AgentActivityRenderClass =
+  | "message"
+  | "relay-op"
+  | "file-edit"
+  | "shell"
+  | "status"
+  | "thought"
+  | "plan"
+  | "permission"
+  | "error"
+  | "generic"
+  | "raw-rail"
+  | "suppressed";
+
+export type AgentActivityTone = "read" | "write" | "admin" | "neutral";
+
+export type AgentActivityDescriptor = {
+  renderClass: AgentActivityRenderClass;
+  label: string;
+  preview: string | null;
+  tone?: AgentActivityTone;
+  operation?: string;
+  object?: string | null;
+  source?: "mcp" | "shell" | "acp" | "harness" | "fallback";
+  groupKey?: string;
+  reason?: string;
+};
+
 /** Observer/ACP wire label for dev-only transcript debugging. */
 export type TranscriptAcpSource = string;
 
@@ -34,6 +62,7 @@ export type TranscriptItem =
   | ({
       id: string;
       type: "message";
+      renderClass: "message";
       role: "assistant" | "user";
       title: string;
       text: string;
@@ -44,6 +73,16 @@ export type TranscriptItem =
   | ({
       id: string;
       type: "thought";
+      renderClass: "thought";
+      title: string;
+      text: string;
+      timestamp: string;
+      acpSource?: TranscriptAcpSource;
+    } & TranscriptItemIdentity)
+  | ({
+      id: string;
+      type: "plan";
+      renderClass: "plan";
       title: string;
       text: string;
       timestamp: string;
@@ -52,14 +91,17 @@ export type TranscriptItem =
   | ({
       id: string;
       type: "lifecycle";
+      renderClass: "status" | "permission" | "error";
       title: string;
       text: string;
       timestamp: string;
+      descriptor?: AgentActivityDescriptor;
       acpSource?: TranscriptAcpSource;
     } & TranscriptItemIdentity)
   | ({
       id: string;
       type: "metadata";
+      renderClass: "raw-rail";
       title: string;
       sections: PromptSection[];
       timestamp: string;
@@ -68,6 +110,8 @@ export type TranscriptItem =
   | ({
       id: string;
       type: "tool";
+      renderClass: AgentActivityRenderClass;
+      descriptor: AgentActivityDescriptor;
       title: string;
       toolName: string;
       buzzToolName: string | null;

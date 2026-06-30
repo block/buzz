@@ -211,3 +211,37 @@ test("buildTranscriptDisplayBlocks passes through items without turnId", () => {
   assert.equal(blocks[0]?.kind, "single");
   assert.equal(blocks[0]?.item.id, "orphan");
 });
+
+test("buildTranscriptDisplayBlocks groups same-kind tool runs within a turn", () => {
+  const items = [1, 2, 3].map((index) => ({
+    id: `tool:${index}`,
+    type: "tool",
+    renderClass: "generic",
+    descriptor: {
+      renderClass: "generic",
+      label: "Read file",
+      preview: `file-${index}.ts`,
+      groupKey: "read_file",
+    },
+    title: "read_file",
+    toolName: "read_file",
+    buzzToolName: null,
+    status: "completed",
+    args: { path: `file-${index}.ts` },
+    result: "",
+    isError: false,
+    timestamp: "2026-06-18T00:00:00Z",
+    startedAt: "2026-06-18T00:00:00Z",
+    completedAt: "2026-06-18T00:00:01Z",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  }));
+
+  const [block] = buildTranscriptDisplayBlocks(items);
+
+  assert.equal(block.kind, "turn");
+  assert.equal(block.segments.length, 1);
+  assert.equal(block.segments[0].kind, "summary");
+  assert.equal(block.segments[0].summary.label, "Read 3 files");
+});

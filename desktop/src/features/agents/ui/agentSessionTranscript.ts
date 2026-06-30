@@ -9,6 +9,7 @@ import {
   isGenericToolTitle,
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
+import { classifyTool } from "./agentSessionToolClassifier";
 import { asRecord, asString } from "./agentSessionUtils";
 import {
   describeTurnStarted,
@@ -149,6 +150,7 @@ function upsertMessage(
   pushItem(d, {
     id: newKey,
     type: "message",
+    renderClass: "message",
     role,
     title,
     text,
@@ -186,9 +188,62 @@ function upsertTextItem(
     return;
   }
   sealOpenMessages(d);
+  if (type === "thought") {
+    pushItem(d, {
+      id,
+      type: "thought",
+      renderClass: "thought",
+      title,
+      text,
+      timestamp,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId,
+      sessionId: ctx.sessionId,
+      acpSource,
+    });
+    return;
+  }
+
   pushItem(d, {
     id,
-    type,
+    type: "lifecycle",
+    renderClass: title.toLowerCase().includes("error") ? "error" : "status",
+    title,
+    text,
+    timestamp,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
+    acpSource,
+  });
+}
+
+function upsertPlan(
+  d: TranscriptDraft,
+  id: string,
+  title: string,
+  text: string,
+  timestamp: string,
+  ctx: TranscriptItemContext,
+  acpSource?: string,
+) {
+  const existing = d.itemsById.get(id);
+  if (existing?.type === "plan") {
+    replaceItem(d, id, {
+      ...existing,
+      text,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
+      acpSource: acpSource ?? existing.acpSource,
+    });
+    return;
+  }
+  sealOpenMessages(d);
+  pushItem(d, {
+    id,
+    type: "plan",
+    renderClass: "plan",
     title,
     text,
     timestamp,
@@ -224,6 +279,7 @@ function upsertMetadata(
   pushItem(d, {
     id,
     type: "metadata",
+    renderClass: "raw-rail",
     title,
     sections,
     timestamp,
@@ -274,15 +330,28 @@ function upsertTool(
       updatedToolName = toolName;
     }
     const mergedStatus = mergeToolStatus(existing.status, status);
+    const updatedArgs = Object.keys(args).length > 0 ? args : existing.args;
+    const updatedResult = result || existing.result;
+    const updatedIsError = isError || existing.isError;
+    const descriptor = classifyTool({
+      title: updatedTitle,
+      toolName: updatedToolName,
+      buzzToolName: updatedBuzzToolName,
+      args: updatedArgs,
+      result: updatedResult,
+      isError: updatedIsError || mergedStatus === "failed",
+    });
     replaceItem(d, id, {
       ...existing,
+      renderClass: descriptor.renderClass,
+      descriptor,
       title: updatedTitle,
       toolName: updatedToolName,
       buzzToolName: updatedBuzzToolName,
       status: mergedStatus,
-      args: Object.keys(args).length > 0 ? args : existing.args,
-      result: result || existing.result,
-      isError: isError || existing.isError,
+      args: updatedArgs,
+      result: updatedResult,
+      isError: updatedIsError,
       completedAt:
         isTerminalToolStatus(mergedStatus) && existing.completedAt == null
           ? timestamp
@@ -294,12 +363,23 @@ function upsertTool(
     });
     return;
   }
+  const resolvedToolName = canonicalBuzzToolName ?? toolName;
+  const descriptor = classifyTool({
+    title,
+    toolName: resolvedToolName,
+    buzzToolName: canonicalBuzzToolName,
+    args,
+    result,
+    isError: isError || status === "failed",
+  });
   sealOpenMessages(d);
   pushItem(d, {
     id,
     type: "tool",
+    renderClass: descriptor.renderClass,
+    descriptor,
     title,
-    toolName: canonicalBuzzToolName ?? toolName,
+    toolName: resolvedToolName,
     buzzToolName: canonicalBuzzToolName,
     status,
     args,
@@ -451,7 +531,7 @@ export function processTranscriptEvent(
             parsedPrompt.userTitle,
             parsedPrompt.userText,
             event.timestamp,
-            channelId,
+            ctx,
             parsedPrompt.userPubkey,
           );
         }
@@ -462,7 +542,7 @@ export function processTranscriptEvent(
             "Prompt context",
             parsedPrompt.sections,
             event.timestamp,
-            channelId,
+            ctx,
           );
         }
       }
@@ -551,10 +631,9 @@ export function processTranscriptEvent(
           updateType,
         );
       } else if (updateType === "plan") {
-        upsertTextItem(
+        upsertPlan(
           d,
           `plan:${ch}:${turnKey}`,
-          "thought",
           "Plan",
           extractContentText(update.content) || JSON.stringify(update, null, 2),
           event.timestamp,

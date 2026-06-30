@@ -33,7 +33,7 @@ test("buildCompactToolSummary formats Buzz send_message preview", () => {
     }),
   );
 
-  assert.equal(summary.kind, "buzz");
+  assert.equal(summary.kind, "message");
   assert.equal(summary.label, "Send Message");
   assert.equal(summary.preview, "Hello team");
   assert.equal(summary.presentation, "message");
@@ -50,7 +50,7 @@ test("buildCompactToolSummary treats buzz messages send commands as messages", (
     }),
   );
 
-  assert.equal(summary.kind, "shell");
+  assert.equal(summary.kind, "message");
   assert.equal(summary.label, "Send Message");
   assert.equal(summary.preview, "@Ned are you working");
   assert.equal(summary.presentation, "message");
@@ -153,5 +153,35 @@ test("buildCompactToolSummary uses running and failed labels", () => {
       makeTool({ toolName: "str_replace", status: "failed", isError: true }),
     ).label,
     "Edit failed",
+  );
+});
+
+test("buildCompactToolSummary promotes non-send buzz CLI commands to relay ops", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "shell",
+      args: {
+        command: "buzz channels get --channel channel-1",
+      },
+    }),
+  );
+
+  assert.equal(summary.kind, "relay-op");
+  assert.equal(summary.label, "Channels Get");
+  assert.equal(summary.preview, "channel-1");
+  assert.equal(summary.presentation, "inline");
+});
+
+test("buildCompactToolSummary promotes file edits and todos to first-class classes", () => {
+  assert.equal(
+    buildCompactToolSummary(
+      makeTool({ toolName: "str_replace", args: { path: "src/app.ts" } }),
+    ).kind,
+    "file-edit",
+  );
+  assert.equal(
+    buildCompactToolSummary(makeTool({ toolName: "todo", args: { todos: [] } }))
+      .kind,
+    "plan",
   );
 });
