@@ -146,7 +146,9 @@ impl SetupPayload {
 ///
 /// Connects to the relay, subscribes to channels, and responds to @mentions
 /// of this agent with a surface-correct setup nudge. Never starts the agent
-/// pool. Runs until the relay connection drops.
+/// pool. Reconnects on relay close (mirroring normal mode) so the nudge
+/// listener survives transient disconnects; `nudged_event_ids` deduplication
+/// guards against replay on reconnect.
 pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) -> Result<()> {
     tracing::info!(
         agent = %payload.agent_name,
@@ -231,8 +233,12 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     loop {
         let Some(buzz_event) = relay.next_event().await else {
-            tracing::info!("setup-mode: relay closed — exiting");
-            break;
+            tracing::warn!("setup-mode: relay event stream ended — requesting reconnect");
+            if let Err(e) = relay.reconnect().await {
+                tracing::error!("setup-mode: relay background task is gone: {e} — exiting");
+                break;
+            }
+            continue;
         };
 
         let kind_u32 = buzz_event.event.kind.as_u16() as u32;
@@ -273,48 +279,31 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &rest_client,
         )
         .await;
-        if !allowed {
-            tracing::debug!(
-                author = %author_hex,
-                "setup-mode: event filtered by author gate"
-            );
-            continue;
-        }
 
         // Apply channel/kind filter rules.
-        let matched = filter::match_event(
+        let filter_matched = filter::match_event(
             &buzz_event.event,
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
         )
-        .await;
-        if matched.is_none() {
+        .await
+        .is_some();
+
+        // Pure gate: author gate verdict + event-id dedup + per-channel cooldown.
+        if !should_nudge_for_event(
+            buzz_event.event.id,
+            buzz_event.channel_id,
+            allowed,
+            filter_matched,
+            &mut nudged_event_ids,
+            &channel_last_nudge,
+            NUDGE_COOLDOWN,
+        ) {
             continue;
         }
 
-        // Deduplicate: one nudge per mention event-id.
-        if !nudged_event_ids.insert(buzz_event.event.id) {
-            tracing::debug!(
-                event_id = %buzz_event.event.id,
-                "setup-mode: skipping already-nudged event"
-            );
-            continue;
-        }
-
-        // Per-channel cooldown.
-        let now = Instant::now();
-        if let Some(last) = channel_last_nudge.get(&buzz_event.channel_id) {
-            if now.duration_since(*last) < NUDGE_COOLDOWN {
-                tracing::debug!(
-                    channel_id = %buzz_event.channel_id,
-                    "setup-mode: within cooldown window, skipping nudge"
-                );
-                continue;
-            }
-        }
-
-        channel_last_nudge.insert(buzz_event.channel_id, now);
+        channel_last_nudge.insert(buzz_event.channel_id, Instant::now());
 
         // Build and publish the setup nudge.
         if let Err(e) = publish_setup_nudge(
@@ -337,6 +326,49 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     }
 
     Ok(())
+}
+
+/// Outcome of the pure per-event gate checks in setup mode.
+///
+/// Callers compute the async gates (`author_allowed`, `filter::match_event`)
+/// up-front, then pass the boolean results here. This helper handles
+/// everything that is synchronous and stateful: the author gate verdict,
+/// event-id dedup, and per-channel cooldown.
+///
+/// Returns `true` when the event should produce a nudge; the caller must then
+/// also record the cooldown via `channel_last_nudge.insert(channel_id, now)`.
+#[must_use]
+pub(crate) fn should_nudge_for_event(
+    event_id: EventId,
+    channel_id: Uuid,
+    author_allowed: bool,
+    filter_matched: bool,
+    nudged_event_ids: &mut HashSet<EventId>,
+    channel_last_nudge: &HashMap<Uuid, Instant>,
+    nudge_cooldown: Duration,
+) -> bool {
+    if !author_allowed {
+        tracing::debug!("setup-mode: event filtered by author gate");
+        return false;
+    }
+    if !filter_matched {
+        return false;
+    }
+    if !nudged_event_ids.insert(event_id) {
+        tracing::debug!(%event_id, "setup-mode: skipping already-nudged event");
+        return false;
+    }
+    let now = Instant::now();
+    if let Some(last) = channel_last_nudge.get(&channel_id) {
+        if now.duration_since(*last) < nudge_cooldown {
+            tracing::debug!(%channel_id, "setup-mode: within cooldown window, skipping nudge");
+            // Undo the dedup insert so a post-cooldown retry is treated as
+            // a new nudge opportunity.
+            nudged_event_ids.remove(&event_id);
+            return false;
+        }
+    }
+    true
 }
 
 /// Build the subscription rules used in setup mode.
@@ -587,5 +619,81 @@ mod tests {
         let body = payload.nudge_body();
         assert!(body.contains("Fizz"));
         assert!(body.contains("needs configuration"));
+    }
+
+    // ── should_nudge_for_event gate tests ─────────────────────────────────────
+    //
+    // These tests exercise the loop-wiring for the two safety-critical guards:
+    // (a) non-allowlisted author → no nudge, (b) same event-id → exactly one
+    // nudge. They use the extracted `should_nudge_for_event` helper, which is
+    // the exact code the live loop calls.
+
+    fn fake_event_id(byte: u8) -> EventId {
+        EventId::from_byte_array([byte; 32])
+    }
+
+    #[test]
+    fn test_non_allowlisted_author_returns_no_nudge() {
+        // author_allowed = false → should return false regardless of other args.
+        let mut dedup: HashSet<EventId> = HashSet::new();
+        let cooldown_map: HashMap<Uuid, Instant> = HashMap::new();
+        let event_id = fake_event_id(0xAA);
+        let channel_id = Uuid::nil();
+
+        let result = should_nudge_for_event(
+            event_id,
+            channel_id,
+            false, // author NOT allowed
+            true,  // filter matched — would otherwise nudge
+            &mut dedup,
+            &cooldown_map,
+            Duration::from_secs(30),
+        );
+
+        assert!(
+            !result,
+            "non-allowlisted author must not produce a nudge"
+        );
+        // Dedup set must remain empty — no phantom insertion for blocked author.
+        assert!(
+            dedup.is_empty(),
+            "dedup set must not record event for blocked author"
+        );
+    }
+
+    #[test]
+    fn test_same_event_id_twice_nudges_exactly_once() {
+        // The first call with a given event-id should return true; the second
+        // call with the identical id must return false (replay dedup).
+        let mut dedup: HashSet<EventId> = HashSet::new();
+        let cooldown_map: HashMap<Uuid, Instant> = HashMap::new();
+        let event_id = fake_event_id(0xBB);
+        let channel_id = Uuid::nil();
+
+        let first = should_nudge_for_event(
+            event_id,
+            channel_id,
+            true, // allowed
+            true, // matched
+            &mut dedup,
+            &cooldown_map,
+            Duration::from_secs(30),
+        );
+        assert!(first, "first occurrence must be accepted");
+
+        // Simulate reconnect replay: same event arrives again.
+        let second = should_nudge_for_event(
+            event_id,
+            channel_id,
+            true, // allowed
+            true, // matched
+            &mut dedup,
+            &cooldown_map,
+            Duration::from_secs(30),
+        );
+        assert!(
+            !second,
+            "replay of the same event-id must be rejected (dedup)"
+        );
     }
 }
