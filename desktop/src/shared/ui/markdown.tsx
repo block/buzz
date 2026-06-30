@@ -1513,12 +1513,11 @@ function createMarkdownComponents(
       : variant === "compact"
         ? "leading-6"
         : "leading-[inherit]";
-  const listItemClassName =
-    variant === "tight" ? "my-0.5 [&_p]:inline" : "my-1 [&_p]:inline";
+  const listItemClassName = "[&_p]:inline";
   const listClassName =
     variant === "tight"
-      ? "space-y-0.5 pl-6 marker:text-muted-foreground"
-      : "space-y-1 pl-6 marker:text-muted-foreground";
+      ? "space-y-1 pl-6 marker:text-muted-foreground/80"
+      : "space-y-1 pl-6 marker:text-muted-foreground/80";
 
   return {
     spoiler: ({

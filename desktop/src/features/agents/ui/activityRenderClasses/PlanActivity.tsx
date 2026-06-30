@@ -20,10 +20,10 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
     <ActivityRow testId="transcript-plan-item">
       <ActivityRowLabel object="plan" openToneScope="tool" verb="Updated" />
       <TranscriptTimestamp timestamp={props.item.timestamp} />
-      <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-6 text-muted-foreground">
+      <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-5 text-muted-foreground">
         <Markdown
-          compact
           content={props.item.text.trim() || "No plan details."}
+          tight
         />
       </ActivityRowContent>
     </ActivityRow>
