@@ -20,6 +20,7 @@ import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
   CHANNEL_TIMELINE_STATE_KINDS,
 } from "@/shared/constants/kinds";
+import { CHANNEL_TASKS_FEATURE_ID, useFeatureEnabled } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
@@ -150,6 +151,7 @@ export function ChannelRouteScreen({
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
   const queryClient = useQueryClient();
+  const isChannelTasksEnabled = useFeatureEnabled(CHANNEL_TASKS_FEATURE_ID);
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
@@ -163,6 +165,27 @@ export function ChannelRouteScreen({
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     return cachedTarget ? [cachedTarget] : [];
   });
+  const effectiveAgentConversationReplyId = isChannelTasksEnabled
+    ? targetAgentConversationReplyId
+    : null;
+  const targetAgentConversationBackfillKey =
+    effectiveAgentConversationReplyId && !selectedPostId
+      ? [
+          channelId,
+          effectiveAgentConversationReplyId,
+          targetMessageId ?? "",
+          targetThreadRootId ?? "",
+        ].join(":")
+      : null;
+  const [
+    completedTargetAgentConversationBackfillKey,
+    setCompletedTargetAgentConversationBackfillKey,
+  ] = React.useState<string | null>(null);
+  const targetAgentConversationBackfillPending = Boolean(
+    targetAgentConversationBackfillKey &&
+      completedTargetAgentConversationBackfillKey !==
+        targetAgentConversationBackfillKey,
+  );
 
   // Reset spliced target events when the channel context changes (channel
   // switch or entering/leaving a forum post). Tied to channel identity rather
@@ -191,11 +214,12 @@ export function ChannelRouteScreen({
     // param-clear blanks the timeline. Resetting on channel / forum-post change
     // is handled by the effect below; here we only fetch when there's a target.
     if (
-      (!targetAgentConversationReplyId &&
+      (!effectiveAgentConversationReplyId &&
         !targetMessageId &&
         !targetThreadRootId) ||
       selectedPostId
     ) {
+      setCompletedTargetAgentConversationBackfillKey(null);
       return () => {
         isCancelled = true;
       };
@@ -215,7 +239,7 @@ export function ChannelRouteScreen({
     }
 
     const eventIds = [
-      targetAgentConversationReplyId,
+      effectiveAgentConversationReplyId,
       targetMessageId,
       targetThreadRootId && targetThreadRootId !== targetMessageId
         ? targetThreadRootId
@@ -225,24 +249,32 @@ export function ChannelRouteScreen({
     void fetchRouteTargetEvents(
       channelId,
       eventIds,
-      targetAgentConversationReplyId ?? targetMessageId,
-      targetAgentConversationReplyId,
+      effectiveAgentConversationReplyId ?? targetMessageId,
+      effectiveAgentConversationReplyId,
       targetThreadRootId,
-    ).then((events) => {
-      if (!isCancelled) {
-        queryClient.setQueryData<RelayEvent[]>(
-          channelMessagesKey(channelId),
-          (currentEvents) => mergeRouteEvents(currentEvents, events),
-        );
-        setTargetMessageEvents((currentEvents) => {
-          const eventsById = new Map<string, RelayEvent>();
-          for (const event of [...currentEvents, ...events]) {
-            eventsById.set(event.id, event);
-          }
-          return Array.from(eventsById.values());
-        });
-      }
-    });
+    )
+      .then((events) => {
+        if (!isCancelled) {
+          queryClient.setQueryData<RelayEvent[]>(
+            channelMessagesKey(channelId),
+            (currentEvents) => mergeRouteEvents(currentEvents, events),
+          );
+          setTargetMessageEvents((currentEvents) => {
+            const eventsById = new Map<string, RelayEvent>();
+            for (const event of [...currentEvents, ...events]) {
+              eventsById.set(event.id, event);
+            }
+            return Array.from(eventsById.values());
+          });
+        }
+      })
+      .finally(() => {
+        if (!isCancelled && targetAgentConversationBackfillKey) {
+          setCompletedTargetAgentConversationBackfillKey(
+            targetAgentConversationBackfillKey,
+          );
+        }
+      });
 
     return () => {
       isCancelled = true;
@@ -251,7 +283,8 @@ export function ChannelRouteScreen({
     selectedPostId,
     channelId,
     queryClient,
-    targetAgentConversationReplyId,
+    effectiveAgentConversationReplyId,
+    targetAgentConversationBackfillKey,
     targetMessageId,
     targetThreadRootId,
   ]);
@@ -277,7 +310,10 @@ export function ChannelRouteScreen({
         void goForumPost(channelId, postId);
       }}
       selectedForumPostId={selectedPostId}
-      targetAgentConversationReplyId={targetAgentConversationReplyId}
+      targetAgentConversationReplyId={effectiveAgentConversationReplyId}
+      targetAgentConversationBackfillPending={
+        targetAgentConversationBackfillPending
+      }
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}

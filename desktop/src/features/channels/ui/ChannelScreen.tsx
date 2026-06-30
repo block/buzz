@@ -12,10 +12,6 @@ import {
   MSG_PREFIX,
   THREAD_PREFIX,
 } from "@/features/channels/readState/readStateFormat";
-import {
-  getDmAutoRouteAgentPubkeys,
-  mergeAutoRouteMentionPubkeys,
-} from "@/features/channels/ui/ChannelPane.helpers";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import {
   ChannelScreenHeader,
@@ -61,6 +57,7 @@ import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
+import { CHANNEL_TASKS_FEATURE_ID, useFeatureEnabled } from "@/shared/features";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
@@ -91,11 +88,13 @@ export function ChannelScreen({
   onCloseForumPost,
   onSelectForumPost,
   selectedForumPostId,
+  targetAgentConversationBackfillPending = false,
   targetAgentConversationReplyId,
   targetForumReplyId,
   targetMessageEvents,
   targetMessageId,
 }: ChannelScreenProps) {
+  const isChannelTasksEnabled = useFeatureEnabled(CHANNEL_TASKS_FEATURE_ID);
   const { goChannel, goHome } = useAppNavigation();
   const [activeSurfaceTab, setActiveSurfaceTab] =
     React.useState<ChannelSurfaceTab>("messages");
@@ -163,7 +162,8 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
-  const canShowTasksSurface = activeChannel?.channelType === "stream";
+  const canShowTasksSurface =
+    isChannelTasksEnabled && activeChannel?.channelType === "stream";
   const effectiveSurfaceTab = canShowTasksSurface
     ? activeSurfaceTab
     : "messages";
@@ -342,6 +342,11 @@ export function ChannelScreen({
   const managedAgents = managedAgentsQuery.data ?? [];
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
+  const agentLookupReady =
+    !channelMembersQuery.isLoading &&
+    !managedAgentsQuery.isLoading &&
+    messageProfilesReady &&
+    !relayAgentsQuery.isLoading;
   const agentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
     for (const member of channelMembers ?? []) {
@@ -435,15 +440,6 @@ export function ChannelScreen({
     }
     return pubkeys;
   }, [agentPubkeys, messageProfiles]);
-  const dmAutoRouteAgentPubkeys = React.useMemo(
-    () =>
-      getDmAutoRouteAgentPubkeys({
-        channel: activeChannel,
-        currentPubkey,
-        knownAgentPubkeys: routingAgentPubkeys,
-      }),
-    [activeChannel, currentPubkey, routingAgentPubkeys],
-  );
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];
@@ -492,7 +488,11 @@ export function ChannelScreen({
     );
   }, []);
   const { agentConversationMarkers, unreadTimelineMessages } =
-    useAgentConversationTimelineState(resolvedMessages, timelineMessages);
+    useAgentConversationTimelineState(
+      resolvedMessages,
+      timelineMessages,
+      isChannelTasksEnabled,
+    );
   const channelFind = useChannelFind({
     channelId: activeChannelId,
     messages: timelineMessages,
@@ -564,23 +564,6 @@ export function ChannelScreen({
     threadReplyTargetId,
     toggleReactionMutation,
   });
-  const handleSendMessageWithDmAutoRoute = React.useCallback(
-    async (
-      content: string,
-      mentionPubkeys: string[],
-      mediaTags?: string[][],
-    ) => {
-      await handleSendMessage(
-        content,
-        mergeAutoRouteMentionPubkeys({
-          autoRouteAgentPubkeys: dmAutoRouteAgentPubkeys,
-          mentionPubkeys,
-        }),
-        mediaTags,
-      );
-    },
-    [dmAutoRouteAgentPubkeys, handleSendMessage],
-  );
   const effectiveToggleReaction = React.useMemo(
     () =>
       activeChannel && !activeChannel.archivedAt && activeChannel.isMember
@@ -724,6 +707,10 @@ export function ChannelScreen({
   }, [activeChannelId, resetComposerTargets]);
   const handleSurfaceTabChange = React.useCallback(
     (tab: ChannelSurfaceTab) => {
+      if (tab === "tasks" && !isChannelTasksEnabled) {
+        return;
+      }
+
       setActiveSurfaceTab(tab);
 
       if (tab !== "tasks") {
@@ -742,6 +729,7 @@ export function ChannelScreen({
     [
       clearOptimisticThreadOverride,
       handleCloseAgentSession,
+      isChannelTasksEnabled,
       setChannelManagementOpen,
       setOpenThreadHeadId,
       setProfilePanelPubkey,
@@ -749,11 +737,18 @@ export function ChannelScreen({
   );
   useAgentConversationRouteTarget({
     activeChannel,
-    activeChannelId,
+    agentConversationMarkers,
+    agentLookupReady,
+    agentPubkeys: routingAgentPubkeys,
+    currentPubkey,
+    enabled: isChannelTasksEnabled,
     goChannel,
     messageProfilesReady,
     openAgentConversation,
-    targetAgentConversationReplyId,
+    targetBackfillPending: targetAgentConversationBackfillPending,
+    targetAgentConversationReplyId: isChannelTasksEnabled
+      ? targetAgentConversationReplyId
+      : null,
     timelineMessages,
   });
   const { mainTimelineTargetMessageId, rootThreadHeadTargetId } =
@@ -935,7 +930,9 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
-        onSurfaceTabChange={handleSurfaceTabChange}
+        onSurfaceTabChange={
+          isChannelTasksEnabled ? handleSurfaceTabChange : undefined
+        }
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView}
         transparentChrome={activeChannel?.channelType !== "forum"}
@@ -954,6 +951,7 @@ export function ChannelScreen({
       effectiveSurfaceTab,
       handleSurfaceTabChange,
       isAddBotOpen,
+      isChannelTasksEnabled,
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
@@ -992,6 +990,7 @@ export function ChannelScreen({
                   activeChannel={activeChannel}
                   activityAgents={channelAgentSessionAgents}
                   agentConversationMarkers={agentConversationMarkers}
+                  agentLookupReady={agentLookupReady}
                   agentPubkeys={routingAgentPubkeys}
                   agentPubkeysPending={agentPubkeysPending}
                   agentSessionAgents={agentSessionAgents}
@@ -999,6 +998,7 @@ export function ChannelScreen({
                   channelFind={channelFind}
                   channelManagementOpen={channelManagementOpen}
                   currentPubkey={currentPubkey}
+                  enableAgentConversations={isChannelTasksEnabled}
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
                   header={channelHeader}
@@ -1063,7 +1063,7 @@ export function ChannelScreen({
                   onCloseProfilePanel={handleCloseProfilePanel}
                   onOpenThread={handleOpenThreadAndCloseAgentSession}
                   onSelectThreadReplyTarget={handleSelectThreadReplyTarget}
-                  onSendMessage={handleSendMessageWithDmAutoRoute}
+                  onSendMessage={handleSendMessage}
                   onSendVideoReviewComment={effectiveSendVideoReviewComment}
                   onSendThreadReply={handleSendThreadReply}
                   onThreadScrollTargetChange={setThreadScrollTargetId}

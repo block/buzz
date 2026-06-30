@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { CHANNEL_TASKS_FEATURE_ID, useFeatureEnabled } from "@/shared/features";
 import {
   listenForAgentConversationDeepLinks,
   listenForMessageDeepLinks,
@@ -22,6 +23,7 @@ import {
  */
 export function useMessageDeepLinks() {
   const { goChannel } = useAppNavigation();
+  const isChannelTasksEnabled = useFeatureEnabled(CHANNEL_TASKS_FEATURE_ID);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -32,18 +34,19 @@ export function useMessageDeepLinks() {
         threadRootId: payload.threadRootId,
       });
     });
-    const agentConversationUnlistenPromise =
-      listenForAgentConversationDeepLinks((payload) => {
-        if (cancelled) return;
-        void goChannel(payload.channelId, {
-          taskReplyId: payload.agentReplyId,
-        });
-      });
+    const agentConversationUnlistenPromise = isChannelTasksEnabled
+      ? listenForAgentConversationDeepLinks((payload) => {
+          if (cancelled) return;
+          void goChannel(payload.channelId, {
+            taskReplyId: payload.agentReplyId,
+          });
+        })
+      : null;
 
     return () => {
       cancelled = true;
       void messageUnlistenPromise.then((fn) => fn());
-      void agentConversationUnlistenPromise.then((fn) => fn());
+      void agentConversationUnlistenPromise?.then((fn) => fn());
     };
-  }, [goChannel]);
+  }, [goChannel, isChannelTasksEnabled]);
 }

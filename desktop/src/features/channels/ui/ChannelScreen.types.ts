@@ -12,6 +12,7 @@ export type ChannelScreenProps = {
   onCloseForumPost: () => void;
   onSelectForumPost: (postId: string) => void;
   selectedForumPostId: string | null;
+  targetAgentConversationBackfillPending?: boolean;
   targetAgentConversationReplyId: string | null;
   targetForumReplyId: string | null;
   targetMessageEvents: RelayEvent[];

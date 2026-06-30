@@ -13,6 +13,7 @@ type PasteView = {
 
 type ComposerPasteHandlerOptions = {
   agentConversationTitleForHref?: (href: string) => string | undefined;
+  enableAgentConversationLinks?: boolean;
   editor: NonNullable<UseRichTextEditorResult["editor"]>;
   scrollComposerToBottom: () => void;
   uploadFile: MediaUploadController["uploadFile"];
@@ -20,6 +21,7 @@ type ComposerPasteHandlerOptions = {
 
 export function createMessageComposerPasteHandler({
   agentConversationTitleForHref,
+  enableAgentConversationLinks = false,
   editor,
   scrollComposerToBottom,
   uploadFile,
@@ -66,7 +68,9 @@ export function createMessageComposerPasteHandler({
 
     const plainText = event.clipboardData?.getData("text/plain") ?? "";
     const taskLinkPasteContent =
-      plainText.includes("\n") || plainText.trim().length === 0
+      !enableAgentConversationLinks ||
+      plainText.includes("\n") ||
+      plainText.trim().length === 0
         ? null
         : buildTaskLinkPasteContent(plainText, agentConversationTitleForHref);
     if (taskLinkPasteContent) {

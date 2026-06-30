@@ -44,7 +44,9 @@ type MessageThreadPanelProps = {
   channelId: string | null;
   channelName: string;
   currentPubkey?: string;
+  canCreateAgentConversation?: boolean;
   disabled?: boolean;
+  enableAgentConversationLinks?: boolean;
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
@@ -355,7 +357,9 @@ export function MessageThreadPanel({
   channelId,
   channelName,
   currentPubkey,
+  canCreateAgentConversation = true,
   disabled = false,
+  enableAgentConversationLinks = false,
   firstUnreadReplyId,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending = false,
@@ -516,6 +520,7 @@ export function MessageThreadPanel({
               isFollowingThread={isFollowingThread}
               isUnread={isMessageUnreadById?.(threadHead.id)}
               message={threadHead}
+              canCreateAgentConversation={canCreateAgentConversation}
               onDelete={
                 onDelete && canManageMessage(threadHead, currentPubkey)
                   ? onDelete
@@ -582,6 +587,7 @@ export function MessageThreadPanel({
                       huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                       isUnread={isMessageUnreadById?.(entry.message.id)}
                       message={entry.message}
+                      canCreateAgentConversation={canCreateAgentConversation}
                       onDelete={
                         onDelete &&
                         canManageMessage(entry.message, currentPubkey)
@@ -680,6 +686,7 @@ export function MessageThreadPanel({
             containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
             disabled={disabled || isSending || !channelId}
             draftKey={`thread:${threadHead.id}`}
+            enableAgentConversationLinks={enableAgentConversationLinks}
             editTarget={editTarget}
             isSending={isSending}
             onCancelEdit={onCancelEdit}

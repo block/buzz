@@ -3,8 +3,8 @@ import test from "node:test";
 
 import {
   canOpenAgentConversationInChannel,
-  getDmAutoRouteAgentPubkeys,
-  getThreadAutoRouteAgentPubkeys,
+  getDmTaskAgentPubkeys,
+  getThreadTaskAgentPubkeys,
   mergeAutoRouteMentionPubkeys,
 } from "./ChannelPane.helpers.ts";
 
@@ -50,7 +50,6 @@ test("new agent conversations require a writable channel", () => {
     false,
   );
 });
-
 test("existing agent conversation markers can open in read-only channels", () => {
   assert.equal(
     canOpenAgentConversationInChannel({
@@ -68,11 +67,21 @@ test("existing agent conversation markers can open in read-only channels", () =>
   );
 });
 
-test("DM composer auto-routes only when exactly one other participant is an agent", () => {
+test("auto-routed mentions merge with explicit mentions without duplicates", () => {
+  assert.deepEqual(
+    mergeAutoRouteMentionPubkeys({
+      autoRouteAgentPubkeys: ["AGENT-ONE"],
+      mentionPubkeys: ["agent-one", "agent-two"],
+    }),
+    ["AGENT-ONE", "agent-two"],
+  );
+});
+
+test("DM task agent inference requires exactly one other known agent", () => {
   const knownAgentPubkeys = new Set(["agent-one", "agent-two"]);
 
   assert.deepEqual(
-    getDmAutoRouteAgentPubkeys({
+    getDmTaskAgentPubkeys({
       channel: channel({
         channelType: "dm",
         participantPubkeys: ["human", "agent-one"],
@@ -84,7 +93,7 @@ test("DM composer auto-routes only when exactly one other participant is an agen
   );
 
   assert.deepEqual(
-    getDmAutoRouteAgentPubkeys({
+    getDmTaskAgentPubkeys({
       channel: channel({
         channelType: "dm",
         participantPubkeys: ["human", "agent-one", "agent-two"],
@@ -96,7 +105,7 @@ test("DM composer auto-routes only when exactly one other participant is an agen
   );
 
   assert.deepEqual(
-    getDmAutoRouteAgentPubkeys({
+    getDmTaskAgentPubkeys({
       channel: channel({
         channelType: "dm",
         participantPubkeys: ["human", "agent-one", "human-two"],
@@ -108,7 +117,7 @@ test("DM composer auto-routes only when exactly one other participant is an agen
   );
 
   assert.deepEqual(
-    getDmAutoRouteAgentPubkeys({
+    getDmTaskAgentPubkeys({
       channel: channel({
         participantPubkeys: ["human", "agent-one"],
       }),
@@ -119,74 +128,57 @@ test("DM composer auto-routes only when exactly one other participant is an agen
   );
 });
 
-test("auto-routed mentions merge with explicit mentions without duplicates", () => {
-  assert.deepEqual(
-    mergeAutoRouteMentionPubkeys({
-      autoRouteAgentPubkeys: ["AGENT-ONE"],
-      mentionPubkeys: ["agent-one", "agent-two"],
-    }),
-    ["AGENT-ONE", "agent-two"],
-  );
-});
-
-test("thread composer auto-routes exactly one current human and one known agent", () => {
+test("thread task agent inference requires exactly one known agent and one human", () => {
   const knownAgentPubkeys = new Set(["agent-one", "agent-two"]);
 
   assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
+    getThreadTaskAgentPubkeys({
       currentPubkey: "human",
       knownAgentPubkeys,
       messages: [
-        { id: "root", pubkey: "human", tags: [["p", "agent-one"]] },
-        { id: "reply", pubkey: "agent-one", tags: [] },
+        {
+          pubkey: "human",
+          tags: [["p", "agent-one"]],
+        },
+        {
+          pubkey: "agent-one",
+          tags: [["p", "human"]],
+        },
       ],
     }),
     ["agent-one"],
   );
 
   assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
-      currentPubkey: "human",
-      knownAgentPubkeys,
-      messages: [
-        { id: "root", pubkey: "human", tags: [["p", "agent-one"]] },
-        { id: "reply", pubkey: "other-human", tags: [] },
-      ],
-    }),
-    [],
-  );
-
-  assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
-      currentPubkey: "human-one",
-      knownAgentPubkeys,
-      messages: [
-        {
-          id: "root",
-          pubkey: "human-one",
-          tags: [
-            ["p", "human-two"],
-            ["p", "agent-one"],
-          ],
-        },
-        { id: "reply", pubkey: "agent-one", tags: [] },
-      ],
-    }),
-    [],
-  );
-
-  assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
+    getThreadTaskAgentPubkeys({
       currentPubkey: "human",
       knownAgentPubkeys,
       messages: [
         {
-          id: "root",
           pubkey: "human",
-          tags: [
-            ["p", "agent-one"],
-            ["p", "agent-two"],
-          ],
+          tags: [["p", "agent-one"]],
+        },
+        {
+          pubkey: "other-human",
+          tags: [["p", "human"]],
+        },
+      ],
+    }),
+    [],
+  );
+
+  assert.deepEqual(
+    getThreadTaskAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        {
+          pubkey: "human",
+          tags: [["p", "agent-one"]],
+        },
+        {
+          pubkey: "agent-two",
+          tags: [["p", "human"]],
         },
       ],
     }),

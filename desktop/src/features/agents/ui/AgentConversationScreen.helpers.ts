@@ -370,7 +370,8 @@ export function buildKnownAgentParticipants({
     });
   }
 
-  if (!participants.has(normalizePubkey(conversation.agentPubkey))) {
+  const primaryAgentKey = normalizePubkey(conversation.agentPubkey);
+  if (primaryAgentKey && !participants.has(primaryAgentKey)) {
     add({
       canMessage: true,
       displayName: conversation.agentName,

@@ -14,6 +14,7 @@ import {
 import { AGENT_CONVERSATION_LINK_NODE_NAME } from "./agentConversationLinkNodeName";
 
 export type AgentConversationLinkNodeOptions = {
+  enabled?: boolean;
   titleForHref?: (href: string) => string | undefined;
 };
 
@@ -48,6 +49,20 @@ function getDisplayTitle(
 
 function ComposerAgentConversationLinkView({ extension, node }: NodeViewProps) {
   const href = String(node.attrs.href ?? "");
+  if (
+    (extension.options as AgentConversationLinkNodeOptions).enabled === false
+  ) {
+    return (
+      <NodeViewWrapper
+        as="span"
+        className="font-medium text-primary underline underline-offset-4"
+        title={href}
+      >
+        {href}
+      </NodeViewWrapper>
+    );
+  }
+
   const title = getDisplayTitle(
     href,
     String(node.attrs.title ?? ""),
@@ -146,6 +161,7 @@ export const AgentConversationLinkNode =
 
     addOptions() {
       return {
+        enabled: true,
         titleForHref: undefined,
       };
     },
@@ -230,6 +246,10 @@ export const AgentConversationLinkNode =
               // biome-ignore lint/suspicious/noExplicitAny: markdown-it is untyped here
               md: any,
             ) {
+              if (this.options.enabled === false) {
+                return;
+              }
+
               registerAgentConversationLinkMarkdownIt(md, this.options);
             },
           },

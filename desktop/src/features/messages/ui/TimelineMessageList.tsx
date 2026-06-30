@@ -33,6 +33,7 @@ type TimelineMessageListProps = {
   channelName?: string;
   channelType?: ChannelType | null;
   currentPubkey?: string;
+  canCreateAgentConversation?: boolean;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
   /** Event id of the oldest unread top-level message; renders a "New" divider above it. */
@@ -90,6 +91,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   channelName,
   channelType,
   currentPubkey,
+  canCreateAgentConversation = true,
   firstUnreadMessageId = null,
   followThreadById,
   highlightedMessageId = null,
@@ -214,6 +216,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               agentConversationMarker={agentConversationMarkerByMessageId.get(
                 item.entry.message.id,
               )}
+              canCreateAgentConversation={canCreateAgentConversation}
               channelId={channelId}
               currentPubkey={currentPubkey}
               entry={item.entry}
@@ -248,6 +251,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       agentConversationMarkers,
       agentPubkeys,
       agentConversationMarkerByMessageId,
+      canCreateAgentConversation,
       channelId,
       currentPubkey,
       followThreadById,
@@ -315,6 +319,7 @@ type MessageRowItemProps = Pick<
   TimelineMessageListProps,
   | "agentPubkeys"
   | "agentConversationMarkers"
+  | "canCreateAgentConversation"
   | "channelId"
   | "currentPubkey"
   | "followThreadById"
@@ -347,6 +352,7 @@ function MessageRowItem({
   agentPubkeys,
   agentConversationMarkers,
   agentConversationMarker,
+  canCreateAgentConversation,
   channelId,
   currentPubkey,
   entry,
@@ -402,6 +408,7 @@ function MessageRowItem({
         <MessageRow
           agentConversationMarkers={agentConversationMarkers}
           agentPubkeys={agentPubkeys}
+          canCreateAgentConversation={canCreateAgentConversation}
           channelId={channelId}
           highlighted={false}
           hoverBackground={false}
@@ -464,6 +471,7 @@ function MessageRowItem({
       <MessageRow
         agentConversationMarkers={agentConversationMarkers}
         agentPubkeys={agentPubkeys}
+        canCreateAgentConversation={canCreateAgentConversation}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
         huddleMemberPubkeys={huddleMemberPubkeys}

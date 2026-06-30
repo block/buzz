@@ -34,18 +34,20 @@ export function useUnreadTimelineMessages(
 
 export function useAgentConversationMarkers(
   messages: RelayEvent[],
+  enabled = true,
 ): AgentConversationMarker[] {
   return React.useMemo(
-    () => buildAgentConversationMarkers(messages),
-    [messages],
+    () => (enabled ? buildAgentConversationMarkers(messages) : []),
+    [enabled, messages],
   );
 }
 
 export function useAgentConversationTimelineState(
   events: RelayEvent[],
   messages: TimelineMessage[],
+  enabled = true,
 ) {
-  const agentConversationMarkers = useAgentConversationMarkers(events);
+  const agentConversationMarkers = useAgentConversationMarkers(events, enabled);
   const unreadTimelineMessages = useUnreadTimelineMessages(
     messages,
     agentConversationMarkers,

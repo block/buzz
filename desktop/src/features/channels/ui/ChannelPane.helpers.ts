@@ -1,9 +1,9 @@
 import { isEphemeralChannel } from "@/features/channels/lib/ephemeralChannel";
-import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 
 export function getChannelIntroKind(channel: Channel): string {
   const isPrivate = channel.visibility === "private";
@@ -94,7 +94,7 @@ function singleKnownAgentPubkey(
   return agentPubkeys.size === 1 ? [...agentPubkeys.values()] : [];
 }
 
-export function getDmAutoRouteAgentPubkeys({
+export function getDmTaskAgentPubkeys({
   channel,
   currentPubkey,
   knownAgentPubkeys,
@@ -110,11 +110,11 @@ export function getDmAutoRouteAgentPubkeys({
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
-
   const otherParticipants = new Map<string, string>();
+
   for (const pubkey of channel.participantPubkeys) {
     const normalized = normalizePubkey(pubkey);
-    if (!normalized || normalized === normalizedCurrentPubkey) {
+    if (normalizedCurrentPubkey && normalized === normalizedCurrentPubkey) {
       continue;
     }
 
@@ -128,7 +128,7 @@ export function getDmAutoRouteAgentPubkeys({
   return singleKnownAgentPubkey(otherParticipants.values(), knownAgentPubkeys);
 }
 
-export function getThreadAutoRouteAgentPubkeys({
+export function getThreadTaskAgentPubkeys({
   currentPubkey,
   knownAgentPubkeys,
   messages,
@@ -137,49 +137,42 @@ export function getThreadAutoRouteAgentPubkeys({
   knownAgentPubkeys: ReadonlySet<string>;
   messages: readonly TimelineMessage[];
 }) {
-  const agentPubkeys = new Map<string, string>();
-  const humanPubkeys = new Set<string>();
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
+  const participants = new Map<string, string>();
 
-  const addAuthor = (pubkey?: string | null) => {
-    if (!pubkey) return;
-    const normalized = normalizePubkey(pubkey);
-    if (!normalized) return;
-    if (knownAgentPubkeys.has(normalized)) {
-      agentPubkeys.set(normalized, pubkey);
+  const addParticipant = (pubkey: string | null | undefined) => {
+    if (!pubkey) {
       return;
     }
-    humanPubkeys.add(normalized);
+    const normalized = normalizePubkey(pubkey);
+    if (!normalized || participants.has(normalized)) {
+      return;
+    }
+    participants.set(normalized, pubkey);
   };
 
   for (const message of messages) {
-    addAuthor(message.pubkey);
+    addParticipant(message.pubkey);
+    for (const tag of message.tags ?? []) {
+      addParticipant(getMentionTagPubkey(tag));
+    }
   }
 
-  for (const pubkey of collectMessageMentionPubkeys([...messages])) {
-    const normalized = normalizePubkey(pubkey);
-    if (!normalized) {
+  const agentPubkeys = new Map<string, string>();
+
+  for (const [normalized, pubkey] of participants) {
+    if (normalizedCurrentPubkey && normalized === normalizedCurrentPubkey) {
       continue;
     }
-
-    if (knownAgentPubkeys.has(normalized)) {
-      agentPubkeys.set(normalized, pubkey);
-      continue;
+    if (!knownAgentPubkeys.has(normalized)) {
+      return [];
     }
-
-    humanPubkeys.add(normalized);
+    agentPubkeys.set(normalized, pubkey);
   }
 
-  if (agentPubkeys.size !== 1 || humanPubkeys.size !== 1) {
-    return [];
-  }
-  if (normalizedCurrentPubkey && !humanPubkeys.has(normalizedCurrentPubkey)) {
-    return [];
-  }
-
-  return [...agentPubkeys.values()];
+  return agentPubkeys.size === 1 ? [...agentPubkeys.values()] : [];
 }
 
 export function mergeAutoRouteMentionPubkeys({
@@ -209,4 +202,21 @@ export function mergeAutoRouteMentionPubkeys({
   }
 
   return merged;
+}
+
+export function mergeTaskAgentMentionPubkeys({
+  agentPubkeys,
+  mentionPubkeys,
+}: {
+  agentPubkeys: readonly string[];
+  mentionPubkeys: string[];
+}) {
+  if (agentPubkeys.length === 0) {
+    return mentionPubkeys;
+  }
+
+  return mergeAutoRouteMentionPubkeys({
+    autoRouteAgentPubkeys: agentPubkeys,
+    mentionPubkeys,
+  });
 }

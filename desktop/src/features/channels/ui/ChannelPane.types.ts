@@ -16,6 +16,7 @@ import type { Channel } from "@/shared/api/types";
 export type ChannelPaneProps = {
   activeChannel: Channel | null;
   agentConversationMarkers?: readonly AgentConversationMarker[];
+  agentLookupReady?: boolean;
   activityAgents?: BotActivityAgent[];
   agentPubkeys?: ReadonlySet<string>;
   agentPubkeysPending?: boolean;
@@ -30,6 +31,7 @@ export type ChannelPaneProps = {
     id: string;
     imetaMedia?: ImetaMedia[];
   } | null;
+  enableAgentConversations?: boolean;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
   hasOlderMessages?: boolean;

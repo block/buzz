@@ -30,6 +30,7 @@ import {
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { CHANNEL_TASKS_FEATURE_ID, useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import {
   extractSupportedLinkPreviews,
@@ -1600,6 +1601,7 @@ function AgentConversationLinkCard({
 function createMarkdownComponents(
   runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
+  agentConversationLinksEnabled = true,
 ): Components {
   const paragraphClassName = "leading-[inherit]";
   const listItemClassName = "my-1 [&_p]:inline";
@@ -1694,41 +1696,42 @@ function createMarkdownComponents(
             </a>
           );
         }
+        if (agentConversationLinksEnabled) {
+          const agentConversationLinkTarget =
+            resolveAgentConversationLinkRenderTarget({
+              href,
+              label,
+            });
+          if (agentConversationLinkTarget.kind !== "none") {
+            if (agentConversationLinkTarget.kind === "card") {
+              return (
+                <AgentConversationLinkCard
+                  href={href}
+                  interactive={interactive}
+                  link={agentConversationLinkTarget.link}
+                  marker={findAgentConversationMarker(
+                    agentConversationMarkers,
+                    agentConversationLinkTarget.link,
+                  )}
+                  onOpenAgentConversationLink={onOpenAgentConversationLink}
+                />
+              );
+            }
 
-        const agentConversationLinkTarget =
-          resolveAgentConversationLinkRenderTarget({
-            href,
-            label,
-          });
-        if (agentConversationLinkTarget.kind !== "none") {
-          if (agentConversationLinkTarget.kind === "card") {
             return (
-              <AgentConversationLinkCard
+              <a
+                {...props}
+                className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
                 href={href}
-                interactive={interactive}
-                link={agentConversationLinkTarget.link}
-                marker={findAgentConversationMarker(
-                  agentConversationMarkers,
-                  agentConversationLinkTarget.link,
-                )}
-                onOpenAgentConversationLink={onOpenAgentConversationLink}
-              />
+                onClick={(event) => {
+                  event.preventDefault();
+                  onOpenAgentConversationLink(agentConversationLinkTarget.link);
+                }}
+              >
+                {children}
+              </a>
             );
           }
-
-          return (
-            <a
-              {...props}
-              className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
-              href={href}
-              onClick={(event) => {
-                event.preventDefault();
-                onOpenAgentConversationLink(agentConversationLinkTarget.link);
-              }}
-            >
-              {children}
-            </a>
-          );
         }
         // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
@@ -2058,6 +2061,9 @@ function createMarkdownComponents(
       const { agentConversationMarkers, onOpenAgentConversationLink } =
         runtimeRef.current;
       const href = getReactNodeText(children);
+      if (!agentConversationLinksEnabled) {
+        return <span data-agent-conversation-link="">{href}</span>;
+      }
       const parsed = parseAgentConversationLink(href);
       if (!parsed.ok) {
         return <span data-agent-conversation-link="">{href}</span>;
@@ -2093,6 +2099,9 @@ function MarkdownInner({
   searchQuery,
   videoReviewContext,
 }: MarkdownProps) {
+  const agentConversationLinksEnabled = useFeatureEnabled(
+    CHANNEL_TASKS_FEATURE_ID,
+  );
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
   const { goChannel } = useAppNavigation();
@@ -2147,24 +2156,34 @@ function MarkdownInner({
   });
 
   const components = React.useMemo(
-    () => createMarkdownComponents(runtimeRef, interactive),
-    [runtimeRef, interactive],
+    () =>
+      createMarkdownComponents(
+        runtimeRef,
+        interactive,
+        agentConversationLinksEnabled,
+      ),
+    [runtimeRef, interactive, agentConversationLinksEnabled],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
-  const remarkPlugins = React.useMemo<any[]>(
-    () => [
+  const remarkPlugins = React.useMemo<any[]>(() => {
+    // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
+    const plugins: any[] = [
       remarkGfm,
       remarkBreaks,
       remarkSpoilers,
       remarkMessageLinks,
-      remarkAgentConversationLinks,
+    ];
+    if (agentConversationLinksEnabled) {
+      plugins.push(remarkAgentConversationLinks);
+    }
+    plugins.push(
       [remarkMentions, { mentionNames }],
       [remarkChannelLinks, { channelNames }],
       [remarkCustomEmoji, { customEmoji }],
-    ],
-    [mentionNames, channelNames, customEmoji],
-  );
+    );
+    return plugins;
+  }, [agentConversationLinksEnabled, mentionNames, channelNames, customEmoji]);
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
   const rehypePlugins = React.useMemo<any[]>(() => {
@@ -2193,7 +2212,9 @@ function MarkdownInner({
       components={components}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
-      urlTransform={messageLinkUrlTransform}
+      urlTransform={(value, key) =>
+        messageLinkUrlTransform(value, key, agentConversationLinksEnabled)
+      }
     >
       {processedContent}
     </ReactMarkdown>

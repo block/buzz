@@ -21,7 +21,9 @@ export async function openProfileMenu(page: Page) {
 
 export async function openSettings(page: Page, section?: SettingsSection) {
   await openProfileMenu(page);
-  await page.getByTestId("profile-popover-settings").click();
+  const settingsItem = page.getByTestId("profile-popover-settings");
+  await expect(settingsItem).toBeVisible();
+  await settingsItem.click({ force: true });
   await expect(page.getByTestId("settings-view")).toBeVisible();
 
   if (section) {

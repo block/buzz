@@ -66,10 +66,18 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
  * component override can see them, which would break copy → paste → click
  * end-to-end. Everything else delegates to `defaultUrlTransform`.
  */
-export function messageLinkUrlTransform(value: string, key: string): string {
+export function messageLinkUrlTransform(
+  value: string,
+  key: string,
+  agentConversationLinksEnabled = true,
+): string {
+  if (key === "href" && isMessageLink(value)) {
+    return value;
+  }
   if (
     key === "href" &&
-    (isMessageLink(value) || isAgentConversationLink(value))
+    agentConversationLinksEnabled &&
+    isAgentConversationLink(value)
   ) {
     return value;
   }

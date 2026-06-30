@@ -43,9 +43,10 @@ import {
   canOpenAgentConversationInChannel,
   getChannelIntroDescription,
   getChannelIntroKind,
-  getThreadAutoRouteAgentPubkeys,
+  getDmTaskAgentPubkeys,
+  getThreadTaskAgentPubkeys,
   isWelcomeSetupSystemMessage,
-  mergeAutoRouteMentionPubkeys,
+  mergeTaskAgentMentionPubkeys,
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
@@ -53,6 +54,7 @@ import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelec
 import { Button } from "@/shared/ui/button";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { isBroadcastReply } from "@/features/messages/lib/threading";
+import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
@@ -61,9 +63,11 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentConversationMarkers,
+  agentLookupReady = true,
   agentPubkeys,
   agentPubkeysPending = false,
   agentSessionAgents,
@@ -73,6 +77,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   channelManagementOpen = false,
   currentPubkey,
   editTarget = null,
+  enableAgentConversations = true,
   fetchOlder,
   header,
   hasOlderMessages,
@@ -154,6 +159,12 @@ export const ChannelPane = React.memo(function ChannelPane({
   const [taskFocusMessageId, setTaskFocusMessageId] = React.useState<
     string | null
   >(null);
+  const [pendingAgentConversationOpen, setPendingAgentConversationOpen] =
+    React.useState<{
+      channelId: string;
+      messageId: string;
+      publishMarker?: boolean;
+    } | null>(null);
   const previousTaskFocusChannelIdRef = React.useRef<string | null>(null);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
@@ -166,7 +177,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.isMember &&
     activeChannel.visibility === "open" &&
     !activeChannel.archivedAt;
-  const isTasksSurface = surfaceTab === "tasks";
+  const isTasksSurface = enableAgentConversations && surfaceTab === "tasks";
   const hasMainComposerOverlay = !isNonMemberView && !isTasksSurface;
   const activeChannelId = activeChannel?.id ?? null;
   const huddleMemberPubkeys = React.useMemo(
@@ -174,6 +185,9 @@ export const ChannelPane = React.memo(function ChannelPane({
     [activeChannel, agentPubkeys, currentPubkey],
   );
   const huddleMemberPubkeysPending = agentPubkeysPending;
+  const activeAgentConversationMarkers = enableAgentConversations
+    ? agentConversationMarkers
+    : undefined;
   const isActiveWelcomeChannel =
     activeChannel !== null && isWelcomeChannel(activeChannel);
   React.useEffect(() => {
@@ -278,6 +292,106 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return pubkeys;
   }, [activityAgents, agentPubkeys, agentSessionAgents]);
+  const dmTaskAgentPubkeys = React.useMemo(
+    () =>
+      getDmTaskAgentPubkeys({
+        channel: activeChannel,
+        currentPubkey,
+        knownAgentPubkeys,
+      }),
+    [activeChannel, currentPubkey, knownAgentPubkeys],
+  );
+  const knownAgentByPubkey = React.useMemo(() => {
+    const agents = new Map<string, { name: string; pubkey: string }>();
+    const addAgent = (pubkey: string, name?: string | null) => {
+      const key = normalizePubkey(pubkey);
+      if (!key) {
+        return;
+      }
+
+      const profileName = profiles?.[key]?.displayName?.trim();
+      const fallbackName = name?.trim() || profileName || pubkey;
+      const current = agents.get(key);
+      agents.set(key, {
+        name:
+          current?.name && current.name !== current.pubkey
+            ? current.name
+            : fallbackName,
+        pubkey: current?.pubkey ?? pubkey,
+      });
+    };
+
+    for (const agent of agentSessionAgents) {
+      addAgent(agent.pubkey, agent.name);
+    }
+    for (const agent of activityAgents) {
+      addAgent(agent.pubkey, agent.name);
+    }
+    for (const pubkey of agentPubkeys ?? []) {
+      addAgent(pubkey);
+    }
+
+    return agents;
+  }, [activityAgents, agentPubkeys, agentSessionAgents, profiles]);
+  const resolveTaskAgentForMessage = React.useCallback(
+    (message: TimelineMessage) => {
+      const markerAgent = activeAgentConversationMarkers?.find(
+        (marker) =>
+          marker.channelId === activeChannelId &&
+          marker.agentReplyId === message.id &&
+          marker.agentPubkey,
+      );
+      if (markerAgent) {
+        return {
+          name: markerAgent.agentName || markerAgent.agentPubkey,
+          pubkey: markerAgent.agentPubkey,
+        };
+      }
+
+      if (message.pubkey) {
+        const directAgent = knownAgentByPubkey.get(
+          normalizePubkey(message.pubkey),
+        );
+        if (directAgent) {
+          return {
+            name: message.author?.trim() || directAgent.name,
+            pubkey: directAgent.pubkey,
+          };
+        }
+        if (message.role === "bot") {
+          return {
+            name:
+              message.author?.trim() ||
+              message.personaDisplayName?.trim() ||
+              message.pubkey,
+            pubkey: message.pubkey,
+          };
+        }
+      }
+
+      for (const pubkey of collectMessageMentionPubkeys([message])) {
+        const mentionedAgent = knownAgentByPubkey.get(normalizePubkey(pubkey));
+        if (mentionedAgent) {
+          return mentionedAgent;
+        }
+      }
+
+      for (const pubkey of dmTaskAgentPubkeys) {
+        const dmAgent = knownAgentByPubkey.get(normalizePubkey(pubkey));
+        if (dmAgent) {
+          return dmAgent;
+        }
+      }
+
+      return null;
+    },
+    [
+      activeAgentConversationMarkers,
+      activeChannelId,
+      dmTaskAgentPubkeys,
+      knownAgentByPubkey,
+    ],
+  );
   const completeWelcomeComposerBanner = React.useCallback(() => {
     if (!activeChannelId || !isActiveWelcomeChannel) {
       return;
@@ -309,13 +423,17 @@ export const ChannelPane = React.memo(function ChannelPane({
       mentionPubkeys: string[],
       mediaTags?: string[][],
     ) => {
+      const sendMentionPubkeys = mergeTaskAgentMentionPubkeys({
+        agentPubkeys: dmTaskAgentPubkeys,
+        mentionPubkeys,
+      });
       const shouldCompleteWelcomeBanner =
         isActiveWelcomeChannel &&
         (containsWelcomePersonaMention(content) ||
-          mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
+          mentionsKnownAgent(sendMentionPubkeys, knownAgentPubkeys));
 
       messageTimelineRef.current?.scrollToBottomOnNextUpdate();
-      await onSendMessage(content, mentionPubkeys, mediaTags);
+      await onSendMessage(content, sendMentionPubkeys, mediaTags);
 
       if (shouldCompleteWelcomeBanner) {
         completeWelcomeComposerBanner();
@@ -323,6 +441,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     },
     [
       completeWelcomeComposerBanner,
+      dmTaskAgentPubkeys,
       isActiveWelcomeChannel,
       knownAgentPubkeys,
       onSendMessage,
@@ -334,11 +453,16 @@ export const ChannelPane = React.memo(function ChannelPane({
     },
     [onOpenAgentSession],
   );
-  const handleOpenAgentConversation = React.useCallback(
-    (message: TimelineMessage, options?: { publishMarker?: boolean }) => {
+  const openResolvedAgentConversation = React.useCallback(
+    (
+      message: TimelineMessage,
+      taskAgent: { name: string; pubkey: string } | null,
+      options?: { publishMarker?: boolean },
+    ) => {
       if (
+        !enableAgentConversations ||
         !activeChannel ||
-        !message.pubkey ||
+        message.pending ||
         !canOpenAgentConversationInChannel({
           channel: activeChannel,
           publishMarker: options?.publishMarker,
@@ -357,8 +481,8 @@ export const ChannelPane = React.memo(function ChannelPane({
       );
       openAgentConversation(
         {
-          agentName: message.author,
-          agentPubkey: message.pubkey,
+          agentName: taskAgent?.name ?? "",
+          agentPubkey: taskAgent?.pubkey ?? "",
           agentReply: message,
           channel: activeChannel,
           contextMessages,
@@ -374,8 +498,85 @@ export const ChannelPane = React.memo(function ChannelPane({
         options,
       );
     },
-    [activeChannel, messages, openAgentConversation],
+    [activeChannel, enableAgentConversations, messages, openAgentConversation],
   );
+  const handleOpenAgentConversation = React.useCallback(
+    (message: TimelineMessage, options?: { publishMarker?: boolean }) => {
+      if (
+        !enableAgentConversations ||
+        !activeChannel ||
+        message.pending ||
+        !canOpenAgentConversationInChannel({
+          channel: activeChannel,
+          publishMarker: options?.publishMarker,
+        })
+      ) {
+        return;
+      }
+
+      const taskAgent = resolveTaskAgentForMessage(message);
+      if (!taskAgent && !agentLookupReady) {
+        setPendingAgentConversationOpen({
+          channelId: activeChannel.id,
+          messageId: message.id,
+          publishMarker: options?.publishMarker,
+        });
+        return;
+      }
+
+      openResolvedAgentConversation(message, taskAgent, options);
+    },
+    [
+      activeChannel,
+      agentLookupReady,
+      enableAgentConversations,
+      openResolvedAgentConversation,
+      resolveTaskAgentForMessage,
+    ],
+  );
+  const canCreateAgentConversation = React.useMemo(
+    () =>
+      enableAgentConversations &&
+      canOpenAgentConversationInChannel({ channel: activeChannel }),
+    [activeChannel, enableAgentConversations],
+  );
+  React.useEffect(() => {
+    if (!pendingAgentConversationOpen) {
+      return;
+    }
+    if (
+      !activeChannel ||
+      activeChannel.id !== pendingAgentConversationOpen.channelId
+    ) {
+      setPendingAgentConversationOpen(null);
+      return;
+    }
+    if (!agentLookupReady) {
+      return;
+    }
+
+    const pendingMessage = messages.find(
+      (message) => message.id === pendingAgentConversationOpen.messageId,
+    );
+    if (!pendingMessage || pendingMessage.pending) {
+      setPendingAgentConversationOpen(null);
+      return;
+    }
+
+    setPendingAgentConversationOpen(null);
+    openResolvedAgentConversation(
+      pendingMessage,
+      resolveTaskAgentForMessage(pendingMessage),
+      { publishMarker: pendingAgentConversationOpen.publishMarker },
+    );
+  }, [
+    activeChannel,
+    agentLookupReady,
+    messages,
+    openResolvedAgentConversation,
+    pendingAgentConversationOpen,
+    resolveTaskAgentForMessage,
+  ]);
   const handleGoToTaskMessage = React.useCallback(
     (
       marker: AgentConversationMarker,
@@ -463,7 +664,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   const threadActivityAgents = React.useMemo(() => {
     if (
       threadComposerBotTypingPubkeys.length === 0 ||
-      (openThreadHeadId &&
+      (enableAgentConversations &&
+        openThreadHeadId &&
         agentConversationMarkers?.some(
           (marker) => marker.threadRootId === openThreadHeadId,
         ))
@@ -480,6 +682,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   }, [
     activityAgents,
     agentConversationMarkers,
+    enableAgentConversations,
     openThreadHeadId,
     threadComposerBotTypingPubkeys,
   ]);
@@ -574,26 +777,27 @@ export const ChannelPane = React.memo(function ChannelPane({
       ...threadMessages.map((entry) => entry.message),
     ];
   }, [threadHeadMessage, threadMessages]);
-  const threadAutoRouteAgentPubkeys = React.useMemo(
-    () =>
-      getThreadAutoRouteAgentPubkeys({
-        currentPubkey,
-        knownAgentPubkeys,
-        messages: threadSourceMessages,
-      }),
-    [currentPubkey, knownAgentPubkeys, threadSourceMessages],
-  );
+  const threadTaskAgentPubkeys = getThreadTaskAgentPubkeys({
+    currentPubkey,
+    knownAgentPubkeys,
+    messages: threadSourceMessages,
+  });
   const handleSendThreadReply = React.useCallback(
     (content: string, mentionPubkeys: string[], mediaTags?: string[][]) => {
-      const sendMentionPubkeys = mergeAutoRouteMentionPubkeys({
-        autoRouteAgentPubkeys: threadAutoRouteAgentPubkeys,
+      const sendMentionPubkeys = mergeTaskAgentMentionPubkeys({
+        agentPubkeys: threadTaskAgentPubkeys,
         mentionPubkeys,
       });
+
       return onSendThreadReply(content, sendMentionPubkeys, mediaTags);
     },
-    [onSendThreadReply, threadAutoRouteAgentPubkeys],
+    [onSendThreadReply, threadTaskAgentPubkeys],
   );
   const hiddenAgentConversationMessageIds = React.useMemo(() => {
+    if (!enableAgentConversations) {
+      return new Set<string>();
+    }
+
     const hiddenIds = getHiddenAgentConversationMessageIds(
       baseVisibleMessages,
       agentConversationMarkers,
@@ -619,6 +823,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     agentConversationMarkers,
     baseVisibleMessages,
     channelFind.activeMatch?.messageId,
+    enableAgentConversations,
     targetMessageId,
     threadScrollTargetId,
     threadSourceMessages,
@@ -781,7 +986,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           {isTasksSurface ? (
             <ChannelTasksView
               activeChannel={activeChannel}
-              agentConversationMarkers={agentConversationMarkers}
+              agentConversationMarkers={activeAgentConversationMarkers}
               currentPubkey={currentPubkey}
               fetchOlder={fetchOlder}
               hasOlderMessages={hasOlderMessages}
@@ -797,13 +1002,14 @@ export const ChannelPane = React.memo(function ChannelPane({
             <>
               <MessageTimeline
                 ref={messageTimelineRef}
-                agentConversationMarkers={agentConversationMarkers}
+                agentConversationMarkers={activeAgentConversationMarkers}
                 agentPubkeys={agentPubkeys}
                 channelId={activeChannel?.id}
                 channelIntro={channelIntro}
                 directMessageIntro={directMessageIntro}
                 scrollContainerRef={timelineScrollRef}
                 currentPubkey={currentPubkey}
+                canCreateAgentConversation={canCreateAgentConversation}
                 fetchOlder={fetchOlder}
                 followThreadById={followThreadById}
                 hasComposerOverlay={hasMainComposerOverlay}
@@ -837,7 +1043,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onEdit={onEdit}
                 onMarkUnread={onMarkUnread}
                 onMarkRead={onMarkRead}
-                onOpenAgentConversation={handleOpenAgentConversation}
+                onOpenAgentConversation={
+                  enableAgentConversations
+                    ? handleOpenAgentConversation
+                    : undefined
+                }
                 onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
                 channelName={activeChannel?.name}
                 channelType={activeChannel?.channelType ?? null}
@@ -900,6 +1110,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       channelType={activeChannel?.channelType ?? null}
                       containerClassName="px-5"
                       disabled={isComposerDisabled}
+                      enableAgentConversationLinks={enableAgentConversations}
                       editTarget={mainEditTarget}
                       isSending={isSending}
                       mediaController={mainComposerMedia}
@@ -976,13 +1187,14 @@ export const ChannelPane = React.memo(function ChannelPane({
         (() => {
           const panel = (
             <MessageThreadPanel
-              agentConversationMarkers={agentConversationMarkers}
+              agentConversationMarkers={activeAgentConversationMarkers}
               agentPubkeys={agentPubkeys}
               channel={activeChannel}
               channelId={activeChannel?.id ?? null}
               channelName={activeChannel?.name ?? "channel"}
               currentPubkey={currentPubkey}
               disabled={isComposerDisabled}
+              enableAgentConversationLinks={enableAgentConversations}
               editTarget={threadEditTarget}
               firstUnreadReplyId={threadFirstUnreadReplyId}
               huddleMemberPubkeys={huddleMemberPubkeys}
@@ -1006,7 +1218,12 @@ export const ChannelPane = React.memo(function ChannelPane({
               onMarkUnread={onMarkUnread}
               onMarkRead={onMarkRead}
               onExpandReplies={onExpandThreadReplies}
-              onOpenAgentConversation={handleOpenAgentConversation}
+              onOpenAgentConversation={
+                enableAgentConversations
+                  ? handleOpenAgentConversation
+                  : undefined
+              }
+              canCreateAgentConversation={canCreateAgentConversation}
               onSelectReplyTarget={onSelectThreadReplyTarget}
               onSend={handleSendThreadReply}
               onScrollTargetResolved={onThreadScrollTargetResolved}

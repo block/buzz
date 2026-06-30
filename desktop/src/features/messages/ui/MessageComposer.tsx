@@ -90,6 +90,7 @@ type MessageComposerProps = {
     mediaTags?: string[][],
   ) => Promise<void>;
   agentConversationTitleForHref?: (href: string) => string | undefined;
+  enableAgentConversationLinks?: boolean;
   placeholder?: string;
   profiles?: UserProfileLookup;
   replyTarget?: {
@@ -119,6 +120,7 @@ function MessageComposerImpl({
   onEditSave,
   onSend,
   agentConversationTitleForHref,
+  enableAgentConversationLinks = false,
   placeholder,
   profiles,
   replyTarget = null,
@@ -233,6 +235,7 @@ function MessageComposerImpl({
     channelNames: channelLinks.knownChannelNames,
     customEmoji,
     agentConversationTitleForHref,
+    enableAgentConversationLinks,
     onSubmit: () => submitMessageRef.current(),
     onEditLastOwnMessage: () => {
       // Never re-enter edit from an empty edit (e.g. image-only edit whose
@@ -675,13 +678,19 @@ function MessageComposerImpl({
         ...richText.editor.options.editorProps,
         handlePaste: createMessageComposerPasteHandler({
           agentConversationTitleForHref,
+          enableAgentConversationLinks,
           editor: richText.editor,
           scrollComposerToBottom,
           uploadFile: uploadFileRef.current,
         }),
       },
     });
-  }, [richText.editor, scrollComposerToBottom, agentConversationTitleForHref]);
+  }, [
+    richText.editor,
+    scrollComposerToBottom,
+    agentConversationTitleForHref,
+    enableAgentConversationLinks,
+  ]);
 
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(

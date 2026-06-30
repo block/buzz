@@ -281,8 +281,8 @@ export function ChannelTasksView({
                   No tasks yet
                 </p>
                 <p className="mx-auto mt-2 max-w-sm text-sm leading-5 text-muted-foreground">
-                  New tasks will appear here when an agent conversation is
-                  opened from this channel.
+                  New tasks will appear here when one is started from a message
+                  in this channel.
                 </p>
               </div>
               {olderTasksLoader}

@@ -47,6 +47,7 @@ type MessageTimelineProps = {
   emptyTitle?: string;
   emptyDescription?: string;
   currentPubkey?: string;
+  canCreateAgentConversation?: boolean;
   fetchOlder?: () => Promise<void>;
   hasOlderMessages?: boolean;
   /** Optional external ref to the scroll container — used by the parent to
@@ -159,6 +160,7 @@ const MessageTimelineBase = React.forwardRef<
     emptyTitle = "No messages yet",
     emptyDescription = "Send the first message to start the thread.",
     currentPubkey,
+    canCreateAgentConversation = true,
     fetchOlder,
     hasComposerOverlay = true,
     contentTopPadding = "chrome",
@@ -619,6 +621,7 @@ const MessageTimelineBase = React.forwardRef<
                     channelName={channelName}
                     channelType={channelType}
                     currentPubkey={currentPubkey}
+                    canCreateAgentConversation={canCreateAgentConversation}
                     firstUnreadMessageId={firstUnreadMessageId}
                     followThreadById={followThreadById}
                     highlightedMessageId={highlightedMessageId}

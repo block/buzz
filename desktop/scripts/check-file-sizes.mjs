@@ -154,7 +154,7 @@ const overrides = new Map([
   ["src/features/messages/ui/MessageComposer.tsx", 1010],
   // continued-agent-conversations: channel sidebar children and active
   // conversation unread suppression. Queued to split with sidebar sections.
-  ["src/features/sidebar/ui/AppSidebar.tsx", 1081],
+  ["src/features/sidebar/ui/AppSidebar.tsx", 1087],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
@@ -170,8 +170,9 @@ const overrides = new Map([
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
   // continued-agent-conversations: task-link card renderer and marker lookup
-  // are temporarily housed here until markdown renderers are split further.
-  ["src/shared/ui/markdown.tsx", 2258],
+  // plus experiment-gate wiring are temporarily housed here until markdown
+  // renderers are split further.
+  ["src/shared/ui/markdown.tsx", 2279],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
   // Option C databricks-model-discovery: parse/HTTP logic moved to buzz-agent

@@ -32,6 +32,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "channel-tasks",
+      "name": "Channel Tasks",
+      "description": "Dedicated agent task conversations inside channels",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }
