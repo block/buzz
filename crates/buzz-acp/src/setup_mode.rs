@@ -108,8 +108,21 @@ impl SetupPayload {
     /// Returns `Ok(None)` when the env var is absent (normal mode).
     /// Returns `Err` if the var is present but malformed.
     pub(crate) fn from_env() -> Result<Option<Self>> {
-        let raw = match std::env::var(SETUP_PAYLOAD_ENV_VAR) {
-            Ok(v) if !v.is_empty() => v,
+        Self::from_raw_env_value(std::env::var(SETUP_PAYLOAD_ENV_VAR).ok())
+    }
+
+    /// Parse an optional raw env-var value into a `SetupPayload`.
+    ///
+    /// `None` or empty string → `Ok(None)` (normal mode, no setup payload).
+    /// Non-empty, valid JSON → `Ok(Some(payload))`.
+    /// Non-empty, malformed JSON → `Err`.
+    ///
+    /// This is the pure core of `from_env()` and is the preferred target for
+    /// unit tests — it requires no global env mutation and is safe to call
+    /// concurrently.
+    pub(crate) fn from_raw_env_value(raw: Option<String>) -> Result<Option<Self>> {
+        let raw = match raw {
+            Some(v) if !v.is_empty() => v,
             _ => return Ok(None),
         };
         let payload = serde_json::from_str::<Self>(&raw)
@@ -435,7 +448,7 @@ async fn handle_setup_membership(
 
     if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
         // Subscribe to the newly-joined channel.
-        let mut ids = vec![channel_id];
+        let ids = vec![channel_id];
         let filters = crate::config::resolve_channel_filters(config, &ids, rules);
         for (cid, filter) in filters {
             if let Err(e) = relay.subscribe_channel(cid, filter).await {
@@ -515,32 +528,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_payload_from_env_returns_none_when_unset() {
-        // The env var is not set in test builds — should return None.
-        // We rely on the var not being set in the test environment.
-        // If it IS set (e.g., running under buzz-acp itself), skip.
-        if std::env::var(SETUP_PAYLOAD_ENV_VAR).is_ok() {
-            return;
-        }
-        let result = SetupPayload::from_env().unwrap();
+    fn setup_payload_from_raw_returns_none_when_absent() {
+        // None → Ok(None): normal startup, no setup payload.
+        let result = SetupPayload::from_raw_env_value(None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn setup_payload_from_env_returns_err_on_malformed_json() {
-        // Temporarily set the env var to malformed JSON.
-        // Note: env var mutation in tests is not safe under parallel test
-        // runners, but `cargo test` runs tests in the same process so this
-        // is deterministic as long as the var name is unique.
-        // We only set it momentarily and restore immediately.
-        let original = std::env::var(SETUP_PAYLOAD_ENV_VAR).ok();
-        std::env::set_var(SETUP_PAYLOAD_ENV_VAR, "not-valid-json{{{");
-        let result = SetupPayload::from_env();
-        // Restore first.
-        match &original {
-            Some(v) => std::env::set_var(SETUP_PAYLOAD_ENV_VAR, v),
-            None => std::env::remove_var(SETUP_PAYLOAD_ENV_VAR),
-        }
+    fn setup_payload_from_raw_returns_none_on_empty_string() {
+        // Empty string → Ok(None): treated the same as absent.
+        let result = SetupPayload::from_raw_env_value(Some(String::new())).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn setup_payload_from_raw_returns_err_on_malformed_json() {
+        // Malformed JSON → Err: no global env mutation, safe to run concurrently.
+        let result = SetupPayload::from_raw_env_value(Some("not-valid-json{{{".into()));
         assert!(result.is_err(), "malformed JSON must return Err");
     }
 
