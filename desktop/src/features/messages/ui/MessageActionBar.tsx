@@ -1,6 +1,7 @@
 import {
   BellOff,
   BellRing,
+  ClipboardPlus,
   Clock,
   Copy,
   CornerUpLeft,
@@ -8,7 +9,6 @@ import {
   Link2,
   MailCheck,
   MailOpen,
-  MessagesSquare,
   Pencil,
   SmilePlus,
   Trash2,
@@ -528,7 +528,7 @@ export function MessageActionBar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
-                  aria-label="Continue conversation"
+                  aria-label="New task"
                   className={ACTION_BUTTON_CLASS}
                   data-testid={`continue-conversation-${message.id}`}
                   onClick={() => {
@@ -538,10 +538,10 @@ export function MessageActionBar({
                   type="button"
                   variant="ghost"
                 >
-                  <MessagesSquare className={ACTION_ICON_CLASS} />
+                  <ClipboardPlus className={ACTION_ICON_CLASS} />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Continue conversation</TooltipContent>
+              <TooltipContent>New task</TooltipContent>
             </Tooltip>
           ) : null}
 

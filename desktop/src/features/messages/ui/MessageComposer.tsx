@@ -24,10 +24,6 @@ import {
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import {
-  hasMentionClipboardHtml,
-  normalizeMentionClipboardHtml,
-} from "@/features/messages/lib/normalizeMentionClipboard";
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
@@ -37,7 +33,7 @@ import {
 import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
-import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
+import { createMessageComposerPasteHandler } from "@/features/messages/lib/composerPasteHandler";
 import { cn } from "@/shared/lib/cn";
 import type { ChannelType } from "@/shared/api/types";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
@@ -93,6 +89,7 @@ type MessageComposerProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
   ) => Promise<void>;
+  agentConversationTitleForHref?: (href: string) => string | undefined;
   placeholder?: string;
   profiles?: UserProfileLookup;
   replyTarget?: {
@@ -121,6 +118,7 @@ function MessageComposerImpl({
   onEditLastOwnMessage,
   onEditSave,
   onSend,
+  agentConversationTitleForHref,
   placeholder,
   profiles,
   replyTarget = null,
@@ -234,6 +232,7 @@ function MessageComposerImpl({
     agentMentionNames: mentions.agentKnownNames,
     channelNames: channelLinks.knownChannelNames,
     customEmoji,
+    agentConversationTitleForHref,
     onSubmit: () => submitMessageRef.current(),
     onEditLastOwnMessage: () => {
       // Never re-enter edit from an empty edit (e.g. image-only edit whose
@@ -674,72 +673,15 @@ function MessageComposerImpl({
     richText.editor.setOptions({
       editorProps: {
         ...richText.editor.options.editorProps,
-        handlePaste: (_view, event) => {
-          // --- File paste ---
-          // Any actual file (image, video, document, …) pastes as an
-          // attachment. String/text items have kind "string", so plain-text
-          // and code-block paste fall through to the handlers below.
-          const items = Array.from(event.clipboardData?.items ?? []);
-          const mediaItem = items.find((item) => item.kind === "file");
-          if (mediaItem) {
-            const file = mediaItem.getAsFile();
-            if (file) {
-              void uploadFileRef.current(file);
-            }
-            return true;
-          }
-
-          // --- Buzz code-block paste ---
-          // The code block copy button writes a small Buzz marker alongside
-          // plain text. Use it to paste back as a literal code block so Markdown
-          // parsing cannot reshape indentation, fence markers, or headings.
-          const codeBlockText = getBuzzCodeBlockClipboardText(
-            event.clipboardData,
-          );
-          if (codeBlockText !== null) {
-            event.preventDefault();
-            richText.editor
-              ?.chain()
-              .focus()
-              .insertContent([
-                {
-                  type: "codeBlock",
-                  content:
-                    codeBlockText.length > 0
-                      ? [{ type: "text", text: codeBlockText }]
-                      : [],
-                },
-                { type: "paragraph" },
-              ])
-              .run();
-            scrollComposerToBottom();
-            return true;
-          }
-
-          // --- Mention / channel-link normalization ---
-          // When copying from the chat area the browser puts styled HTML
-          // on the clipboard. The mention/channel-link wrappers have
-          // font-weight:600 which Tiptap's Bold extension misinterprets
-          // as bold. Strip those wrappers and use ProseMirror's pasteHTML
-          // to parse the cleaned HTML into proper rich content nodes.
-          const html = event.clipboardData?.getData("text/html");
-          if (html && hasMentionClipboardHtml(html)) {
-            const cleanHtml = normalizeMentionClipboardHtml(html);
-            event.preventDefault();
-            _view.pasteHTML(cleanHtml);
-            return true;
-          }
-
-          const plainText = event.clipboardData?.getData("text/plain") ?? "";
-          if (plainText.includes("\n")) {
-            scrollComposerToBottom();
-          }
-
-          return false;
-        },
+        handlePaste: createMessageComposerPasteHandler({
+          agentConversationTitleForHref,
+          editor: richText.editor,
+          scrollComposerToBottom,
+          uploadFile: uploadFileRef.current,
+        }),
       },
     });
-  }, [richText.editor, scrollComposerToBottom]);
+  }, [richText.editor, scrollComposerToBottom, agentConversationTitleForHref]);
 
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(

@@ -63,6 +63,7 @@ export type ChannelPaneProps = {
   onOpenMembers?: () => void;
   onOpenProfilePanel: (pubkey: string) => void;
   onOpenThread: (message: TimelineMessage) => void;
+  onSurfaceTabChange?: (tab: "messages" | "tasks") => void;
   onResetThreadPanelWidth: () => void;
   onSelectThreadReplyTarget: (message: TimelineMessage) => void;
   onSendMessage: (
@@ -88,6 +89,7 @@ export type ChannelPaneProps = {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  onThreadScrollTargetChange: (messageId: string | null) => void;
   onThreadScrollTargetResolved: () => void;
   onThreadPanelResizeStart: (
     event: React.PointerEvent<HTMLButtonElement>,
@@ -97,6 +99,7 @@ export type ChannelPaneProps = {
   openThreadHeadId: string | null;
   shouldShowThreadSkeleton: boolean;
   openAgentSessionPubkey: string | null;
+  surfaceTab?: "messages" | "tasks";
   onProfilePanelViewChange: (
     view: ProfilePanelView,
     options?: { replace?: boolean },

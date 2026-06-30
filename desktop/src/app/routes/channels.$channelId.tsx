@@ -15,6 +15,7 @@ type ChannelRouteSearch = {
   profile?: string;
   profileTab?: ProfilePanelTab;
   profileView?: ProfilePanelView;
+  taskReplyId?: string;
   thread?: string;
   threadRootId?: string;
 };
@@ -32,6 +33,7 @@ function validateChannelSearch(
     profile: nonEmptyString(search.profile),
     profileTab: parseProfilePanelTab(search.profileTab) ?? undefined,
     profileView: parseProfilePanelView(search.profileView) ?? undefined,
+    taskReplyId: nonEmptyString(search.taskReplyId),
     thread: nonEmptyString(search.thread),
     threadRootId: nonEmptyString(search.threadRootId),
   };
@@ -58,6 +60,7 @@ function ChannelRouteComponent() {
       <ChannelRouteScreen
         channelId={channelId}
         selectedPostId={null}
+        targetAgentConversationReplyId={search.taskReplyId ?? null}
         targetMessageId={search.messageId ?? null}
         targetReplyId={null}
         targetThreadRootId={search.threadRootId ?? search.thread ?? null}

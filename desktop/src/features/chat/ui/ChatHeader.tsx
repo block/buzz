@@ -25,6 +25,8 @@ type ChatHeaderProps = {
   actions?: React.ReactNode;
   animatedTitle?: boolean;
   animatedTitleResetKey?: string;
+  belowTitleContent?: React.ReactNode;
+  belowTitleContentClassName?: string;
   belowSystemChrome?: boolean;
   compactTitleStack?: boolean;
   /** Ref to the outer chrome wrapper when `belowSystemChrome` is true. */
@@ -42,10 +44,17 @@ type ChatHeaderProps = {
   /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
   transparentChrome?: boolean;
   subtitle?: string | null;
+  showCopyTitle?: boolean;
+  titleAction?: {
+    ariaLabel: string;
+    onClick: () => void;
+    title?: string;
+  };
+  titleTrailingContent?: React.ReactNode;
 };
 
 const HEADER_ICON_CLASS = "h-4 w-4 text-muted-foreground";
-const CHANNEL_HASH_ICON_CLASS = "h-4 w-4 translate-y-px";
+const CHANNEL_HASH_ICON_CLASS = "h-4 w-4 translate-y-px text-foreground";
 
 function ChannelIcon({
   channelType,
@@ -88,13 +97,15 @@ function ChannelIcon({
     return <FileText className={HEADER_ICON_CLASS} />;
   }
 
-  return <Hash className={CHANNEL_HASH_ICON_CLASS} color="gray" />;
+  return <Hash className={CHANNEL_HASH_ICON_CLASS} />;
 }
 
 export function ChatHeader({
   actions,
   animatedTitle = false,
   animatedTitleResetKey,
+  belowTitleContent,
+  belowTitleContentClassName,
   belowSystemChrome = false,
   compactTitleStack = false,
   chromeWrapperRef,
@@ -109,7 +120,10 @@ export function ChatHeader({
   overlaysContent = false,
   statusBadge,
   transparentChrome = false,
+  showCopyTitle = true,
   subtitle,
+  titleAction,
+  titleTrailingContent,
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
   const trimmedSubtitle = subtitle?.trim() ?? "";
@@ -143,17 +157,31 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 min-w-0 shrink-0 cursor-default select-none bg-transparent px-5 py-2 transition-[margin,padding] duration-200 ease-linear",
+        "pointer-events-auto relative z-30 min-w-0 shrink-0 cursor-default select-none bg-transparent px-5 transition-[margin,padding] duration-200 ease-linear",
+        belowTitleContent ? "pb-0 pt-2" : "py-2",
         overlaysContent && !belowSystemChrome && "-mb-14",
         clearCollapsedTopChromeControls && "pl-[176px]",
       )}
       data-testid="chat-header"
       data-tauri-drag-region
     >
+      {belowTitleContent ? (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-border/70"
+        />
+      ) : null}
       <div
         className={cn(
-          "flex min-w-0 items-center gap-2.5",
-          compactTitleStack ? "min-h-10" : "h-9",
+          "flex min-w-0 gap-2.5",
+          belowTitleContent ? "items-start" : "items-center",
+          belowTitleContent
+            ? compactTitleStack
+              ? "min-h-10"
+              : "min-h-9"
+            : compactTitleStack
+              ? "min-h-10"
+              : "h-9",
         )}
       >
         {renderedLeadingContent && leadingContentLayout === "side" ? (
@@ -162,7 +190,12 @@ export function ChatHeader({
           </div>
         ) : null}
         <div className="min-w-0 flex-1">
-          <div className="group/title flex min-w-0 items-center gap-[4px] overflow-hidden">
+          <div
+            className={cn(
+              "group/title flex min-w-0 items-center gap-[4px] overflow-hidden",
+              belowTitleContent && (compactTitleStack ? "min-h-10" : "h-9"),
+            )}
+          >
             {renderedLeadingContent && leadingContentLayout === "inline" ? (
               <div className={cn("shrink-0", leadingContentContainerClassName)}>
                 {renderedLeadingContent}
@@ -172,11 +205,26 @@ export function ChatHeader({
               className={cn(
                 "min-w-0 truncate text-base font-semibold tracking-tight",
                 compactTitleStack ? "leading-5" : "translate-y-px leading-6",
+                titleTrailingContent &&
+                  "flex max-w-[45%] shrink-0 items-center",
               )}
               data-testid="chat-title"
               title={trimmedDescription || undefined}
             >
-              {animatedTitle ? (
+              {titleAction ? (
+                <button
+                  aria-label={titleAction.ariaLabel}
+                  className={cn(
+                    "flex max-w-full items-center truncate rounded-sm text-left outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+                    compactTitleStack ? "h-5 leading-5" : "h-6 leading-6",
+                  )}
+                  onClick={titleAction.onClick}
+                  title={titleAction.title}
+                  type="button"
+                >
+                  {title}
+                </button>
+              ) : animatedTitle ? (
                 <AnimatedTextSwap
                   className="max-w-full overflow-hidden text-ellipsis"
                   key={animatedTitleResetKey}
@@ -186,20 +234,27 @@ export function ChatHeader({
                 title
               )}
             </h1>
-            <Button
-              aria-label={`Copy channel name: ${title}`}
-              className={cn(
-                "shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100",
-                compactTitleStack ? "h-5 w-5 [&_svg]:size-3" : "h-6 w-6",
-              )}
-              onClick={() => void handleCopyTitle()}
-              size="icon-xs"
-              title="Copy channel name"
-              type="button"
-              variant="ghost"
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
+            {titleTrailingContent ? (
+              <div className="flex h-6 min-w-0 flex-1 items-center gap-[4px] overflow-hidden">
+                {titleTrailingContent}
+              </div>
+            ) : null}
+            {showCopyTitle ? (
+              <Button
+                aria-label={`Copy channel name: ${title}`}
+                className={cn(
+                  "shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100",
+                  compactTitleStack ? "h-5 w-5 [&_svg]:size-3" : "h-6 w-6",
+                )}
+                onClick={() => void handleCopyTitle()}
+                size="icon-xs"
+                title="Copy channel name"
+                type="button"
+                variant="ghost"
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
             {statusBadge ? (
               <div className="flex shrink-0 flex-wrap items-center gap-1">
                 {statusBadge}
@@ -216,9 +271,19 @@ export function ChatHeader({
               {trimmedSubtitle}
             </p>
           ) : null}
+          {belowTitleContent ? (
+            <div className={cn("mt-1.5 min-w-0", belowTitleContentClassName)}>
+              {belowTitleContent}
+            </div>
+          ) : null}
         </div>
 
-        <div className="flex shrink-0 items-center gap-1">
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-1",
+            belowTitleContent && (compactTitleStack ? "min-h-10" : "h-9"),
+          )}
+        >
           <UpdateIndicator />
           {actions ? <div className="shrink-0">{actions}</div> : null}
         </div>

@@ -33,10 +33,35 @@ fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
     }))
 }
 
+/// Parse the query string of a `buzz://task?…` URL into the JSON payload
+/// emitted on `deep-link-agent-conversation`.
+fn parse_task_deep_link(url: &Url) -> Option<serde_json::Value> {
+    let mut channel: Option<String> = None;
+    let mut reply: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        let v = v.into_owned();
+        if v.is_empty() {
+            continue;
+        }
+        match k.as_ref() {
+            "channel" => channel = Some(v),
+            "reply" => reply = Some(v),
+            _ => {}
+        }
+    }
+    let (channel_id, agent_reply_id) = (channel?, reply?);
+    Some(serde_json::json!({
+        "channelId": channel_id,
+        "agentReplyId": agent_reply_id,
+    }))
+}
+
 /// Handle an incoming `buzz://` deep link URL.
 ///
 /// Currently supports:
 /// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
+/// - `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]` — emits `deep-link-message`
+/// - `buzz://task?channel=<uuid>&reply=<eventId>` — emits `deep-link-agent-conversation`
 pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
@@ -93,6 +118,13 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             };
             let _ = app.emit("deep-link-message", payload);
         }
+        Some("task") => {
+            let Some(payload) = parse_task_deep_link(&url) else {
+                eprintln!("buzz-desktop: task deep link missing channel or reply: {url_str}");
+                return;
+            };
+            let _ = app.emit("deep-link-agent-conversation", payload);
+        }
         Some(action) => {
             eprintln!("buzz-desktop: unknown deep link action: {action}");
         }
@@ -106,7 +138,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 mod tests {
     use url::Url;
 
-    use super::parse_message_deep_link;
+    use super::{parse_message_deep_link, parse_task_deep_link};
 
     #[test]
     fn parse_message_deep_link_extracts_required_params() {
@@ -156,5 +188,31 @@ mod tests {
         let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert!(payload["threadRootId"].is_null());
+    }
+
+    #[test]
+    fn parse_task_deep_link_extracts_required_params() {
+        let url = Url::parse("buzz://task?channel=abc&reply=xyz").unwrap();
+        let payload = parse_task_deep_link(&url).expect("required params present");
+        assert_eq!(payload["channelId"], "abc");
+        assert_eq!(payload["agentReplyId"], "xyz");
+    }
+
+    #[test]
+    fn parse_task_deep_link_rejects_missing_reply() {
+        let url = Url::parse("buzz://task?channel=abc").unwrap();
+        assert!(parse_task_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_task_deep_link_rejects_empty_channel() {
+        let url = Url::parse("buzz://task?channel=&reply=xyz").unwrap();
+        assert!(parse_task_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_task_deep_link_rejects_empty_reply() {
+        let url = Url::parse("buzz://task?channel=abc&reply=").unwrap();
+        assert!(parse_task_deep_link(&url).is_none());
     }
 }

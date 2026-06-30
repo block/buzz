@@ -56,7 +56,7 @@ type MessageTimelineProps = {
   hasComposerOverlay?: boolean;
   contentTopPadding?: "chrome" | "compact";
   isFetchingOlder?: boolean;
-  layoutShiftKey?: string | number | null;
+  scrollResetKey?: string | number | null;
   messageListPlacement?: "bottom" | "top";
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -164,7 +164,7 @@ const MessageTimelineBase = React.forwardRef<
     contentTopPadding = "chrome",
     hasOlderMessages = true,
     isFetchingOlder = false,
-    layoutShiftKey = null,
+    scrollResetKey = null,
     messageListPlacement = "bottom",
     followThreadById,
     huddleMemberPubkeys,
@@ -233,16 +233,15 @@ const MessageTimelineBase = React.forwardRef<
     liveSnapshot,
   });
   const isRenderPending = deferredSnapshot !== liveSnapshot;
-  const scrollRouteKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
+  const scrollIdentityKey = `${channelId ?? "none"}:${scrollResetKey ?? "none"}`;
   const scrollRestorationId = targetMessageId
-    ? `message-timeline:${scrollRouteKey}:target:${targetMessageId}`
-    : `message-timeline:${scrollRouteKey}`;
-  // Keep the scroll node's DOM lifetime scoped to a channel. TanStack Router's
-  // scroll-restoration listener runs outside React and may write a saved
-  // scrollTop into the current scroll element during navigation; reusing the
-  // same node across channel routes can leave the newly-loaded message list
-  // painted at a stale offset until the user's next scroll event forces layout.
-  const scrollContainerDomKey = scrollRouteKey;
+    ? `message-timeline:${scrollIdentityKey}:target:${targetMessageId}`
+    : `message-timeline:${scrollIdentityKey}`;
+  // Keep the scroll node's DOM lifetime scoped to the rendered conversation.
+  // Channel layout changes (for example opening the thread panel) should keep
+  // this stable, while switching task conversations should start from a fresh
+  // scroll state.
+  const scrollContainerDomKey = scrollIdentityKey;
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
@@ -250,6 +249,9 @@ const MessageTimelineBase = React.forwardRef<
     liveCount: messages.length,
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
+  const isHistoryPrependPending =
+    isFetchingOlder ||
+    isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages);
 
   const {
     highlightedMessageId,
@@ -263,9 +265,10 @@ const MessageTimelineBase = React.forwardRef<
     channelId,
     contentRef,
     isLoading: showTimelineSkeleton,
+    isHistoryPrependPending,
     messages: deferredMessages,
     onTargetReached,
-    resetKey: scrollRouteKey,
+    resetKey: scrollIdentityKey,
     scrollContainerRef,
     targetMessageId,
   });
@@ -274,7 +277,7 @@ const MessageTimelineBase = React.forwardRef<
     hasChannelIntro: channelIntro !== null && directMessageIntro === null,
     hasDirectMessageIntro: directMessageIntro !== null,
     hasReachedChannelStart:
-      !isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) &&
+      !isHistoryPrependPending &&
       (messages.length === 0 || (!hasOlderMessages && !isFetchingOlder)),
     isSkeletonVisible: showTimelineSkeleton,
   });
@@ -327,11 +330,16 @@ const MessageTimelineBase = React.forwardRef<
     }
   }, [isAtBottom]);
   const showUnreadPill =
+    !isAtBottom &&
     !isUnreadPillDismissed &&
     unreadCount > 0 &&
     firstUnreadMessageId !== null &&
     !showTimelineSkeleton;
-  if (showUnreadPill) hasShownPillRef.current = true;
+  React.useEffect(() => {
+    if (showUnreadPill) {
+      hasShownPillRef.current = true;
+    }
+  }, [showUnreadPill]);
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
     if (firstUnreadMessageId) {
@@ -407,8 +415,7 @@ const MessageTimelineBase = React.forwardRef<
         ) : null}
         {/* `isFetchingOlder` clears on fetch resolve, but rows paint a frame
             later off the deferred snapshot — keep the spinner up until then. */}
-        {isFetchingOlder ||
-        isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
+        {isHistoryPrependPending ? (
           <div
             className={cn(
               "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",

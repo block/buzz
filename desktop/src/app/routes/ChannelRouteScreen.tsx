@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -8,21 +9,30 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
+import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  CHANNEL_TIMELINE_CONTENT_KINDS,
+  CHANNEL_TIMELINE_STATE_KINDS,
+} from "@/shared/constants/kinds";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
   channelId: string;
   selectedPostId: string | null;
+  targetAgentConversationReplyId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
   targetThreadRootId: string | null;
 };
 
 const MAX_ROUTE_ANCESTOR_HOPS = 50;
+const MAX_ROUTE_TASK_EVENTS = 1000;
 
 async function fetchRouteEvent(eventId: string): Promise<RelayEvent | null> {
   try {
@@ -42,8 +52,10 @@ function getReplyParentId(event: RelayEvent): string | null {
 }
 
 async function fetchRouteTargetEvents(
+  channelId: string,
   eventIds: string[],
   targetMessageId: string | null,
+  targetAgentConversationReplyId: string | null,
   targetThreadRootId: string | null,
 ): Promise<RelayEvent[]> {
   const eventsById = new Map<string, RelayEvent>();
@@ -67,9 +79,35 @@ async function fetchRouteTargetEvents(
   }
 
   const targetThreadRef = getThreadReference(targetEvent.tags);
-  const threadRootId = targetThreadRootId ?? targetThreadRef.rootId ?? null;
+  const threadRootId =
+    targetThreadRootId ??
+    targetThreadRef.rootId ??
+    (targetAgentConversationReplyId ? targetEvent.id : null);
   if (threadRootId && !eventsById.has(threadRootId)) {
     addEvent(await fetchRouteEvent(threadRootId));
+  }
+
+  if (targetAgentConversationReplyId && threadRootId) {
+    try {
+      const taskEvents = await relayClient.fetchEvents({
+        "#e": [threadRootId],
+        "#h": [channelId],
+        kinds: [
+          ...CHANNEL_TIMELINE_CONTENT_KINDS,
+          ...CHANNEL_TIMELINE_STATE_KINDS,
+        ],
+        limit: MAX_ROUTE_TASK_EVENTS,
+      });
+      for (const event of taskEvents) {
+        addEvent(event);
+      }
+    } catch (error) {
+      console.error(
+        "Failed to load route task conversation",
+        targetAgentConversationReplyId,
+        error,
+      );
+    }
   }
 
   let parentId = getReplyParentId(targetEvent);
@@ -93,13 +131,25 @@ async function fetchRouteTargetEvents(
   return [...eventsById.values()];
 }
 
+function mergeRouteEvents(
+  currentEvents: RelayEvent[] | undefined,
+  routeEvents: RelayEvent[],
+): RelayEvent[] {
+  return routeEvents.reduce(
+    (messages, event) => mergeTimelineCacheMessages(messages, event),
+    currentEvents ?? [],
+  );
+}
+
 export function ChannelRouteScreen({
   channelId,
   selectedPostId,
+  targetAgentConversationReplyId,
   targetMessageId,
   targetReplyId,
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
+  const queryClient = useQueryClient();
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
@@ -140,7 +190,12 @@ export function ChannelRouteScreen({
     // deep-linked message, the spliced event is the only copy — dropping it on
     // param-clear blanks the timeline. Resetting on channel / forum-post change
     // is handled by the effect below; here we only fetch when there's a target.
-    if ((!targetMessageId && !targetThreadRootId) || selectedPostId) {
+    if (
+      (!targetAgentConversationReplyId &&
+        !targetMessageId &&
+        !targetThreadRootId) ||
+      selectedPostId
+    ) {
       return () => {
         isCancelled = true;
       };
@@ -148,6 +203,10 @@ export function ChannelRouteScreen({
 
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     if (cachedTarget) {
+      queryClient.setQueryData<RelayEvent[]>(
+        channelMessagesKey(channelId),
+        (currentEvents) => mergeRouteEvents(currentEvents, [cachedTarget]),
+      );
       setTargetMessageEvents((currentEvents) =>
         currentEvents.some((event) => event.id === cachedTarget.id)
           ? currentEvents
@@ -156,6 +215,7 @@ export function ChannelRouteScreen({
     }
 
     const eventIds = [
+      targetAgentConversationReplyId,
       targetMessageId,
       targetThreadRootId && targetThreadRootId !== targetMessageId
         ? targetThreadRootId
@@ -163,11 +223,17 @@ export function ChannelRouteScreen({
     ].filter((eventId): eventId is string => eventId !== null);
 
     void fetchRouteTargetEvents(
+      channelId,
       eventIds,
-      targetMessageId,
+      targetAgentConversationReplyId ?? targetMessageId,
+      targetAgentConversationReplyId,
       targetThreadRootId,
     ).then((events) => {
       if (!isCancelled) {
+        queryClient.setQueryData<RelayEvent[]>(
+          channelMessagesKey(channelId),
+          (currentEvents) => mergeRouteEvents(currentEvents, events),
+        );
         setTargetMessageEvents((currentEvents) => {
           const eventsById = new Map<string, RelayEvent>();
           for (const event of [...currentEvents, ...events]) {
@@ -181,7 +247,14 @@ export function ChannelRouteScreen({
     return () => {
       isCancelled = true;
     };
-  }, [selectedPostId, targetMessageId, targetThreadRootId]);
+  }, [
+    selectedPostId,
+    channelId,
+    queryClient,
+    targetAgentConversationReplyId,
+    targetMessageId,
+    targetThreadRootId,
+  ]);
 
   if (channelsQuery.isPending && !activeChannel) {
     return (
@@ -204,6 +277,7 @@ export function ChannelRouteScreen({
         void goForumPost(channelId, postId);
       }}
       selectedForumPostId={selectedPostId}
+      targetAgentConversationReplyId={targetAgentConversationReplyId}
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}

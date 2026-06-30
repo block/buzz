@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  buildAgentConversationMentionPubkeys,
   buildAgentConversation,
+  buildAgentConversationMentionPubkeys,
   buildAgentConversationRecap,
   buildAgentConversationMarkers,
   deriveAgentConversationTitle,

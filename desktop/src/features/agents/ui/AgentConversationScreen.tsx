@@ -1,16 +1,19 @@
 import * as React from "react";
-import { ArrowLeft, Bot, createLucideIcon } from "lucide-react";
+import { Bot, ChevronRight, Copy, createLucideIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import {
-  buildAgentConversationMentionPubkeys,
+  buildAgentConversationLink,
+  parseAgentConversationLink,
+} from "@/features/agents/agentConversationLink";
+import {
   buildAgentConversationMarkers,
   buildAgentConversationRecap,
   deriveAgentConversationTitle,
-  getAutoRoutedAgentConversationPubkeys,
   type AgentConversation,
   publishAgentConversationMarker,
 } from "@/features/agents/agentConversations";
+import { mergeAutoRouteMentionPubkeys } from "@/features/channels/ui/ChannelPane.helpers";
 import {
   useManagedAgentsQuery,
   useRelayAgentsQuery,
@@ -58,6 +61,7 @@ import type { Channel, Identity, Profile } from "@/shared/api/types";
 import { channelContentTopPaddingMeasurement } from "@/shared/layout/chromeLayout";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { AnimatedTextSwap } from "@/shared/ui/AnimatedTextSwap";
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -496,9 +500,9 @@ export function AgentConversationScreen({
         .map((participant) => participant.pubkey),
     [agentParticipants],
   );
-  const autoRoutedAgentPubkeys = React.useMemo(
-    () => getAutoRoutedAgentConversationPubkeys(agentParticipants),
-    [agentParticipants],
+  const autoRouteAgentPubkeys = React.useMemo(
+    () => (routeableAgentPubkeys.length === 1 ? routeableAgentPubkeys : []),
+    [routeableAgentPubkeys],
   );
   const canMessageAnyAgent = routeableAgentPubkeys.length > 0;
   const restrictedAgentNames = React.useMemo(
@@ -565,21 +569,23 @@ export function AgentConversationScreen({
       mentionPubkeys: string[],
       mediaTags?: string[][],
     ) => {
+      const routedMentionPubkeys = mergeAutoRouteMentionPubkeys({
+        autoRouteAgentPubkeys,
+        mentionPubkeys,
+      });
+
       await sendMessageMutation.mutateAsync({
         clientTags: [
           ["client", "agent-conversation", conversation.agentReply.id],
         ],
         content,
         mediaTags,
-        mentionPubkeys: buildAgentConversationMentionPubkeys({
-          autoRouteAgentPubkeys: autoRoutedAgentPubkeys,
-          mentionPubkeys,
-        }),
+        mentionPubkeys: routedMentionPubkeys,
         parentEventId: replyParentEventId,
       });
     },
     [
-      autoRoutedAgentPubkeys,
+      autoRouteAgentPubkeys,
       conversation.agentReply.id,
       replyParentEventId,
       sendMessageMutation,
@@ -707,9 +713,7 @@ export function AgentConversationScreen({
         >
           <Summary className="h-4 w-4" />
           <span>
-            {isPublishingThreadSummary
-              ? "Generating recap..."
-              : "Send recap to thread"}
+            {isPublishingThreadSummary ? "Generating recap..." : "Send recap"}
           </span>
         </Button>
       </TooltipTrigger>
@@ -718,25 +722,68 @@ export function AgentConversationScreen({
       </TooltipContent>
     </Tooltip>
   );
-  const headerLeadingContent = onBackToThread ? (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label="Back to source thread"
-          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-          data-testid="agent-conversation-back-to-thread"
-          onClick={() => onBackToThread(conversation)}
-          title="Back to source thread"
-          type="button"
-          variant="ghost"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>Back to source thread</TooltipContent>
-    </Tooltip>
-  ) : (
-    false
+  const sourceChannelName = channel?.name ?? conversation.channelName;
+  const sourceChannelType = channel?.channelType ?? "stream";
+  const sourceChannelVisibility = channel?.visibility ?? "open";
+  const handleCopyConversationLink = React.useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(
+        buildAgentConversationLink({
+          agentReplyId: conversation.agentReply.id,
+          channelId: channel?.id ?? conversation.channelId,
+        }),
+      );
+      toast.success("Task link copied");
+    } catch {
+      toast.error("Failed to copy task link");
+    }
+  }, [channel?.id, conversation.agentReply.id, conversation.channelId]);
+  const getAgentConversationTitleForHref = React.useCallback(
+    (href: string) => {
+      const parsed = parseAgentConversationLink(href);
+      if (
+        !parsed.ok ||
+        parsed.value.channelId !== conversation.channelId ||
+        parsed.value.agentReplyId !== conversation.agentReply.id
+      ) {
+        return undefined;
+      }
+
+      return conversation.title;
+    },
+    [conversation.agentReply.id, conversation.channelId, conversation.title],
+  );
+  const headerTitleTrailingContent = (
+    <>
+      <ChevronRight
+        aria-hidden
+        className="h-4 w-4 translate-y-px shrink-0 text-muted-foreground/70"
+      />
+      <span className="flex h-6 min-w-0 items-center truncate text-base font-normal leading-6 tracking-tight text-foreground/55">
+        <AnimatedTextSwap
+          className="max-w-full overflow-hidden text-ellipsis"
+          key={`${conversation.id}:${conversation.titleStatus}`}
+          value={conversation.title}
+        />
+      </span>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            aria-label="Copy task link"
+            className="h-6 w-6 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
+            data-testid="agent-conversation-copy-link"
+            onClick={() => void handleCopyConversationLink()}
+            size="icon-xs"
+            title="Copy task link"
+            type="button"
+            variant="ghost"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Copy task link</TooltipContent>
+      </Tooltip>
+    </>
   );
 
   return (
@@ -748,19 +795,26 @@ export function AgentConversationScreen({
     >
       <ChatHeader
         actions={headerActions}
-        animatedTitle
-        animatedTitleResetKey={conversation.id}
         belowSystemChrome
         chromeWrapperRef={headerChromeRef}
-        channelType="dm"
-        compactTitleStack
-        leadingContent={headerLeadingContent}
-        leadingContentContainerClassName="-ml-2 mr-0.5"
-        leadingContentLayout="side"
-        title={conversation.title}
+        channelType={sourceChannelType}
+        showCopyTitle={false}
+        title={sourceChannelName}
+        titleAction={
+          onBackToThread
+            ? {
+                ariaLabel: `Back to ${sourceChannelName}`,
+                onClick: () => onBackToThread(conversation),
+                title: "Back to source thread",
+              }
+            : undefined
+        }
+        titleTrailingContent={headerTitleTrailingContent}
+        visibility={sourceChannelVisibility}
       />
 
       <MessageTimeline
+        agentConversationMarkers={agentConversationMarkers}
         agentPubkeys={agentPubkeys}
         channelId={channel?.id ?? conversation.channelId}
         channelIntro={{
@@ -777,10 +831,10 @@ export function AgentConversationScreen({
         emptyTitle="No conversation messages yet"
         hasComposerOverlay
         isLoading={messagesQuery.isLoading && timelineMessages.length === 0}
-        layoutShiftKey={conversation.id}
         messageListPlacement="top"
         messages={timelineMessages}
         profiles={profiles}
+        scrollResetKey={conversation.id}
         scrollContainerRef={timelineScrollRef}
         showInitialDayDivider={false}
         trailingContent={
@@ -802,6 +856,7 @@ export function AgentConversationScreen({
       >
         <div className="pointer-events-auto">
           <MessageComposer
+            agentConversationTitleForHref={getAgentConversationTitleForHref}
             channelId={channel?.id ?? conversation.channelId}
             channelName={channel?.name ?? conversation.channelName}
             channelType={channel?.channelType ?? "stream"}

@@ -417,9 +417,9 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `buzz://message?…` links
+// which would break copy → paste → click for internal `buzz://…` links
 // end-to-end. We pass a custom `urlTransform` that delegates to the
-// default for `buzz://message` and legacy `buzz://message` hrefs.
+// default for external/unsafe hrefs.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
 // and asserts the link href survives to the rendered DOM. Mirrors the
@@ -429,11 +429,15 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
+import { isAgentConversationLink } from "../../features/agents/agentConversationLink.ts";
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
 import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 function messageLinkUrlTransform(value, key) {
-  if (key === "href" && isMessageLink(value)) {
+  if (
+    key === "href" &&
+    (isMessageLink(value) || isAgentConversationLink(value))
+  ) {
     return value;
   }
   return defaultUrlTransform(value);
@@ -467,6 +471,11 @@ test("messageLinkUrlTransform: preserves buzz://message href with thread", () =>
     "[link](buzz://message?channel=c1&id=m1&thread=t1)",
   );
   assert.match(html, /href="buzz:\/\/message\?[^"]*thread=t1"/);
+});
+
+test("messageLinkUrlTransform: preserves buzz://task href", () => {
+  const html = renderMarkdown("[task](buzz://task?channel=c1&reply=m1)");
+  assert.match(html, /href="buzz:\/\/task\?channel=c1&(?:amp;)?reply=m1"/);
 });
 
 test("messageLinkUrlTransform: still strips javascript: scheme", () => {
@@ -526,9 +535,15 @@ test("remarkSpoilers: block delimiter spoilers expose a block prop to React", ()
 // the rendering side is a plain React component covered by app-level use.
 
 import remarkMessageLinks from "../../features/messages/lib/remarkMessageLinks.ts";
+import remarkAgentConversationLinks from "../../features/agents/remarkAgentConversationLinks.ts";
 
 function runPlugin(tree) {
   remarkMessageLinks()(tree);
+  return tree;
+}
+
+function runTaskPlugin(tree) {
+  remarkAgentConversationLinks()(tree);
   return tree;
 }
 
@@ -655,4 +670,34 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
   assert.equal(kids.length, 1);
   assert.equal(kids[0].type, "inlineCode");
   assert.equal(kids[0].value, "buzz://message?channel=c&id=m");
+});
+
+test("remarkAgentConversationLinks: bare buzz://task URL is replaced", () => {
+  const tree = runTaskPlugin(paragraph(text("buzz://task?channel=c&reply=r")));
+  const para = tree.children[0];
+  assert.equal(para.children.length, 1);
+  assert.equal(para.children[0].type, "agent-conversation-link");
+  assert.equal(para.children[0].value, "buzz://task?channel=c&reply=r");
+  assert.equal(para.children[0].data.hName, "agent-conversation-link");
+});
+
+test("remarkAgentConversationLinks: trailing punctuation stays outside URL", () => {
+  const tree = runTaskPlugin(
+    paragraph(text("see buzz://task?channel=c&reply=r.")),
+  );
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 3);
+  assert.equal(kids[0].value, "see ");
+  assert.equal(kids[1].type, "agent-conversation-link");
+  assert.equal(kids[1].value, "buzz://task?channel=c&reply=r");
+  assert.equal(kids[2].value, ".");
+});
+
+test("remarkAgentConversationLinks: non-task buzz:// URLs are not matched", () => {
+  const original = "buzz://message?channel=c&id=m";
+  const tree = runTaskPlugin(paragraph(text(original)));
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "text");
+  assert.equal(kids[0].value, original);
 });

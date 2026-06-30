@@ -1445,9 +1445,11 @@ test("wave attachment huddle passes the bot DM pubkey", async ({ page }) => {
   );
   await expect(profilePopover).toBeVisible();
   await expect(profilePopover.getByText("Codex")).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-wave-${TEST_IDENTITIES.charlie.pubkey}`)
-    .click();
+  const charlieWaveButton = profilePopover.getByTestId(
+    `user-profile-popover-wave-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(charlieWaveButton).toBeEnabled();
+  await charlieWaveButton.click();
 
   await expect(page.getByTestId("message-wave-attachment")).toBeVisible();
   await page
@@ -1505,14 +1507,15 @@ test("wave attachment huddle waits for placeholder profile-only bot data", async
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-wave-${PROFILE_ONLY_AGENT_PUBKEY}`)
-    .click();
+  const miraWaveButton = profilePopover.getByTestId(
+    `user-profile-popover-wave-${PROFILE_ONLY_AGENT_PUBKEY}`,
+  );
+  await expect(miraWaveButton).toBeEnabled({ timeout: 5_000 });
+  await miraWaveButton.click();
 
   const startHuddleButton = page
     .getByTestId("message-wave-attachment")
     .getByRole("button", { name: "Start huddle" });
-  await expect(startHuddleButton).toBeDisabled();
   await expect(startHuddleButton).toBeEnabled({ timeout: 5_000 });
   await startHuddleButton.click();
 
@@ -1561,14 +1564,16 @@ test("wave attachment huddle waits for delayed bot DM pubkey", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-wave-${DELAYED_RELAY_AGENT_PUBKEY}`)
-    .click();
+  const orbitWaveButton = profilePopover.getByTestId(
+    `user-profile-popover-wave-${DELAYED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(orbitWaveButton).toBeDisabled();
+  await expect(orbitWaveButton).toBeEnabled({ timeout: 7_000 });
+  await orbitWaveButton.click();
 
   const startHuddleButton = page
     .getByTestId("message-wave-attachment")
     .getByRole("button", { name: "Start huddle" });
-  await expect(startHuddleButton).toBeDisabled();
   await expect(startHuddleButton).toBeEnabled({ timeout: 7_000 });
   await startHuddleButton.click();
 

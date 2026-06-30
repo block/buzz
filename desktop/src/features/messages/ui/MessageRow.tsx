@@ -5,6 +5,7 @@ import type {
   TimelineMessage,
   TimelineReaction,
 } from "@/features/messages/types";
+import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -127,6 +128,7 @@ export const MessageRow = React.memo(
     huddleMemberPubkeys,
     huddleMemberPubkeysPending = false,
     actionBarPlacement = "floating",
+    agentConversationMarkers,
     collapseDescendantsLabel,
     isFollowingThread,
     isUnread,
@@ -151,6 +153,7 @@ export const MessageRow = React.memo(
     agentPubkeys,
     videoReviewContext,
   }: {
+    agentConversationMarkers?: readonly AgentConversationMarker[];
     agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
     collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
@@ -380,10 +383,13 @@ export const MessageRow = React.memo(
             if (waveMessage) {
               return (
                 <WaveMessageAttachment
+                  agentPubkeys={agentPubkeys}
                   channelId={channelId}
                   fallbackText={waveMessage.fallbackText}
                   huddleMemberPubkeys={huddleMemberPubkeys}
                   huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                  targetIsAgent={waveMessage.targetIsAgent}
+                  targetPubkey={waveMessage.targetPubkey}
                 />
               );
             }
@@ -392,6 +398,7 @@ export const MessageRow = React.memo(
           return (
             <Markdown
               channelNames={channelNames}
+              agentConversationMarkers={agentConversationMarkers}
               className={cn(
                 "max-w-full text-sm",
                 emojiOnly &&
@@ -862,6 +869,7 @@ export const MessageRow = React.memo(
     prev.message.tags === next.message.tags &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
+    prev.agentConversationMarkers === next.agentConversationMarkers &&
     prev.agentPubkeys === next.agentPubkeys &&
     prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&

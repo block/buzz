@@ -30,29 +30,43 @@ function channel(overrides = {}) {
   };
 }
 
-function message(overrides = {}) {
-  return {
-    id: "message",
-    createdAt: 1,
-    pubkey: "human",
-    author: "Human",
-    avatarUrl: null,
-    role: undefined,
-    personaDisplayName: undefined,
-    time: "1:00 PM",
-    body: "Body",
-    parentId: null,
-    rootId: null,
-    depth: 0,
-    accent: false,
-    pending: undefined,
-    edited: false,
-    kind: 9,
-    tags: [],
-    reactions: undefined,
-    ...overrides,
-  };
-}
+test("new agent conversations require a writable channel", () => {
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel(),
+    }),
+    true,
+  );
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ archivedAt: "2026-06-27T00:00:00.000Z" }),
+    }),
+    false,
+  );
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ isMember: false }),
+    }),
+    false,
+  );
+});
+
+test("existing agent conversation markers can open in read-only channels", () => {
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ archivedAt: "2026-06-27T00:00:00.000Z" }),
+      publishMarker: false,
+    }),
+    true,
+  );
+  assert.equal(
+    canOpenAgentConversationInChannel({
+      channel: channel({ isMember: false }),
+      publishMarker: false,
+    }),
+    true,
+  );
+});
 
 test("DM composer auto-routes only when exactly one other participant is an agent", () => {
   const knownAgentPubkeys = new Set(["agent-one", "agent-two"]);
@@ -105,58 +119,6 @@ test("DM composer auto-routes only when exactly one other participant is an agen
   );
 });
 
-test("thread composer auto-routes only for one human and one known agent", () => {
-  const knownAgentPubkeys = new Set(["agent-one", "agent-two"]);
-
-  assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
-      knownAgentPubkeys,
-      messages: [
-        message({ id: "root", tags: [["p", "agent-one"]] }),
-        message({ id: "agent-reply", pubkey: "agent-one" }),
-      ],
-    }),
-    ["agent-one"],
-  );
-
-  assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
-      knownAgentPubkeys,
-      messages: [
-        message({
-          id: "root",
-          pubkey: "human-one",
-          tags: [
-            ["p", "human-one"],
-            ["p", "agent-one"],
-          ],
-        }),
-        message({
-          id: "human-two-reply",
-          pubkey: "human-two",
-          tags: [
-            ["p", "human-two"],
-            ["p", "agent-one"],
-          ],
-        }),
-        message({ id: "agent-reply", pubkey: "agent-one" }),
-      ],
-    }),
-    [],
-  );
-
-  assert.deepEqual(
-    getThreadAutoRouteAgentPubkeys({
-      knownAgentPubkeys,
-      messages: [
-        message({ id: "agent-one-reply", pubkey: "agent-one" }),
-        message({ id: "agent-two-reply", pubkey: "agent-two" }),
-      ],
-    }),
-    [],
-  );
-});
-
 test("auto-routed mentions merge with explicit mentions without duplicates", () => {
   assert.deepEqual(
     mergeAutoRouteMentionPubkeys({
@@ -167,40 +129,67 @@ test("auto-routed mentions merge with explicit mentions without duplicates", () 
   );
 });
 
-test("new agent conversations require a writable channel", () => {
-  assert.equal(
-    canOpenAgentConversationInChannel({
-      channel: channel(),
-    }),
-    true,
-  );
-  assert.equal(
-    canOpenAgentConversationInChannel({
-      channel: channel({ archivedAt: "2026-06-27T00:00:00.000Z" }),
-    }),
-    false,
-  );
-  assert.equal(
-    canOpenAgentConversationInChannel({
-      channel: channel({ isMember: false }),
-    }),
-    false,
-  );
-});
+test("thread composer auto-routes exactly one current human and one known agent", () => {
+  const knownAgentPubkeys = new Set(["agent-one", "agent-two"]);
 
-test("existing agent conversation markers can open in read-only channels", () => {
-  assert.equal(
-    canOpenAgentConversationInChannel({
-      channel: channel({ archivedAt: "2026-06-27T00:00:00.000Z" }),
-      publishMarker: false,
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        { id: "root", pubkey: "human", tags: [["p", "agent-one"]] },
+        { id: "reply", pubkey: "agent-one", tags: [] },
+      ],
     }),
-    true,
+    ["agent-one"],
   );
-  assert.equal(
-    canOpenAgentConversationInChannel({
-      channel: channel({ isMember: false }),
-      publishMarker: false,
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        { id: "root", pubkey: "human", tags: [["p", "agent-one"]] },
+        { id: "reply", pubkey: "other-human", tags: [] },
+      ],
     }),
-    true,
+    [],
+  );
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human-one",
+      knownAgentPubkeys,
+      messages: [
+        {
+          id: "root",
+          pubkey: "human-one",
+          tags: [
+            ["p", "human-two"],
+            ["p", "agent-one"],
+          ],
+        },
+        { id: "reply", pubkey: "agent-one", tags: [] },
+      ],
+    }),
+    [],
+  );
+
+  assert.deepEqual(
+    getThreadAutoRouteAgentPubkeys({
+      currentPubkey: "human",
+      knownAgentPubkeys,
+      messages: [
+        {
+          id: "root",
+          pubkey: "human",
+          tags: [
+            ["p", "agent-one"],
+            ["p", "agent-two"],
+          ],
+        },
+      ],
+    }),
+    [],
   );
 });

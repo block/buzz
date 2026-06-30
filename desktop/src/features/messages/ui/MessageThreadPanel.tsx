@@ -1,7 +1,10 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
-import type { AgentConversationMarker } from "@/features/agents/agentConversations";
+import {
+  getAgentConversationMarkerTitleForHref,
+  type AgentConversationMarker,
+} from "@/features/agents/agentConversations";
 import type { TranscriptItem } from "@/features/agents/ui/agentSessionTypes";
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -505,6 +508,7 @@ export function MessageThreadPanel({
           <div className="rounded-2xl">
             <MessageRow
               actionBarPlacement="inside"
+              agentConversationMarkers={agentConversationMarkers}
               agentPubkeys={agentPubkeys}
               channelId={channelId}
               huddleMemberPubkeys={huddleMemberPubkeys}
@@ -571,6 +575,7 @@ export function MessageThreadPanel({
                   >
                     {showUnreadDivider ? <UnreadDivider /> : null}
                     <MessageRow
+                      agentConversationMarkers={agentConversationMarkers}
                       agentPubkeys={agentPubkeys}
                       channelId={channelId}
                       huddleMemberPubkeys={huddleMemberPubkeys}
@@ -663,6 +668,12 @@ export function MessageThreadPanel({
       >
         <div className="pointer-events-auto">
           <MessageComposer
+            agentConversationTitleForHref={(href) =>
+              getAgentConversationMarkerTitleForHref(
+                agentConversationMarkers,
+                href,
+              )
+            }
             channelId={channelId}
             channelName={channelName}
             channelType={channel?.channelType ?? null}

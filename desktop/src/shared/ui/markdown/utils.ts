@@ -1,6 +1,7 @@
 import * as React from "react";
 import { defaultUrlTransform } from "react-markdown";
 
+import { isAgentConversationLink } from "@/features/agents/agentConversationLink";
 import { isMessageLink } from "@/features/messages/lib/messageLink";
 
 export function useStableArray<T>(arr: T[]): T[] {
@@ -60,13 +61,16 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
 }
 
 /**
- * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
- * links. The default transform strips unknown schemes (returns `""`) before
- * the `a` component override can see them, which would break copy → paste →
- * click end-to-end. Everything else delegates to `defaultUrlTransform`.
+ * `urlTransform` for `<ReactMarkdown>` that preserves internal Buzz links.
+ * The default transform strips unknown schemes (returns `""`) before the `a`
+ * component override can see them, which would break copy → paste → click
+ * end-to-end. Everything else delegates to `defaultUrlTransform`.
  */
 export function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
+  if (
+    key === "href" &&
+    (isMessageLink(value) || isAgentConversationLink(value))
+  ) {
     return value;
   }
   return defaultUrlTransform(value);

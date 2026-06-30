@@ -117,6 +117,12 @@ const overrides = new Map([
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
   ["src-tauri/src/migration.rs", 1449],
+  // persona-events rebase: boot-time event-sync wiring (run_boot_migrations
+  // syncs team-dir edits before all personas.json readers; run_event_sync
+  // signs the persona/team retention events post-identity) layered on top of
+  // main's growth. continued-agent-conversations: task deep-link parsing and
+  // regression tests. Load-bearing feature growth, queued to split with the list.
+  ["src-tauri/src/lib.rs", 1092],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -134,12 +140,15 @@ const overrides = new Map([
   // continued-agent-conversations: persisted channel-scoped conversation state
   // and route wiring. Queued to split with the rest of AppShell state.
   ["src/app/AppShell.tsx", 1060],
-  // continued-agent-conversations: marker filtering, thread handoff, and
-  // activity handoff props live at the channel surface for now.
-  ["src/features/channels/ui/ChannelPane.tsx", 1107],
-  // continued-agent-conversations: channel task/message surface routing is
-  // threaded through the screen while the pane split follow-up is pending.
-  ["src/features/channels/ui/ChannelScreen.tsx", 1027],
+  // continued-agent-conversations: marker filtering, tasks tab list/focus
+  // behavior, thread handoff, and activity handoff props live at the channel
+  // surface for now.
+  ["src/features/channels/ui/ChannelPane.tsx", 1415],
+  // continued-agent-conversations: channel task-tab state, deep-link task
+  // routing, side-panel suppression, and task-link route target plumbing sit at
+  // the channel orchestration seam.
+  // latest main rebase threads additional header routing through this seam.
+  ["src/features/channels/ui/ChannelScreen.tsx", 1122],
   // continued-agent-conversations: composer notice banner for read-only agent
   // conversations.
   ["src/features/messages/ui/MessageComposer.tsx", 1010],
@@ -160,7 +169,9 @@ const overrides = new Map([
   ["src/features/channels/readState/readStateManager.ts", 1030],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
-  ["src/shared/ui/markdown.tsx", 2082],
+  // continued-agent-conversations: task-link card renderer and marker lookup
+  // are temporarily housed here until markdown renderers are split further.
+  ["src/shared/ui/markdown.tsx", 2258],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
   // Option C databricks-model-discovery: parse/HTTP logic moved to buzz-agent

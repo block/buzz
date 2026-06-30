@@ -24,6 +24,15 @@ export type MessageDeepLinkPayload = {
 };
 
 /**
+ * Payload emitted by the Rust deep-link handler for `buzz://task?…`.
+ * `agentReplyId` is the shared event id used to reconstruct/open the task.
+ */
+export type AgentConversationDeepLinkPayload = {
+  agentReplyId: string;
+  channelId: string;
+};
+
+/**
  * Register listeners for deep-link events emitted by the Rust backend.
  *
  * When a `buzz://connect?relay=<url>` link is opened, the handler
@@ -63,4 +72,15 @@ export function listenForMessageDeepLinks(
   return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
     onOpen(event.payload);
   });
+}
+
+export function listenForAgentConversationDeepLinks(
+  onOpen: (payload: AgentConversationDeepLinkPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<AgentConversationDeepLinkPayload>(
+    "deep-link-agent-conversation",
+    (event) => {
+      onOpen(event.payload);
+    },
+  );
 }

@@ -6377,10 +6377,16 @@ async function handleGetEvent(
   },
   config: E2eConfig | undefined,
 ) {
+  const mockEvent = Array.from(mockMessages.values())
+    .flat()
+    .find((item) => item.id === args.eventId);
+  if (mockEvent) {
+    return JSON.stringify(mockEvent);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const knownEvents: RelayEvent[] = [
-      ...Array.from(mockMessages.values()).flat(),
       {
         id: "mock-engineering-shipped",
         pubkey:

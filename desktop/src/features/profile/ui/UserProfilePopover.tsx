@@ -10,7 +10,11 @@ import {
   useChannelsQuery,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
-import { useProfileQuery, useUserProfileQuery } from "@/features/profile/hooks";
+import {
+  useProfileQuery,
+  useUserProfileQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   useRelayAgentsQuery,
@@ -188,6 +192,9 @@ export function UserProfilePopover({
     enabled: open,
   });
   const userStatusQuery = useUserStatusQuery(open ? [pubkey] : []);
+  const usersBatchQuery = useUsersBatchQuery(open ? [pubkey] : [], {
+    enabled: open,
+  });
 
   const { onOpenAgentSession } = useAgentSession();
   const { openProfilePanel } = useProfilePanel();
@@ -197,11 +204,25 @@ export function UserProfilePopover({
     (a) => a.pubkey === pubkey,
   );
   const isBotProfile = role === "bot" || Boolean(relayAgent || managedAgent);
+  const normalizedProfilePubkey = normalizePubkey(pubkey);
+  const profileAgentSummary =
+    usersBatchQuery.data?.profiles[normalizedProfilePubkey];
+  const isProfileAgentLookupPending =
+    open &&
+    role !== "bot" &&
+    !isBotProfile &&
+    (usersBatchQuery.isPending ||
+      usersBatchQuery.isPlaceholderData ||
+      (usersBatchQuery.isFetching && profileAgentSummary === undefined));
   const isAgentClassificationPending =
     open &&
     role !== "bot" &&
-    (relayAgentsQuery.isPending || managedAgentsQuery.isPending);
+    (relayAgentsQuery.isPending ||
+      managedAgentsQuery.isPending ||
+      isProfileAgentLookupPending);
   const profile = profileQuery.data;
+  const isAgentByProfile = Boolean(profileAgentSummary?.isAgent);
+  const isAgentTarget = isBotProfile || isAgentByProfile;
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
@@ -327,7 +348,7 @@ export function UserProfilePopover({
     try {
       const dm = await openDmMutation.mutateAsync({ pubkeys: [pubkey] });
       await goChannel(dm.id);
-      await startHuddle(dm.id, isBotProfile ? [pubkey] : []);
+      await startHuddle(dm.id, isAgentTarget ? [pubkey] : []);
       await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       if (isMountedRef.current) {
         setOpen(false);
@@ -345,7 +366,7 @@ export function UserProfilePopover({
     clearHoverTimer,
     goChannel,
     isAgentClassificationPending,
-    isBotProfile,
+    isAgentTarget,
     isStartingHuddle,
     openDmMutation,
     pendingAction,
@@ -356,7 +377,13 @@ export function UserProfilePopover({
   ]);
 
   const handleWave = React.useCallback(async () => {
-    if (!showProfileActions || pendingAction !== null) return;
+    if (
+      !showProfileActions ||
+      pendingAction !== null ||
+      isAgentClassificationPending
+    ) {
+      return;
+    }
 
     clearHoverTimer();
     setPendingAction("wave");
@@ -374,7 +401,9 @@ export function UserProfilePopover({
         selfProfileQuery.data?.displayName?.trim() ||
         identity.displayName.trim() ||
         truncatePubkey(identity.pubkey);
-      const content = buildWaveMessageContent(senderName);
+      const content = buildWaveMessageContent(senderName, pubkey, {
+        targetIsAgent: isAgentTarget,
+      });
       const queryKey = channelMessagesKey(dm.id);
 
       await queryClient.cancelQueries({ queryKey });
@@ -439,6 +468,8 @@ export function UserProfilePopover({
     currentPubkey,
     goChannel,
     identityQuery.data,
+    isAgentClassificationPending,
+    isAgentTarget,
     openDmMutation,
     pendingAction,
     pubkey,
@@ -599,7 +630,9 @@ export function UserProfilePopover({
                     className="buzz-wave-hover-trigger shrink-0 px-3"
                     data-testid={`user-profile-popover-wave-${pubkey}`}
                     disabled={
-                      pendingAction !== null || openDmMutation.isPending
+                      pendingAction !== null ||
+                      openDmMutation.isPending ||
+                      isAgentClassificationPending
                     }
                     onClick={() => {
                       void handleWave();

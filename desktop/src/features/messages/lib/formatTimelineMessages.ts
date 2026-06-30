@@ -13,6 +13,7 @@ import {
   getThreadReference,
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
+import { collectWaveTargetPubkeys } from "@/features/messages/lib/waveMessage";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -488,7 +489,7 @@ export function collectMessageAuthorPubkeys(events: RelayEvent[]) {
 }
 
 export function collectMessageMentionPubkeys(
-  events: Array<{ tags?: string[][] }>,
+  events: Array<{ tags?: string[][]; content?: string }>,
 ) {
   const pubkeys = new Set<string>();
 
@@ -499,6 +500,9 @@ export function collectMessageMentionPubkeys(
         pubkeys.add(pubkey);
       }
     }
+  }
+  for (const pubkey of collectWaveTargetPubkeys(events)) {
+    pubkeys.add(pubkey);
   }
 
   return [...pubkeys];

@@ -86,16 +86,48 @@ async function emitUnreadMessages(
   }
 }
 
+async function emitReadHistory(
+  page: import("@playwright/test").Page,
+  count: number,
+) {
+  const base = Math.floor(Date.now() / 1000) + 1;
+  for (let index = 0; index < count; index += 1) {
+    await emitMockMessage(
+      page,
+      "general",
+      `Read history message ${index + 1}`,
+      base + index,
+    );
+  }
+}
+
 // Scroll the timeline up so the viewport is no longer pinned to the bottom.
 // The pill auto-dismisses once the user reaches the bottom of the timeline, so
 // it only stays rendered while scrolled up. Scrolling part-way (rather than to
 // the very top) keeps real message context on screen instead of the channel's
 // empty-state intro.
 async function scrollTimelineUp(page: import("@playwright/test").Page) {
-  await page.getByTestId("message-timeline").evaluate((el) => {
-    el.scrollTop = Math.floor(el.scrollHeight * 0.35);
-  });
-  await page.waitForTimeout(300);
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.hover();
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    await page.mouse.wheel(0, -1200);
+    await page.waitForTimeout(100);
+    const distanceFromBottom = await timeline.evaluate((element) => {
+      const el = element as HTMLDivElement;
+      return el.scrollHeight - el.scrollTop - el.clientHeight;
+    });
+    if (distanceFromBottom > 64) {
+      return;
+    }
+  }
+  await expect
+    .poll(() =>
+      timeline.evaluate((element) => {
+        const el = element as HTMLDivElement;
+        return el.scrollHeight - el.scrollTop - el.clientHeight;
+      }),
+    )
+    .toBeGreaterThan(64);
 }
 
 test.describe("unread pill & divider", () => {
@@ -107,6 +139,10 @@ test.describe("unread pill & divider", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
+    await emitReadHistory(page, 40);
+    await expect(page.getByTestId("message-timeline")).toContainText(
+      "Read history message 40",
+    );
 
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
@@ -134,6 +170,10 @@ test.describe("unread pill & divider", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
+    await emitReadHistory(page, 40);
+    await expect(page.getByTestId("message-timeline")).toContainText(
+      "Read history message 40",
+    );
 
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
@@ -158,6 +198,10 @@ test.describe("unread pill & divider", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
+    await emitReadHistory(page, 40);
+    await expect(page.getByTestId("message-timeline")).toContainText(
+      "Read history message 40",
+    );
 
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");

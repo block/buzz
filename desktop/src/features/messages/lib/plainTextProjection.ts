@@ -1,6 +1,7 @@
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
+import { AGENT_CONVERSATION_LINK_NODE_NAME } from "./agentConversationLinkNodeName";
 
 /**
  * Plain-text projection of a ProseMirror document.
@@ -170,13 +171,18 @@ export function buildPlainTextProjection(
       return true; // descend into block children
     }
 
-    // ── Leaf inline: custom-emoji atom ─────────────────────────────
-    // 1 PM position wide, projects to its full `:shortcode:` text. Keeps
-    // the two mappings consistent with what `renderText` emits, so cursor
-    // math and autocomplete offsets see the shortcode at its natural width.
-    if (node.type.name === CUSTOM_EMOJI_NODE_NAME) {
-      const shortcode = String(node.attrs.shortcode ?? "");
-      const projected = `:${shortcode}:`;
+    // ── Leaf inline atoms ──────────────────────────────────────────
+    // 1 PM position wide, projecting to their markdown/plain-text
+    // representation. Keeps autocomplete offsets and send-disabled checks
+    // aligned with what node renderText/markdown serialization emits.
+    if (
+      node.type.name === CUSTOM_EMOJI_NODE_NAME ||
+      node.type.name === AGENT_CONVERSATION_LINK_NODE_NAME
+    ) {
+      const projected =
+        node.type.name === CUSTOM_EMOJI_NODE_NAME
+          ? `:${String(node.attrs.shortcode ?? "")}:`
+          : String(node.attrs.href ?? "");
       segments.push({
         kind: "atom",
         pmFrom: pos,

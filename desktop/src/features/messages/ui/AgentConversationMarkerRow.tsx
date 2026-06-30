@@ -1,4 +1,4 @@
-import { MessagesSquare } from "lucide-react";
+import { ClipboardPlus } from "lucide-react";
 
 import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -303,11 +303,11 @@ export function AgentConversationMarkerRow({
               aria-hidden
               className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-background p-2.5 text-muted-foreground shadow-xs ring-1 ring-border/60"
             >
-              <MessagesSquare className="size-5" />
+              <ClipboardPlus className="size-5" />
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium text-foreground">
-                Dedicated conversation
+                New task
               </p>
               <p className="mt-0.5 truncate text-xs text-muted-foreground">
                 {marker.title}

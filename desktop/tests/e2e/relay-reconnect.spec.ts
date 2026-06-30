@@ -167,6 +167,22 @@ test("reconnect backfills more missed channel messages than the live subscriptio
     seenBeforeDisconnect,
   );
 
+  const timeline = page.getByTestId("message-timeline");
+  await expect
+    .poll(async () => {
+      return timeline.evaluate((element) => {
+        const scrollable = element as HTMLDivElement;
+        scrollable.scrollTop = scrollable.scrollHeight;
+        scrollable.dispatchEvent(new Event("scroll", { bubbles: true }));
+        return (
+          scrollable.scrollHeight -
+          scrollable.clientHeight -
+          scrollable.scrollTop
+        );
+      });
+    })
+    .toBeLessThan(8);
+
   await disconnectMockWebsockets(page);
 
   const missedMessages = Array.from({ length: 260 }, (_, index) => ({
@@ -177,7 +193,6 @@ test("reconnect backfills more missed channel messages than the live subscriptio
 
   // The newest backfilled message renders at the bottom once the reconnect
   // catch-up settles.
-  const timeline = page.getByTestId("message-timeline");
   await expect(timeline).toContainText("reconnect e2e missed 260", {
     timeout: 15_000,
   });

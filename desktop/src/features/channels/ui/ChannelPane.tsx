@@ -11,12 +11,12 @@ import {
   MessageTimeline,
   type MessageTimelineHandle,
 } from "@/features/messages/ui/MessageTimeline";
-import { getHiddenAgentConversationMessageIds } from "@/features/agents/agentConversations";
-import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
 import {
-  getDmHuddleMemberPubkeys,
-  hasOtherDmParticipant,
-} from "@/features/channels/lib/dmHuddleMembers";
+  getHiddenAgentConversationMessageIds,
+  type AgentConversationMarker,
+} from "@/features/agents/agentConversations";
+import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
+import { getDmHuddleMemberPubkeys } from "@/features/channels/lib/dmHuddleMembers";
 import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewContextForMessage,
@@ -29,6 +29,7 @@ import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThre
 import { ChannelManagementAuxiliaryPanel } from "@/features/channels/ui/ChannelManagementAuxiliaryPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
+import { ChannelTasksView } from "@/features/channels/ui/ChannelTasksView";
 import {
   containsWelcomePersonaMention,
   WelcomeComposerBanner,
@@ -42,13 +43,16 @@ import {
   canOpenAgentConversationInChannel,
   getChannelIntroDescription,
   getChannelIntroKind,
+  getThreadAutoRouteAgentPubkeys,
   isWelcomeSetupSystemMessage,
+  mergeAutoRouteMentionPubkeys,
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { Button } from "@/shared/ui/button";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import { isBroadcastReply } from "@/features/messages/lib/threading";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
@@ -107,11 +111,13 @@ export const ChannelPane = React.memo(function ChannelPane({
   onOpenMembers,
   onOpenProfilePanel,
   onOpenThread,
+  onSurfaceTabChange,
   onResetThreadPanelWidth,
   onSelectThreadReplyTarget,
   onSendMessage,
   onSendVideoReviewComment,
   onSendThreadReply,
+  onThreadScrollTargetChange,
   onThreadScrollTargetResolved,
   onThreadPanelResizeStart,
   onTargetReached,
@@ -123,6 +129,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   openThreadHeadId,
   shouldShowThreadSkeleton,
   openAgentSessionPubkey,
+  surfaceTab = "messages",
   onProfilePanelViewChange,
   onProfilePanelTabChange,
   profilePanelPubkey,
@@ -144,6 +151,10 @@ export const ChannelPane = React.memo(function ChannelPane({
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
   const { openAgentConversation } = useAppShell();
+  const [taskFocusMessageId, setTaskFocusMessageId] = React.useState<
+    string | null
+  >(null);
+  const previousTaskFocusChannelIdRef = React.useRef<string | null>(null);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
@@ -155,16 +166,24 @@ export const ChannelPane = React.memo(function ChannelPane({
     !activeChannel.isMember &&
     activeChannel.visibility === "open" &&
     !activeChannel.archivedAt;
-  const hasMainComposerOverlay = !isNonMemberView;
+  const isTasksSurface = surfaceTab === "tasks";
+  const hasMainComposerOverlay = !isNonMemberView && !isTasksSurface;
   const activeChannelId = activeChannel?.id ?? null;
   const huddleMemberPubkeys = React.useMemo(
     () => getDmHuddleMemberPubkeys(activeChannel, agentPubkeys, currentPubkey),
     [activeChannel, agentPubkeys, currentPubkey],
   );
-  const huddleMemberPubkeysPending =
-    agentPubkeysPending && hasOtherDmParticipant(activeChannel, currentPubkey);
+  const huddleMemberPubkeysPending = agentPubkeysPending;
   const isActiveWelcomeChannel =
     activeChannel !== null && isWelcomeChannel(activeChannel);
+  React.useEffect(() => {
+    if (previousTaskFocusChannelIdRef.current === activeChannelId) {
+      return;
+    }
+
+    previousTaskFocusChannelIdRef.current = activeChannelId;
+    setTaskFocusMessageId(null);
+  }, [activeChannelId]);
   useComposerHeightPadding(
     timelineScrollRef,
     composerWrapperRef,
@@ -212,7 +231,6 @@ export const ChannelPane = React.memo(function ChannelPane({
       threadMessages.some((entry) => entry.message.id === editTarget.id));
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
-
   const findLastOwnEditable = React.useCallback(
     (candidates: TimelineMessage[]): TimelineMessage | null => {
       if (!onEdit || !currentPubkey) return null;
@@ -233,7 +251,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     },
     [onEdit, currentPubkey],
   );
-
   const handleEditLastOwnMainMessage = React.useCallback((): boolean => {
     const target = findLastOwnEditable(messages);
     if (!target || !onEdit) return false;
@@ -358,6 +375,48 @@ export const ChannelPane = React.memo(function ChannelPane({
       );
     },
     [activeChannel, messages, openAgentConversation],
+  );
+  const handleGoToTaskMessage = React.useCallback(
+    (
+      marker: AgentConversationMarker,
+      message: TimelineMessage,
+      threadMessage: TimelineMessage,
+    ) => {
+      onSurfaceTabChange?.("messages");
+      const isBroadcastTask = isBroadcastReply(message.tags ?? []);
+      const isThreadedTask =
+        !isBroadcastTask &&
+        (Boolean(marker.parentMessageId) ||
+          Boolean(message.parentId) ||
+          Boolean(message.rootId && message.rootId !== message.id) ||
+          threadMessage.id !== message.id);
+
+      if (isThreadedTask) {
+        onOpenThread(threadMessage);
+        onThreadScrollTargetChange(message.id);
+        return;
+      }
+
+      onCloseThread();
+      setTaskFocusMessageId(message.id);
+    },
+    [
+      onCloseThread,
+      onOpenThread,
+      onSurfaceTabChange,
+      onThreadScrollTargetChange,
+    ],
+  );
+  const handleTimelineTargetReached = React.useCallback(
+    (messageId: string) => {
+      setTaskFocusMessageId((current) =>
+        current === messageId ? null : current,
+      );
+      if (taskFocusMessageId !== messageId) {
+        onTargetReached?.(messageId);
+      }
+    },
+    [onTargetReached, taskFocusMessageId],
   );
   const canDropInMainColumn =
     hasMainComposerOverlay && !isComposerDisabled && !isSinglePanelView;
@@ -515,6 +574,25 @@ export const ChannelPane = React.memo(function ChannelPane({
       ...threadMessages.map((entry) => entry.message),
     ];
   }, [threadHeadMessage, threadMessages]);
+  const threadAutoRouteAgentPubkeys = React.useMemo(
+    () =>
+      getThreadAutoRouteAgentPubkeys({
+        currentPubkey,
+        knownAgentPubkeys,
+        messages: threadSourceMessages,
+      }),
+    [currentPubkey, knownAgentPubkeys, threadSourceMessages],
+  );
+  const handleSendThreadReply = React.useCallback(
+    (content: string, mentionPubkeys: string[], mediaTags?: string[][]) => {
+      const sendMentionPubkeys = mergeAutoRouteMentionPubkeys({
+        autoRouteAgentPubkeys: threadAutoRouteAgentPubkeys,
+        mentionPubkeys,
+      });
+      return onSendThreadReply(content, sendMentionPubkeys, mediaTags);
+    },
+    [onSendThreadReply, threadAutoRouteAgentPubkeys],
+  );
   const hiddenAgentConversationMessageIds = React.useMemo(() => {
     const hiddenIds = getHiddenAgentConversationMessageIds(
       baseVisibleMessages,
@@ -687,7 +765,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           }
         >
           {header}
-          {channelFind.isOpen ? (
+          {channelFind.isOpen && !isTasksSurface ? (
             <div className={cn("absolute inset-x-0 z-40", channelChrome.top)}>
               <ChannelFindBar
                 matchCount={channelFind.matchCount}
@@ -700,163 +778,187 @@ export const ChannelPane = React.memo(function ChannelPane({
               />
             </div>
           ) : null}
-          <MessageTimeline
-            ref={messageTimelineRef}
-            agentConversationMarkers={agentConversationMarkers}
-            agentPubkeys={agentPubkeys}
-            channelId={activeChannel?.id}
-            channelIntro={channelIntro}
-            directMessageIntro={directMessageIntro}
-            scrollContainerRef={timelineScrollRef}
-            currentPubkey={currentPubkey}
-            fetchOlder={fetchOlder}
-            followThreadById={followThreadById}
-            hasComposerOverlay={hasMainComposerOverlay}
-            hasOlderMessages={hasOlderMessages}
-            huddleMemberPubkeys={huddleMemberPubkeys}
-            huddleMemberPubkeysPending={huddleMemberPubkeysPending}
-            isFetchingOlder={isFetchingOlder}
-            isFollowingThreadById={isFollowingThreadById}
-            isMessageUnreadById={isMessageUnreadById}
-            personaLookup={personaLookup}
-            profiles={profiles}
-            unfollowThreadById={unfollowThreadById}
-            emptyDescription={
-              activeChannel?.channelType === "forum"
-                ? "Select a stream or DM to load real message history in this first integration pass."
-                : "Messages and sub-replies will appear here once the relay has history for this channel."
-            }
-            emptyTitle={
-              activeChannel
-                ? activeChannel.channelType === "forum"
-                  ? "Forum channels are next"
-                  : "No messages yet"
-                : "No channel selected"
-            }
-            isLoading={isTimelineLoading}
-            mainEntries={mainTimelineEntries}
-            messages={visibleMessages}
-            firstUnreadMessageId={firstUnreadMessageId}
-            unreadCount={unreadCount}
-            onDelete={onDelete}
-            onEdit={onEdit}
-            onMarkUnread={onMarkUnread}
-            onMarkRead={onMarkRead}
-            onOpenAgentConversation={handleOpenAgentConversation}
-            onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
-            channelName={activeChannel?.name}
-            channelType={activeChannel?.channelType ?? null}
-            isSendingVideoReviewComment={isSending}
-            onSendVideoReviewComment={
-              activeChannel?.archivedAt ? undefined : onSendVideoReviewComment
-            }
-            onTargetReached={onTargetReached}
-            onToggleReaction={onToggleReaction}
-            searchActiveMessageId={channelFind.activeMatch?.messageId ?? null}
-            searchMatchingMessageIds={channelFind.matchingMessageIds}
-            searchQuery={channelFind.query}
-            targetMessageId={targetMessageId}
-            threadUnreadCounts={threadUnreadCounts}
-          />
-          {isNonMemberView ? (
-            <div
-              data-testid="join-banner"
-              className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-5 py-3"
-            >
-              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
-                <Hash className="h-4 w-4 shrink-0" />
-                <span className="truncate">
-                  Viewing{" "}
-                  <span className="font-medium text-foreground">
-                    #{activeChannel?.name}
-                  </span>
-                </span>
-              </div>
-              <Button
-                disabled={isJoining}
-                onClick={() => {
-                  void onJoinChannel?.();
-                }}
-                size="sm"
-                variant="default"
-              >
-                <LogIn className="mr-1.5 h-4 w-4" />
-                {isJoining ? "Joining..." : "Join to participate"}
-              </Button>
-            </div>
+          {isTasksSurface ? (
+            <ChannelTasksView
+              activeChannel={activeChannel}
+              agentConversationMarkers={agentConversationMarkers}
+              currentPubkey={currentPubkey}
+              fetchOlder={fetchOlder}
+              hasOlderMessages={hasOlderMessages}
+              isFetchingOlder={isFetchingOlder}
+              isTimelineLoading={isTimelineLoading}
+              messages={messages}
+              onOpenAgentConversation={handleOpenAgentConversation}
+              onGoToTaskMessage={handleGoToTaskMessage}
+              profiles={profiles}
+              scrollContainerRef={timelineScrollRef}
+            />
           ) : (
-            <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
-              ref={composerWrapperRef}
-            >
-              <div className="pointer-events-auto">
-                {isActiveWelcomeChannel ? (
-                  <WelcomeComposerBanner state={welcomeComposerBannerState} />
-                ) : null}
-                <MessageComposer
-                  channelId={activeChannel?.id ?? null}
-                  channelName={activeChannel?.name ?? "channel"}
-                  channelType={activeChannel?.channelType ?? null}
-                  containerClassName="px-5"
-                  disabled={isComposerDisabled}
-                  editTarget={mainEditTarget}
-                  isSending={isSending}
-                  mediaController={mainComposerMedia}
-                  onCancelEdit={onCancelEdit}
-                  onEditLastOwnMessage={handleEditLastOwnMainMessage}
-                  onEditSave={onEditSave}
-                  onSend={handleSendMessage}
-                  profiles={profiles}
-                  placeholder={
-                    activeChannel?.archivedAt
-                      ? "Archived channels are read-only."
-                      : activeChannel?.channelType === "forum"
-                        ? "Forum posting is not wired in this pass."
-                        : activeChannel
-                          ? activeChannel.channelType === "dm" &&
-                            directMessageIntro
-                            ? `Message ${directMessageIntro.displayName}`
-                            : `Message #${activeChannel.name}`
-                          : "Select a channel"
-                  }
-                  showTopBorder={false}
-                />
-                <div className="h-7 overflow-visible bg-background px-5 pb-1 pt-0">
-                  <div className="flex h-full w-full items-center gap-2 overflow-visible">
-                    {hasComposerBotActivity ? (
-                      <div className="shrink-0 overflow-visible">
-                        <BotActivityComposerAction
-                          agents={activityAgents}
-                          channelId={activeChannel?.id ?? null}
-                          onOpenAgentSession={handleOpenAgentSession}
-                          openAgentSessionPubkey={openAgentSessionPubkey}
-                          profiles={profiles}
-                          typingBotPubkeys={composerBotTypingPubkeys}
-                          variant="inline"
-                        />
-                      </div>
-                    ) : null}
-                    {hasTypingActivity ? (
-                      <TypingIndicatorRow
-                        channel={activeChannel}
-                        className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                        currentPubkey={currentPubkey}
-                        profiles={profiles}
-                        typingPubkeys={typingPubkeys}
+            <>
+              <MessageTimeline
+                ref={messageTimelineRef}
+                agentConversationMarkers={agentConversationMarkers}
+                agentPubkeys={agentPubkeys}
+                channelId={activeChannel?.id}
+                channelIntro={channelIntro}
+                directMessageIntro={directMessageIntro}
+                scrollContainerRef={timelineScrollRef}
+                currentPubkey={currentPubkey}
+                fetchOlder={fetchOlder}
+                followThreadById={followThreadById}
+                hasComposerOverlay={hasMainComposerOverlay}
+                hasOlderMessages={hasOlderMessages}
+                huddleMemberPubkeys={huddleMemberPubkeys}
+                huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                isFetchingOlder={isFetchingOlder}
+                isFollowingThreadById={isFollowingThreadById}
+                isMessageUnreadById={isMessageUnreadById}
+                personaLookup={personaLookup}
+                profiles={profiles}
+                unfollowThreadById={unfollowThreadById}
+                emptyDescription={
+                  activeChannel?.channelType === "forum"
+                    ? "Select a stream or DM to load real message history in this first integration pass."
+                    : "Messages and sub-replies will appear here once the relay has history for this channel."
+                }
+                emptyTitle={
+                  activeChannel
+                    ? activeChannel.channelType === "forum"
+                      ? "Forum channels are next"
+                      : "No messages yet"
+                    : "No channel selected"
+                }
+                isLoading={isTimelineLoading}
+                mainEntries={mainTimelineEntries}
+                messages={visibleMessages}
+                firstUnreadMessageId={firstUnreadMessageId}
+                unreadCount={unreadCount}
+                onDelete={onDelete}
+                onEdit={onEdit}
+                onMarkUnread={onMarkUnread}
+                onMarkRead={onMarkRead}
+                onOpenAgentConversation={handleOpenAgentConversation}
+                onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
+                channelName={activeChannel?.name}
+                channelType={activeChannel?.channelType ?? null}
+                isSendingVideoReviewComment={isSending}
+                onSendVideoReviewComment={
+                  activeChannel?.archivedAt
+                    ? undefined
+                    : onSendVideoReviewComment
+                }
+                onTargetReached={handleTimelineTargetReached}
+                onToggleReaction={onToggleReaction}
+                searchActiveMessageId={
+                  channelFind.activeMatch?.messageId ?? null
+                }
+                searchMatchingMessageIds={channelFind.matchingMessageIds}
+                searchQuery={channelFind.query}
+                targetMessageId={taskFocusMessageId ?? targetMessageId}
+                threadUnreadCounts={threadUnreadCounts}
+              />
+              {isNonMemberView ? (
+                <div
+                  data-testid="join-banner"
+                  className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-5 py-3"
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
+                    <Hash className="h-4 w-4 shrink-0" />
+                    <span className="truncate">
+                      Viewing{" "}
+                      <span className="font-medium text-foreground">
+                        #{activeChannel?.name}
+                      </span>
+                    </span>
+                  </div>
+                  <Button
+                    disabled={isJoining}
+                    onClick={() => {
+                      void onJoinChannel?.();
+                    }}
+                    size="sm"
+                    variant="default"
+                  >
+                    <LogIn className="mr-1.5 h-4 w-4" />
+                    {isJoining ? "Joining..." : "Join to participate"}
+                  </Button>
+                </div>
+              ) : (
+                <div
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
+                  ref={composerWrapperRef}
+                >
+                  <div className="pointer-events-auto">
+                    {isActiveWelcomeChannel ? (
+                      <WelcomeComposerBanner
+                        state={welcomeComposerBannerState}
                       />
                     ) : null}
+                    <MessageComposer
+                      channelId={activeChannel?.id ?? null}
+                      channelName={activeChannel?.name ?? "channel"}
+                      channelType={activeChannel?.channelType ?? null}
+                      containerClassName="px-5"
+                      disabled={isComposerDisabled}
+                      editTarget={mainEditTarget}
+                      isSending={isSending}
+                      mediaController={mainComposerMedia}
+                      onCancelEdit={onCancelEdit}
+                      onEditLastOwnMessage={handleEditLastOwnMainMessage}
+                      onEditSave={onEditSave}
+                      onSend={handleSendMessage}
+                      profiles={profiles}
+                      placeholder={
+                        activeChannel?.archivedAt
+                          ? "Archived channels are read-only."
+                          : activeChannel?.channelType === "forum"
+                            ? "Forum posting is not wired in this pass."
+                            : activeChannel
+                              ? activeChannel.channelType === "dm" &&
+                                directMessageIntro
+                                ? `Message ${directMessageIntro.displayName}`
+                                : `Message #${activeChannel.name}`
+                              : "Select a channel"
+                      }
+                      showTopBorder={false}
+                    />
+                    <div className="h-7 overflow-visible bg-background px-5 pb-1 pt-0">
+                      <div className="flex h-full w-full items-center gap-2 overflow-visible">
+                        {hasComposerBotActivity ? (
+                          <div className="shrink-0 overflow-visible">
+                            <BotActivityComposerAction
+                              agents={activityAgents}
+                              channelId={activeChannel?.id ?? null}
+                              onOpenAgentSession={handleOpenAgentSession}
+                              openAgentSessionPubkey={openAgentSessionPubkey}
+                              profiles={profiles}
+                              typingBotPubkeys={composerBotTypingPubkeys}
+                              variant="inline"
+                            />
+                          </div>
+                        ) : null}
+                        {hasTypingActivity ? (
+                          <TypingIndicatorRow
+                            channel={activeChannel}
+                            className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
+                            currentPubkey={currentPubkey}
+                            profiles={profiles}
+                            typingPubkeys={typingPubkeys}
+                          />
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
+              )}
+            </>
           )}
           {canDropInMainColumn && mainComposerMedia.isDragOver ? (
             <DropZoneOverlay className="z-30 rounded-none" />
           ) : null}
         </section>
       ) : null}
-
-      {channelManagementOpen && activeChannel ? (
+      {!isTasksSurface && channelManagementOpen && activeChannel ? (
         <ChannelManagementAuxiliaryPanel
           activeChannel={activeChannel}
           canResetThreadPanelWidth={canResetThreadPanelWidth}
@@ -870,7 +972,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           useSplitAuxiliaryPane={useSplitAuxiliaryPane}
           transparentChrome={hasSplitAuxiliaryPane}
         />
-      ) : threadHeadMessage ? (
+      ) : !isTasksSurface && threadHeadMessage ? (
         (() => {
           const panel = (
             <MessageThreadPanel
@@ -906,7 +1008,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               onExpandReplies={onExpandThreadReplies}
               onOpenAgentConversation={handleOpenAgentConversation}
               onSelectReplyTarget={onSelectThreadReplyTarget}
-              onSend={onSendThreadReply}
+              onSend={handleSendThreadReply}
               onScrollTargetResolved={onThreadScrollTargetResolved}
               onToggleReaction={onToggleReaction}
               onUnfollowThread={onUnfollowThread}
@@ -925,7 +1027,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           );
           return wrapAux(panel, "message-thread-panel");
         })()
-      ) : shouldShowThreadSkeleton ? (
+      ) : !isTasksSurface && shouldShowThreadSkeleton ? (
         (() => {
           const panel = (
             <MessageThreadPanelSkeleton
@@ -940,7 +1042,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           );
           return wrapAux(panel, "message-thread-panel");
         })()
-      ) : activeChannel && selectedAgent ? (
+      ) : !isTasksSurface && activeChannel && selectedAgent ? (
         (() => {
           const panel = (
             <AgentSessionThreadPanel
@@ -972,7 +1074,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           );
           return wrapAux(panel, "agent-session-thread-panel");
         })()
-      ) : profilePanelPubkey ? (
+      ) : !isTasksSurface && profilePanelPubkey ? (
         (() => {
           const panel = (
             <UserProfilePanel
