@@ -5,14 +5,14 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
-        ensure_persona_is_active, find_managed_agent_mut, invoke_provider, load_managed_agents,
-        load_personas, managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
+        ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
+        managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
         normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
         save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
-        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
+        ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -1407,49 +1407,6 @@ pub fn get_managed_agent_log(
         content: read_log_tail(&log_path, line_count.unwrap_or(120) as usize)?,
         log_path: log_path.display().to_string(),
     })
-}
-
-// ── New backend-provider commands ────────────────────────────────────────────
-
-#[tauri::command]
-pub fn discover_backend_providers() -> Vec<BackendProviderInfo> {
-    discover_provider_candidates()
-        .into_iter()
-        .map(|(id, path)| BackendProviderInfo {
-            id,
-            binary_path: path.display().to_string(),
-        })
-        .collect()
-}
-
-#[tauri::command]
-pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::Value, String> {
-    // Validate that the requested path is actually a discovered buzz-backend-* binary.
-    // This prevents arbitrary binary execution via a compromised frontend or IPC.
-    let candidates = discover_provider_candidates();
-    let path = std::path::PathBuf::from(&binary_path);
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("binary not found: {binary_path}: {e}"))?;
-    let is_known = candidates
-        .iter()
-        .any(|(_, p)| p.canonicalize().ok().as_ref() == Some(&canonical));
-    if !is_known {
-        return Err(format!(
-            "binary '{binary_path}' is not a discovered buzz-backend-* provider"
-        ));
-    }
-    // request_id is for provider-side logging — not validated in the response
-    // (stdin→stdout is 1:1 per process invocation).
-    let request = serde_json::json!({
-        "op": "info",
-        "request_id": uuid::Uuid::new_v4().to_string(),
-    });
-    tokio::task::spawn_blocking(move || {
-        invoke_provider(&canonical, &request, std::time::Duration::from_secs(10))
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 // Remote agent shutdown is handled entirely by the frontend:
