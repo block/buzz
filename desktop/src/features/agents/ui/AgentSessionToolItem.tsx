@@ -178,7 +178,7 @@ function CompactFileEditSummaryView({
       <span className="shrink-0 text-sm font-semibold text-muted-foreground/50 group-open:text-muted-foreground/70">
         Edited
       </span>
-      <span className="min-w-0 truncate text-sm font-semibold text-muted-foreground/80 group-open:text-muted-foreground">
+      <span className="min-w-0 truncate text-sm font-normal text-muted-foreground/80 group-open:text-muted-foreground">
         {summary.filename}
       </span>
       <span className="shrink-0 text-xs font-semibold text-green-600 dark:text-green-400">
@@ -360,7 +360,7 @@ function ToolDetailBlocks({
   const showParameters = hasArgs && !showFileEditDiff;
 
   return (
-    <div className="space-y-4 py-2 pl-5 text-popover-foreground outline-hidden">
+    <div className="space-y-4 py-2 text-popover-foreground outline-hidden">
       {description ? (
         <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
           {description}
@@ -407,13 +407,8 @@ function hasLineDiff(diff: FileEditDiff) {
 
 function FileEditDiffBlock({ diff }: { diff: FileEditDiff }) {
   return (
-    <div className="space-y-2 overflow-hidden">
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="min-w-0 truncate text-xs font-normal text-muted-foreground/70">
-          {diff.path}
-        </span>
-      </div>
-      <pre className="max-h-64 overflow-auto rounded-md border border-border/50 bg-muted/35 py-2 font-mono text-xs leading-5 text-foreground">
+    <div className="flex max-h-64 flex-col overflow-hidden rounded-md border border-border/50 bg-muted/35 text-xs leading-5 text-foreground">
+      <pre className="min-h-0 flex-1 overflow-auto py-2 font-mono">
         {diff.lines
           .filter((line) => line.kind !== "meta")
           .map((line, index) => (
@@ -424,6 +419,12 @@ function FileEditDiffBlock({ diff }: { diff: FileEditDiff }) {
             />
           ))}
       </pre>
+      <div
+        className="truncate border-t border-border/50 px-3 py-1.5 text-xs font-normal text-muted-foreground/70"
+        title={diff.path}
+      >
+        {diff.path}
+      </div>
     </div>
   );
 }
