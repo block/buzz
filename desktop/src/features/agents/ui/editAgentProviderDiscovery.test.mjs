@@ -390,3 +390,99 @@ test("editAgent_inheritedAgentRuntimeSwitch_producesConsistentCommandProviderPai
     "command and provider must both be set — a mismatched pair is impossible",
   );
 });
+
+// ── Finding C fix: re-checking inherit after a runtime/provider edit does not
+//                  persist the provider onto the inherited runtime ───────────
+//
+// The UI dropdown state (selectedRuntimeId / llmProviderFieldVisible) is for
+// visibility only. Provider PERSISTENCE at submit must key on the EFFECTIVE
+// runtime — i.e. the one that will actually run after save. When inheritHarness
+// is true, the persona's runtime runs; persisting a provider chosen for a
+// different dropdown selection would create the exact runtime/provider mismatch
+// these passes have been eliminating.
+
+test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntime", () => {
+  // Simulate: inherited Claude agent (agentCommandOverride == null)
+  // → user picks buzz-agent (inheritHarness→false, selectedRuntimeId='buzz-agent')
+  // → user picks databricks_v2
+  // → user RE-CHECKS inherit (inheritHarness→true, selectedRuntimeId STAYS 'buzz-agent')
+  // → save: effective runtime is inherited (Claude), provider must NOT be persisted.
+
+  const inheritHarness = true; // re-checked before save
+  const selectedRuntimeId = "buzz-agent"; // dropdown state (stale after re-check)
+  const savedProvider = null; // was null on open (inherited Claude had no provider)
+  const chosenProvider = "databricks_v2"; // chosen while dropdown was buzz-agent
+
+  // llmProviderFieldVisible is driven by the live dropdown (buzz-agent → true).
+  // This is the UX visibility — unchanged by the fix.
+  const llmProviderFieldVisible =
+    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  assert.equal(
+    llmProviderFieldVisible,
+    true,
+    "provider field is visible (dropdown shows buzz-agent) — this is the UX state",
+  );
+
+  // llmProviderCanPersistAtSubmit is the fix: gated on the EFFECTIVE runtime.
+  // When inheritHarness=true, the inherited runtime runs → treat as not-provider-capable.
+  const llmProviderCanPersistAtSubmit =
+    !inheritHarness && llmProviderFieldVisible;
+  assert.equal(
+    llmProviderCanPersistAtSubmit,
+    false,
+    "provider must NOT be persistable when the agent will inherit (effective runtime is inherited Claude)",
+  );
+
+  // Submit logic for provider tri-state (mirrors the component).
+  const normalizedProvider = chosenProvider;
+  let providerUpdate;
+  if (llmProviderCanPersistAtSubmit) {
+    providerUpdate =
+      normalizedProvider !== (savedProvider ?? null)
+        ? normalizedProvider
+        : undefined;
+  } else {
+    // Clear any stale saved provider, omit if already null.
+    providerUpdate = (savedProvider ?? null) !== null ? null : undefined;
+  }
+
+  assert.equal(
+    providerUpdate,
+    undefined,
+    "provider update must be omitted (not sent as databricks_v2) when reverting to inherit",
+  );
+});
+
+test("editAgent_inheritCheckboxRoundTrip_clearsStaleSavedProviderWhenRevertingToInherit", () => {
+  // Variant: agent previously had a provider saved (e.g. was pinned to buzz-agent
+  // with databricks_v2). User opens edit, re-checks inherit → provider must be
+  // cleared (sent as null) so the record doesn't retain a stale provider on the
+  // inherited runtime.
+
+  const inheritHarness = true; // re-checked before save
+  const selectedRuntimeId = "buzz-agent"; // dropdown state
+  const savedProvider = "databricks_v2"; // was saved on open (pre-existing provider)
+  const chosenProvider = "databricks_v2"; // unchanged from saved
+
+  const llmProviderFieldVisible =
+    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const llmProviderCanPersistAtSubmit =
+    !inheritHarness && llmProviderFieldVisible;
+
+  const normalizedProvider = chosenProvider;
+  let providerUpdate;
+  if (llmProviderCanPersistAtSubmit) {
+    providerUpdate =
+      normalizedProvider !== (savedProvider ?? null)
+        ? normalizedProvider
+        : undefined;
+  } else {
+    providerUpdate = (savedProvider ?? null) !== null ? null : undefined;
+  }
+
+  assert.equal(
+    providerUpdate,
+    null,
+    "reverting to inherit when a provider was previously saved must clear it (send null)",
+  );
+});

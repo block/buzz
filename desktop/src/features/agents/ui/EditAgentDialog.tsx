@@ -424,6 +424,15 @@ export function EditAgentDialog({
           ? agentCommand.trim()
           : undefined;
 
+      // The effective runtime for provider persistence is the one that will
+      // actually run AFTER submit. When the agent is (or has been re-checked
+      // back to) inheriting, the persona's runtime runs — which may be
+      // provider-locked. Conservatively treat it as not-provider-capable so
+      // the UI dropdown state can never persist a provider against a runtime
+      // that won't actually run it. When pinned, defer to the live dropdown.
+      const llmProviderCanPersistAtSubmit =
+        !inheritHarness && llmProviderFieldVisible;
+
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
@@ -464,9 +473,10 @@ export function EditAgentDialog({
             ? normalizedModel
             : undefined,
         // Tri-state: send null to clear, value to set, omit if unchanged.
-        // Only persist provider when the live runtime supports provider selection;
-        // switching to a locked runtime clears the provider.
-        provider: llmProviderFieldVisible
+        // Only persist provider when the effective runtime at submit supports
+        // provider selection — visibility (llmProviderFieldVisible) is for UX
+        // only; persistence uses the runtime that will actually run after save.
+        provider: llmProviderCanPersistAtSubmit
           ? normalizedProvider !== (agent.provider ?? null)
             ? normalizedProvider
             : undefined
