@@ -1104,9 +1104,7 @@ async fn tokio_main() -> Result<()> {
     if let Some(payload) = setup_mode::SetupPayload::from_env()
         .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
     {
-        tracing::info!(
-            "buzz-acp: setup payload present, entering setup-listener mode"
-        );
+        tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
 
