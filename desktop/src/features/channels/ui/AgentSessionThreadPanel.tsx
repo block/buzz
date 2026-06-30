@@ -3,15 +3,6 @@ import { Octagon, Settings, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
-import {
-  DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL,
-  DEBUG_AGENT_ACTIVITY_AGENT_NAME,
-  DEBUG_AGENT_ACTIVITY_PROFILES,
-} from "@/features/agents/ui/debugAgentActivityFixture";
-import {
-  DEBUG_AGENT_ACTIVITY_RAW_EVENTS,
-  DEBUG_AGENT_ACTIVITY_TRANSCRIPT,
-} from "@/features/agents/ui/debugAgentActivityRawFixture";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
@@ -84,36 +75,6 @@ export function AgentSessionThreadPanel({
     },
     [rawFeedScopeKey],
   );
-  const [showDebugRenderClasses, setShowDebugRenderClasses] =
-    React.useState(false);
-  const handleDebugRenderClassesChange = React.useCallback(
-    (checked: boolean) => {
-      setShowDebugRenderClasses(checked);
-    },
-    [],
-  );
-  const debugProfiles = React.useMemo(
-    () =>
-      showDebugRenderClasses
-        ? {
-            ...(profiles ?? {}),
-            ...DEBUG_AGENT_ACTIVITY_PROFILES,
-          }
-        : profiles,
-    [profiles, showDebugRenderClasses],
-  );
-  const debugAgent = React.useMemo(
-    () =>
-      showDebugRenderClasses
-        ? {
-            ...agent,
-            avatarUrl: DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL,
-            name: DEBUG_AGENT_ACTIVITY_AGENT_NAME,
-          }
-        : agent,
-    [agent, showDebugRenderClasses],
-  );
-
   async function handleInterruptTurn() {
     if (!channel) {
       return;
@@ -162,23 +123,6 @@ export function AgentSessionThreadPanel({
             className="min-w-56"
             onCloseAutoFocus={(event) => event.preventDefault()}
           >
-            <DropdownMenuCheckboxItem
-              checked={showDebugRenderClasses}
-              className="items-start gap-3"
-              data-testid="agent-session-toggle-debug-render-classes"
-              onCheckedChange={handleDebugRenderClassesChange}
-              title="Swap the live transcript for a temporary fixture covering every activity render class."
-            >
-              <span className="min-w-0 flex-1">
-                <span className="block text-sm font-medium">
-                  Debug: show all render classes
-                </span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  Temporary fixture for visual taxonomy review.
-                </span>
-              </span>
-            </DropdownMenuCheckboxItem>
-            <DropdownMenuSeparator />
             <DropdownMenuCheckboxItem
               checked={showRawFeed}
               className="items-start gap-3"
@@ -278,7 +222,7 @@ export function AgentSessionThreadPanel({
         panelPadding
       >
         <ManagedAgentSessionPanel
-          agent={debugAgent}
+          agent={agent}
           channelId={channel?.id ?? null}
           className="border-0 bg-transparent p-0 shadow-none"
           emptyDescription={
@@ -286,16 +230,10 @@ export function AgentSessionThreadPanel({
               ? `Mention ${agent.name} in the channel to see its work here.`
               : `Mention ${agent.name} in any channel to see its work here.`
           }
-          profiles={debugProfiles}
-          rawEventsOverride={
-            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_RAW_EVENTS : undefined
-          }
+          profiles={profiles}
           rawLayout="exclusive"
           showHeader={false}
           showRaw={showRawFeed}
-          transcriptOverride={
-            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_TRANSCRIPT : undefined
-          }
         />
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>
