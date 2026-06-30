@@ -18,7 +18,8 @@ import {
  *
  * Params: `thread` (open thread head id), `profile` (profile panel pubkey),
  * `profileView` (profile panel focused view), `profileTab` (profile summary
- * tab), `agentSession` (agent session panel pubkey), `channelManagement`
+ * tab), `agentSession` (agent session panel pubkey), `agentSessionChannel`
+ * (optional channel scope for the agent session panel), `channelManagement`
  * (presence flag for the channel-management panel — open/closed only, so it
  * carries a sentinel `"1"` rather than an id).
  */
@@ -32,6 +33,7 @@ export type PanelValueSetter = (
 
 const CHANNEL_SEARCH_KEYS = [
   "agentSession",
+  "agentSessionChannel",
   "channelManagement",
   "messageId",
   "profile",
@@ -75,7 +77,16 @@ export function useChannelPanelHistoryState() {
   );
 
   const setOpenAgentSessionPubkey = React.useCallback<PanelValueSetter>(
-    (value, options) => applyPatch({ agentSession: value }, options),
+    (value, options) =>
+      applyPatch(
+        { agentSession: value, agentSessionChannel: value ? undefined : null },
+        options,
+      ),
+    [applyPatch],
+  );
+
+  const setOpenAgentSessionChannelId = React.useCallback<PanelValueSetter>(
+    (value, options) => applyPatch({ agentSessionChannel: value }, options),
     [applyPatch],
   );
 
@@ -97,12 +108,14 @@ export function useChannelPanelHistoryState() {
   return {
     channelManagementOpen: values.channelManagement != null,
     clearMessageRouteTarget,
+    openAgentSessionChannelId: values.agentSessionChannel,
     openAgentSessionPubkey: values.agentSession,
     openThreadHeadId: values.thread,
     profilePanelPubkey: values.profile,
     profilePanelTab: profilePanelTabFromSearch(values.profileTab),
     profilePanelView: profilePanelViewFromSearch(values.profileView),
     setChannelManagementOpen,
+    setOpenAgentSessionChannelId,
     setOpenAgentSessionPubkey,
     setOpenThreadHeadId,
     setProfilePanelTab,

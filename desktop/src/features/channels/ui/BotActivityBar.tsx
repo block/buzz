@@ -19,7 +19,7 @@ export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
   channelId?: string | null;
-  onOpenAgentSession: (pubkey: string) => void;
+  onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
   typingBotPubkeys: string[];
@@ -244,7 +244,7 @@ export function BotActivityComposerAction({
                 onClick={() => {
                   clearHoverTimer();
                   setOpen(false);
-                  onOpenAgentSession(agent.pubkey);
+                  onOpenAgentSession(agent.pubkey, channelId);
                 }}
                 type="button"
               >
