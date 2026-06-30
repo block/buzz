@@ -8,7 +8,8 @@ web_dir := "web"
 
 # Opt-in mesh-llm. Off by default so `just dev`/`just staging` skip ~420 extra
 # crates + the llama.cpp native runtime build and stay fast to iterate on.
-# Turn on to test mesh compute features: `just mesh=1 dev` / `just mesh=1 staging`.
+# Turn on to test mesh compute features: `just mesh=1 dev` / `just mesh=1 staging` /
+# `just mesh=1 staging-release`.
 mesh := ""
 
 # List all available tasks
@@ -201,6 +202,53 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+
+# Build and open an optimized desktop app pointed at the internal staging relay
+staging-release: bootstrap
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    pnpm install  # unconditional: release builds must start from a clean dep tree
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    ./scripts/bundle-sidecars.sh
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    chmod +x desktop/src-tauri/binaries/*-"$TARGET"
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    fi
+    STAGING_INFO_PLIST="desktop/src-tauri/target/staging-release/Info.plist"
+    mkdir -p "$(dirname "$STAGING_INFO_PLIST")"
+    cat > "$STAGING_INFO_PLIST" <<'PLIST'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>CFBundleDisplayName</key>
+        <string>Buzz Staging</string>
+        <key>CFBundleName</key>
+        <string>Buzz Staging</string>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>Buzz Staging needs microphone access for voice huddles.</string>
+        <key>NSCameraUsageDescription</key>
+        <string>Buzz Staging needs camera access to record animated avatars.</string>
+    </dict>
+    </plist>
+    PLIST
+    STAGING_CONFIG='{ "productName": "Buzz Staging", "identifier": "xyz.block.buzz.app.staging", "bundle": { "macOS": { "infoPlist": "target/staging-release/Info.plist" } } }'
+    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    cd {{desktop_dir}}
+    pnpm tauri build ${FEATURES[@]+"${FEATURES[@]}"} --config "$STAGING_CONFIG"
+    APP_PATH="src-tauri/target/release/bundle/macos/Buzz Staging.app"
+    if [[ ! -d "$APP_PATH" ]]; then
+        APP_PATH=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Buzz Staging.app' -type d | head -1)
+    fi
+    if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
+        echo "Error: built app bundle not found under desktop/src-tauri/target/release/bundle/macos" >&2
+        exit 1
+    fi
+    open "$APP_PATH"
 
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
