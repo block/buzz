@@ -1811,9 +1811,16 @@ pub fn spawn_agent_child(
                 None
             };
 
-        // Always remove the key after user env has been written (above) so
-        // that a saved agent env var or an ambient parent-process value
-        // cannot forge or suppress setup mode.
+        // Strip the key from the process-spawned command on every path.
+        // Two independent guards protect the invariant:
+        //   1. BUZZ_ACP_SETUP_PAYLOAD is in RESERVED_ENV_KEYS, so
+        //      merged_user_env() can never write it via saved/persona env.
+        //   2. This env_remove() clears any ambient parent-process value
+        //      inherited by std::process::Command before we conditionally
+        //      set the desktop-computed trusted value below.
+        // Note: merged_user_env() is written further below in this function;
+        // ordering relative to that call is NOT what makes this safe — the
+        // reserved-key strip (guard 1) handles user env regardless of order.
         command.env_remove("BUZZ_ACP_SETUP_PAYLOAD");
 
         // Set the payload only when desktop computed NotReady.
