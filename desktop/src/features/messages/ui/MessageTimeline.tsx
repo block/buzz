@@ -7,6 +7,7 @@ import {
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
+import type { AgentConversationMarker } from "@/features/agents/agentConversations";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -28,6 +29,7 @@ export type MessageTimelineHandle = {
 };
 
 type MessageTimelineProps = {
+  agentConversationMarkers?: readonly AgentConversationMarker[];
   agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
   channelIntro?: ChannelIntro | null;
@@ -52,7 +54,10 @@ type MessageTimelineProps = {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
+  contentTopPadding?: "chrome" | "compact";
   isFetchingOlder?: boolean;
+  layoutShiftKey?: string | number | null;
+  messageListPlacement?: "bottom" | "top";
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
@@ -64,6 +69,10 @@ type MessageTimelineProps = {
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
+  onOpenAgentConversation?: (
+    message: TimelineMessage,
+    options?: { publishMarker?: boolean },
+  ) => void;
   onReply?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
@@ -85,6 +94,7 @@ type MessageTimelineProps = {
   searchMatchingMessageIds?: Set<string>;
   /** The current find-in-channel query string. */
   searchQuery?: string;
+  showInitialDayDivider?: boolean;
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
   /** Event id of the oldest unread top-level message at channel open, or null. */
@@ -93,6 +103,7 @@ type MessageTimelineProps = {
   unreadCount?: number;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  trailingContent?: React.ReactNode;
 };
 
 type ChannelIntroAction = {
@@ -137,6 +148,7 @@ const MessageTimelineBase = React.forwardRef<
   MessageTimelineProps
 >(function MessageTimeline(
   {
+    agentConversationMarkers,
     agentPubkeys,
     channelId,
     channelIntro = null,
@@ -149,8 +161,11 @@ const MessageTimelineBase = React.forwardRef<
     currentPubkey,
     fetchOlder,
     hasComposerOverlay = true,
+    contentTopPadding = "chrome",
     hasOlderMessages = true,
     isFetchingOlder = false,
+    layoutShiftKey = null,
+    messageListPlacement = "bottom",
     followThreadById,
     huddleMemberPubkeys,
     huddleMemberPubkeysPending = false,
@@ -163,6 +178,7 @@ const MessageTimelineBase = React.forwardRef<
     onEdit,
     onMarkUnread,
     onMarkRead,
+    onOpenAgentConversation,
     onReply,
     channelName,
     channelType,
@@ -174,11 +190,13 @@ const MessageTimelineBase = React.forwardRef<
     searchActiveMessageId = null,
     searchMatchingMessageIds,
     searchQuery,
+    showInitialDayDivider = true,
     targetMessageId = null,
     onTargetReached,
     firstUnreadMessageId = null,
     unreadCount = 0,
     threadUnreadCounts,
+    trailingContent,
   }: MessageTimelineProps,
   ref,
 ) {
@@ -215,15 +233,16 @@ const MessageTimelineBase = React.forwardRef<
     liveSnapshot,
   });
   const isRenderPending = deferredSnapshot !== liveSnapshot;
+  const scrollRouteKey = `${channelId ?? "none"}:${layoutShiftKey ?? "none"}`;
   const scrollRestorationId = targetMessageId
-    ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
-    : `message-timeline:${channelId ?? "none"}`;
+    ? `message-timeline:${scrollRouteKey}:target:${targetMessageId}`
+    : `message-timeline:${scrollRouteKey}`;
   // Keep the scroll node's DOM lifetime scoped to a channel. TanStack Router's
   // scroll-restoration listener runs outside React and may write a saved
   // scrollTop into the current scroll element during navigation; reusing the
   // same node across channel routes can leave the newly-loaded message list
   // painted at a stale offset until the user's next scroll event forces layout.
-  const scrollContainerDomKey = channelId ?? "none";
+  const scrollContainerDomKey = scrollRouteKey;
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
@@ -246,6 +265,7 @@ const MessageTimelineBase = React.forwardRef<
     isLoading: showTimelineSkeleton,
     messages: deferredMessages,
     onTargetReached,
+    resetKey: scrollRouteKey,
     scrollContainerRef,
     targetMessageId,
   });
@@ -404,7 +424,7 @@ const MessageTimelineBase = React.forwardRef<
         <div
           className={cn(
             "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-none px-2 pt-1",
-            hasComposerOverlay ? "pb-24" : "pb-4",
+            hasComposerOverlay ? "pb-40" : "pb-4",
           )}
           data-scroll-restoration-id={scrollRestorationId}
           data-testid="message-timeline"
@@ -415,7 +435,9 @@ const MessageTimelineBase = React.forwardRef<
           <div
             className={cn(
               "flex w-full flex-col gap-2",
-              channelChrome.contentPadding,
+              contentTopPadding === "chrome"
+                ? channelChrome.contentPadding
+                : "pt-2",
               (showIntro || showGenericEmpty || showMessageList) &&
                 "min-h-full",
             )}
@@ -432,9 +454,13 @@ const MessageTimelineBase = React.forwardRef<
 
             <div
               className={cn(
-                "flex min-h-[18rem] min-w-0 flex-col gap-2",
+                "flex min-w-0 flex-col gap-2",
+                messageListPlacement === "bottom" ? "min-h-[18rem]" : "min-h-0",
                 (showIntro || showGenericEmpty) && "min-h-full",
-                showMessageList && !showIntro && "mt-auto",
+                showMessageList &&
+                  !showIntro &&
+                  messageListPlacement === "bottom" &&
+                  "mt-auto",
               )}
             >
               {showTimelineSkeleton ? (
@@ -570,10 +596,16 @@ const MessageTimelineBase = React.forwardRef<
 
               {showMessageList ? (
                 <div
-                  className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
+                  className={cn(
+                    "flex flex-col gap-2",
+                    !showIntro &&
+                      messageListPlacement === "bottom" &&
+                      "mt-auto",
+                  )}
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
+                    agentConversationMarkers={agentConversationMarkers}
                     key={scrollContainerDomKey}
                     agentPubkeys={agentPubkeys}
                     channelId={channelId}
@@ -596,6 +628,7 @@ const MessageTimelineBase = React.forwardRef<
                     onEdit={onEdit}
                     onMarkUnread={onMarkUnread}
                     onMarkRead={onMarkRead}
+                    onOpenAgentConversation={onOpenAgentConversation}
                     onReply={onReply}
                     isSendingVideoReviewComment={isSendingVideoReviewComment}
                     onSendVideoReviewComment={onSendVideoReviewComment}
@@ -605,9 +638,11 @@ const MessageTimelineBase = React.forwardRef<
                     searchActiveMessageId={searchActiveMessageId}
                     searchMatchingMessageIds={searchMatchingMessageIds}
                     searchQuery={searchQuery}
+                    showInitialDayDivider={showInitialDayDivider}
                     threadUnreadCounts={threadUnreadCounts}
                     unfollowThreadById={unfollowThreadById}
                   />
+                  {trailingContent}
                 </div>
               ) : null}
             </div>

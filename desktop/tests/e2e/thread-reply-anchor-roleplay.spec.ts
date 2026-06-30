@@ -136,18 +136,6 @@ async function openThread(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 }
 
-async function expandReply(
-  page: import("@playwright/test").Page,
-  replyId: string,
-) {
-  const replies = page
-    .getByTestId("message-thread-replies")
-    .getByTestId("message-row");
-  const before = await replies.count();
-  await page.locator(`[data-thread-head-id="${replyId}"]`).click();
-  await expect.poll(() => replies.count()).toBeGreaterThan(before);
-}
-
 async function screenshotThreadPanel(
   page: import("@playwright/test").Page,
   path: string,
@@ -160,7 +148,7 @@ async function screenshotThreadPanel(
 }
 
 test.describe("thread reply anchor A/B roleplay screenshots", () => {
-  test("01-baseline-human-reply-nests-agent-at-depth-2", async ({ page }) => {
+  test("01-baseline-human-reply-flattens-agent-in-panel", async ({ page }) => {
     await setupRoleplayChannel(page);
 
     const now = Math.floor(Date.now() / 1000);
@@ -186,8 +174,8 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
       },
     );
 
-    // Baseline queue.rs anchored the agent response to the triggering human
-    // reply, producing depth 2 under Nora's message.
+    // Even when an older agent response is anchored to the triggering human
+    // reply, the thread panel now renders the whole thread as a flat list.
     await emitMockMessage(
       page,
       CHANNEL,
@@ -201,15 +189,14 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     );
 
     await openThread(page);
-    await expandReply(page, humanReply.id);
     await expect(page.getByText("Nora: adding context")).toBeVisible();
     await expect(page.getByText("Pinky: Got it")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
-    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(1);
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(0);
 
-    await screenshotThreadPanel(page, `${SHOTS}/01-baseline-depth-2.png`);
+    await screenshotThreadPanel(page, `${SHOTS}/01-baseline-flat.png`);
   });
 
   test("02-patched-human-reply-flattens-agent-at-root", async ({ page }) => {
@@ -300,7 +287,7 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     await screenshotThreadPanel(page, `${SHOTS}/03-top-level-human-root.png`);
   });
 
-  test("04-agent-only-branch-keeps-deeper-nesting", async ({ page }) => {
+  test("04-agent-only-branch-flattens-in-panel", async ({ page }) => {
     await setupRoleplayChannel(page);
 
     const now = Math.floor(Date.now() / 1000);
@@ -338,14 +325,13 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     );
 
     await openThread(page);
-    await expandReply(page, brainReply.id);
     await expect(page.getByText("Brain: Check the anchor")).toBeVisible();
     await expect(page.getByText("Pinky: Good catch")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
-    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(1);
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(0);
 
-    await screenshotThreadPanel(page, `${SHOTS}/04-agent-only-nested.png`);
+    await screenshotThreadPanel(page, `${SHOTS}/04-agent-only-flat.png`);
   });
 });

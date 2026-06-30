@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectAgentConversationMarkerReferenceIds,
   collectAuxEventIdsForDeletionBackfill,
   collectMessageIdsForAuxBackfill,
   mergeAuxEventsWithDeletionBackfill,
@@ -57,6 +58,45 @@ test("excludes auxiliary kinds (reactions, edits, deletions)", () => {
 test("returns empty for a window of only auxiliary events", () => {
   const events = [event(hex("2"), 7), event(hex("3"), 40003)];
   assert.deepEqual(collectMessageIdsForAuxBackfill(events), []);
+});
+
+test("collects task marker references from loaded timeline replies", () => {
+  const rootId = hex("1");
+  const parentId = hex("2");
+  const replyId = hex("3");
+  const events = [
+    event(replyId, 9, {
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", rootId, "", "root"],
+        ["e", parentId, "", "reply"],
+      ],
+    }),
+  ];
+
+  assert.deepEqual(collectAgentConversationMarkerReferenceIds(events), [
+    replyId,
+    rootId,
+    parentId,
+  ]);
+});
+
+test("skips non-content events when collecting task marker references", () => {
+  const messageId = hex("1");
+  const markerId = hex("2");
+  const events = [
+    event(messageId, 9),
+    event(markerId, 40004, {
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", messageId, "", "root"],
+      ],
+    }),
+  ];
+
+  assert.deepEqual(collectAgentConversationMarkerReferenceIds(events), [
+    messageId,
+  ]);
 });
 
 test("collects reaction and edit ids for deletion-marker backfill", () => {

@@ -4,8 +4,8 @@ import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize
 
 /**
  * Observes the height of the composer overlay and sets the scroll
- * container's `paddingBottom` to match, so content is never hidden
- * behind the absolutely-positioned composer.
+ * container's `paddingBottom` to match, plus optional extra breathing room, so
+ * content is never hidden behind the absolutely-positioned composer.
  *
  * If the user is already scrolled to the bottom when padding increases,
  * auto-scrolls to keep them at the bottom (no visible gap).
@@ -14,6 +14,7 @@ export function useComposerHeightPadding(
   scrollContainerRef: React.RefObject<HTMLElement | null>,
   composerRef: React.RefObject<HTMLElement | null>,
   resetKey?: unknown,
+  extraPaddingPx = 0,
 ) {
   React.useEffect(() => {
     void resetKey;
@@ -35,7 +36,7 @@ export function useComposerHeightPadding(
     let lastPadding: number | null = null;
 
     const applyPadding = (height: number) => {
-      const padding = Math.ceil(height);
+      const padding = Math.ceil(height + extraPaddingPx);
       if (lastPadding !== null && Math.abs(padding - lastPadding) <= 1) {
         return;
       }
@@ -60,5 +61,5 @@ export function useComposerHeightPadding(
       disconnect();
       scrollEl.style.paddingBottom = "";
     };
-  }, [scrollContainerRef, composerRef, resetKey]);
+  }, [scrollContainerRef, composerRef, resetKey, extraPaddingPx]);
 }

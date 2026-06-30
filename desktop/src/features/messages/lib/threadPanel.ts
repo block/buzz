@@ -315,70 +315,58 @@ export function hasNestedThreadBranches(entries: readonly MainTimelineEntry[]) {
   );
 }
 
-function appendExpandedReplies(params: {
-  entries: MainTimelineEntry[];
-  parentId: string;
-  depth: number;
-  directChildrenByParentId: Map<string, TimelineMessage[]>;
-  descendantStatsByMessageId: Map<string, ThreadDescendantStats>;
-  expandedReplyIds: ReadonlySet<string>;
-}) {
-  const {
-    entries,
-    parentId,
-    depth,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  } = params;
-  const directReplies = directChildrenByParentId.get(parentId) ?? [];
-
-  for (const reply of directReplies) {
-    const isExpanded = expandedReplyIds.has(reply.id);
-    entries.push({
-      message: normalizeInlineReplyMessage(reply, depth),
-      summary: isExpanded
-        ? null
-        : buildSummaryForDirectReplies(reply.id, descendantStatsByMessageId),
-    });
-
-    if (isExpanded) {
-      appendExpandedReplies({
-        entries,
-        parentId: reply.id,
-        depth: depth + 1,
-        directChildrenByParentId,
-        descendantStatsByMessageId,
-        expandedReplyIds,
-      });
-    }
+function isDescendantOfMessage(
+  message: TimelineMessage,
+  ancestorId: string,
+  messageById: Map<string, TimelineMessage>,
+) {
+  if (message.id === ancestorId) {
+    return false;
   }
+
+  if (message.rootId === ancestorId || message.parentId === ancestorId) {
+    return true;
+  }
+
+  let parentId = message.parentId ?? null;
+  let hops = 0;
+  const maxHops = messageById.size + 1;
+  while (parentId && hops < maxHops) {
+    if (parentId === ancestorId) {
+      return true;
+    }
+
+    parentId = messageById.get(parentId)?.parentId ?? null;
+    hops += 1;
+  }
+
+  return false;
 }
 
 function buildVisibleThreadReplies(params: {
   openThreadHeadId: string;
-  directChildrenByParentId: Map<string, TimelineMessage[]>;
-  descendantStatsByMessageId: Map<string, ThreadDescendantStats>;
-  expandedReplyIds: ReadonlySet<string>;
+  messageById: Map<string, TimelineMessage>;
 }) {
-  const {
-    openThreadHeadId,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  } = params;
-  const entries: MainTimelineEntry[] = [];
+  const { openThreadHeadId, messageById } = params;
 
-  appendExpandedReplies({
-    entries,
-    parentId: openThreadHeadId,
-    depth: 1,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
-  });
+  return [...messageById.values()]
+    .map((message, index) => ({ index, message }))
+    .filter(({ message }) =>
+      isDescendantOfMessage(message, openThreadHeadId, messageById),
+    )
+    .sort((left, right) => {
+      if (left.message.createdAt !== right.message.createdAt) {
+        return left.message.createdAt - right.message.createdAt;
+      }
 
-  return entries;
+      return left.index - right.index;
+    })
+    .map(
+      ({ message }): MainTimelineEntry => ({
+        message: normalizeInlineReplyMessage(message, 1),
+        summary: null,
+      }),
+    );
 }
 
 export function buildMainTimelineEntries(
@@ -428,7 +416,7 @@ export function buildThreadPanelDataFromIndex(
   index: ThreadPanelIndex,
   openThreadHeadId: string | null,
   threadReplyTargetId: string | null,
-  expandedReplyIds: ReadonlySet<string>,
+  _expandedReplyIds: ReadonlySet<string>,
 ): ThreadPanelData {
   if (!openThreadHeadId) {
     return {
@@ -439,8 +427,7 @@ export function buildThreadPanelDataFromIndex(
     };
   }
 
-  const { directChildrenByParentId, descendantStatsByMessageId, messageById } =
-    index;
+  const { descendantStatsByMessageId, messageById } = index;
   const threadHead = messageById.get(openThreadHeadId) ?? null;
 
   if (!threadHead) {
@@ -455,9 +442,7 @@ export function buildThreadPanelDataFromIndex(
   const normalizedThreadHead = normalizeHeadMessage(threadHead);
   const visibleReplies = buildVisibleThreadReplies({
     openThreadHeadId,
-    directChildrenByParentId,
-    descendantStatsByMessageId,
-    expandedReplyIds,
+    messageById,
   });
 
   const replyTargetInBranch =

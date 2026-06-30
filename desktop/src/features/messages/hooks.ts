@@ -126,6 +126,7 @@ export function createOptimisticMessage(
   mentionPubkeys: string[] = [],
   parentEventId: string | null = null,
   mediaTags: string[][] = [],
+  clientTags: string[][] = [],
 ): RelayEvent {
   const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
@@ -152,6 +153,9 @@ export function createOptimisticMessage(
   }
 
   for (const tag of mediaTags) {
+    tags.push(tag);
+  }
+  for (const tag of clientTags) {
     tags.push(tag);
   }
 
@@ -248,6 +252,7 @@ export function useChannelSubscription(channel: Channel | null) {
       channelMessagesKey(channelId),
       (current = []) => mergeTimelineCacheMessages(current, event),
     );
+    void backfillAuxForMessages(queryClient, channelId, [event]);
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {
       try {
@@ -341,10 +346,12 @@ export function useSendMessageMutation(
       mentionPubkeys?: string[];
       parentEventId?: string | null;
       mediaTags?: string[][];
+      clientTags?: string[][];
     },
     MessageQueryContext | undefined
   >({
     mutationFn: async ({
+      clientTags,
       content,
       mentionPubkeys,
       parentEventId,
@@ -371,7 +378,12 @@ export function useSendMessageMutation(
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
-      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
+      if (
+        parentEventId ||
+        imetaTags.length > 0 ||
+        emojiTags.length > 0 ||
+        (clientTags?.length ?? 0) > 0
+      ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(channel.id),
@@ -385,6 +397,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          clientTags,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -423,6 +436,7 @@ export function useSendMessageMutation(
             ...imetaTags,
             ...emojiTags,
             ...mentionTags,
+            ...(clientTags ?? []),
           ],
           content: content.trim(),
           sig: "",
@@ -436,7 +450,13 @@ export function useSendMessageMutation(
         mentionTags,
       );
     },
-    onMutate: async ({ content, mentionPubkeys, parentEventId, mediaTags }) => {
+    onMutate: async ({
+      clientTags,
+      content,
+      mentionPubkeys,
+      parentEventId,
+      mediaTags,
+    }) => {
       if (!channel || !identity || channel.channelType === "forum") {
         return undefined;
       }
@@ -454,6 +474,7 @@ export function useSendMessageMutation(
         mentionPubkeys ?? [],
         parentEventId ?? null,
         mediaTags ?? [],
+        clientTags ?? [],
       );
 
       queryClient.setQueryData<RelayEvent[]>(

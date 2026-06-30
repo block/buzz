@@ -40,6 +40,8 @@ type UseAnchoredScrollOptions = {
   contentRef: React.RefObject<HTMLDivElement | null>;
   /** Resets when changed; lets us drop anchor + scroll state across channels. */
   channelId?: string | null;
+  /** Resets when changed; includes channel plus route-specific layout state. */
+  resetKey?: string | null;
   /** Suppresses initial scroll-to-bottom while a skeleton is showing. */
   isLoading: boolean;
   /** Source of truth for the rendered list. Used to detect new-at-bottom
@@ -145,6 +147,7 @@ export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
   channelId,
+  resetKey = channelId ?? null,
   isLoading,
   messages,
 
@@ -181,10 +184,10 @@ export function useAnchoredScroll({
   // guard runs on a native scroll event, outside React's render cycle.
   const settlingRef = React.useRef(false);
 
-  // Reset everything when the channel changes — the layout effect that runs
-  // immediately after this reset is responsible for either jumping to bottom
-  // or to the target message for the new channel.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is intentionally the sole trigger — we want this effect to fire exactly when the channel changes (and on mount).
+  // Reset everything when the route's scroll identity changes — the layout
+  // effect that runs immediately after this reset is responsible for either
+  // jumping to bottom or to the target message for the new view.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetKey is intentionally the sole trigger — it includes channel identity plus route-specific layout state.
   React.useLayoutEffect(() => {
     anchorRef.current = { kind: "at-bottom" };
     setIsAtBottom(true);
@@ -205,7 +208,7 @@ export function useAnchoredScroll({
       cancelAnimationFrame(mountPinRafIdRef.current);
       mountPinRafIdRef.current = null;
     }
-  }, [channelId]);
+  }, [resetKey]);
 
   const scrollToBottomImperative = React.useCallback(
     (behavior: ScrollBehavior = "auto") => {
@@ -454,7 +457,7 @@ export function useAnchoredScroll({
   // mid-history, native scroll anchoring (overflow-anchor) holds the reading
   // row across the reflow, so there's nothing to do.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on a channel switch the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous channel's detached node and re-observe the live one.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetKey is a deliberate re-subscription trigger — the effect body reads only the stable refs, but on route identity changes the keyed scroll container remounts and contentRef.current becomes a fresh node, so the observer must disconnect from the previous route's detached node and re-observe the live one.
   React.useEffect(() => {
     const content = contentRef.current;
     if (!content || typeof ResizeObserver === "undefined") return;
@@ -467,7 +470,7 @@ export function useAnchoredScroll({
     });
     observer.observe(content);
     return () => observer.disconnect();
-  }, [channelId, contentRef, scrollContainerRef]);
+  }, [resetKey, contentRef, scrollContainerRef]);
 
   // ---------------------------------------------------------------------------
   // Target message handling (deep link, jump-to-reply, etc.). Distinct from

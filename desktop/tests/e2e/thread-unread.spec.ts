@@ -91,24 +91,6 @@ function unreadTimestamp() {
 // dot without the user having to participate in the thread first.
 const SELF_PUBKEY = "deadbeef".repeat(8);
 
-// Nested replies are collapsed behind a summary row that carries the parent's
-// id (data-thread-head-id). Expanding one level renders that reply's direct
-// children, so the rendered count MUST grow after the click — asserting that
-// ties the test to genuine rendered depth: a no-op expansion fails here rather
-// than passing silently. A level can reveal several children at once (a
-// branch), so the check is "grew", not "grew by one".
-async function expandReply(
-  page: import("@playwright/test").Page,
-  replyId: string,
-) {
-  const replies = page
-    .getByTestId("message-thread-replies")
-    .getByTestId("message-row");
-  const before = await replies.count();
-  await page.locator(`[data-thread-head-id="${replyId}"]`).click();
-  await expect.poll(() => replies.count()).toBeGreaterThan(before);
-}
-
 test.describe("thread unread indicator", () => {
   test("01-thread-unread-badge", async ({ page }) => {
     await installMockBridge(page);
@@ -277,9 +259,8 @@ test.describe("thread unread indicator", () => {
     await waitForMockLiveSubscription(page, "general");
 
     // Build a genuinely nested branch by chaining parentEventId: each reply's
-    // id becomes the next reply's parent, so threadPanel increments depth per
-    // level and renders progressive indentation. The first three levels are
-    // dated in the past — they are the "already read" structure.
+    // id becomes the next reply's parent. The panel now presents that whole
+    // thread as a flat list, while unread counting still walks the subtree.
     const past = Math.floor(Date.now() / 1000) - 60;
     const r1 = await emitMockMessage(
       page,
@@ -313,15 +294,15 @@ test.describe("thread unread indicator", () => {
       createdAt: past + 3,
     });
 
-    // Open the thread on the welcome root, expand the read structure
-    // (r1 → r2; r3 is a leaf until r4/r5 arrive), then close. This sets the
-    // read frontier over everything that currently exists.
+    // Open the thread on the welcome root, then close. The flat panel marks the
+    // currently visible descendants read.
     const summary = page.getByTestId("message-thread-summary").first();
     await expect(summary).toBeVisible();
     await summary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expandReply(page, r1.id);
-    await expandReply(page, r2.id);
+    await expect(
+      page.getByTestId("message-thread-replies").getByTestId("message-row"),
+    ).toHaveCount(4);
     await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
@@ -342,63 +323,30 @@ test.describe("thread unread indicator", () => {
       createdAt: base + 1,
     });
 
-    // Switch back, open the thread, and expand every level down to the
-    // unread tail. Each expandReply asserts a row appeared, so green here
-    // means the nesting genuinely rendered — not just that a divider exists.
+    // Switch back and open the thread. All descendants, including the unread
+    // tail, should be visible without expanding nested branches.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expandReply(page, r1.id);
-    await expandReply(page, r2.id);
-    await expandReply(page, r3.id);
-    await expandReply(page, r4.id);
 
     // Fully expanded: r1, r2, sibling, r3, r4, r5 — six rendered replies.
     const replies = page
       .getByTestId("message-thread-replies")
       .getByTestId("message-row");
     await expect(replies).toHaveCount(6);
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(0);
+    await expect(page.getByTestId("thread-collapse-guide")).toHaveCount(0);
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByTestId("message-thread-summary"),
+    ).toHaveCount(0);
 
     const divider = page.getByTestId("message-unread-divider");
     await expect(divider).toBeVisible();
     await divider.scrollIntoViewIfNeeded();
     await page.waitForTimeout(300);
-
-    const panel = page.getByTestId("message-thread-panel");
-    await page.getByTestId("message-thread-head").scrollIntoViewIfNeeded();
-    await expect(
-      panel.locator(
-        `[data-testid="thread-collapse-rail"][data-thread-head-id="mock-general-welcome"]`,
-      ),
-    ).toHaveCount(0);
-    await expect(
-      panel.locator(
-        `[data-testid="thread-collapse-guide"][data-thread-head-id="mock-general-welcome"]`,
-      ),
-    ).toHaveCount(0);
-
-    await page
-      .locator(
-        `[data-testid="thread-collapse-guide"][data-thread-head-id="${r1.id}"]`,
-      )
-      .first()
-      .click();
-    await expect(replies).toHaveCount(1);
-    await expect(
-      page
-        .getByTestId("message-thread-replies")
-        .locator(
-          `[data-testid="message-thread-summary"][data-thread-head-id="${r1.id}"]`,
-        ),
-    ).toBeVisible();
-    await expect(
-      page
-        .getByTestId("message-thread-replies")
-        .locator(
-          `[data-testid="thread-collapse-rail"][data-thread-head-id="${r1.id}"]`,
-        ),
-    ).toHaveCount(0);
   });
 
   test("05-thread-in-panel-subtree-badge", async ({ page }) => {
@@ -410,9 +358,7 @@ test.describe("thread unread indicator", () => {
     await waitForMockLiveSubscription(page, "general");
 
     // A branch p (with a child c) plus a leaf sibling of p, all dated in the
-    // past so they form the "already read" structure. p keeps a child, so its
-    // in-panel row renders as a collapsible summary that can carry a subtree
-    // badge; the leaf sibling proves the panel shows other rows too.
+    // past so they form the "already read" structure.
     const past = Math.floor(Date.now() / 1000) - 60;
     const p = await emitMockMessage(page, "general", "Branch parent", {
       parentEventId: "mock-general-welcome",
@@ -431,8 +377,7 @@ test.describe("thread unread indicator", () => {
     });
 
     // Open the thread to snapshot the read frontier over the existing
-    // structure, then close. p stays collapsed — its summary row must remain a
-    // collapsed branch for the subtree badge to render.
+    // structure, then close.
     const summary = page.getByTestId("message-thread-summary").first();
     await expect(summary).toBeVisible();
     await summary.click();
@@ -440,8 +385,7 @@ test.describe("thread unread indicator", () => {
     await page.getByTestId("auxiliary-panel-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
-    // Switch away, then emit two unread replies deep under p (children of c) —
-    // p's subtree gains unread descendants while p itself stays collapsed.
+    // Switch away, then emit two unread replies deep under p (children of c).
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
@@ -462,44 +406,39 @@ test.describe("thread unread indicator", () => {
       createdAt: base + 1,
     });
 
-    // Switch back and open the panel WITHOUT expanding p. The collapsed p row
-    // must show its subtree unread count (the two unread descendants).
+    // Switch back. The root summary still counts unread descendants even
+    // though the panel will render them flat.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
+    const rootBadge = page
+      .getByTestId("message-thread-summary")
+      .first()
+      .getByTestId("thread-unread-badge");
+    await expect(rootBadge).toContainText("2");
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
-    // p renders as a collapsed summary row (it has a child); the sibling is a
-    // leaf and renders as a plain row, not a summary. Gate on p's summary row
-    // first — green here means the branch genuinely rendered, so the badge
-    // assertion below is read off a real collapsed row, not an empty panel.
-    const inPanelSummaries = page
+    const replies = page
       .getByTestId("message-thread-replies")
-      .getByTestId("message-thread-summary");
-    await expect(inPanelSummaries).toHaveCount(1);
-
-    // Scope to message-thread-replies: this is the in-panel per-branch badge,
-    // NOT the depth-0 channel-timeline badge that lives outside the container.
-    // Against pre-2.5 code the in-panel badge was hard-0, so this fails there.
-    const inPanelBadge = page
-      .getByTestId("message-thread-replies")
-      .getByTestId("thread-unread-badge");
-    await expect(inPanelBadge).toBeVisible();
-    await expect(inPanelBadge).toContainText("2");
-
-    // v3 contract: expanding a branch marks only its REVEALED direct children
-    // read, never the whole subtree. The unread replies sit two levels under p
-    // (p -> c -> c2 -> c2-child), so a single expand of p only reveals c — the
-    // deeper unread stays collapsed and the badge survives. The badge clears
-    // only as each level is individually revealed: expand p (reveals c, badge
-    // still counts c2 + c2-child), expand c (reveals c2, read), expand c2
-    // (reveals c2-child, read) -> badge clears to 0.
-    await expandReply(page, p.id);
-    await expect(inPanelBadge).toBeVisible();
-
-    await expandReply(page, c.id);
-    await expandReply(page, c2.id);
-    await expect(inPanelBadge).toHaveCount(0);
+      .getByTestId("message-row");
+    await expect(replies).toHaveCount(5);
+    await expect(
+      page.getByText("Unread under the branch", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Another unread under the branch"),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByTestId("message-thread-summary"),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByTestId("thread-unread-badge"),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("message-unread-divider")).toBeVisible();
   });
 
   test("06-in-panel-badge-bumps-on-live-reply", async ({ page }) => {
@@ -510,8 +449,7 @@ test.describe("thread unread indicator", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
 
-    // Collapsed branch p with one read child, plus an unread descendant so the
-    // in-panel subtree badge starts at a known count.
+    // Branch p with one read child, plus an unread descendant.
     const past = Math.floor(Date.now() / 1000) - 60;
     const p = await emitMockMessage(page, "general", "Branch parent", {
       parentEventId: "mock-general-welcome",
@@ -541,28 +479,32 @@ test.describe("thread unread indicator", () => {
       createdAt: base,
     });
 
-    // Reopen WITHOUT expanding p: badge shows the single unread descendant.
+    // Reopen. The unread descendant is visible directly in the flat panel.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
-    const inPanelBadge = page
-      .getByTestId("message-thread-replies")
-      .getByTestId("thread-unread-badge");
-    await expect(inPanelBadge).toBeVisible();
-    await expect(inPanelBadge).toContainText("1");
+    await expect(page.getByText("First unread under branch")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByTestId("thread-unread-badge"),
+    ).toHaveCount(0);
 
-    // A live reply from another author lands under the open, collapsed branch.
-    // The live root marker did NOT advance (panel open ≠ branch expanded), so
-    // the badge must bump to 2 on the same tick — readStateVersion-driven
-    // recompute is what makes this fire live rather than on a later re-render.
+    // A live reply from another author lands under the open thread and appears
+    // as another flat reply instead of bumping an in-panel branch badge.
     await emitMockMessage(page, "general", "Second unread under branch", {
       parentEventId: c.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: base + 1,
     });
-    await expect(inPanelBadge).toContainText("2");
+    await expect(page.getByText("Second unread under branch")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByTestId("thread-unread-badge"),
+    ).toHaveCount(0);
   });
 
   test("07-expand-clears-own-branch-badge-sibling-survives", async ({
@@ -575,7 +517,7 @@ test.describe("thread unread indicator", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await waitForMockLiveSubscription(page, "general");
 
-    // Two collapsed sibling branches, each with one read child. branchOld will
+    // Two sibling branches, each with one read child. branchOld will
     // gain a chronologically EARLIER unread reply; branchNew a LATER one.
     const past = Math.floor(Date.now() / 1000) - 120;
     const branchOld = await emitMockMessage(page, "general", "Older branch", {
@@ -611,11 +553,7 @@ test.describe("thread unread indicator", () => {
 
     // Each branch gains its own unread reply, nested one level under the
     // branch's child (branchNew -> newChild -> unread; branchOld -> oldChild ->
-    // unread). Under the v3 per-message contract, expanding a branch marks only
-    // its REVEALED direct children read — so revealing newChild does NOT reach
-    // the unread reply beneath it. Clearing a branch's badge requires expanding
-    // down to the level the unread actually sits at; the sibling branch is
-    // never touched, so its badge survives independently.
+    // unread).
     const base = unreadTimestamp();
     await emitMockMessage(page, "general", "Unread in older branch", {
       parentEventId: oldChild.id,
@@ -630,29 +568,26 @@ test.describe("thread unread indicator", () => {
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
+    const rootBadge = page
+      .getByTestId("message-thread-summary")
+      .first()
+      .getByTestId("thread-unread-badge");
+    await expect(rootBadge).toContainText("2");
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
-    // Both collapsed branches carry an unread badge before any expand.
-    const inPanelBadges = page
+    const replies = page
       .getByTestId("message-thread-replies")
-      .getByTestId("thread-unread-badge");
-    await expect(inPanelBadges).toHaveCount(2);
-
-    // Expand the LATER branch down to where its unread sits: revealing
-    // branchNew shows newChild (still collapsed over the unread reply, so the
-    // badge survives), then revealing newChild marks the unread reply read and
-    // clears branchNew's badge. The older sibling is never expanded, so its
-    // badge survives — per-message markers isolate each branch.
-    await expandReply(page, branchNew.id);
-    await expect(inPanelBadges).toHaveCount(2);
-    await expandReply(page, newChild.id);
-    await expect(inPanelBadges).toHaveCount(1);
-
-    // Expanding the older branch to its unread depth clears the last badge.
-    await expandReply(page, branchOld.id);
-    await expandReply(page, oldChild.id);
-    await expect(inPanelBadges).toHaveCount(0);
+      .getByTestId("message-row");
+    await expect(replies).toHaveCount(6);
+    await expect(page.getByText("Unread in older branch")).toBeVisible();
+    await expect(page.getByText("Unread in newer branch")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByTestId("thread-unread-badge"),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(0);
   });
 
   // Regression guard for the Option-1 channel-marker fix: viewing a channel
@@ -858,15 +793,9 @@ test.describe("thread unread indicator", () => {
   // Regression guard for the mention-gate + subtree-count fixes. The viewer is
   // a pure MENTION RECIPIENT of a nested reply in a thread they never authored,
   // participated in, or followed: root `mock-general-alice` (Alice-authored) ->
-  // reply A (Alice) -> reply B (Alice, @-mentions self). This fails pre-fix on
-  // TWO independent defects:
-  //   1. The badge gate `isNotifiedForThread` had no mention term, so a
-  //      recipient who never participated/authored/followed gated false and the
-  //      badge never appeared at all.
-  //   2. `computeThreadBadgeCounts` counted only the root's DIRECT children, so
-  //      the nested mention reply B (under A) was never tallied toward the root.
-  // After the gate fix the badge appears but undercounts (1, missing B); only
-  // after the subtree-count fix does it reach 2. Asserting `2` gates both.
+  // reply A (Alice) -> reply B (Alice, @-mentions self). The root badge must
+  // count the whole unread subtree, while opening the flat thread panel should
+  // reveal and mark both replies read without branch expansion.
   test("14-mention-only-nested-thread-badge", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
@@ -911,17 +840,13 @@ test.describe("thread unread indicator", () => {
     await expect(badge).toBeVisible();
     await expect(badge).toContainText("2");
 
-    // v3 contract: opening a thread marks only its REVEALED direct children
-    // read, never the whole subtree. Opening Alice's thread reveals direct
-    // child A (read), but nested mention B stays collapsed under A — so the
-    // root badge drops to 1, not 0. Expanding A reveals B, marks it read, and
-    // clears the badge. The badge predicate reads the live per-message marker,
-    // not a subtree-max open ceiling.
     await aliceSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expect(badge).toContainText("1");
-
-    await expandReply(page, replyA?.id ?? "");
+    await expect(page.getByText("Reply A (depth 1)")).toBeVisible();
+    await expect(
+      page.getByText("Reply B mentioning you (depth 2)"),
+    ).toBeVisible();
+    await expect(page.getByTestId("thread-collapse-rail")).toHaveCount(0);
     await expect(badge).toHaveCount(0);
 
     await page.getByTestId("auxiliary-panel-close").click();

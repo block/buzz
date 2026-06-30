@@ -1,7 +1,10 @@
 import * as React from "react";
 
-import type { TimelineMessage } from "@/features/messages/types";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
+import type {
+  TimelineMessage,
+  TimelineReaction,
+} from "@/features/messages/types";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -41,6 +44,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
+const AGENT_STATUS_REACTION_EMOJIS = new Set(["👀", "💬"]);
 
 export type ThreadDepthGuideAction = {
   active?: boolean;
@@ -48,6 +52,66 @@ export type ThreadDepthGuideAction = {
   label: string;
   message: TimelineMessage;
 };
+
+function stripAgentStatusReactionUsers(
+  reaction: TimelineReaction,
+  agentPubkeys: ReadonlySet<string>,
+): TimelineReaction | null {
+  if (!AGENT_STATUS_REACTION_EMOJIS.has(reaction.emoji)) {
+    return reaction;
+  }
+
+  const remainingUsers = reaction.users.filter(
+    (user) => !agentPubkeys.has(normalizePubkey(user.pubkey)),
+  );
+  const removedCount = reaction.users.length - remainingUsers.length;
+  if (removedCount <= 0) {
+    return reaction;
+  }
+
+  const nextCount = Math.max(0, reaction.count - removedCount);
+  if (nextCount === 0) {
+    return null;
+  }
+
+  return {
+    ...reaction,
+    count: nextCount,
+    users: remainingUsers,
+  };
+}
+
+function stripAgentStatusReactions(
+  message: TimelineMessage,
+  agentPubkeys: ReadonlySet<string>,
+) {
+  if (!message.reactions?.length || agentPubkeys.size === 0) {
+    return message;
+  }
+
+  let didChange = false;
+  const reactions = message.reactions
+    .map((reaction) => {
+      const nextReaction = stripAgentStatusReactionUsers(
+        reaction,
+        agentPubkeys,
+      );
+      if (nextReaction !== reaction) {
+        didChange = true;
+      }
+      return nextReaction;
+    })
+    .filter((reaction): reaction is TimelineReaction => reaction !== null);
+
+  if (!didChange) {
+    return message;
+  }
+
+  return {
+    ...message,
+    reactions: reactions.length > 0 ? reactions : undefined,
+  };
+}
 
 export const MessageRow = React.memo(
   function MessageRow({
@@ -77,6 +141,7 @@ export const MessageRow = React.memo(
     onFollowThread,
     onMarkUnread,
     onMarkRead,
+    onOpenAgentConversation,
     onToggleReaction,
     onReply,
     onUnfollowThread,
@@ -119,6 +184,10 @@ export const MessageRow = React.memo(
     onFollowThread?: (message: TimelineMessage) => void;
     onMarkUnread?: (message: TimelineMessage) => void;
     onMarkRead?: (message: TimelineMessage) => void;
+    onOpenAgentConversation?: (
+      message: TimelineMessage,
+      options?: { publishMarker?: boolean },
+    ) => void;
     onToggleReaction?: (
       message: TimelineMessage,
       emoji: string,
@@ -137,23 +206,6 @@ export const MessageRow = React.memo(
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
     );
-    const {
-      reactions,
-      canToggle: canToggleReactions,
-      pending: reactionPending,
-      errorMessage: reactionErrorMessage,
-      select: handleReactionSelect,
-    } = useReactionHandler(message, onToggleReaction);
-    const { openReminder, activeReminderEventIds } = useRemindLater();
-    const hasActiveReminder = activeReminderEventIds.has(message.id);
-    const mentionNames = React.useMemo(
-      () => resolveMentionNames(message.tags, profiles),
-      [profiles, message.tags],
-    );
-    const mentionPubkeysByName = React.useMemo(
-      () => resolveMentionPubkeysByName(message.tags, profiles),
-      [profiles, message.tags],
-    );
     const resolvedAgentPubkeys = React.useMemo(() => {
       const pubkeys = new Set(agentPubkeys ?? []);
 
@@ -171,6 +223,27 @@ export const MessageRow = React.memo(
         resolvedAgentPubkeys.has(normalizePubkey(message.pubkey)))
         ? "bot"
         : message.role;
+    const messageForReactions = React.useMemo(
+      () => stripAgentStatusReactions(message, resolvedAgentPubkeys),
+      [message, resolvedAgentPubkeys],
+    );
+    const {
+      reactions,
+      canToggle: canToggleReactions,
+      pending: reactionPending,
+      errorMessage: reactionErrorMessage,
+      select: handleReactionSelect,
+    } = useReactionHandler(messageForReactions, onToggleReaction);
+    const { openReminder, activeReminderEventIds } = useRemindLater();
+    const hasActiveReminder = activeReminderEventIds.has(message.id);
+    const mentionNames = React.useMemo(
+      () => resolveMentionNames(message.tags, profiles),
+      [profiles, message.tags],
+    );
+    const mentionPubkeysByName = React.useMemo(
+      () => resolveMentionPubkeysByName(message.tags, profiles),
+      [profiles, message.tags],
+    );
     const agentMentionPubkeysByName = React.useMemo(() => {
       if (!mentionPubkeysByName) {
         return undefined;
@@ -196,7 +269,10 @@ export const MessageRow = React.memo(
       message.tags,
     );
     const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
-
+    const isAgentMessage =
+      message.pubkey != null &&
+      !message.pending &&
+      resolvedAgentPubkeys.has(normalizePubkey(message.pubkey));
     const { channels } = useChannelNavigation();
     const channelNames = React.useMemo(
       () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
@@ -391,6 +467,9 @@ export const MessageRow = React.memo(
           isFollowingThread={isFollowingThread}
           isUnread={isUnread}
           message={message}
+          onContinueConversation={
+            isAgentMessage ? onOpenAgentConversation : undefined
+          }
           onDelete={onDelete}
           onEdit={onEdit}
           onFollowThread={onFollowThread}
@@ -804,6 +883,7 @@ export const MessageRow = React.memo(
     prev.onCollapseDescendants === next.onCollapseDescendants &&
     prev.onCollapseDescendantsHoverChange ===
       next.onCollapseDescendantsHoverChange &&
+    prev.onOpenAgentConversation === next.onOpenAgentConversation &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,

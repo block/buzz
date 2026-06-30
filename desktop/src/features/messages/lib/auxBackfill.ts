@@ -1,11 +1,15 @@
 import type { QueryClient } from "@tanstack/react-query";
 
+import { getThreadReference } from "@/features/messages/lib/threading";
 import {
   channelMessagesKey,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
 import { relayClient } from "@/shared/api/relayClient";
-import { buildChannelStructuralAuxFilter } from "@/shared/api/relayChannelFilters";
+import {
+  buildChannelAgentConversationMarkerFilter,
+  buildChannelStructuralAuxFilter,
+} from "@/shared/api/relayChannelFilters";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -17,6 +21,10 @@ const TIMELINE_CONTENT_KINDS: ReadonlySet<number> = new Set(
   CHANNEL_TIMELINE_CONTENT_KINDS,
 );
 
+function isTimelineContentEvent(event: RelayEvent) {
+  return TIMELINE_CONTENT_KINDS.has(event.kind);
+}
+
 /**
  * Extract the ids of the visible content messages from a freshly-fetched
  * history window. Auxiliary events (reactions, edits, deletions) are then
@@ -26,9 +34,30 @@ const TIMELINE_CONTENT_KINDS: ReadonlySet<number> = new Set(
 export function collectMessageIdsForAuxBackfill(
   historyEvents: RelayEvent[],
 ): string[] {
-  return historyEvents
-    .filter((event) => TIMELINE_CONTENT_KINDS.has(event.kind))
-    .map((event) => event.id);
+  return historyEvents.filter(isTimelineContentEvent).map((event) => event.id);
+}
+
+export function collectAgentConversationMarkerReferenceIds(
+  historyEvents: RelayEvent[],
+): string[] {
+  const referenceIds = new Set<string>();
+
+  for (const event of historyEvents) {
+    if (!isTimelineContentEvent(event)) {
+      continue;
+    }
+
+    referenceIds.add(event.id);
+    const { parentId, rootId } = getThreadReference(event.tags);
+    if (rootId) {
+      referenceIds.add(rootId);
+    }
+    if (parentId) {
+      referenceIds.add(parentId);
+    }
+  }
+
+  return [...referenceIds];
 }
 
 export function collectAuxEventIdsForDeletionBackfill(
@@ -86,18 +115,31 @@ export async function backfillAuxForMessages(
   historyEvents: RelayEvent[],
 ): Promise<void> {
   const messageIds = collectMessageIdsForAuxBackfill(historyEvents);
-  if (messageIds.length === 0) {
+  const markerReferenceIds =
+    collectAgentConversationMarkerReferenceIds(historyEvents);
+  if (messageIds.length === 0 && markerReferenceIds.length === 0) {
     return;
   }
 
   try {
     const cacheKey = channelMessagesKey(channelId);
     const cachedEvents = queryClient.getQueryData<RelayEvent[]>(cacheKey) ?? [];
-    const auxEvents = await relayClient.fetchAuxEventsByReference(
-      channelId,
-      messageIds,
-      buildChannelStructuralAuxFilter,
-    );
+    const [auxEvents, markerEvents] = await Promise.all([
+      messageIds.length > 0
+        ? relayClient.fetchAuxEventsByReference(
+            channelId,
+            messageIds,
+            buildChannelStructuralAuxFilter,
+          )
+        : Promise.resolve([]),
+      markerReferenceIds.length > 0
+        ? relayClient.fetchAuxEventsByReference(
+            channelId,
+            markerReferenceIds,
+            buildChannelAgentConversationMarkerFilter,
+          )
+        : Promise.resolve([]),
+    ]);
     const mergedAuxEvents = await mergeAuxEventsWithDeletionBackfill({
       channelId,
       cachedEvents,
@@ -105,16 +147,17 @@ export async function backfillAuxForMessages(
       fetchAuxEventsForMessages: (...args) =>
         relayClient.fetchAuxDeletionEventsForAuxEvents(...args),
     });
-    if (mergedAuxEvents.length === 0) {
+    const eventsToMerge = [...markerEvents, ...mergedAuxEvents];
+    if (eventsToMerge.length === 0) {
       return;
     }
 
     queryClient.setQueryData<RelayEvent[]>(cacheKey, (current = []) =>
-      sortMessages([...current, ...mergedAuxEvents]),
+      sortMessages([...current, ...eventsToMerge]),
     );
   } catch (error) {
     console.error(
-      "Failed to backfill auxiliary events for channel",
+      "Failed to backfill timeline reference events for channel",
       channelId,
       error,
     );

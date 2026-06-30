@@ -569,9 +569,12 @@ export function AppShell() {
       <ChannelNavigationProvider channels={channels}>
         <AppShellProvider
           value={{
+            agentConversations: [],
             markAllChannelsRead,
             markChannelRead,
             markChannelUnread,
+            openAgentConversation: () => {},
+            updateAgentConversationTitle: () => {},
             openCreateChannel: handleOpenCreateChannel,
             openChannelManagement: (channelId?: string) => {
               setManagedChannelId(

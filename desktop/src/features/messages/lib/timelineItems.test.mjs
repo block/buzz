@@ -86,6 +86,24 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
+test("buildTimelineItems: can omit only the initial day divider", () => {
+  const entries = [
+    entry({ id: "d1a", createdAt: dayAt(2026, 6, 13) }),
+    entry({ id: "d1b", createdAt: dayAt(2026, 6, 13, 13) }),
+    entry({ id: "d2a", createdAt: dayAt(2026, 6, 14) }),
+  ];
+  const { items } = buildTimelineItems(entries, null, {
+    showInitialDayDivider: false,
+  });
+
+  assert.deepEqual(kinds(items), [
+    "message",
+    "message",
+    "day-divider",
+    "message",
+  ]);
+});
+
 test("buildTimelineItems: empty entries produce no items", () => {
   const { items } = buildTimelineItems([], null);
   assert.equal(items.length, 0);
