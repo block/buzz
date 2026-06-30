@@ -245,3 +245,42 @@ test("buildTranscriptDisplayBlocks groups same-kind tool runs within a turn", ()
   assert.equal(block.segments[0].kind, "summary");
   assert.equal(block.segments[0].summary.label, "Read 3 files");
 });
+
+test("buildTranscriptDisplayBlocks groups consecutive file edit tool runs", () => {
+  const items = [1, 2].map((index) => ({
+    id: `edit:${index}`,
+    type: "tool",
+    renderClass: "file-edit",
+    descriptor: {
+      renderClass: "file-edit",
+      label: "Edited file",
+      preview: `src/file-${index}.ts`,
+      groupKey: "file-edit:str_replace",
+    },
+    title: "str_replace",
+    toolName: "str_replace",
+    buzzToolName: null,
+    status: "completed",
+    args: { path: `src/file-${index}.ts` },
+    result: "",
+    isError: false,
+    timestamp: "2026-06-18T00:00:00Z",
+    startedAt: "2026-06-18T00:00:00Z",
+    completedAt: "2026-06-18T00:00:01Z",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  }));
+
+  const [block] = buildTranscriptDisplayBlocks(items);
+
+  assert.equal(block.kind, "turn");
+  assert.equal(block.segments.length, 1);
+  assert.equal(block.segments[0].kind, "summary");
+  assert.equal(block.segments[0].summary.label, "Edited 2 files");
+  assert.equal(block.segments[0].summary.renderClass, "file-edit");
+  assert.deepEqual(
+    block.segments[0].summary.items.map((item) => item.id),
+    ["edit:1", "edit:2"],
+  );
+});

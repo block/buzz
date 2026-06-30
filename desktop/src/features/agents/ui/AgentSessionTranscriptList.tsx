@@ -204,7 +204,15 @@ function TranscriptTurnSegmentView({
   }
 
   if (segment.kind === "summary") {
-    return <SameKindSummaryItem summary={segment.summary} />;
+    return (
+      <SameKindSummaryItem
+        agentAvatarUrl={agentAvatarUrl}
+        agentName={agentName}
+        agentPubkey={agentPubkey}
+        profiles={profiles}
+        summary={segment.summary}
+      />
+    );
   }
 
   return (
@@ -219,31 +227,83 @@ function TranscriptTurnSegmentView({
 }
 
 function SameKindSummaryItem({
+  agentAvatarUrl,
+  agentName,
+  agentPubkey,
+  profiles,
   summary,
-}: {
+}: AgentTranscriptIdentityProps & {
+  profiles?: UserProfileLookup;
   summary: Extract<TranscriptTurnSegment, { kind: "summary" }>["summary"];
 }) {
+  const expandsToToolItems = summary.items.every(
+    (item) => item.type === "tool",
+  );
+
   return (
     <details
-      className="group not-prose my-1 rounded-md border border-border/40 bg-muted/20 px-2 py-1"
+      className="group/summary not-prose flex flex-col gap-0.5"
       data-testid="transcript-same-kind-summary"
     >
       <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
-        <span className="truncate text-sm font-medium">{summary.label}</span>
+        <ToolRunSummaryLabel label={summary.label} />
         <TranscriptTimestamp timestamp={summary.timestamp} />
-        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
+        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open/summary:rotate-180" />
       </summary>
-      <div className="space-y-1 py-2 pl-5">
-        {summary.items.map((item) => (
-          <p className="truncate text-xs text-muted-foreground" key={item.id}>
-            {item.type === "tool"
-              ? item.descriptor.preview || item.descriptor.label
-              : item.title}
-          </p>
-        ))}
+      <div
+        className={cn(
+          "flex flex-col",
+          expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
+        )}
+      >
+        {expandsToToolItems
+          ? summary.items.map((item) => (
+              <TranscriptItemView
+                agentAvatarUrl={agentAvatarUrl}
+                agentName={agentName}
+                agentPubkey={agentPubkey}
+                item={item}
+                key={item.id}
+                profiles={profiles}
+              />
+            ))
+          : summary.items.map((item) => (
+              <p
+                className="truncate text-xs text-muted-foreground"
+                key={item.id}
+              >
+                {item.type === "tool"
+                  ? item.descriptor.preview || item.descriptor.label
+                  : item.title}
+              </p>
+            ))}
       </div>
     </details>
   );
+}
+
+function ToolRunSummaryLabel({ label }: { label: string }) {
+  const parts = splitToolRunLabel(label);
+
+  if (!parts) {
+    return <span className="truncate text-sm font-medium">{label}</span>;
+  }
+
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5">
+      <span className="shrink-0 text-sm font-semibold text-muted-foreground/50 group-open/summary:text-muted-foreground/70">
+        {parts.verb}
+      </span>
+      <span className="min-w-0 truncate text-sm font-normal text-muted-foreground/80 group-open/summary:text-muted-foreground">
+        {parts.object}
+      </span>
+    </span>
+  );
+}
+
+function splitToolRunLabel(label: string) {
+  const match = label.match(/^(Edited|Ran|Read)\s+(.+)$/);
+  return match ? { verb: match[1], object: match[2] } : null;
 }
 
 function TurnPromptBlock({

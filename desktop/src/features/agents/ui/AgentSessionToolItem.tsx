@@ -40,10 +40,7 @@ export function ToolItem({
   );
 
   return (
-    <div
-      className="not-prose w-full px-0 py-0.5"
-      data-testid="transcript-tool-item"
-    >
+    <div className="not-prose w-full" data-testid="transcript-tool-item">
       <details
         className="group w-full"
         onToggle={handleToggle}

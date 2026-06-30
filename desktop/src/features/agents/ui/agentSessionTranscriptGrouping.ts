@@ -21,6 +21,7 @@ export type TranscriptSameKindSummary = {
   label: string;
   count: number;
   items: TranscriptItem[];
+  renderClass: TranscriptItem["renderClass"] | null;
   timestamp: string;
 };
 
@@ -125,7 +126,7 @@ function groupSameKindSegments(
       run.push(next.item);
       j += 1;
     }
-    if (run.length >= 3) {
+    if (run.length >= minimumSummaryRunLength(run[0])) {
       grouped.push({
         kind: "summary",
         summary: {
@@ -133,6 +134,7 @@ function groupSameKindSegments(
           label: sameKindLabel(run[0], run.length),
           count: run.length,
           items: run,
+          renderClass: getRenderClass(run[0]),
           timestamp: run[0].timestamp,
         },
       });
@@ -147,23 +149,36 @@ function groupSameKindSegments(
 
 function sameKindKey(item: TranscriptItem): string | null {
   if (item.type !== "tool") return null;
-  const descriptor = item.descriptor ?? classifyToolItem(item);
-  const renderClass = item.renderClass ?? descriptor.renderClass;
-  if (renderClass === "message" || renderClass === "file-edit") {
+  const renderClass = getRenderClass(item);
+  if (renderClass === "message") {
     return null;
   }
+  const descriptor = item.descriptor ?? classifyToolItem(item);
   return descriptor.groupKey ?? renderClass;
 }
 
 function sameKindLabel(item: TranscriptItem, count: number): string {
   if (item.type !== "tool") return `${count} items`;
   const descriptor = item.descriptor ?? classifyToolItem(item);
-  const renderClass = item.renderClass ?? descriptor.renderClass;
+  const renderClass = getRenderClass(item);
   const label = descriptor.label;
+  if (renderClass === "file-edit") {
+    return `Edited ${count} file${count === 1 ? "" : "s"}`;
+  }
   if (label === "Read file") return `Read ${count} files`;
   if (label === "Ran command") return `Ran ${count} commands`;
   if (renderClass === "relay-op") return `${count} Buzz relay ops`;
   return `${label} ×${count}`;
+}
+
+function minimumSummaryRunLength(item: TranscriptItem): number {
+  return getRenderClass(item) === "file-edit" ? 2 : 3;
+}
+
+function getRenderClass(item: TranscriptItem) {
+  if (item.type !== "tool") return item.renderClass;
+  const descriptor = item.descriptor ?? classifyToolItem(item);
+  return item.renderClass ?? descriptor.renderClass;
 }
 
 /**
