@@ -59,6 +59,8 @@ pub struct TaskMeta {
     /// tasks only — all prompt tasks install a steer channel regardless
     /// of the agent's name.
     pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
+    /// True when this task is a dream consolidation turn.
+    pub is_dream: bool,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -81,11 +83,14 @@ pub struct SessionState {
     /// channel_id → session_id
     pub sessions: HashMap<Uuid, String>,
     pub heartbeat_session: Option<String>,
+    pub dream_session: Option<String>,
     /// Per-channel turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
     pub turn_counts: HashMap<Uuid, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
+    /// Turn counter for the dream session.
+    pub dream_turn_count: u32,
     /// channel_id → rendered NIP-AE core prompt section, populated once at
     /// session creation per Tyler's spec (no mid-session refresh).
     pub core_sections: HashMap<Uuid, String>,
@@ -101,6 +106,10 @@ impl SessionState {
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
                 self.heartbeat_turn_count = 0;
+            }
+            PromptSource::Dream => {
+                self.dream_session = None;
+                self.dream_turn_count = 0;
             }
         }
     }
@@ -119,6 +128,8 @@ impl SessionState {
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
+        self.dream_session = None;
+        self.dream_turn_count = 0;
         self.core_sections.clear();
     }
 
@@ -171,11 +182,12 @@ pub struct PromptResult {
     pub batch: Option<FlushBatch>,
 }
 
-/// Whether the prompt came from a channel event or a heartbeat.
+/// Whether the prompt came from a channel event, a heartbeat, or a dream consolidation.
 #[derive(Debug)]
 pub enum PromptSource {
     Channel(Uuid),
     Heartbeat,
+    Dream,
 }
 
 /// Apply state effects for Race 1, where a control signal arrives just after the
@@ -391,6 +403,9 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Dream consolidation prompt text, loaded from the skill file at startup.
+    /// `None` when the skill file doesn't exist — dream dispatch is a no-op.
+    pub dream_prompt: Option<String>,
 }
 
 impl AgentPool {
@@ -1044,16 +1059,20 @@ pub async fn run_prompt_task(
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    source_hint: Option<PromptSource>,
 ) {
-    // Is this a channel prompt or a heartbeat?
-    let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
-        None => PromptSource::Heartbeat,
+    // Determine prompt source: explicit hint (dream), or infer from batch.
+    let source = match source_hint {
+        Some(s) => s,
+        None => match &batch {
+            Some(b) => PromptSource::Channel(b.channel_id),
+            None => PromptSource::Heartbeat,
+        },
     };
     let turn_id = uuid::Uuid::new_v4().to_string();
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
-        PromptSource::Heartbeat => None,
+        PromptSource::Heartbeat | PromptSource::Dream => None,
     };
     agent.acp.set_observer_context(observer::context_for(
         observer_channel_id,
@@ -1070,6 +1089,7 @@ pub async fn run_prompt_task(
             "source": match &source {
                 PromptSource::Channel(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
+                PromptSource::Dream => "dream",
             },
             "triggeringEventIds": triggering_event_ids,
         }),
@@ -1158,10 +1178,10 @@ pub async fn run_prompt_task(
     }
 
     // The core section to fold into the system prompt for this turn's session.
-    // Channel-scoped; heartbeats carry no owner core.
+    // Channel-scoped; heartbeats and dreams carry no owner core.
     let agent_core: Option<String> = match &source {
         PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
-        PromptSource::Heartbeat => None,
+        PromptSource::Heartbeat | PromptSource::Dream => None,
     };
 
     let (session_id, is_new_session) = match &source {
@@ -1237,6 +1257,42 @@ pub async fn run_prompt_task(
                             PromptOutcome::Error(e),
                             None,
                         );
+                        return;
+                    }
+                }
+            }
+        }
+        PromptSource::Dream => {
+            if let Some(sid) = &agent.state.dream_session {
+                (sid.clone(), false)
+            } else {
+                match create_session_and_apply_model(&mut agent, &ctx, None).await {
+                    Ok(sid) => {
+                        tracing::info!(
+                            target: "pool::session",
+                            "created dream session {sid} for agent {}",
+                            agent.index
+                        );
+                        agent.state.dream_session = Some(sid.clone());
+                        (sid, true)
+                    }
+                    Err(AcpError::AgentExited) => {
+                        agent.state.invalidate_all();
+                        let _ = result_tx.send(PromptResult {
+                            agent,
+                            source,
+                            outcome: PromptOutcome::AgentExited,
+                            batch: None,
+                        });
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = result_tx.send(PromptResult {
+                            agent,
+                            source,
+                            outcome: PromptOutcome::Error(e),
+                            batch: None,
+                        });
                         return;
                     }
                 }
@@ -1661,6 +1717,10 @@ pub async fn run_prompt_task(
                         PromptSource::Heartbeat => {
                             agent.state.heartbeat_turn_count += 1;
                             agent.state.heartbeat_turn_count >= limit
+                        }
+                        PromptSource::Dream => {
+                            agent.state.dream_turn_count += 1;
+                            agent.state.dream_turn_count >= limit
                         }
                     }
                 } else {
@@ -2392,6 +2452,7 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     let label = match source {
         PromptSource::Channel(cid) => format!("channel {cid}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
+        PromptSource::Dream => "dream".to_string(),
     };
     match stop_reason {
         StopReason::EndTurn => {

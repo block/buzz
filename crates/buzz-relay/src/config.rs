@@ -151,6 +151,22 @@ pub struct Config {
     /// When set, the relay serves the SPA from this directory for browser requests.
     /// When unset, no static file serving happens (relay behaves as before).
     pub web_dir: Option<std::path::PathBuf>,
+
+    /// Memory budget (bytes) per agent above which a `dream-due` signal is emitted.
+    /// The relay computes the total byte size of all non-tombstone kind:30174 engram
+    /// events for each agent and emits `KIND_DREAM_DUE` to any agent that exceeds
+    /// this threshold during a sweep, provided it also passes the idle gate.
+    ///
+    /// Default: 65,536 (64 KiB). Set via `BUZZ_DREAM_MEMORY_BUDGET_BYTES`.
+    /// Set to 0 to disable dream sweep entirely.
+    pub dream_memory_budget_bytes: usize,
+
+    /// Sweep interval (seconds) for the dream-due background scanner.
+    /// Every interval, the relay queries agent engram sizes and emits
+    /// `KIND_DREAM_DUE` to over-budget idle agents.
+    ///
+    /// Default: 300 (5 minutes). Set via `BUZZ_DREAM_SWEEP_INTERVAL_SECS`.
+    pub dream_sweep_interval_secs: u64,
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -433,6 +449,14 @@ impl Config {
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             web_dir,
+            dream_memory_budget_bytes: std::env::var("BUZZ_DREAM_MEMORY_BUDGET_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(65_536),
+            dream_sweep_interval_secs: std::env::var("BUZZ_DREAM_SWEEP_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
         })
     }
 }

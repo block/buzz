@@ -65,9 +65,10 @@ const overrides = new Map([
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
   // self-contained repos_dir functions and their unit tests live in repos.rs;
-  // this is the seam that must stay in nest.rs. Approved override; still queued
-  // to split with the rest of this list.
-  ["src-tauri/src/managed_agents/nest.rs", 1450],
+  // this is the seam that must stay in nest.rs. Dream-skill scaffolding (+76)
+  // mirrors the buzz-cli seam already in this module; queued to split with the
+  // rest of this list.
+  ["src-tauri/src/managed_agents/nest.rs", 1526],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider

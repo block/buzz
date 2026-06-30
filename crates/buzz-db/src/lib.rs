@@ -532,6 +532,17 @@ impl Db {
         event::get_events_by_ids(&self.pool, community_id, ids).await
     }
 
+    /// Query agents whose total engram size (kind:30174) exceeds `budget_bytes`.
+    ///
+    /// Returns one row per agent pubkey over budget. Used by the dream-due sweep.
+    pub async fn agents_over_memory_budget(
+        &self,
+        community_id: CommunityId,
+        budget_bytes: i64,
+    ) -> Result<Vec<event::AgentMemoryRow>> {
+        event::agents_over_memory_budget(&self.pool, community_id, budget_bytes).await
+    }
+
     /// Atomically insert an event AND its thread metadata in a single transaction.
     pub async fn insert_event_with_thread_metadata(
         &self,

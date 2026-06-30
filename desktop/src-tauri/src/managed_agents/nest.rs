@@ -41,20 +41,30 @@ pub(crate) const AGENTS_MD: &str = include_str!("nest_agents.md");
 /// Written to ~/.buzz/.agents/skills/buzz-cli/SKILL.md on first init.
 const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
+/// Default SKILL.md content for the dream consolidation skill.
+/// Written to ~/.buzz/.agents/skills/dream/SKILL.md on first init.
+const DREAM_SKILL_MD: &str = include_str!("nest_dream_skill.md");
+
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
 const NEST_AGENTS_VERSION: u32 = 4;
 
-/// Template content version for SKILL.md.
+/// Template content version for the buzz-cli SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
 const NEST_SKILL_VERSION: u32 = 3;
+
+/// Template content version for the dream SKILL.md.
+/// Bump this when changing `nest_dream_skill.md` to trigger refresh on existing installs.
+const NEST_DREAM_SKILL_VERSION: u32 = 1;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
 
-/// Canonical skill directory path relative to the nest root.
+/// Canonical skill directory path relative to the nest root — buzz-cli skill.
 const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
+/// Canonical skill directory path relative to the nest root — dream skill.
+const CANONICAL_DREAM_SKILL_DIR: &str = ".agents/skills/dream";
 /// Returns the nest root path (`~/.buzz`), or `None` if the home
 /// directory cannot be resolved.
 pub fn nest_dir() -> Option<PathBuf> {
@@ -75,15 +85,17 @@ pub fn ensure_nest() -> Result<(), String> {
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
 /// - Writes `.agents/skills/buzz-cli/SKILL.md` only if it doesn't already exist.
+/// - Writes `.agents/skills/dream/SKILL.md` only if it doesn't already exist.
 /// - Creates harness-specific symlinks pointing to the canonical
-///   `.agents/skills/buzz-cli` directory for each known provider.
+///   `.agents/skills/buzz-cli` and `.agents/skills/dream` directories
+///   for each known provider.
 /// - Sets 700 permissions on the root, all subdirectories, and the skill
-///   directory tree (Unix).
+///   directory trees (Unix).
 ///
 /// Idempotent: safe to call on every launch. Static template content in
-/// AGENTS.md (above the managed-section markers) and SKILL.md is refreshed
-/// when the embedded template version changes. The managed section in AGENTS.md
-/// and any user content below it are preserved.
+/// AGENTS.md (above the managed-section markers) and both SKILL.md files are
+/// refreshed when the embedded template versions change. The managed section
+/// in AGENTS.md and any user content below it are preserved.
 ///
 /// Rejects symlinks at the root path to prevent redirect attacks.
 ///
@@ -169,9 +181,32 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
     // refresh_skill_md_if_stale; ensure_skill_symlinks skips paths that already exist.
     ensure_skill_symlinks(root)?;
 
+    // Write dream skill to the harness-agnostic .agents path (first-init only).
+    let dream_skill_dir = root.join(CANONICAL_DREAM_SKILL_DIR);
+    fs::create_dir_all(&dream_skill_dir)
+        .map_err(|e| format!("create {}: {e}", dream_skill_dir.display()))?;
+
+    let dream_skill_md = dream_skill_dir.join("SKILL.md");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dream_skill_md)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(DREAM_SKILL_MD.as_bytes())
+                .map_err(|e| format!("write {}: {e}", dream_skill_md.display()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            return Err(format!("create {}: {e}", dream_skill_md.display()));
+        }
+    }
+
     // Refresh static content if the embedded template version is newer.
     refresh_agents_md_if_stale(root)?;
     refresh_skill_md_if_stale(root)?;
+    refresh_dream_skill_md_if_stale(root)?;
 
     // Set owner-only permissions on root and all subdirectories.
     // Skip any path that is a symlink — chmod would affect the target.
@@ -214,6 +249,13 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
                 skill_perm_dirs.push(root.join(&accumulated));
             }
         }
+        {
+            let mut accumulated = std::path::PathBuf::new();
+            for component in std::path::Path::new(CANONICAL_DREAM_SKILL_DIR).components() {
+                accumulated.push(component);
+                skill_perm_dirs.push(root.join(&accumulated));
+            }
+        }
         for skill_dir in known_skill_dirs() {
             // Ensure every ancestor dir gets 700, not just the leaf.
             let mut accumulated = std::path::PathBuf::new();
@@ -252,6 +294,20 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
         let depth = std::path::Path::new(skill_dir).components().count();
         let prefix = "../".repeat(depth);
         let target = format!("{prefix}{CANONICAL_SKILL_DIR}");
+        std::os::unix::fs::symlink(&target, &link)
+            .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
+    }
+    // Also create dream skill symlinks so every provider can load it.
+    for skill_dir in known_skill_dirs() {
+        let parent = root.join(skill_dir);
+        fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let link = parent.join("dream");
+        if link.symlink_metadata().is_ok() {
+            continue; // symlink or real path exists — skip
+        }
+        let depth = std::path::Path::new(skill_dir).components().count();
+        let prefix = "../".repeat(depth);
+        let target = format!("{prefix}{CANONICAL_DREAM_SKILL_DIR}");
         std::os::unix::fs::symlink(&target, &link)
             .map_err(|e| format!("symlink {} → {}: {e}", link.display(), target))?;
     }
@@ -454,6 +510,40 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
 
 fn escape_md_cell(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
+}
+
+/// Refresh dream SKILL.md if the template version has changed.
+///
+/// Dream SKILL.md has no user-editable sections — it is fully overwritten on
+/// version bump. Unlike buzz-cli, there is no migration path (no pre-existing
+/// location to merge from).
+fn refresh_dream_skill_md_if_stale(root: &Path) -> Result<(), String> {
+    let dream_skill_dir = root.join(CANONICAL_DREAM_SKILL_DIR);
+    let version_path = dream_skill_dir.join(".skill-version");
+    if read_version_file(&version_path) >= NEST_DREAM_SKILL_VERSION {
+        return Ok(());
+    }
+
+    // Ensure the canonical .agents dream skill directory exists.
+    fs::create_dir_all(&dream_skill_dir)
+        .map_err(|e| format!("create {}: {e}", dream_skill_dir.display()))?;
+
+    // Atomic write via temp file.
+    let skill_md = dream_skill_dir.join("SKILL.md");
+    let mut tmp = tempfile::NamedTempFile::new_in(&dream_skill_dir)
+        .map_err(|e| format!("tempfile in {}: {e}", dream_skill_dir.display()))?;
+    {
+        use std::io::Write;
+        tmp.write_all(DREAM_SKILL_MD.as_bytes())
+            .map_err(|e| format!("write tempfile: {e}"))?;
+    }
+    tmp.persist(&skill_md)
+        .map_err(|e| format!("persist {}: {e}", skill_md.display()))?;
+
+    fs::write(&version_path, format!("{NEST_DREAM_SKILL_VERSION}\n"))
+        .map_err(|e| format!("write {}: {e}", version_path.display()))?;
+
+    Ok(())
 }
 
 pub fn render_dynamic_section(

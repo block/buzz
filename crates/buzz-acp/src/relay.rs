@@ -431,6 +431,9 @@ enum RelayMessage {
 const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
 /// Subscription ID for encrypted owner-to-agent observer control frames.
 const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
+/// Subscription ID for dream-due consolidation signals from the relay.
+/// Global, filtered by `#p=[agent_pubkey]`, kinds: [KIND_DREAM_DUE].
+pub(crate) const DREAM_SIGNAL_SUB_ID: &str = "dream-signal";
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
 enum RelayCommand {
@@ -450,6 +453,8 @@ enum RelayCommand {
     SubscribeMembership,
     /// Subscribe to encrypted observer control frames addressed to this agent.
     SubscribeObserverControls,
+    /// Subscribe to dream-due consolidation signals addressed to this agent.
+    SubscribeDream,
     /// Publish a signed event to the relay (for typing indicators, etc.).
     PublishEvent { event: Box<Event> },
     /// Set the startup watermark timestamp for Finding #22.
@@ -697,6 +702,19 @@ impl HarnessRelay {
         Ok(())
     }
 
+    /// Subscribe to dream-due consolidation signals addressed to this agent.
+    ///
+    /// These are global ephemeral events (kinds: [KIND_DREAM_DUE], #p=[agent_pubkey])
+    /// emitted by the relay sweep when the agent's memory is over budget and
+    /// the agent appears idle (no live presence key in Redis).
+    pub async fn subscribe_dream_signals(&mut self) -> Result<(), RelayError> {
+        self.cmd_tx
+            .send(RelayCommand::SubscribeDream)
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?;
+        Ok(())
+    }
+
     /// Take the observer-control receiver for polling outside this relay object.
     pub fn take_observer_control_rx(&mut self) -> Option<mpsc::Receiver<Event>> {
         self.observer_control_rx.take()
@@ -909,6 +927,8 @@ struct BgState {
     membership_sub_active: bool,
     /// Whether the observer control subscription is active.
     observer_control_sub_active: bool,
+    /// Whether the dream-due signal subscription is active.
+    dream_sub_active: bool,
     /// Oldest dropped channel-event timestamp per channel, keyed by channel_id.
     /// Mirrors `membership_dropped_since` but for ordinary channel events.
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
@@ -942,6 +962,7 @@ impl BgState {
             membership_last_seen: None,
             membership_sub_active: false,
             observer_control_sub_active: false,
+            dream_sub_active: false,
             channel_dropped_since: HashMap::new(),
             proactive_resubscribe_needed: false,
             startup_watermark: None,
@@ -1038,6 +1059,9 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
         }
         RelayCommand::SubscribeObserverControls => {
             state.observer_control_sub_active = true;
+        }
+        RelayCommand::SubscribeDream => {
+            state.dream_sub_active = true;
         }
         RelayCommand::SetStartupWatermark { ts } => {
             state.startup_watermark = Some(ts);
@@ -1154,6 +1178,17 @@ async fn execute_connected_command(
             } else {
                 warn!("observer control subscribe REQ failed — recording intent for reconnect");
                 state.observer_control_sub_active = true;
+                false
+            }
+        }
+        RelayCommand::SubscribeDream => {
+            let sent = send_dream_subscribe(ws, agent_pubkey_hex).await;
+            if sent {
+                state.dream_sub_active = true;
+                true
+            } else {
+                warn!("dream-due subscribe REQ failed — recording intent for reconnect");
+                state.dream_sub_active = true;
                 false
             }
         }
@@ -1690,6 +1725,23 @@ async fn handle_ws_message(
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
+                    } else if subscription_id == DREAM_SIGNAL_SUB_ID {
+                        // Dream-due consolidation signal — no channel ID needed.
+                        // Use Uuid::nil() as a sentinel; the main loop exits via
+                        // `continue` before touching channel_id for KIND_DREAM_DUE.
+                        let buzz_event = BuzzEvent {
+                            channel_id: Uuid::nil(),
+                            event: *event,
+                        };
+                        match event_tx.try_send(Some(buzz_event)) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                // Drop this signal — the next relay sweep will
+                                // re-emit it on the following interval.
+                                warn!("dream-due signal dropped (backpressure) — relay will re-emit on next sweep");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                        }
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
@@ -1809,6 +1861,16 @@ async fn handle_ws_message(
                             // Keep membership_sub_active = true so reconnect restores it.
                             warn!(
                                 "membership resubscribe failed after CLOSED — triggering reconnect"
+                            );
+                            return false;
+                        }
+                    } else if subscription_id == DREAM_SIGNAL_SUB_ID {
+                        let sent = send_dream_subscribe(ws, agent_pubkey_hex).await;
+                        if sent {
+                            state.dream_sub_active = true;
+                        } else {
+                            warn!(
+                                "dream-due resubscribe failed after CLOSED — triggering reconnect"
                             );
                             return false;
                         }
@@ -2032,6 +2094,11 @@ async fn resubscribe_after_reconnect(
         && !send_observer_control_subscribe(ws, agent_pubkey_hex).await
     {
         warn!("failed to resubscribe observer controls after reconnect");
+        all_ok = false;
+    }
+
+    if state.dream_sub_active && !send_dream_subscribe(ws, agent_pubkey_hex).await {
+        warn!("failed to resubscribe dream-due signals after reconnect");
         all_ok = false;
     }
 
@@ -2470,6 +2537,47 @@ async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &s
         }
         Err(e) => {
             warn!("failed to serialize observer control REQ: {e}");
+            false
+        }
+    }
+}
+
+/// Send a NIP-01 REQ for dream-due consolidation signals (KIND_DREAM_DUE,
+/// global, #p=[agent_pubkey]).
+///
+/// No `since` watermark: dream-due events are ephemeral relay-initiated
+/// signals. Missing one is safe — the relay sweep will re-emit on the next
+/// interval for any agent that is still over budget.
+///
+/// Returns `true` if the REQ was successfully written to the WebSocket.
+pub(crate) fn build_dream_req_filter(agent_pubkey_hex: &str) -> serde_json::Value {
+    json!({
+        "kinds": [buzz_core::kind::KIND_DREAM_DUE as u64],
+        "#p": [agent_pubkey_hex],
+    })
+}
+
+async fn send_dream_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
+    let req = json!([
+        "REQ",
+        DREAM_SIGNAL_SUB_ID,
+        build_dream_req_filter(agent_pubkey_hex)
+    ]);
+    match serde_json::to_string(&req) {
+        Ok(text) => {
+            match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
+                Ok(()) => {
+                    debug!("subscribed to dream-due signals");
+                    true
+                }
+                Err(e) => {
+                    warn!("failed to send dream-due REQ: {e}");
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!("failed to serialize dream-due REQ: {e}");
             false
         }
     }
@@ -3710,6 +3818,96 @@ mod tests {
         assert!(
             !resubscribed.contains(&channel_id),
             "the dropped channel must not be resubscribed — the loop cannot re-form"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dream_subscription_tests {
+    //! Tests for the dream-due subscription filter and subscription ID contract.
+    //!
+    //! These tests pin the NIP-01 subscription filter shape that ACP sends to
+    //! the relay for KIND_DREAM_DUE signals, verifying:
+    //!   - `kinds` contains KIND_DREAM_DUE and only that kind.
+    //!   - `#p` contains the agent pubkey (so the relay matches agent-directed signals).
+    //!   - No `#h` tag (dream-due is global, not channel-scoped).
+    //!
+    //! The filter is what Thufir's CRITICAL finding was about: the old code
+    //! relied on the membership subscription (which hard-coded only
+    //! KIND_MEMBER_ADDED_NOTIFICATION and KIND_MEMBER_REMOVED_NOTIFICATION) to
+    //! deliver dream-due signals — a claim that was false. `build_dream_req_filter`
+    //! is the canonical filter source; tests here prevent silent regression.
+
+    use super::*;
+    use buzz_core::kind::KIND_DREAM_DUE;
+
+    const TEST_PUBKEY: &str = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+
+    /// The dream subscription ID must not collide with membership or observer IDs.
+    #[test]
+    fn test_dream_sub_id_is_distinct() {
+        assert_ne!(DREAM_SIGNAL_SUB_ID, MEMBERSHIP_NOTIF_SUB_ID);
+        assert_ne!(DREAM_SIGNAL_SUB_ID, OBSERVER_CONTROL_SUB_ID);
+    }
+
+    /// The filter must include KIND_DREAM_DUE in `kinds`.
+    #[test]
+    fn test_dream_filter_includes_kind_dream_due() {
+        let filter = build_dream_req_filter(TEST_PUBKEY);
+        let kinds = filter["kinds"].as_array().expect("kinds must be an array");
+        let kind_vals: Vec<u64> = kinds.iter().filter_map(|v| v.as_u64()).collect();
+        assert!(
+            kind_vals.contains(&(KIND_DREAM_DUE as u64)),
+            "dream filter must include KIND_DREAM_DUE ({KIND_DREAM_DUE}); got {kind_vals:?}"
+        );
+    }
+
+    /// The filter must have exactly one kind (no accidental broadening).
+    #[test]
+    fn test_dream_filter_has_only_dream_due_kind() {
+        let filter = build_dream_req_filter(TEST_PUBKEY);
+        let kinds = filter["kinds"].as_array().expect("kinds must be an array");
+        assert_eq!(
+            kinds.len(),
+            1,
+            "dream filter must subscribe to exactly one kind to avoid accidental broadening; got {kinds:?}"
+        );
+    }
+
+    /// The filter must carry a `#p` array containing the agent pubkey.
+    #[test]
+    fn test_dream_filter_has_p_tag_with_pubkey() {
+        let filter = build_dream_req_filter(TEST_PUBKEY);
+        let p_tag = filter["#p"].as_array().expect("#p must be an array");
+        let pubkeys: Vec<&str> = p_tag.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            pubkeys.contains(&TEST_PUBKEY),
+            "dream filter must include the agent pubkey in #p; got {pubkeys:?}"
+        );
+    }
+
+    /// The filter must NOT carry `#h` — dream-due is a global agent-directed
+    /// signal, not a channel event. A `#h` filter would prevent the relay from
+    /// matching the event (dream-due events carry no `#h` tag).
+    #[test]
+    fn test_dream_filter_has_no_h_tag() {
+        let filter = build_dream_req_filter(TEST_PUBKEY);
+        assert!(
+            filter.get("#h").is_none(),
+            "dream filter must NOT include #h — dream-due is global, not channel-scoped"
+        );
+    }
+
+    /// Different pubkeys produce different filters (no accidental sharing).
+    #[test]
+    fn test_dream_filter_uses_provided_pubkey() {
+        let pubkey_a = "aaaa".repeat(16);
+        let pubkey_b = "bbbb".repeat(16);
+        let filter_a = build_dream_req_filter(&pubkey_a);
+        let filter_b = build_dream_req_filter(&pubkey_b);
+        assert_ne!(
+            filter_a["#p"], filter_b["#p"],
+            "filters for different pubkeys must not be equal"
         );
     }
 }

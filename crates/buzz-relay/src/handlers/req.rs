@@ -1332,6 +1332,32 @@ mod tests {
     }
 
     #[test]
+    fn dream_due_subscription_requires_matching_p_tag() {
+        // KIND_DREAM_DUE (24300) is a #p-gated ephemeral kind: "single-delivery
+        // to the authenticated agent". A filter targeting another agent's pubkey
+        // must be rejected; a filter targeting self must be accepted.
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        // No #p at all → rejected (could subscribe to all agents' dream signals).
+        let no_p = Filter::new().kind(nostr::Kind::Custom(buzz_core::kind::KIND_DREAM_DUE as u16));
+        assert!(!p_gated_filters_authorized(&[no_p], authed));
+
+        // #p targeting another agent → rejected (info leak: "agent X is over budget + idle").
+        let wrong_p = Filter::new()
+            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_DREAM_DUE as u16))
+            .custom_tags(p_tag, [other]);
+        assert!(!p_gated_filters_authorized(&[wrong_p], authed));
+
+        // #p targeting self → accepted (this is the ACP harness's own subscription).
+        let self_p = Filter::new()
+            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_DREAM_DUE as u16))
+            .custom_tags(p_tag, [authed]);
+        assert!(p_gated_filters_authorized(&[self_p], authed));
+    }
+
+    #[test]
     fn d_tag_pushdown_only_for_nip33_kinds() {
         let d_tag = SingleLetterTag::lowercase(Alphabet::D);
 

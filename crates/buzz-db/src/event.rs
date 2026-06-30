@@ -1327,6 +1327,60 @@ pub async fn release_due_reminder(
     Ok(result.rows_affected() == 1)
 }
 
+/// A single row from [`agents_over_memory_budget`].
+#[derive(Debug)]
+pub struct AgentMemoryRow {
+    /// Raw 32-byte pubkey of the agent.
+    pub pubkey: Vec<u8>,
+    /// Total byte size of all non-tombstone kind:30174 engram events for this agent.
+    pub total_bytes: i64,
+}
+
+/// Query agents whose total engram size (kind:30174) exceeds `budget_bytes`.
+///
+/// Returns one row per agent pubkey that has at least `budget_bytes` of stored
+/// engram content (NULLs and tombstone events excluded). Community-scoped.
+///
+/// Used by the dream-due sweep: agents over budget and idle should receive a
+/// `KIND_DREAM_DUE` signal to trigger memory consolidation.
+pub async fn agents_over_memory_budget(
+    pool: &PgPool,
+    community_id: CommunityId,
+    budget_bytes: i64,
+) -> Result<Vec<AgentMemoryRow>> {
+    // kind:30174 = NIP-AE agent engrams (parameterized replaceable).
+    // Each live engram is the latest version for that (pubkey, d_tag) pair;
+    // tombstones (empty content or deleted_at IS NOT NULL) are excluded.
+    // We sum content length per agent and return only those over budget.
+    let rows = sqlx::query(
+        r#"
+        SELECT pubkey, SUM(LENGTH(content))::BIGINT AS total_bytes
+        FROM events
+        WHERE community_id = $1
+          AND kind = 30174
+          AND deleted_at IS NULL
+          AND content <> ''
+        GROUP BY pubkey
+        HAVING SUM(LENGTH(content)) > $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(budget_bytes)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            let total_bytes: i64 = row.try_get("total_bytes")?;
+            Ok(AgentMemoryRow {
+                pubkey,
+                total_bytes,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
