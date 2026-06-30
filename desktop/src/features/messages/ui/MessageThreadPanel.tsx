@@ -95,6 +95,7 @@ const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
 const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";
 const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = -0.125;
+
 type MessageThreadPanelSkeletonProps = {
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
@@ -838,7 +839,9 @@ export function MessageThreadPanel({
           >
             <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
               {toolbarExtraActions ? (
-                <div className="shrink-0">{toolbarExtraActions}</div>
+                <div className="min-w-0 flex-1 overflow-hidden">
+                  {toolbarExtraActions}
+                </div>
               ) : null}
               {threadTypingPubkeys.length > 0 ? (
                 <TypingIndicatorRow
