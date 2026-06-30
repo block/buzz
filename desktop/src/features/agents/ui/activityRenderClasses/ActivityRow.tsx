@@ -68,7 +68,7 @@ export function ActivityRow({
       data-testid={testId}
       open={defaultOpen}
     >
-      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px text-muted-foreground">
+      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
         {summaryChildren}
         <ChevronDown
           className={cn(

@@ -88,7 +88,7 @@ export function AgentSessionTranscriptList({
       <div
         aria-label="Live ACP transcript"
         aria-live="polite"
-        className="w-full py-0.5"
+        className="flex w-full flex-col gap-2.5"
         role="log"
       >
         {displayBlocks.map((block) => (
@@ -153,7 +153,7 @@ function TranscriptDisplayBlockView({
 
   return (
     <div
-      className="first:mt-0 mt-2.5"
+      className="flex flex-col gap-2.5"
       data-testid="transcript-turn-group"
       data-turn-id={block.turnId}
     >
@@ -526,10 +526,7 @@ function TranscriptItemRow({
   profiles?: UserProfileLookup;
 }) {
   return (
-    <div
-      className={cn("first:mt-0", getTranscriptItemRowSpacing(item))}
-      key={item.id}
-    >
+    <div key={item.id}>
       {SHOW_TRANSCRIPT_ACP_SOURCE && item.acpSource ? (
         <TranscriptAcpSourceBadge source={item.acpSource} />
       ) : null}
@@ -555,23 +552,10 @@ function TurnSetupStatus({
   }
 
   return (
-    <div className="mt-1.5 rounded-md px-2 py-1.5">
+    <div className="rounded-md px-2">
       <TurnSetupFooter items={items} timestamp={timestamp} />
     </div>
   );
-}
-
-function getTranscriptItemRowSpacing(item: TranscriptItem): string {
-  if (item.type === "message") {
-    return "my-2.5";
-  }
-  if (item.type === "tool") {
-    return "my-1";
-  }
-  if (item.type === "plan" || item.type === "lifecycle") {
-    return "my-1.5";
-  }
-  return "my-2";
 }
 
 const TranscriptItemView = React.memo(function TranscriptItemView({

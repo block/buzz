@@ -68,9 +68,7 @@ function MessageItem({
     <div
       className={cn(
         "flex animate-in fade-in duration-200 motion-reduce:animate-none",
-        isAssistant
-          ? "flex-row px-0 py-1.5"
-          : "flex-row items-start justify-end px-0 py-0.5",
+        isAssistant ? "flex-row" : "flex-row items-start justify-end",
       )}
       data-role={isAssistant ? "assistant-message" : "user-message"}
       data-testid={
