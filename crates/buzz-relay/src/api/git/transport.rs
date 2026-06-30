@@ -739,6 +739,21 @@ pub async fn upload_pack(
     )
 }
 
+/// Build the URL the pre-receive hook curls for the `/internal/git/policy`
+/// callback.
+///
+/// When a UDS path is configured the hook routes over the unix socket (the
+/// caller adds `--unix-socket`), and curl ignores the URL host:port — so the
+/// host here is a placeholder. Otherwise the hook curls the relay's own TCP
+/// loopback on its bind port. Kept as a small pure fn so the host/port
+/// selection is unit-testable without standing up a relay.
+fn policy_hook_url(uds_path: Option<&str>, bind_port: u16) -> String {
+    match uds_path {
+        Some(_) => "http://localhost/internal/git/policy".to_string(),
+        None => format!("http://127.0.0.1:{bind_port}/internal/git/policy"),
+    }
+}
+
 /// `POST /git/{owner}/{repo}/git-receive-pack`
 ///
 /// Handles push — client sends ref updates + pack data.
@@ -814,12 +829,23 @@ pub async fn receive_pack(
     })?;
 
     // Build hook env vars for the pre-receive hook.
-    let hook_url = format!(
-        "http://127.0.0.1:{}/internal/git/policy",
-        state.config.bind_addr.port()
+    //
+    // The hook curls the relay's own /internal/git/policy callback. By default
+    // it targets the TCP loopback `127.0.0.1:{bind_port}`. When a UDS is
+    // configured (BUZZ_UDS_PATH), the same router is also served over the unix
+    // socket (see main.rs), so we point the hook at the socket via curl's
+    // --unix-socket. This dodges any in-pod L4 interception of the loopback
+    // TCP port (e.g. an Istio sidecar's iptables capture of the app port),
+    // which otherwise breaks the relay's call to itself.
+    //
+    // Under --unix-socket curl ignores the URL host:port and uses only the
+    // path, so the URL host is a placeholder when a socket is set.
+    let hook_url = policy_hook_url(
+        state.config.uds_path.as_deref(),
+        state.config.bind_addr.port(),
     );
     let hooks_dir = repo.path().join("hooks").display().to_string();
-    let hook_env = vec![
+    let mut hook_env = vec![
         ("BUZZ_HOOK_URL", hook_url),
         (
             "BUZZ_HOOK_SECRET",
@@ -839,6 +865,12 @@ pub async fn receive_pack(
         ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
         ("GIT_CONFIG_VALUE_0", hooks_dir),
     ];
+    // When a UDS is configured, route the policy callback over it. The hook
+    // only honors BUZZ_HOOK_SOCKET when it is non-empty, so the TCP path is
+    // untouched for local/dev/CI where BUZZ_UDS_PATH is unset.
+    if let Some(ref uds_path) = state.config.uds_path {
+        hook_env.push(("BUZZ_HOOK_SOCKET", uds_path.clone()));
+    }
 
     // Run receive-pack against the tempdir. Returns the *owned* subprocess
     // output (PackOutput) — crucially NOT a Response, so the post-push
@@ -1891,5 +1923,30 @@ mod track_c_tests {
         let body = build_upload_pack_advertisement(&m);
         let caps = String::from_utf8_lossy(&body);
         assert!(caps.contains("object-format=sha256"));
+    }
+
+    #[test]
+    fn policy_hook_url_uses_tcp_loopback_without_uds() {
+        // No UDS configured → hook curls the relay's own TCP loopback on its
+        // bind port. Unchanged behavior for local/dev/CI.
+        assert_eq!(
+            policy_hook_url(None, 3000),
+            "http://127.0.0.1:3000/internal/git/policy"
+        );
+        assert_eq!(
+            policy_hook_url(None, 8080),
+            "http://127.0.0.1:8080/internal/git/policy"
+        );
+    }
+
+    #[test]
+    fn policy_hook_url_uses_placeholder_host_with_uds() {
+        // UDS configured → curl routes over --unix-socket and ignores the URL
+        // host:port, so the bind port must not leak into the URL. The path is
+        // what matters; the host is a placeholder.
+        let url = policy_hook_url(Some("/run/buzz/relay.sock"), 3000);
+        assert_eq!(url, "http://localhost/internal/git/policy");
+        assert!(!url.contains("3000"));
+        assert!(!url.contains("127.0.0.1"));
     }
 }

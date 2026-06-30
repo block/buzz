@@ -124,7 +124,17 @@ fi
 SAFE_REPO_ID=$(printf '%s' "$BUZZ_REPO_ID" | sed 's/\\/\\\\/g; s/"/\\"/g')
 BODY="{\"repo_id\":\"${SAFE_REPO_ID}\",\"repo_owner\":\"${BUZZ_REPO_OWNER}\",\"community_id\":\"${BUZZ_COMMUNITY_ID}\",\"pusher_pubkey\":\"${BUZZ_PUSHER_PUBKEY}\",\"ref_updates\":[${REFS}],\"timestamp\":${TIMESTAMP},\"signature\":\"${SIGNATURE}\"}"
 
+# Route the policy callback over a unix socket when the relay configured one
+# (BUZZ_HOOK_SOCKET). This lets the hook reach the relay's own endpoint even
+# when the loopback TCP port is intercepted in-pod (e.g. by an Istio sidecar).
+# When unset/empty, fall through to the TCP URL exactly as before.
+CURL_TRANSPORT=()
+if [ -n "${BUZZ_HOOK_SOCKET:-}" ]; then
+    CURL_TRANSPORT=(--unix-socket "$BUZZ_HOOK_SOCKET")
+fi
+
 HTTP_CODE=$(curl --silent --max-time 10 \
+    "${CURL_TRANSPORT[@]}" \
     -o "$RESP_FILE" \
     -w "%{http_code}" \
     -X POST \

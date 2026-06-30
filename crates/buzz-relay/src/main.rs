@@ -786,12 +786,21 @@ async fn serve(
         let router_uds = router.clone();
         let mut uds_rx = shutdown_tx.subscribe();
         let uds_handle = tokio::spawn(async move {
-            axum::serve(uds_listener, router_uds.into_make_service())
-                .with_graceful_shutdown(async move {
-                    uds_rx.changed().await.ok();
-                })
-                .await
-                .ok();
+            // Serve UDS connections with a connect-info marker so the internal
+            // `/internal/git/policy` route's `require_localhost` guard accepts
+            // them: a unix socket has no peer IP, so without this the guard's
+            // loopback-`SocketAddr` check fails closed (HTTP 403). The socket
+            // is an in-pod path, so its presence is itself the localhost proof.
+            axum::serve(
+                uds_listener,
+                router_uds
+                    .into_make_service_with_connect_info::<buzz_relay::api::git::UdsConnectInfo>(),
+            )
+            .with_graceful_shutdown(async move {
+                uds_rx.changed().await.ok();
+            })
+            .await
+            .ok();
         });
 
         let mut tcp_rx = shutdown_tx.subscribe();
