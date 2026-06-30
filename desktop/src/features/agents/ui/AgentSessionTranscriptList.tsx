@@ -66,10 +66,12 @@ export function AgentSessionTranscriptList({
   agentAvatarUrl,
   agentName,
   agentPubkey,
+  autoTail = false,
   emptyDescription,
   items,
   profiles,
 }: AgentTranscriptIdentityProps & {
+  autoTail?: boolean;
   emptyDescription: string;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
@@ -78,6 +80,16 @@ export function AgentSessionTranscriptList({
     () => buildTranscriptDisplayBlocks(items),
     [items],
   );
+  const tailRef = React.useRef<HTMLDivElement>(null);
+  const latestItemId = items.length > 0 ? items[items.length - 1]?.id : null;
+
+  React.useEffect(() => {
+    if (!autoTail || !latestItemId) {
+      return;
+    }
+
+    tailRef.current?.scrollIntoView({ block: "end" });
+  }, [autoTail, latestItemId]);
 
   if (items.length === 0) {
     return (
@@ -111,6 +123,7 @@ export function AgentSessionTranscriptList({
             />
           </div>
         ))}
+        {autoTail ? <div aria-hidden="true" ref={tailRef} /> : null}
       </div>
     </div>
   );

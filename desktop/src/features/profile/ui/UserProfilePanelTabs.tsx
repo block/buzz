@@ -2,6 +2,8 @@ import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
 
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
   AgentDetailsRows,
   AgentInstructionRow,
@@ -257,12 +259,14 @@ export function ProfileTabBar({
 export function ProfileInfoTabContent({
   agentInfoFields,
   isArchived,
+  managedAgent,
   onOpenActivity,
   pubkey,
   showActivityIngress,
 }: {
   agentInfoFields: ProfileField[];
   isArchived: boolean;
+  managedAgent?: ManagedAgent;
   onOpenActivity: () => void;
   pubkey: string | null;
   showActivityIngress: boolean;
@@ -280,6 +284,8 @@ export function ProfileInfoTabContent({
       ]
     : agentInfoFields;
   const hasInfoFields = infoFields.length > 0;
+  const activeTurns = useActiveAgentTurns(managedAgent?.pubkey ?? null);
+  const showLiveActivityEmbed = showActivityIngress && activeTurns.length > 0;
 
   if (!hasInfoFields && !showActivityIngress) {
     return null;
@@ -288,15 +294,94 @@ export function ProfileInfoTabContent({
   return (
     <div className="space-y-2">
       {showActivityIngress ? (
-        <ProfileIngressRow
-          icon={Wrench}
-          label="Activity log"
-          onClick={onOpenActivity}
-          testId={`user-profile-view-activity-${pubkey}`}
-          trailing="View"
-        />
+        showLiveActivityEmbed && managedAgent ? (
+          <ProfileLiveActivityEmbed
+            managedAgent={managedAgent}
+            onOpenActivity={onOpenActivity}
+          />
+        ) : (
+          <ProfileIngressRow
+            icon={Wrench}
+            label="Activity log"
+            onClick={onOpenActivity}
+            testId={`user-profile-view-activity-${pubkey}`}
+            trailing="View"
+          />
+        )
       ) : null}
       {hasInfoFields ? <ProfileFieldGroup fields={infoFields} /> : null}
+    </div>
+  );
+}
+
+function ProfileLiveActivityEmbed({
+  managedAgent,
+  onOpenActivity,
+}: {
+  managedAgent: ManagedAgent;
+  onOpenActivity: () => void;
+}) {
+  const handleClick = React.useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const interactiveTarget = target?.closest(
+        "button, a, [role='button'], [role='link']",
+      );
+      if (interactiveTarget && interactiveTarget !== event.currentTarget) {
+        return;
+      }
+
+      onOpenActivity();
+    },
+    [onOpenActivity],
+  );
+
+  const handleKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      const interactiveTarget = target?.closest(
+        "button, a, [role='button'], [role='link']",
+      );
+      if (interactiveTarget && interactiveTarget !== event.currentTarget) {
+        return;
+      }
+
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onOpenActivity();
+      }
+    },
+    [onOpenActivity],
+  );
+
+  return (
+    // biome-ignore lint/a11y/useSemanticElements: The embedded transcript contains its own buttons and links, so the clickable shell cannot be a semantic button.
+    <div
+      aria-label="Open live activity feed"
+      className="group cursor-pointer overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid={`user-profile-live-activity-${managedAgent.pubkey}`}
+      onClick={handleClick}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+    >
+      <ManagedAgentSessionPanel
+        agent={managedAgent}
+        autoTail={true}
+        className="h-48 overflow-y-auto rounded-none border-0 bg-transparent p-3 shadow-none"
+        emptyDescription="Live activity will appear here."
+        rawLayout="responsive"
+        showHeader={false}
+        showRaw={false}
+      />
     </div>
   );
 }

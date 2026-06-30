@@ -34,6 +34,7 @@ type ManagedAgentSessionPanelProps = {
   agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
     avatarUrl?: string | null;
   };
+  autoTail?: boolean;
   channelId?: string | null;
   className?: string;
   emptyDescription?: string;
@@ -47,6 +48,7 @@ type ManagedAgentSessionPanelProps = {
 
 export function ManagedAgentSessionPanel({
   agent,
+  autoTail = false,
   channelId = null,
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
@@ -106,6 +108,7 @@ export function ManagedAgentSessionPanel({
         agentName={agent.name}
         agentPubkey={agent.pubkey}
         connectionState={connectionState}
+        autoTail={autoTail}
         emptyDescription={emptyDescription}
         errorMessage={errorMessage}
         events={displayEvents}
@@ -159,6 +162,7 @@ function SessionBody({
   agentAvatarUrl,
   agentName,
   agentPubkey,
+  autoTail,
   connectionState,
   emptyDescription,
   errorMessage,
@@ -173,6 +177,7 @@ function SessionBody({
   agentAvatarUrl: string | null;
   agentName: string;
   agentPubkey: string;
+  autoTail: boolean;
   connectionState: ConnectionState;
   emptyDescription: string;
   errorMessage: string | null;
@@ -224,6 +229,7 @@ function SessionBody({
             emptyDescription={emptyDescription}
             items={transcript}
             profiles={profiles}
+            autoTail={autoTail}
           />
           {rawRail.mode === "side" ? <RawEventRail events={events} /> : null}
         </div>

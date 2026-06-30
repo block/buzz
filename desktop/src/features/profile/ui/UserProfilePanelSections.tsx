@@ -398,6 +398,7 @@ export function ProfileSummaryView({
             <ProfileInfoTabContent
               agentInfoFields={agentInfoFields}
               isArchived={isArchived}
+              managedAgent={managedAgent}
               onOpenActivity={onOpenActivity}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
