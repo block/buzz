@@ -418,12 +418,27 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     title: "Prompt context",
     sections: [
       {
-        title: "Channel",
-        body: "buzz-agent-observability · live agent activity thread",
+        title: "Agent Memory — core",
+        body: [
+          "Prefer auditing the taxonomy before changing the renderer.",
+          "Keep reasoning, assistant/user messages, tool output, relay operations, and raw ACP payloads visually distinct.",
+        ].join("\n"),
       },
       {
-        title: "Recent directive",
-        body: "Keep the UI honest: reasoning, messages, shell output, relay operations, and raw ACP payloads stay distinct.",
+        title: "Context",
+        body: [
+          "Channel: buzz-agent-observability",
+          "Thread: live agent activity rebuild review",
+          "Goal: design the activity feed against realistic prompt context, boring chatter, and tool-heavy turns.",
+        ].join("\n"),
+      },
+      {
+        title: "Buzz event: @mention",
+        body: [
+          "From: Taylor Ho (hex: debug-user-render-classes)",
+          "Kind: channel message",
+          "Content: @Agent audit the activity feed taxonomy and show me the risky spots before you edit.",
+        ].join("\n"),
       },
     ],
     timestamp: timestamp(2.2),

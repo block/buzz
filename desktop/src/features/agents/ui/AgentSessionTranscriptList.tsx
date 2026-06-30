@@ -367,6 +367,7 @@ function TurnPromptBlock({
       ) : null}
       <PromptUserMessage
         context={context}
+        defaultContextOpen={user.id.startsWith("debug:")}
         item={user}
         profiles={profiles}
         setup={setup}
@@ -377,16 +378,20 @@ function TurnPromptBlock({
 
 function PromptUserMessage({
   context = null,
+  defaultContextOpen = false,
   item,
   profiles,
   setup = [],
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
+  defaultContextOpen?: boolean;
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
 }) {
-  const [contextOpen, setContextOpen] = React.useState(false);
+  const [contextOpen, setContextOpen] = React.useState(
+    () => defaultContextOpen && context != null && context.sections.length > 0,
+  );
 
   return (
     <UserMessageBubble

@@ -25,8 +25,41 @@ function sessionUpdatePayload(update: Record<string, unknown>) {
   };
 }
 
+function promptPayloadForMessage(
+  item: Extract<TranscriptItem, { type: "message" }>,
+) {
+  const promptContext = DEBUG_AGENT_ACTIVITY_FIXTURE.find(
+    (candidate): candidate is Extract<TranscriptItem, { type: "metadata" }> =>
+      candidate.type === "metadata" &&
+      candidate.acpSource === "session/prompt:context" &&
+      candidate.turnId === item.turnId,
+  );
+  const sections = promptContext?.sections ?? [
+    {
+      title: "Buzz event",
+      body: `From: ${item.title}\nContent: ${item.text}`,
+    },
+  ];
+
+  return {
+    jsonrpc: "2.0",
+    method: "session/prompt",
+    params: {
+      sessionId: item.sessionId,
+      prompt: sections.map((section) => ({
+        type: "text",
+        text: `[${section.title}]\n${section.body}`,
+      })),
+    },
+  };
+}
+
 function payloadForItem(item: TranscriptItem): unknown {
   if (item.type === "message") {
+    if (item.acpSource === "session/prompt:user") {
+      return promptPayloadForMessage(item);
+    }
+
     return sessionUpdatePayload({
       sessionId: item.sessionId,
       sessionUpdate:
@@ -137,6 +170,9 @@ function payloadForItem(item: TranscriptItem): unknown {
 function kindForItem(item: TranscriptItem) {
   if (item.acpSource === "turn_started") return "turn_started";
   if (item.acpSource === "session_resolved") return "session_resolved";
+  if (item.type === "message" && item.acpSource === "session/prompt:user") {
+    return "acp_write";
+  }
   if (item.acpSource === "permission_request") return "acp_read";
   if (item.acpSource === "turn_error") return "turn_error";
   if (item.acpSource === "raw_json_rpc") return "raw_json_rpc";
