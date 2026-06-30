@@ -152,19 +152,29 @@ impl BlobLockGuard {
                 .chain(std::iter::once(0u16))
                 .collect();
             use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
             use windows_sys::Win32::System::Threading::{
                 CreateMutexW, WaitForSingleObject, INFINITE,
             };
-            let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr()) };
-            if handle == 0 {
+            // CreateMutexW: lpMutexAttributes = null (default security),
+            // bInitialOwner = FALSE (0), lpName = our mutex name.
+            let handle = unsafe {
+                CreateMutexW(
+                    std::ptr::null::<SECURITY_ATTRIBUTES>(),
+                    0,
+                    name_wide.as_ptr(),
+                )
+            };
+            // HANDLE = *mut c_void; null means creation failed.
+            if handle.is_null() {
                 let err = std::io::Error::last_os_error();
                 return Err(format!("blob lock CreateMutexW: {err}"));
             }
             let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
             if wait_result != WAIT_OBJECT_0 {
-                // Also accept WAIT_ABANDONED_0 (0x80) — previous holder crashed;
+                // Also accept WAIT_ABANDONED (0x80) — previous holder crashed;
                 // the mutex is still acquired and we own it.
-                if wait_result != 0x80 {
+                if wait_result != windows_sys::Win32::Foundation::WAIT_ABANDONED {
                     let err = std::io::Error::last_os_error();
                     unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
                     return Err(format!(
