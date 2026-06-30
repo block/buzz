@@ -252,6 +252,7 @@ export function useChannelSubscription(channel: Channel | null) {
       channelMessagesKey(channelId),
       (current = []) => mergeTimelineCacheMessages(current, event),
     );
+    void backfillAuxForMessages(queryClient, channelId, [event]);
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {
       try {
