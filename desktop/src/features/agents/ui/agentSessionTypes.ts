@@ -36,10 +36,16 @@ export type AgentActivityRenderClass =
 
 export type AgentActivityTone = "read" | "write" | "admin" | "neutral";
 
+export type AgentActivityAction = {
+  verb: string;
+  object?: string | null;
+};
+
 export type AgentActivityDescriptor = {
   renderClass: AgentActivityRenderClass;
   label: string;
   preview: string | null;
+  action?: AgentActivityAction;
   tone?: AgentActivityTone;
   operation?: string;
   object?: string | null;

@@ -82,6 +82,7 @@ test("buildCompactToolSummary formats shell command preview", () => {
 
   assert.equal(summary.label, "Ran command");
   assert.equal(summary.preview, "git status");
+  assert.deepEqual(summary.action, { verb: "Ran", object: "git status" });
   assert.equal(summary.presentation, "inline");
 });
 
@@ -122,6 +123,10 @@ test("buildCompactToolSummary formats read_file path preview", () => {
 
   assert.equal(summary.label, "Read file");
   assert.equal(summary.preview, "desktop/src/app/App.tsx");
+  assert.deepEqual(summary.action, {
+    verb: "Read",
+    object: "desktop/src/app/App.tsx",
+  });
 });
 
 test("buildCompactToolSummary formats todo list preview", () => {
@@ -169,7 +174,23 @@ test("buildCompactToolSummary promotes non-send buzz CLI commands to relay ops",
   assert.equal(summary.kind, "relay-op");
   assert.equal(summary.label, "Channels Get");
   assert.equal(summary.preview, "channel-1");
+  assert.deepEqual(summary.action, { verb: "Read", object: "channel-1" });
   assert.equal(summary.presentation, "inline");
+});
+
+test("buildCompactToolSummary derives structured actions for native Buzz MCP tools", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "get_channel",
+      buzzToolName: "get_channel",
+      args: {
+        channel_id: "channel-1",
+      },
+    }),
+  );
+
+  assert.equal(summary.kind, "relay-op");
+  assert.deepEqual(summary.action, { verb: "Read", object: "channel-1" });
 });
 
 test("buildCompactToolSummary promotes file edits and todos to first-class classes", () => {

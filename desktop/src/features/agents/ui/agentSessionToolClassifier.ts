@@ -1,4 +1,5 @@
 import type {
+  AgentActivityAction,
   AgentActivityDescriptor,
   AgentActivityRenderClass,
   AgentActivityTone,
@@ -155,6 +156,7 @@ function classifyDeveloperHarnessTool(
       renderClass: "shell",
       label: "Ran command",
       preview: command,
+      action: { verb: "Ran", object: command ?? "command" },
       source: "harness",
       groupKey: "shell:command",
     };
@@ -166,6 +168,7 @@ function classifyDeveloperHarnessTool(
       renderClass: "generic",
       label: "Read file",
       preview: path,
+      action: { verb: "Read", object: path ?? "file" },
       source: "harness",
       groupKey: "read_file",
     };
@@ -177,6 +180,10 @@ function classifyDeveloperHarnessTool(
       renderClass: "generic",
       label: "Viewed image",
       preview: source ? basenameOrUrl(source) : null,
+      action: {
+        verb: "Viewed",
+        object: source ? basenameOrUrl(source) : "image",
+      },
       source: "harness",
       groupKey: "view_image",
     };
@@ -188,16 +195,19 @@ function classifyDeveloperHarnessTool(
       renderClass: "file-edit",
       label: "Edited file",
       preview: path,
+      action: { verb: "Edited", object: path ?? "file" },
       source: "harness",
       groupKey: "file-edit:str_replace",
     };
   }
 
   if (kind === "todo") {
+    const preview = getTodoPreview(input.args);
     return {
       renderClass: "plan",
       label: "Updated todos",
-      preview: getTodoPreview(input.args),
+      preview,
+      action: { verb: "Updated", object: preview },
       source: "harness",
       groupKey: "plan:todo",
     };
@@ -208,6 +218,7 @@ function classifyDeveloperHarnessTool(
       renderClass: "suppressed",
       label: "Checked todos",
       preview: null,
+      action: { verb: "Checked", object: "todos" },
       source: "harness",
       groupKey: "suppressed:stop-hook",
     };
@@ -218,15 +229,18 @@ function classifyDeveloperHarnessTool(
       renderClass: "status",
       label: "Context compacted",
       preview: null,
+      action: { verb: "Compacted", object: "context" },
       source: "harness",
       groupKey: "status:post-compact",
     };
   }
 
+  const preview = genericPreview(input);
   return {
     renderClass: "generic",
     label: "Ran tool",
-    preview: genericPreview(input),
+    preview,
+    action: { verb: "Ran", object: preview ?? "tool" },
     source: "harness",
     groupKey: "generic:dev-mcp",
   };
@@ -250,6 +264,7 @@ function classifyBuzzTool(
     renderClass: isBuzzMessageSend(operation) ? "message" : "relay-op",
     label,
     preview,
+    action: actionForBuzzOperation(operation, preview, info.tone),
     tone: info.tone,
     operation,
     object: preview,
@@ -267,10 +282,12 @@ function classifyGenericTool(
 function genericDescriptor(
   input: ToolClassificationInput,
 ): AgentActivityDescriptor {
+  const preview = genericPreview(input);
   return {
     renderClass: "generic",
     label: "Ran tool",
-    preview: genericPreview(input),
+    preview,
+    action: { verb: "Ran", object: preview ?? "tool" },
     source: "fallback",
     groupKey: `generic:${normalizeToolNameText(input.toolName || input.title)}`,
   };
@@ -336,6 +353,7 @@ function parseBuzzCliCommand(command: string): AgentActivityDescriptor | null {
       group === "messages" && verb === "send" ? "message" : "relay-op",
     label: titleForBuzzCli(group, verb),
     preview,
+    action: actionForBuzzOperation(operation, preview, tone),
     tone,
     operation,
     object: preview,
@@ -356,6 +374,54 @@ function titleForBuzzCli(group: string, verb: string) {
     )
     .filter(Boolean)
     .join(" ");
+}
+
+function actionForBuzzOperation(
+  operation: string,
+  object: string | null,
+  tone: AgentActivityTone,
+): AgentActivityAction {
+  const verb = buzzOperationVerbToken(operation);
+  return {
+    verb: buzzOperationVerb(verb, tone),
+    object: object ?? buzzOperationObject(operation),
+  };
+}
+
+function buzzOperationVerbToken(operation: string) {
+  if (operation.includes(".")) {
+    return operation.split(".")[1] ?? "run";
+  }
+  return operation.split("_")[0] ?? "run";
+}
+
+function buzzOperationVerb(verb: string, tone: AgentActivityTone) {
+  if (verb === "add") return "Added";
+  if (verb === "archive") return "Archived";
+  if (verb === "create") return "Created";
+  if (verb === "delete") return "Deleted";
+  if (verb === "get" || verb === "list" || verb === "members") return "Read";
+  if (verb === "remove") return "Removed";
+  if (verb === "runs") return "Read";
+  if (verb === "search") return "Searched";
+  if (verb === "send") return "Sent";
+  if (verb === "thread") return "Read";
+  if (verb === "unarchive") return "Unarchived";
+  if (tone === "read") return "Read";
+  return "Updated";
+}
+
+function buzzOperationObject(operation: string) {
+  if (isBuzzMessageSend(operation)) return "message";
+  if (operation.includes(".")) {
+    const [group] = operation.split(".");
+    return group ? group.replace(/[-_]+/g, " ") : "Buzz";
+  }
+  const object = operation.replace(
+    /^(add|approve|archive|create|delete|edit|get|hide|join|leave|list|open|publish|remove|search|send|set|trigger|unarchive|update|vote)_/,
+    "",
+  );
+  return object ? object.replace(/[-_]+/g, " ") : "Buzz";
 }
 
 function buzzCliTone(group: string, verb: string): AgentActivityTone {

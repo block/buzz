@@ -177,7 +177,7 @@ export function splitActivityRowLabel(
   label: string,
 ): ActivityRowLabelParts | null {
   const match = label.match(
-    /^(Captured|Edited|Ran|Read|Updated|Viewed)\s+(.+)$/,
+    /^(Added|Archived|Captured|Checked|Compacted|Created|Deleted|Edited|Ran|Read|Removed|Searched|Sent|Unarchived|Updated|Viewed)\s+(.+)$/,
   );
   return match ? { verb: match[1], object: match[2] } : null;
 }

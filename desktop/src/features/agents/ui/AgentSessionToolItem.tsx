@@ -4,7 +4,7 @@ import { ChevronDown, Send } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-import type { TranscriptItem } from "./agentSessionTypes";
+import type { AgentActivityAction, TranscriptItem } from "./agentSessionTypes";
 import { getBuzzToolInfo } from "./agentSessionToolCatalog";
 import {
   buildCompactToolSummary,
@@ -68,6 +68,7 @@ export function ToolItem({
             />
           ) : (
             <CompactToolSummaryRow
+              action={compactSummary.action}
               duration={duration}
               fileEditSummary={compactSummary.fileEditSummary}
               preview={compactSummary.preview}
@@ -108,12 +109,14 @@ function resolveImageSrc(source: string): string {
 }
 
 function CompactToolSummaryRow({
+  action,
   duration,
   fileEditSummary,
   label,
   preview,
   thumbnailSrc,
 }: {
+  action: AgentActivityAction | null;
   duration: string | null;
   fileEditSummary: CompactFileEditSummary | null;
   label: string;
@@ -128,7 +131,7 @@ function CompactToolSummaryRow({
   }, [thumbnailFailed, thumbnailSrc]);
   const actionLabel = fileEditSummary
     ? null
-    : getCompactToolActionLabel(label, preview);
+    : getCompactToolActionLabel(action, label, preview);
 
   return (
     <>
@@ -178,9 +181,19 @@ function CompactToolSummaryRow({
 }
 
 function getCompactToolActionLabel(
+  action: AgentActivityAction | null,
   label: string,
   preview: string | null,
 ): (ActivityRowLabelParts & { title?: string }) | null {
+  if (action) {
+    const object = action.object ?? preview ?? undefined;
+    return {
+      verb: action.verb,
+      object,
+      title: typeof object === "string" ? object : undefined,
+    };
+  }
+
   const parts = splitActivityRowLabel(label);
   if (!parts) return null;
 

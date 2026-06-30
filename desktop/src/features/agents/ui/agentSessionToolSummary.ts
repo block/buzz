@@ -1,4 +1,8 @@
-import type { ToolStatus, TranscriptItem } from "./agentSessionTypes";
+import type {
+  AgentActivityAction,
+  ToolStatus,
+  TranscriptItem,
+} from "./agentSessionTypes";
 import type { AgentActivityDescriptor } from "./agentSessionTypes";
 import { getToolString } from "./agentSessionUtils";
 import { classifyToolItem } from "./agentSessionToolClassifier";
@@ -23,6 +27,7 @@ export type CompactToolKind =
   | "suppressed";
 
 export type CompactToolSummary = {
+  action: AgentActivityAction | null;
   kind: CompactToolKind;
   label: string;
   preview: string | null;
@@ -54,6 +59,7 @@ export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
   const failed = item.isError || item.status === "failed";
   const running = item.status === "executing" || item.status === "pending";
   return {
+    action: descriptor.action ?? null,
     kind: descriptor.renderClass,
     label: labelForStatus(descriptor, item.status, failed, running),
     preview: fileEditSummary?.filename ?? descriptor.preview,
