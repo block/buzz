@@ -736,3 +736,46 @@ test("buildTranscript no-ops on a permission response with an unmatched id", () 
   assert.doesNotMatch(item.text ?? "", /Approved/);
   assert.doesNotMatch(item.text ?? "", /Denied/);
 });
+
+test("buildTranscript appends Approved outcome for a numeric JSON-RPC id (selected allow_once)", () => {
+  // JSON-RPC 2.0 allows numeric ids; the ACP runtime preserves them as
+  // serde_json::Value. asString() drops numbers, so this exercises the
+  // jsonRpcId() helper path that handles finite-number ids.
+  const transcript = buildTranscript([
+    makePermissionRequest(1, 42),
+    makePermissionResponse(2, 42, "selected", "allow_once"),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "permission");
+  assert.match(item.text, /Approved \(allow_once\)/);
+});
+
+test("buildTranscript appends Cancelled outcome for a numeric JSON-RPC id (cancelled)", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, 99),
+    makePermissionResponse(2, 99, "cancelled"),
+  ]);
+
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.match(item.text, /Cancelled/);
+});
+
+test('buildTranscript does not collide between numeric id 1 and string id "1"', () => {
+  // JSON.stringify produces "1" for number 1 and "\"1\"" for string "1",
+  // so requests with these two different id types must NOT cross-attach.
+  const transcriptNumeric = buildTranscript([
+    makePermissionRequest(1, 1),
+    makePermissionResponse(2, 1, "selected", "allow_once"),
+  ]);
+  const transcriptString = buildTranscript([
+    makePermissionRequest(1, "1"),
+    makePermissionResponse(2, "1", "selected", "reject_once"),
+  ]);
+
+  assert.match(transcriptNumeric[0].text, /Approved \(allow_once\)/);
+  assert.match(transcriptString[0].text, /Denied \(reject_once\)/);
+});

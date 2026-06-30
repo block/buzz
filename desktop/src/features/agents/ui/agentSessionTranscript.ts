@@ -248,6 +248,19 @@ function describePermissionOutcome(
   return outcome;
 }
 
+/**
+ * Stable map key for a JSON-RPC id, which may be a string or a finite number
+ * per the spec. Using JSON.stringify avoids collisions between the number 1 and
+ * the string "1". Returns null for null, undefined, or non-id values (objects,
+ * booleans) so callers can gate on presence without a separate type check.
+ */
+function jsonRpcId(value: unknown): string | null {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value))
+    return JSON.stringify(value);
+  return null;
+}
+
 function describeFreeformStatus(payload: Record<string, unknown>) {
   const statusType = asString(payload.type) ?? asString(payload.status);
   const title =
@@ -744,7 +757,7 @@ export function processTranscriptEvent(
       );
       // Index by JSON-RPC id so the response (acp_write with result.outcome,
       // no method) can correlate by id rather than by turn/seq.
-      const requestId = asString(payload.id);
+      const requestId = jsonRpcId(payload.id);
       if (requestId) {
         d.pendingPermissions = new Map(d.pendingPermissions);
         d.pendingPermissions.set(requestId, {
@@ -754,7 +767,7 @@ export function processTranscriptEvent(
       }
     } else if (event.kind === "acp_write" && !method) {
       // Permission response: {"id": <same as request>, "result": {"outcome": {...}}}
-      const responseId = asString(payload.id);
+      const responseId = jsonRpcId(payload.id);
       const result = asRecord(asRecord(payload.result).outcome);
       const outcomeKind = asString(result.outcome);
       const pending = responseId ? d.pendingPermissions.get(responseId) : null;
