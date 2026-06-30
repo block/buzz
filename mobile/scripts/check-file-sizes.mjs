@@ -19,7 +19,6 @@ const rules = [
 // Do not add to this list; split the file instead. Remove each entry as its
 // file is broken up.
 const overrides = new Map([
-  ["lib/features/channels/channels_page.dart", 2423],
   ["lib/features/channels/channel_detail_page.dart", 1305],
   ["lib/features/channels/compose_bar.dart", 1111],
 ]);
