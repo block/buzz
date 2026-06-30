@@ -25,7 +25,6 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { cn } from "@/shared/lib/cn";
 import {
   extractSupportedLinkPreviews,
-  isSupportedLinkAutolinkLabel,
   parseSupportedLinkPreview,
 } from "@/shared/lib/linkPreview";
 import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
@@ -1525,8 +1524,7 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
-      const { imetaByUrl, linkPreviewHrefs, onOpenMessageLink } =
-        runtimeRef.current;
+      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -1601,13 +1599,6 @@ function createMarkdownComponents(
         ? parseSupportedLinkPreview(href)
         : null;
       const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
-      if (
-        supportedLinkPreview &&
-        linkPreviewHrefs.has(supportedLinkPreview.href) &&
-        isSupportedLinkAutolinkLabel(label, supportedLinkPreview)
-      ) {
-        return null;
-      }
 
       return (
         <a
@@ -1958,15 +1949,10 @@ function MarkdownInner({
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
   );
-  const linkPreviewHrefs = React.useMemo(
-    () => new Set(linkPreviews.map((preview) => preview.href)),
-    [linkPreviews],
-  );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
     imetaByUrl,
-    linkPreviewHrefs,
     mentionPubkeysByName,
     onOpenChannel,
     onOpenMessageLink,
