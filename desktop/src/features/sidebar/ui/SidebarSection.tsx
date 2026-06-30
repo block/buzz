@@ -99,6 +99,29 @@ function UnreadDotBadge({
   );
 }
 
+function formatAgentList(names: readonly string[]) {
+  if (names.length <= 1) return names[0] ?? "Agent";
+  if (names.length === 2) return `${names[0]} & ${names[1]}`;
+  return `${names.slice(0, -1).join(", ")}, & ${names[names.length - 1]}`;
+}
+
+export function formatWorkingTooltip(
+  summary: ActiveChannelTurnSummary,
+): string {
+  const names =
+    summary.agentNames && summary.agentNames.length > 0
+      ? summary.agentNames
+      : summary.agentPubkeys;
+  const visibleNames = names.slice(0, 3);
+  const othersCount = summary.agentCount - visibleNames.length;
+  const subject =
+    othersCount > 0
+      ? `${visibleNames.join(", ")}, & ${othersCount} ${othersCount === 1 ? "other" : "others"}`
+      : formatAgentList(visibleNames);
+
+  return `${subject} working`;
+}
+
 function ChannelWorkingBadge({
   channelName,
   isActive,
@@ -112,6 +135,7 @@ function ChannelWorkingBadge({
   const elapsed = formatElapsed(now - summary.anchorAt);
   const label =
     summary.agentCount > 1 ? `${elapsed} (${summary.agentCount})` : elapsed;
+  const title = formatWorkingTooltip(summary);
 
   return (
     <span
@@ -122,7 +146,7 @@ function ChannelWorkingBadge({
           : "bg-primary/10 text-primary",
       )}
       data-testid={`channel-working-${channelName}`}
-      title={label}
+      title={title}
     >
       {label}
     </span>

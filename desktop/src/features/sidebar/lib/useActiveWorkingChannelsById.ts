@@ -7,6 +7,23 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+
+export function resolveActiveWorkingChannelNames(
+  summary: ActiveChannelTurnSummary,
+  managedAgents: readonly { pubkey: string; name: string }[],
+): ActiveChannelTurnSummary {
+  const namesByPubkey = new Map(
+    managedAgents.map((agent) => [normalizePubkey(agent.pubkey), agent.name]),
+  );
+
+  return {
+    ...summary,
+    agentNames: summary.agentPubkeys.map(
+      (pubkey) => namesByPubkey.get(normalizePubkey(pubkey)) ?? pubkey,
+    ),
+  };
+}
 
 export function useActiveWorkingChannelsById(): ReadonlyMap<
   string,
@@ -25,8 +42,14 @@ export function useActiveWorkingChannelsById(): ReadonlyMap<
   return React.useMemo(
     () =>
       new Map(
-        activeWorkingChannels.map((summary) => [summary.channelId, summary]),
+        activeWorkingChannels.map((summary) => {
+          const resolvedSummary = resolveActiveWorkingChannelNames(
+            summary,
+            managedAgents,
+          );
+          return [resolvedSummary.channelId, resolvedSummary];
+        }),
       ),
-    [activeWorkingChannels],
+    [activeWorkingChannels, managedAgents],
   );
 }
