@@ -346,7 +346,7 @@ fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("read {}: {e}", path.display()))?;
 
-        let updated = rewrite_persona_md_frontmatter(&content, persona)?;
+        let updated = rewrite_persona_md(&content, persona, &loaded.prompt, pack.pack_instructions.as_deref())?;
         if updated == content {
             return Ok(());
         }
@@ -360,20 +360,38 @@ fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
     }
 }
 
-/// Rewrite the frontmatter of a `.persona.md` file with the fields from
-/// `persona`, preserving the markdown body and all other frontmatter keys.
+/// Rewrite a `.persona.md` file with updated frontmatter fields and, when safe,
+/// an updated body (system prompt). Returns the full rewritten file content, or
+/// the original unchanged when the result would be byte-identical.
 ///
-/// The `model` key is the joined `"provider:model"` string (or bare `"model"`
-/// when provider is absent), matching the pack format that `resolve_pack`
-/// splits via `split_model`. A separate `provider:` key is never emitted.
+/// **Frontmatter fields rewritten:** `display_name`, `runtime`, `avatar`, and
+/// `model` (joined `"provider:model"` per the pack format). All other keys and
+/// their order are preserved.
 ///
-/// Returns the rewritten file content, or the original unchanged if the
-/// frontmatter round-trip would be a no-op.
-fn rewrite_persona_md_frontmatter(
+/// **Body (system prompt) write-back:**
+/// The `persona.system_prompt` field holds the *composed* prompt:
+/// `compose_prompt(raw_body, pack_instructions)`. To recover the raw body we
+/// reverse `compose_prompt`:
+///
+/// - If `pack_instructions` is absent or blank: new body = `system_prompt`
+///   verbatim (no suffix to strip).
+/// - If `pack_instructions` is present and non-blank: the composed prompt ends
+///   with `"\n\n---\n# Team Instructions\n{instructions}"`. If
+///   `system_prompt` ends with that exact suffix, strip it to get the new raw
+///   body. **Safety guard**: if the suffix is absent (user edited inside the
+///   Team Instructions block, or instructions drifted), we cannot safely
+///   recover the raw body — preserve the existing body and log a skip. This
+///   prevents a corrupted file or double-appended instructions.
+/// - If `system_prompt` equals `compose_prompt(current_raw_body, instructions)`
+///   exactly (user did not edit the prompt), the body is preserved
+///   byte-for-byte (no-op for the body section).
+fn rewrite_persona_md(
     content: &str,
     persona: &PersonaRecord,
+    current_raw_body: &str,
+    pack_instructions: Option<&str>,
 ) -> Result<String, String> {
-    let (frontmatter, body) = buzz_persona_pkg::persona::split_frontmatter(content)
+    let (frontmatter, existing_body) = buzz_persona_pkg::persona::split_frontmatter(content)
         .map_err(|e| format!("split_frontmatter: {e:?}"))?;
 
     let mut value = serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
@@ -429,7 +447,46 @@ fn rewrite_persona_md_frontmatter(
 
     let updated_frontmatter = serde_yaml::to_string(&value)
         .map_err(|e| format!("yaml serialize: {e}"))?;
-    Ok(format!("---\n{updated_frontmatter}---\n{body}"))
+
+    // Determine the body to write back.
+    // `compose_prompt` is: body + "\n\n---\n# Team Instructions\n{instructions}"
+    // when instructions is non-blank, or body verbatim when absent/blank.
+    let effective_instructions = pack_instructions
+        .filter(|s| !s.trim().is_empty());
+    let expected_composed = match effective_instructions {
+        Some(instr) => format!("{current_raw_body}\n\n---\n# Team Instructions\n{instr}"),
+        None => current_raw_body.to_owned(),
+    };
+
+    let new_body: &str = if persona.system_prompt == expected_composed {
+        // User did not edit the prompt — keep the existing body byte-for-byte.
+        existing_body
+    } else {
+        // User edited the prompt. Recover the raw body by reversing compose_prompt.
+        match effective_instructions {
+            None => {
+                // No pack instructions: composed == raw, write verbatim.
+                &persona.system_prompt
+            }
+            Some(instr) => {
+                let suffix = format!("\n\n---\n# Team Instructions\n{instr}");
+                if let Some(raw) = persona.system_prompt.strip_suffix(suffix.as_str()) {
+                    raw
+                } else {
+                    // Safety guard: suffix absent — cannot safely recover raw body.
+                    // Preserve the existing body to avoid corruption or double-append.
+                    eprintln!(
+                        "buzz-desktop: persona-writeback: \
+                         system_prompt does not end with expected Team Instructions suffix; \
+                         preserving existing body to avoid corruption"
+                    );
+                    existing_body
+                }
+            }
+        }
+    };
+
+    Ok(format!("---\n{updated_frontmatter}---\n{new_body}"))
 }
 
 #[tauri::command]
@@ -1446,7 +1503,7 @@ mod writeback_tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// Build a minimal PersonaRecord with the fields that `rewrite_persona_md_frontmatter` reads.
+    /// Build a minimal PersonaRecord with the fields that `rewrite_persona_md` reads.
     fn persona(
         display_name: &str,
         runtime: Option<&str>,
@@ -1454,11 +1511,25 @@ mod writeback_tests {
         provider: Option<&str>,
         model: Option<&str>,
     ) -> PersonaRecord {
+        // system_prompt matches the SAMPLE_MD body so the "no prompt edit" path
+        // is taken in rewrite_persona_md (body preserved byte-for-byte).
+        persona_with_prompt(display_name, runtime, avatar_url, provider, model, "You are Paul.\n")
+    }
+
+    /// Like `persona` but with an explicit system_prompt value.
+    fn persona_with_prompt(
+        display_name: &str,
+        runtime: Option<&str>,
+        avatar_url: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+        system_prompt: &str,
+    ) -> PersonaRecord {
         PersonaRecord {
             id: "test-id".to_string(),
             display_name: display_name.to_string(),
             avatar_url: avatar_url.map(str::to_string),
-            system_prompt: "composed prompt\n\n---\n# Team Instructions\nFollow rules.".to_string(),
+            system_prompt: system_prompt.to_string(),
             runtime: runtime.map(str::to_string),
             model: model.map(str::to_string),
             provider: provider.map(str::to_string),
@@ -1485,12 +1556,12 @@ extra_key: keep-me
 You are Paul.
 ";
 
-    // ── rewrite_persona_md_frontmatter unit tests ─────────────────────────────
+    // ── rewrite_persona_md unit tests ─────────────────────────────────────────
 
     #[test]
     fn test_rewrite_model_provider_joined_and_body_preserved() {
         let p = persona("Paul", Some("goose"), None, Some("databricks_v2"), Some("goose-claude-opus-4-8"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &p, "You are Paul.\n", None).unwrap();
 
         // Body is byte-preserved.
         assert!(result.ends_with("\nYou are Paul.\n"), "body not preserved: {result:?}");
@@ -1511,7 +1582,7 @@ You are Paul.
     #[test]
     fn test_rewrite_bare_model_when_provider_none() {
         let p = persona("Paul", Some("goose"), None, None, Some("bare-model-id"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &p, "You are Paul.\n", None).unwrap();
 
         assert!(result.contains("model: bare-model-id"), "bare model missing: {result}");
         assert!(!result.contains("provider:"), "provider key must not be emitted: {result}");
@@ -1520,7 +1591,7 @@ You are Paul.
     #[test]
     fn test_rewrite_runtime_removed_when_none() {
         let p = persona("Paul", None, None, None, Some("some-model"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &p, "You are Paul.\n", None).unwrap();
 
         // runtime was in source but persona.runtime is None — key must be removed.
         assert!(!result.contains("runtime:"), "runtime key should be removed when None: {result}");
@@ -1529,7 +1600,7 @@ You are Paul.
     #[test]
     fn test_rewrite_preserves_description_and_name_and_extra_keys() {
         let p = persona("Paul Updated", Some("goose"), None, Some("anthropic"), Some("claude-opus-4"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &p, "You are Paul.\n", None).unwrap();
 
         // name and description are not persona record fields — must survive untouched.
         assert!(result.contains("name: paul"), "name key lost: {result}");
@@ -1544,7 +1615,7 @@ You are Paul.
     #[test]
     fn test_rewrite_no_provider_no_model_removes_model_key() {
         let p = persona("Paul", None, None, None, None);
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &p, "You are Paul.\n", None).unwrap();
 
         // When both provider and model are cleared, the model key is removed.
         assert!(!result.contains("model:"), "model key should be removed when both absent: {result}");
@@ -1553,11 +1624,11 @@ You are Paul.
     #[test]
     fn test_rewrite_avatar_set_and_cleared() {
         let with_avatar = persona("Paul", Some("goose"), Some("data:image/png;base64,abc"), Some("openai"), Some("gpt-4o"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &with_avatar).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &with_avatar, "You are Paul.\n", None).unwrap();
         assert!(result.contains("avatar:"), "avatar key should be set: {result}");
 
         let without_avatar = persona("Paul", Some("goose"), None, Some("openai"), Some("gpt-4o"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &without_avatar).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &without_avatar, "You are Paul.\n", None).unwrap();
         assert!(!result.contains("avatar:"), "avatar key should be absent when None: {result}");
     }
 
@@ -1566,12 +1637,107 @@ You are Paul.
         // system_prompt on the PersonaRecord is the COMPOSED prompt (body + pack instructions).
         // The body of the .persona.md must not be replaced with it.
         let p = persona("Paul", Some("goose"), None, Some("databricks_v2"), Some("goose-claude-opus-4-8"));
-        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+        let result = rewrite_persona_md(SAMPLE_MD, &p, "You are Paul.\n", None).unwrap();
 
         // The raw body from the file ("You are Paul.") is preserved.
         assert!(result.ends_with("You are Paul.\n"), "raw body must be preserved, not replaced by composed system_prompt: {result:?}");
         // The composed instructions suffix must NOT appear in the file body.
         assert!(!result.contains("# Team Instructions"), "composed system_prompt must not be written to body: {result}");
+    }
+
+    // ── body (system_prompt) write-back tests ─────────────────────────────────
+    //
+    // These tests exercise the compose_prompt inversion logic in rewrite_persona_md.
+
+    /// Frontmatter-only MD (no body to preserve) for prompt tests.
+    const PROMPT_MD: &str = "\
+---
+name: paul
+display_name: \"Paul\"
+model: goose-claude-4-6-opus
+---
+You are Paul.
+";
+
+    #[test]
+    fn test_prompt_edited_with_pack_instructions_body_rewritten() {
+        // User edits the prompt. system_prompt = new_raw_body + separator + instructions.
+        // Body in file should be updated to new_raw_body; Team Instructions must NOT appear.
+        let instructions = "Follow the rules.";
+        let new_raw_body = "You are Paul, a wise orchestrator.";
+        let composed = format!("{new_raw_body}\n\n---\n# Team Instructions\n{instructions}");
+
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        p.system_prompt = composed;
+
+        let result = rewrite_persona_md(PROMPT_MD, &p, "You are Paul.", Some(instructions)).unwrap();
+        assert!(result.ends_with("You are Paul, a wise orchestrator."), "new body not written: {result:?}");
+        assert!(!result.contains("# Team Instructions"), "Team Instructions must not appear in body: {result}");
+    }
+
+    #[test]
+    fn test_prompt_edited_no_pack_instructions_body_rewritten_verbatim() {
+        // No pack instructions: composed == raw. New body is system_prompt verbatim.
+        let new_raw_body = "You are Paul, updated.";
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        p.system_prompt = new_raw_body.to_string();
+
+        let result = rewrite_persona_md(PROMPT_MD, &p, "You are Paul.", None).unwrap();
+        assert!(result.ends_with("You are Paul, updated."), "body not updated: {result:?}");
+    }
+
+    #[test]
+    fn test_prompt_unedited_body_preserved() {
+        // system_prompt equals compose_prompt(current_raw_body, instructions) exactly.
+        // The body section must not change even though frontmatter may be rewritten.
+        let instructions = "Follow the rules.";
+        let raw_body = "You are Paul.";
+        let composed = format!("{raw_body}\n\n---\n# Team Instructions\n{instructions}");
+
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        // Frontmatter also unchanged (matches PROMPT_MD).
+        p.system_prompt = composed;
+
+        let result = rewrite_persona_md(PROMPT_MD, &p, raw_body, Some(instructions)).unwrap();
+        // Body must remain "You are Paul." (no prompt edit — body section preserved).
+        assert!(result.ends_with("You are Paul.\n"), "body must be unchanged: {result:?}");
+        // Team Instructions must not leak into the body.
+        assert!(!result.contains("# Team Instructions"), "Team Instructions must not appear: {result}");
+    }
+
+    #[test]
+    fn test_prompt_safety_guard_missing_suffix_preserves_body() {
+        // pack_instructions is non-empty but system_prompt does NOT end with the
+        // expected suffix (user edited inside the Team Instructions block, or the
+        // instructions drifted). The existing body must be preserved — no corruption.
+        let instructions = "Follow the rules.";
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        // system_prompt lacks the expected suffix entirely.
+        p.system_prompt = "Some rogue prompt with # Team Instructions in the middle".to_string();
+
+        let result = rewrite_persona_md(PROMPT_MD, &p, "You are Paul.", Some(instructions)).unwrap();
+        // Body preserved from the file.
+        assert!(result.ends_with("You are Paul.\n"), "body must be preserved by safety guard: {result:?}");
+    }
+
+    #[test]
+    fn test_prompt_round_trip_no_double_append() {
+        // After write-back, running compose_prompt on the written body + instructions
+        // must reproduce the stored system_prompt exactly. This proves no double-append.
+        let instructions = "Follow the rules.";
+        let new_raw_body = "You are Paul, updated for the round-trip.";
+        let composed = format!("{new_raw_body}\n\n---\n# Team Instructions\n{instructions}");
+
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        p.system_prompt = composed.clone();
+
+        let result = rewrite_persona_md(PROMPT_MD, &p, "You are Paul.", Some(instructions)).unwrap();
+
+        // Extract the written body (everything after the last "---\n").
+        let written_body = result.split("---\n").last().unwrap();
+        // Re-compose: body + instructions must equal the original composed prompt.
+        let recomposed = format!("{written_body}\n\n---\n# Team Instructions\n{instructions}");
+        assert_eq!(recomposed, composed, "round-trip failed — double-append would occur: recomposed={recomposed:?}");
     }
 
     // ── write_back_persona_md path-resolution tests ───────────────────────────
@@ -1644,7 +1810,7 @@ You are Paul.
         p.source_team_persona_slug = Some("paul".to_string());
 
         let content = std::fs::read_to_string(&source_path).unwrap();
-        let updated = rewrite_persona_md_frontmatter(&content, &p).unwrap();
+        let updated = rewrite_persona_md(&content, &p, "You are Paul.\n", None).unwrap();
         std::fs::write(&source_path, &updated).unwrap();
 
         let after = std::fs::read_to_string(&source_path).unwrap();
@@ -1679,7 +1845,7 @@ You are Paul.
         p.source_team_persona_slug = Some("paul".to_string());
 
         let content = std::fs::read_to_string(&source_path).unwrap();
-        let updated = rewrite_persona_md_frontmatter(&content, &p).unwrap();
+        let updated = rewrite_persona_md(&content, &p, "You are Paul.\n", None).unwrap();
         std::fs::write(&source_path, &updated).unwrap();
 
         let after = std::fs::read_to_string(&source_path).unwrap();
