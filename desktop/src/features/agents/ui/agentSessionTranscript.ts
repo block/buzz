@@ -281,7 +281,10 @@ function upsertTextItem(
   if (existing && existing.type === type) {
     replaceItem(d, id, {
       ...existing,
-      text: existing.text + text,
+      text:
+        type === "lifecycle"
+          ? joinLifecycleText(existing.text, text)
+          : existing.text + text,
       channelId: ctx.channelId,
       turnId: ctx.turnId ?? existing.turnId,
       sessionId: ctx.sessionId ?? existing.sessionId,
@@ -318,6 +321,12 @@ function upsertTextItem(
   );
 }
 
+function joinLifecycleText(existing: string, next: string) {
+  if (!existing) return next;
+  if (!next) return existing;
+  return `${existing}\n${next}`;
+}
+
 function upsertLifecycleItem(
   d: TranscriptDraft,
   id: string,
@@ -338,7 +347,7 @@ function upsertLifecycleItem(
       ...existing,
       renderClass,
       title,
-      text: existing.text + text,
+      text: joinLifecycleText(existing.text, text),
       descriptor: descriptor ?? existing.descriptor,
       channelId: ctx.channelId,
       turnId: ctx.turnId ?? existing.turnId,

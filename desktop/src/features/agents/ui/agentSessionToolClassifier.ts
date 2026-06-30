@@ -101,7 +101,6 @@ const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
 const providers: ToolClassifierProvider[] = [
   classifyDeveloperHarnessTool,
   classifyBuzzTool,
-  classifyGenericTool,
 ];
 
 export function classifyTool(
@@ -271,12 +270,6 @@ function classifyBuzzTool(
     source: "mcp",
     groupKey: `buzz:${operation}`,
   };
-}
-
-function classifyGenericTool(
-  input: ToolClassificationInput,
-): AgentActivityDescriptor {
-  return genericDescriptor(input);
 }
 
 function genericDescriptor(

@@ -1,32 +1,29 @@
 import type { AgentActivityRenderClass } from "../agentSessionTypes";
-import { ErrorActivity } from "./ErrorActivity";
-import { FileEditActivity } from "./FileEditActivity";
-import { GenericActivity } from "./GenericActivity";
+import { LifecycleActivity } from "./LifecycleActivity";
 import { MessageActivity } from "./MessageActivity";
-import { PermissionActivity } from "./PermissionActivity";
 import { PlanActivity } from "./PlanActivity";
 import { RawRailActivity } from "./RawRailActivity";
-import { RelayOpActivity } from "./RelayOpActivity";
-import { ShellActivity } from "./ShellActivity";
-import { StatusActivity } from "./StatusActivity";
 import { SuppressedActivity } from "./SuppressedActivity";
 import { ThoughtActivity } from "./ThoughtActivity";
+import { ToolActivity } from "./ToolActivity";
 import type {
   ActivityRenderClassItemProps,
   ActivityRenderClassPresenter,
 } from "./types";
 
+// Exhaustive render-class routing. Several semantic classes intentionally share
+// a presenter when their row treatment is the same.
 export const ACTIVITY_RENDER_CLASS_PRESENTERS = {
   message: MessageActivity,
-  "relay-op": RelayOpActivity,
-  "file-edit": FileEditActivity,
-  shell: ShellActivity,
-  status: StatusActivity,
+  "relay-op": ToolActivity,
+  "file-edit": ToolActivity,
+  shell: ToolActivity,
+  status: LifecycleActivity,
   thought: ThoughtActivity,
   plan: PlanActivity,
-  permission: PermissionActivity,
-  error: ErrorActivity,
-  generic: GenericActivity,
+  permission: LifecycleActivity,
+  error: LifecycleActivity,
+  generic: ToolActivity,
   "raw-rail": RawRailActivity,
   suppressed: SuppressedActivity,
 } satisfies Record<AgentActivityRenderClass, ActivityRenderClassPresenter>;

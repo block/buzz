@@ -68,3 +68,19 @@ test("classifyTool promotes buzz CLI shell commands to relay operations", () => 
   assert.equal(descriptor.preview, "buzz-agent-observability");
   assert.equal(descriptor.groupKey, "buzz-cli:channels.get");
 });
+
+test("classifyTool falls back once to a generic descriptor", () => {
+  const descriptor = classifyTool({
+    title: "Mystery",
+    toolName: "mcp__mystery",
+    buzzToolName: null,
+    args: { path: "notes.md" },
+    result: "",
+    isError: false,
+  });
+
+  assert.equal(descriptor.renderClass, "generic");
+  assert.equal(descriptor.label, "Ran tool");
+  assert.equal(descriptor.preview, "notes.md");
+  assert.equal(descriptor.source, "fallback");
+});

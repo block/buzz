@@ -573,3 +573,32 @@ test("debug raw fixture makes permission, free-form status, and raw rail screens
     "raw_json_rpc fixture should flow through the reducer",
   );
 });
+
+test("buildTranscript separates repeated lifecycle text", () => {
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-06-30T09:00:00.000Z",
+      kind: "turn_error",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      payload: { outcome: "recovered", error: "first" },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-06-30T09:00:01.000Z",
+      kind: "turn_error",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      payload: { outcome: "recovered", error: "second" },
+    },
+  ];
+
+  const [item] = buildTranscript(events);
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.text, "recovered: first\nrecovered: second");
+});

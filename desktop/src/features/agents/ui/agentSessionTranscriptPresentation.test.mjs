@@ -39,7 +39,7 @@ function makeMessage(overrides = {}) {
 }
 
 test("getActivityHeadline formats tool titles and assistant text", () => {
-  assert.equal(getActivityHeadline(makeTool()), "Send Message");
+  assert.equal(getActivityHeadline(makeTool()), "Send Message · abc");
   assert.equal(
     getActivityHeadline(makeMessage({ text: "First line\nSecond line" })),
     "First line",
@@ -77,5 +77,44 @@ test("isMeaningfulItem ignores lifecycle noise and metadata", () => {
       timestamp: baseTimestamp,
     }),
     true,
+  );
+});
+
+test("getActivityHeadline uses semantic tool descriptors", () => {
+  assert.equal(
+    getActivityHeadline(
+      makeTool({
+        title: "Shell",
+        toolName: "dev__shell",
+        buzzToolName: null,
+        args: { command: "buzz messages send --content hi" },
+        descriptor: {
+          renderClass: "message",
+          label: "Send Message",
+          preview: "hi",
+          source: "shell",
+          groupKey: "buzz-cli:messages.send",
+        },
+      }),
+    ),
+    "Send Message · hi",
+  );
+});
+
+test("isMeaningfulItem ignores suppressed tools", () => {
+  assert.equal(
+    isMeaningfulItem(
+      makeTool({
+        renderClass: "suppressed",
+        descriptor: {
+          renderClass: "suppressed",
+          label: "Checked todos",
+          preview: null,
+          source: "harness",
+          groupKey: "suppressed:stop-hook",
+        },
+      }),
+    ),
+    false,
   );
 });

@@ -179,6 +179,8 @@ export function buildTranscriptDisplayBlocks(
 ): TranscriptDisplayBlock[] {
   const blocks: TranscriptDisplayBlock[] = [];
   const turnBuckets = new Map<string, TurnBucket>();
+  // Callers pass a channel-scoped item stream; revisit this bare turnId bucket
+  // if grouping ever receives multi-channel transcript items.
   const displayOrder: Array<
     { kind: "single"; item: TranscriptItem } | { kind: "turn"; turnId: string }
   > = [];

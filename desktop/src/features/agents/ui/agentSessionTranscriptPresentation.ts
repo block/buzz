@@ -1,5 +1,5 @@
-import { formatToolTitle } from "./agentSessionToolCatalog";
 import type { TranscriptItem } from "./agentSessionTypes";
+import { buildCompactToolSummary } from "./agentSessionToolSummary";
 
 const LIFECYCLE_NOISE = new Set([
   "turn started",
@@ -10,7 +10,8 @@ const LIFECYCLE_NOISE = new Set([
 /** Human-readable headline for a single transcript item. */
 export function getActivityHeadline(item: TranscriptItem): string | null {
   if (item.type === "tool") {
-    return formatToolTitle(item.buzzToolName ?? item.toolName, item.title);
+    const summary = buildCompactToolSummary(item);
+    return [summary.label, summary.preview].filter(Boolean).join(" · ");
   }
 
   if (item.type === "message") {
@@ -48,6 +49,9 @@ function isLifecycleNoise(
 
 /** Whether an item should contribute to the "Now" summary and headline scan. */
 export function isMeaningfulItem(item: TranscriptItem): boolean {
+  if (item.type === "tool" && item.renderClass === "suppressed") {
+    return false;
+  }
   if (item.type === "lifecycle") {
     return !isLifecycleNoise(item);
   }
