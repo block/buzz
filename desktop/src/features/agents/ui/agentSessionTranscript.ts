@@ -771,7 +771,7 @@ export function processTranscriptEvent(
       const result = asRecord(asRecord(payload.result).outcome);
       const outcomeKind = asString(result.outcome);
       const pending = responseId ? d.pendingPermissions.get(responseId) : null;
-      if (pending && outcomeKind) {
+      if (pending && outcomeKind && responseId) {
         const optionId = asString(result.optionId) ?? null;
         const outcomeText = describePermissionOutcome(
           outcomeKind,
