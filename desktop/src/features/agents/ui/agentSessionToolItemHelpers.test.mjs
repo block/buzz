@@ -6,6 +6,7 @@ import {
   formatTranscriptTime,
   getToolDurationDisplay,
   isInlineImageData,
+  parseShellToolOutput,
   parseToolResultValue,
 } from "./agentSessionUtils.ts";
 
@@ -90,6 +91,36 @@ test("parseToolResultValue returns the inner string when it is not JSON", () => 
 
 test("parseToolResultValue returns null for invalid JSON", () => {
   assert.equal(parseToolResultValue("not json {"), null);
+});
+
+test("parseShellToolOutput extracts stdout from a shell result envelope", () => {
+  assert.deepEqual(
+    parseShellToolOutput(
+      JSON.stringify({
+        exit_code: 0,
+        stdout: "4 files changed\n",
+        stderr: "",
+        timed_out: false,
+      }),
+    ),
+    {
+      exitCode: 0,
+      raw: "",
+      stderr: "",
+      stdout: "4 files changed\n",
+      timedOut: false,
+    },
+  );
+});
+
+test("parseShellToolOutput preserves non-envelope output as raw text", () => {
+  assert.deepEqual(parseShellToolOutput(JSON.stringify("plain output")), {
+    exitCode: null,
+    raw: "plain output",
+    stderr: "",
+    stdout: "",
+    timedOut: false,
+  });
 });
 
 // ---- getToolDurationDisplay (fallback chain) ----

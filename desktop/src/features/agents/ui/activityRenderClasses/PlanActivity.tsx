@@ -23,7 +23,7 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
         title={formatTranscriptTimestampTitle(props.item.timestamp)}
       >
         <ActivityRowLabel
-          object={["plan", props.item.text].filter(Boolean).join(" · ")}
+          object={<PlanUpdateLabelObject text={props.item.text} />}
           openToneScope="none"
           verb="Updated"
         />
@@ -44,5 +44,19 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
         />
       </ActivityRowContent>
     </ActivityRow>
+  );
+}
+
+function PlanUpdateLabelObject({ text }: { text: string }) {
+  return (
+    <>
+      plan
+      {text ? (
+        <>
+          {" · "}
+          <span className="text-foreground">{text}</span>
+        </>
+      ) : null}
+    </>
   );
 }

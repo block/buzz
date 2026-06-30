@@ -50,6 +50,44 @@ export function formatCodeValue(value: string): string {
   }
 }
 
+export type ShellToolOutput = {
+  exitCode: number | null;
+  raw: string;
+  stderr: string;
+  stdout: string;
+  timedOut: boolean;
+};
+
+export function parseShellToolOutput(result: string): ShellToolOutput {
+  const parsed = parseToolResultValue(result);
+  const record = asRecord(parsed);
+  const hasShellShape =
+    "stdout" in record ||
+    "stderr" in record ||
+    "exit_code" in record ||
+    "exitCode" in record ||
+    "timed_out" in record ||
+    "timedOut" in record;
+
+  if (!hasShellShape) {
+    return {
+      exitCode: null,
+      raw: typeof parsed === "string" ? parsed : result,
+      stderr: "",
+      stdout: "",
+      timedOut: false,
+    };
+  }
+
+  return {
+    exitCode: getToolNumber(record, ["exit_code", "exitCode"]),
+    raw: "",
+    stderr: getOptionalString(record, ["stderr"]),
+    stdout: getOptionalString(record, ["stdout"]),
+    timedOut: getOptionalBoolean(record, ["timed_out", "timedOut"]),
+  };
+}
+
 export function titleCase(value: string): string {
   return value
     .replace(/[_-]+/g, " ")
@@ -86,6 +124,32 @@ function getToolNumber(
     }
   }
   return null;
+}
+
+function getOptionalBoolean(
+  record: Record<string, unknown>,
+  keys: string[],
+): boolean {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") {
+      return value;
+    }
+  }
+  return false;
+}
+
+function getOptionalString(
+  record: Record<string, unknown>,
+  keys: string[],
+): string {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string") {
+      return value;
+    }
+  }
+  return "";
 }
 
 /** Format a millisecond duration; negative input yields null. */
