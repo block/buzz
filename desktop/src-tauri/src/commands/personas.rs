@@ -259,9 +259,141 @@ pub fn update_persona(
         .into_iter()
         .find(|record| record.id == input.id)
         .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
+
+    // For pack-backed personas, also write the edit back to the source
+    // `.persona.md` so that launch sync (which reads the file) becomes a
+    // no-op rather than overwriting the record we just saved.
+    write_back_persona_md(&app, &result);
+
     retain_persona_pending(&app, &state, &result);
     try_regenerate_nest(&app);
     Ok(result)
+}
+
+/// Write updated frontmatter fields back to the source `.persona.md` file for
+/// pack-backed personas (`source_team` is set). Non-fatal: any miss (no
+/// `source_dir`, missing file, parse or write error) is logged and swallowed so
+/// that the in-app edit — already persisted to `personas.json` — always lands.
+///
+/// Only the four fields that the UI can set and that live in frontmatter are
+/// rewritten: `display_name`, `runtime`, `avatar`, and `model` (the combined
+/// `"provider:model"` string used by the pack format). The markdown body is
+/// preserved byte-for-byte because `PersonaRecord.system_prompt` is the
+/// _composed_ prompt (body + pack instructions appended by `compose_prompt`)
+/// and writing it back to the file would cause the instructions to be
+/// double-appended on the next launch sync.
+fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
+    // Only pack-backed personas have a source file to write back to.
+    let Some(source_team_id) = &persona.source_team else {
+        return;
+    };
+    let Some(slug) = &persona.source_team_persona_slug else {
+        eprintln!(
+            "buzz-desktop: persona-writeback: persona {} has source_team but no slug; skipping",
+            persona.id
+        );
+        return;
+    };
+
+    let result = (|| -> Result<(), String> {
+        let teams = load_teams(app)?;
+        let team = teams
+            .iter()
+            .find(|t| &t.id == source_team_id)
+            .ok_or_else(|| format!("team {source_team_id} not found"))?;
+        let source_dir = team
+            .source_dir
+            .as_ref()
+            .ok_or_else(|| "team has no source_dir (JSON-only team)".to_string())?;
+
+        let path = source_dir.join("agents").join(format!("{slug}.persona.md"));
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+
+        let updated = rewrite_persona_md_frontmatter(&content, persona)?;
+        if updated == content {
+            return Ok(());
+        }
+        std::fs::write(&path, &updated)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: persona-writeback: {e}");
+    }
+}
+
+/// Rewrite the frontmatter of a `.persona.md` file with the fields from
+/// `persona`, preserving the markdown body and all other frontmatter keys.
+///
+/// The `model` key is the joined `"provider:model"` string (or bare `"model"`
+/// when provider is absent), matching the pack format that `resolve_pack`
+/// splits via `split_model`. A separate `provider:` key is never emitted.
+///
+/// Returns the rewritten file content, or the original unchanged if the
+/// frontmatter round-trip would be a no-op.
+fn rewrite_persona_md_frontmatter(
+    content: &str,
+    persona: &PersonaRecord,
+) -> Result<String, String> {
+    let (frontmatter, body) = buzz_persona_pkg::persona::split_frontmatter(content)
+        .map_err(|e| format!("split_frontmatter: {e:?}"))?;
+
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
+        .map_err(|e| format!("yaml parse: {e}"))?;
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or("frontmatter is not a YAML mapping")?;
+
+    // display_name
+    mapping.insert(
+        serde_yaml::Value::String("display_name".to_string()),
+        serde_yaml::Value::String(persona.display_name.clone()),
+    );
+
+    // runtime: set when Some, remove when None
+    let runtime_key = serde_yaml::Value::String("runtime".to_string());
+    match &persona.runtime {
+        Some(rt) if !rt.is_empty() => {
+            mapping.insert(runtime_key, serde_yaml::Value::String(rt.clone()));
+        }
+        _ => {
+            mapping.remove(&runtime_key);
+        }
+    }
+
+    // avatar: set when Some, remove when None
+    let avatar_key = serde_yaml::Value::String("avatar".to_string());
+    match &persona.avatar_url {
+        Some(av) if !av.is_empty() => {
+            mapping.insert(avatar_key, serde_yaml::Value::String(av.clone()));
+        }
+        _ => {
+            mapping.remove(&avatar_key);
+        }
+    }
+
+    // model: joined "provider:model" or bare "model"; remove when both absent
+    let model_key = serde_yaml::Value::String("model".to_string());
+    match (&persona.provider, &persona.model) {
+        (Some(prov), Some(mdl)) if !prov.is_empty() && !mdl.is_empty() => {
+            mapping.insert(
+                model_key,
+                serde_yaml::Value::String(format!("{prov}:{mdl}")),
+            );
+        }
+        (_, Some(mdl)) if !mdl.is_empty() => {
+            mapping.insert(model_key, serde_yaml::Value::String(mdl.clone()));
+        }
+        _ => {
+            mapping.remove(&model_key);
+        }
+    }
+
+    let updated_frontmatter = serde_yaml::to_string(&value)
+        .map_err(|e| format!("yaml serialize: {e}"))?;
+    Ok(format!("---\n{updated_frontmatter}---\n{body}"))
 }
 
 #[tauri::command]
@@ -1270,5 +1402,137 @@ mod inbound_tests {
         assert_eq!(agents.len(), 1, "non-matching agent tombstone no-ops");
         agents.retain(|r| r.pubkey != AGENT_PUBKEY);
         assert!(agents.is_empty(), "agent removed by pubkey");
+    }
+}
+
+#[cfg(test)]
+mod writeback_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// Build a minimal PersonaRecord with the fields that `rewrite_persona_md_frontmatter` reads.
+    fn persona(
+        display_name: &str,
+        runtime: Option<&str>,
+        avatar_url: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
+    ) -> PersonaRecord {
+        PersonaRecord {
+            id: "test-id".to_string(),
+            display_name: display_name.to_string(),
+            avatar_url: avatar_url.map(str::to_string),
+            system_prompt: "composed prompt\n\n---\n# Team Instructions\nFollow rules.".to_string(),
+            runtime: runtime.map(str::to_string),
+            model: model.map(str::to_string),
+            provider: provider.map(str::to_string),
+            name_pool: vec![],
+            is_builtin: false,
+            is_active: true,
+            source_team: Some("team-1".to_string()),
+            source_team_persona_slug: Some("paul".to_string()),
+            env_vars: BTreeMap::new(),
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    const SAMPLE_MD: &str = "\
+---
+name: paul
+display_name: \"Paul\"
+description: \"An orchestrator.\"
+model: goose-claude-4-6-opus
+runtime: goose
+extra_key: keep-me
+---
+You are Paul.
+";
+
+    #[test]
+    fn test_rewrite_model_provider_joined_and_body_preserved() {
+        let p = persona("Paul", Some("goose"), None, Some("databricks_v2"), Some("goose-claude-opus-4-8"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+
+        // Body is byte-preserved.
+        assert!(result.ends_with("\nYou are Paul.\n"), "body not preserved: {result:?}");
+
+        // model key is the joined form.
+        assert!(result.contains("model: databricks_v2:goose-claude-opus-4-8"), "joined model missing: {result}");
+
+        // No separate provider key.
+        assert!(!result.contains("provider:"), "separate provider key must not be emitted: {result}");
+
+        // Unrelated key preserved.
+        assert!(result.contains("extra_key: keep-me"), "extra key lost: {result}");
+
+        // Still valid frontmatter (parses cleanly).
+        assert!(result.starts_with("---\n"), "must start with ---");
+    }
+
+    #[test]
+    fn test_rewrite_bare_model_when_provider_none() {
+        let p = persona("Paul", Some("goose"), None, None, Some("bare-model-id"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+
+        assert!(result.contains("model: bare-model-id"), "bare model missing: {result}");
+        assert!(!result.contains("provider:"), "provider key must not be emitted: {result}");
+    }
+
+    #[test]
+    fn test_rewrite_runtime_removed_when_none() {
+        let p = persona("Paul", None, None, None, Some("some-model"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+
+        // runtime was in source but persona.runtime is None — key must be removed.
+        assert!(!result.contains("runtime:"), "runtime key should be removed when None: {result}");
+    }
+
+    #[test]
+    fn test_rewrite_preserves_description_and_name_and_extra_keys() {
+        let p = persona("Paul Updated", Some("goose"), None, Some("anthropic"), Some("claude-opus-4"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+
+        // name and description are not persona record fields — must survive untouched.
+        assert!(result.contains("name: paul"), "name key lost: {result}");
+        assert!(result.contains("description:"), "description key lost: {result}");
+        assert!(result.contains("extra_key: keep-me"), "extra_key lost: {result}");
+
+        // display_name updated.
+        assert!(result.contains("display_name: Paul Updated") || result.contains("display_name: \"Paul Updated\""),
+            "display_name not updated: {result}");
+    }
+
+    #[test]
+    fn test_rewrite_no_provider_no_model_removes_model_key() {
+        let p = persona("Paul", None, None, None, None);
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+
+        // When both provider and model are cleared, the model key is removed.
+        assert!(!result.contains("model:"), "model key should be removed when both absent: {result}");
+    }
+
+    #[test]
+    fn test_rewrite_avatar_set_and_cleared() {
+        let with_avatar = persona("Paul", Some("goose"), Some("data:image/png;base64,abc"), Some("openai"), Some("gpt-4o"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &with_avatar).unwrap();
+        assert!(result.contains("avatar:"), "avatar key should be set: {result}");
+
+        let without_avatar = persona("Paul", Some("goose"), None, Some("openai"), Some("gpt-4o"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &without_avatar).unwrap();
+        assert!(!result.contains("avatar:"), "avatar key should be absent when None: {result}");
+    }
+
+    #[test]
+    fn test_rewrite_body_not_replaced_by_system_prompt() {
+        // system_prompt on the PersonaRecord is the COMPOSED prompt (body + pack instructions).
+        // The body of the .persona.md must not be replaced with it.
+        let p = persona("Paul", Some("goose"), None, Some("databricks_v2"), Some("goose-claude-opus-4-8"));
+        let result = rewrite_persona_md_frontmatter(SAMPLE_MD, &p).unwrap();
+
+        // The raw body from the file ("You are Paul.") is preserved.
+        assert!(result.ends_with("You are Paul.\n"), "raw body must be preserved, not replaced by composed system_prompt: {result:?}");
+        // The composed instructions suffix must NOT appear in the file body.
+        assert!(!result.contains("# Team Instructions"), "composed system_prompt must not be written to body: {result}");
     }
 }
