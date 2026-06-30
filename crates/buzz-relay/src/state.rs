@@ -166,7 +166,9 @@ impl ConnectionManager {
                     let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= conn.grace_limit {
                         tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
-                        crate::metrics::metrics().ws_backpressure_disconnects_total.add(1, &[]);
+                        crate::metrics::metrics()
+                            .ws_backpressure_disconnects_total
+                            .add(1, &[]);
                         conn.cancel.cancel();
                     } else {
                         tracing::warn!(conn_id = %conn_id, count, grace = conn.grace_limit, "fan-out: send buffer full — grace {count}/{}", conn.grace_limit);
@@ -466,10 +468,14 @@ impl AppState {
     ) -> Result<bool, buzz_db::DbError> {
         let key = (community_id, channel_id, pubkey.to_vec());
         if let Some(cached) = self.membership_cache.get(&key) {
-            crate::metrics::metrics().membership_cache_hits_total.add(1, &[]);
+            crate::metrics::metrics()
+                .membership_cache_hits_total
+                .add(1, &[]);
             return Ok(cached);
         }
-        crate::metrics::metrics().membership_cache_misses_total.add(1, &[]);
+        crate::metrics::metrics()
+            .membership_cache_misses_total
+            .add(1, &[]);
         let result = self.db.is_member(community_id, channel_id, pubkey).await?;
         self.membership_cache.insert(key, result);
         Ok(result)
@@ -598,10 +604,14 @@ impl AppState {
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
         let key = (community_id, pubkey.to_vec());
         if let Some(cached) = self.accessible_channels_cache.get(&key) {
-            crate::metrics::metrics().accessible_channels_cache_hits_total.add(1, &[]);
+            crate::metrics::metrics()
+                .accessible_channels_cache_hits_total
+                .add(1, &[]);
             return Ok(cached);
         }
-        crate::metrics::metrics().accessible_channels_cache_misses_total.add(1, &[]);
+        crate::metrics::metrics()
+            .accessible_channels_cache_misses_total
+            .add(1, &[]);
         let result = self
             .db
             .get_accessible_channel_ids(community_id, pubkey)

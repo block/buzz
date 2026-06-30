@@ -312,9 +312,10 @@ pub async fn upload_blob(
         }
         _ => "other",
     };
-    crate::metrics::metrics()
-        .media_uploads_total
-        .add(1, &[opentelemetry::KeyValue::new("mime", mime_label.to_string())]);
+    crate::metrics::metrics().media_uploads_total.add(
+        1,
+        &[opentelemetry::KeyValue::new("mime", mime_label.to_string())],
+    );
 
     // Audit via bounded channel — same pattern as event audit.
     let desc = descriptor.clone();
@@ -334,7 +335,9 @@ pub async fn upload_blob(
         .await
     {
         tracing::error!("Media audit channel closed — entry lost: {e}");
-        crate::metrics::metrics().audit_send_errors_total.add(1, &[]);
+        crate::metrics::metrics()
+            .audit_send_errors_total
+            .add(1, &[]);
     }
 
     Ok(Json(descriptor))

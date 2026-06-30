@@ -66,6 +66,11 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         }
     };
 
+    // Record the declared span fields now that we have the values.
+    tracing::Span::current()
+        .record("event_id", event_id_hex.as_str())
+        .record("conn_id", conn_id.to_string().as_str());
+
     // Extract the NIP-OA auth tag before verification consumes the event.
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
@@ -105,9 +110,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 };
                 if !allowed {
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), "pubkey not in allowlist");
-                    crate::metrics::metrics()
-                        .auth_failures_total
-                        .add(1, &[opentelemetry::KeyValue::new("reason", "allowlist_denied")]);
+                    crate::metrics::metrics().auth_failures_total.add(
+                        1,
+                        &[opentelemetry::KeyValue::new("reason", "allowlist_denied")],
+                    );
                     *conn.auth_state.write().await = AuthState::Failed;
                     conn.send(RelayMessage::ok(
                         &event_id_hex,
@@ -130,9 +136,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 Ok(owner) => owner,
                 Err(e) => {
                     warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = ?e, "not a relay member");
-                    crate::metrics::metrics()
-                        .auth_failures_total
-                        .add(1, &[opentelemetry::KeyValue::new("reason", "not_relay_member")]);
+                    crate::metrics::metrics().auth_failures_total.add(
+                        1,
+                        &[opentelemetry::KeyValue::new("reason", "not_relay_member")],
+                    );
                     *conn.auth_state.write().await = AuthState::Failed;
                     conn.send(RelayMessage::ok(
                         &event_id_hex,
@@ -246,9 +253,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
         }
         Err(e) => {
             warn!(conn_id = %conn_id, error = %e, "NIP-42 auth failed");
-            crate::metrics::metrics()
-                .auth_failures_total
-                .add(1, &[opentelemetry::KeyValue::new("reason", "nip42_invalid")]);
+            crate::metrics::metrics().auth_failures_total.add(
+                1,
+                &[opentelemetry::KeyValue::new("reason", "nip42_invalid")],
+            );
             *conn.auth_state.write().await = AuthState::Failed;
             conn.send(RelayMessage::ok(
                 &event_id_hex,

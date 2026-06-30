@@ -31,7 +31,9 @@ use opentelemetry::{
     metrics::{Counter, Histogram, Meter, UpDownCounter},
     KeyValue,
 };
-use opentelemetry_sdk::metrics::{Aggregation, Instrument, PeriodicReader, SdkMeterProvider, Stream};
+use opentelemetry_sdk::metrics::{
+    Aggregation, Instrument, PeriodicReader, SdkMeterProvider, Stream,
+};
 use prometheus::Registry;
 
 // ─── Bucket boundaries ───────────────────────────────────────────────────────
@@ -42,8 +44,7 @@ pub const LATENCY_BUCKETS_MS: &[f64] = &[
 ];
 
 /// Seconds-scale buckets for internal processing histograms (event, search, audit).
-pub const DURATION_BUCKETS_S: &[f64] =
-    &[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0];
+pub const DURATION_BUCKETS_S: &[f64] = &[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0];
 
 /// Integer-count buckets for fan-out recipient histograms.
 pub const FANOUT_BUCKETS: &[f64] = &[0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0, 1000.0];
@@ -152,9 +153,7 @@ fn build_metrics() -> Metrics {
         fanout_recipients: m.f64_histogram("buzz_fanout_recipients").build(),
         multinode_fanout_total: m.u64_counter("buzz_multinode_fanout_total").build(),
         multinode_fanout_lag_total: m.u64_counter("buzz_multinode_fanout_lag_total").build(),
-        cache_invalidation_lag_total: m
-            .u64_counter("buzz_cache_invalidation_lag_total")
-            .build(),
+        cache_invalidation_lag_total: m.u64_counter("buzz_cache_invalidation_lag_total").build(),
 
         search_index_seconds: m.f64_histogram("buzz_search_index_seconds").build(),
         search_index_errors_total: m.u64_counter("buzz_search_index_errors_total").build(),
@@ -167,16 +166,12 @@ fn build_metrics() -> Metrics {
         auth_failures_total: m.u64_counter("buzz_auth_failures_total").build(),
 
         media_uploads_total: m.u64_counter("buzz_media_uploads_total").build(),
-        media_upload_rejections_total: m
-            .u64_counter("buzz_media_upload_rejections_total")
-            .build(),
+        media_upload_rejections_total: m.u64_counter("buzz_media_upload_rejections_total").build(),
 
         workflow_runs_total: m.u64_counter("buzz_workflow_runs_total").build(),
 
         membership_cache_hits_total: m.u64_counter("buzz_membership_cache_hits_total").build(),
-        membership_cache_misses_total: m
-            .u64_counter("buzz_membership_cache_misses_total")
-            .build(),
+        membership_cache_misses_total: m.u64_counter("buzz_membership_cache_misses_total").build(),
         accessible_channels_cache_hits_total: m
             .u64_counter("buzz_accessible_channels_cache_hits_total")
             .build(),
@@ -208,8 +203,16 @@ pub fn meter() -> Meter {
 ///
 /// # Panics
 /// Panics if called more than once or if the HTTP listener cannot bind to `port`.
-pub fn install(port: u16) -> SdkMeterProvider {
+pub fn install(port: u16, resource: opentelemetry_sdk::Resource) -> SdkMeterProvider {
     let registry = prometheus::Registry::new();
+
+    // Bind synchronously so that a port conflict fails startup immediately,
+    // matching the prior `metrics-exporter-prometheus` behaviour.
+    let listener = {
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        std::net::TcpListener::bind(addr)
+            .unwrap_or_else(|e| panic!("metrics listener failed to bind :{port}: {e}"))
+    };
 
     // Build the Prometheus exporter (pull-based: no periodic push needed).
     let prom_exporter = opentelemetry_prometheus::exporter()
@@ -220,10 +223,15 @@ pub fn install(port: u16) -> SdkMeterProvider {
         .without_counter_suffixes()
         // otel_scope_* labels add noise; the relay has a single scope.
         .without_scope_info()
+        // Suppress the `target_info` series added by OTEL for resource attributes.
+        // The old metrics-rs endpoint did not emit it; excluding it keeps byte-parity
+        // so the Datadog openmetrics annotation needs no changes.
+        .without_target_info()
         .build()
         .expect("Prometheus exporter must build exactly once");
 
     let mut provider_builder = SdkMeterProvider::builder()
+        .with_resource(resource)
         .with_reader(prom_exporter)
         .with_view(explicit_bucket_view);
 
@@ -256,8 +264,15 @@ pub fn install(port: u16) -> SdkMeterProvider {
     // for test isolation — the Prometheus endpoint test calls install() first).
     METRICS.get_or_init(build_metrics);
 
-    // Spawn the Prometheus HTTP listener on the metrics port.
-    tokio::spawn(serve_prometheus(port, registry));
+    // Convert the synchronously-bound std listener and spawn the HTTP server.
+    // The bind already succeeded above; non-blocking mode is required before
+    // handing the socket to tokio.
+    listener
+        .set_nonblocking(true)
+        .expect("set metrics listener non-blocking");
+    let async_listener =
+        tokio::net::TcpListener::from_std(listener).expect("convert std TcpListener to tokio");
+    tokio::spawn(serve_prometheus(async_listener, registry));
 
     provider
 }
@@ -292,15 +307,17 @@ fn explicit_bucket_view(inst: &Instrument) -> Option<Stream> {
 
 // ─── Prometheus HTTP endpoint ─────────────────────────────────────────────────
 
-/// Serve the Prometheus `/metrics` endpoint on a bare TCP listener.
+/// Serve the Prometheus `/metrics` endpoint on a pre-bound TCP listener.
+///
+/// Accepts a listener that has already been bound synchronously in [`install`]
+/// so that port-in-use errors surface at startup, not inside a detached task.
 ///
 /// This is intentionally minimal — no middleware, no auth. Port access controls
 /// are expected to be enforced at the network/mesh level (Istio excludes this
 /// port from the mesh by default in the Blox deployment).
-async fn serve_prometheus(port: u16, registry: Registry) {
+async fn serve_prometheus(listener: tokio::net::TcpListener, registry: Registry) {
     use axum::{routing::get, Router};
     use prometheus::{Encoder, TextEncoder};
-    use std::net::SocketAddr;
 
     let app = Router::new().route(
         "/metrics",
@@ -314,21 +331,11 @@ async fn serve_prometheus(port: u16, registry: Registry) {
                     .encode(&families, &mut buf)
                     .expect("encode prometheus metrics");
                 let content_type = encoder.format_type().to_owned();
-                (
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        content_type,
-                    )],
-                    buf,
-                )
+                ([(axum::http::header::CONTENT_TYPE, content_type)], buf)
             }
         }),
     );
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|e| panic!("metrics listener failed to bind :{port}: {e}"));
     axum::serve(listener, app).await.ok();
 }
 
@@ -466,12 +473,11 @@ mod tests {
             .without_units()
             .without_counter_suffixes()
             .without_scope_info()
+            .without_target_info()
             .build()
             .expect("build test prometheus exporter");
 
-        let provider = SdkMeterProvider::builder()
-            .with_reader(exporter)
-            .build();
+        let provider = SdkMeterProvider::builder().with_reader(exporter).build();
 
         // 2. Create a meter from this isolated provider (not the global one).
         let meter = opentelemetry::metrics::MeterProvider::meter(&provider, METER_SCOPE);
@@ -488,18 +494,19 @@ mod tests {
         events_stored.add(1, &[KeyValue::new("kind", "42")]);
         auth_attempts.add(1, &[KeyValue::new("method", "nip42")]);
 
-        // 4. Bind port 0 → let OS pick a free port, then release so the
-        //    listener can bind it.  (Tiny TOCTOU gap acceptable in tests.)
-        let port = {
-            let sock = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-            sock.local_addr().expect("local_addr").port()
-        };
+        // 4. Bind synchronously (matching install() behaviour) then convert.
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = std_listener.local_addr().expect("local_addr").port();
+        // tokio requires non-blocking mode before from_std().
+        std_listener.set_nonblocking(true).expect("set_nonblocking");
+        let listener =
+            tokio::net::TcpListener::from_std(std_listener).expect("convert to tokio listener");
 
-        // 5. Spawn the Prometheus HTTP server with the isolated registry.
-        tokio::spawn(serve_prometheus(port, registry));
+        // 5. Spawn the Prometheus HTTP server with the pre-bound listener.
+        tokio::spawn(serve_prometheus(listener, registry));
 
-        // Give the listener a moment to finish binding.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Yield to let the spawned Axum task start accepting connections.
+        tokio::task::yield_now().await;
 
         // 6. Fetch /metrics and verify the expected names are present.
         let url = format!("http://127.0.0.1:{port}/metrics");

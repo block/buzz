@@ -363,7 +363,9 @@ pub(crate) async fn dispatch_persistent_event(
     };
     if let Err(e) = state.audit_tx.send(audit_entry).await {
         error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
-        crate::metrics::metrics().audit_send_errors_total.add(1, &[]);
+        crate::metrics::metrics()
+            .audit_send_errors_total
+            .add(1, &[]);
     }
 
     // Skip workflow triggering for workflow-execution kinds and relay-signed workflow messages.
@@ -415,10 +417,17 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
     let kind_str = bounded_kind_label(kind_u32);
+
+    // Record the declared span fields now that we have the values.
+    tracing::Span::current()
+        .record("event_id", event_id_hex.as_str())
+        .record("kind", kind_u32);
+
     debug!(event_id = %event_id_hex, kind = kind_u32, "EVENT");
-    crate::metrics::metrics()
-        .events_received_total
-        .add(1, &[opentelemetry::KeyValue::new("kind", kind_str.to_string())]);
+    crate::metrics::metrics().events_received_total.add(
+        1,
+        &[opentelemetry::KeyValue::new("kind", kind_str.to_string())],
+    );
 
     let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
         let auth = conn.auth_state.read().await;
@@ -517,9 +526,10 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                crate::metrics::metrics()
-                    .events_stored_total
-                    .add(1, &[opentelemetry::KeyValue::new("kind", kind_str.to_string())]);
+                crate::metrics::metrics().events_stored_total.add(
+                    1,
+                    &[opentelemetry::KeyValue::new("kind", kind_str.to_string())],
+                );
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,

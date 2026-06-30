@@ -31,7 +31,12 @@ async fn main() -> anyhow::Result<()> {
     // JSON-only structured logs — simple, machine-parseable, CAKE-compatible.
     // If OTEL_EXPORTER_OTLP_ENDPOINT is set, also attach an OpenTelemetry tracing
     // layer that exports spans via OTLP gRPC alongside the JSON stdout logs.
-    let tracer_provider = telemetry::try_init_tracer();
+    //
+    // Build a single shared Resource (service.name=buzz-relay by default, overridable
+    // via OTEL_SERVICE_NAME) used by both the trace and metric providers so that
+    // Datadog can correlate spans and metrics under the same service identity.
+    let resource = telemetry::service_resource();
+    let tracer_provider = telemetry::try_init_tracer(resource.clone());
     let otel_layer = tracer_provider.as_ref().map(|p| {
         use opentelemetry::trace::TracerProvider as _;
         tracing_opentelemetry::layer().with_tracer(p.tracer("buzz-relay"))
@@ -58,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         "Config loaded"
     );
 
-    let meter_provider = relay_metrics::install(config.metrics_port);
+    let meter_provider = relay_metrics::install(config.metrics_port, resource);
     info!(
         port = config.metrics_port,
         "Prometheus metrics exporter started"
@@ -724,7 +729,8 @@ async fn main() -> anyhow::Result<()> {
         let interval_secs = std::env::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(10);
+            .unwrap_or(10)
+            .max(1); // tokio::time::interval panics on Duration::ZERO
         tokio::spawn(async move {
             let m = relay_metrics::meter();
             let db_pool_size = m.u64_gauge("buzz_db_pool_size").build();
@@ -735,8 +741,7 @@ async fn main() -> anyhow::Result<()> {
             let redis_pool_max = m.u64_gauge("buzz_redis_pool_max").build();
             let redis_pool_waiting = m.u64_gauge("buzz_redis_pool_waiting").build();
 
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
                 interval.tick().await;
                 let db_stats = pool_state.db.pool_stats();
