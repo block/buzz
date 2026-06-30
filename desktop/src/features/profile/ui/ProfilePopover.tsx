@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronRight, Smile } from "lucide-react";
+import { CalendarDays, ChevronRight, Smile } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -18,6 +18,7 @@ interface ProfilePopoverProps {
   avatarDataUrl?: string | null;
   currentStatus: PresenceStatus;
   isStatusPending?: boolean;
+  calendarBusyLabel?: string | null;
   userStatusText?: string;
   userStatusEmoji?: string;
   onSetStatus: (status: PresenceStatus) => void;
@@ -48,6 +49,7 @@ export function ProfilePopover({
   avatarDataUrl,
   currentStatus,
   isStatusPending,
+  calendarBusyLabel,
   userStatusText,
   userStatusEmoji,
   onSetStatus,
@@ -62,6 +64,7 @@ export function ProfilePopover({
   const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
   const presenceHoverTimer = React.useRef<number | null>(null);
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
+  const hasCalendarBusy = Boolean(calendarBusyLabel);
   const settingsShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
 
   function clearPresenceHoverTimer() {
@@ -167,7 +170,11 @@ export function ProfilePopover({
                 role="menuitem"
                 type="button"
               >
-                <Smile className="h-4 w-4 shrink-0 text-muted-foreground" />
+                {hasCalendarBusy && !hasUserStatus ? (
+                  <CalendarDays className="h-4 w-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <Smile className="h-4 w-4 shrink-0 text-muted-foreground" />
+                )}
                 {hasUserStatus ? (
                   <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-popover-foreground">
                     {userStatusEmoji ? (
@@ -177,6 +184,10 @@ export function ProfilePopover({
                       />
                     ) : null}
                     <span className="truncate">{userStatusText}</span>
+                  </span>
+                ) : hasCalendarBusy ? (
+                  <span className="flex-1 truncate text-popover-foreground">
+                    {calendarBusyLabel}
                   </span>
                 ) : (
                   <span className="flex-1 truncate text-muted-foreground">

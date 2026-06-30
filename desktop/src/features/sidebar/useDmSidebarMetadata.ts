@@ -4,8 +4,13 @@ import { usePresenceQuery } from "@/features/presence/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveChannelDisplayLabel } from "@/features/sidebar/lib/channelLabels";
+import { useUserStatusQuery } from "@/features/user-status/hooks";
 import type { SidebarDmParticipant } from "@/features/sidebar/ui/SidebarSection";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
+
+function isMeetingStatus(status: string | null | undefined): boolean {
+  return /\bmeeting\b/i.test(status?.trim() ?? "");
+}
 
 export function useDmSidebarMetadata({
   currentPubkey,
@@ -51,8 +56,11 @@ export function useDmSidebarMetadata({
   const dmProfilesQuery = useUsersBatchQuery(dmParticipantPubkeys, {
     enabled: enabled && directMessages.length > 0,
   });
+  const dmUserStatusQuery = useUserStatusQuery(
+    enabled ? dmParticipantPubkeys : [],
+  );
   const dmProfiles = dmProfilesQuery.data?.profiles;
-  const dmPresenceByChannelId = React.useMemo(
+  const otherParticipantByChannelId = React.useMemo(
     () =>
       Object.fromEntries(
         directMessages.map((channel) => {
@@ -69,16 +77,41 @@ export function useDmSidebarMetadata({
             },
           );
 
+          return [channel.id, otherParticipantPubkey?.toLowerCase() ?? null];
+        }),
+      ) satisfies Record<string, string | null>,
+    [currentPubkey, directMessages, selfDmLabels],
+  );
+  const dmPresenceByChannelId = React.useMemo(
+    () =>
+      Object.fromEntries(
+        directMessages.map((channel) => {
+          const otherParticipantPubkey =
+            otherParticipantByChannelId[channel.id];
+
           return [
             channel.id,
             otherParticipantPubkey
-              ? (dmPresenceQuery.data?.[otherParticipantPubkey.toLowerCase()] ??
-                "offline")
+              ? (dmPresenceQuery.data?.[otherParticipantPubkey] ?? "offline")
               : "offline",
           ];
         }),
       ) satisfies Record<string, PresenceStatus>,
-    [currentPubkey, directMessages, dmPresenceQuery.data, selfDmLabels],
+    [directMessages, dmPresenceQuery.data, otherParticipantByChannelId],
+  );
+  const dmInMeetingByChannelId = React.useMemo(
+    () =>
+      Object.fromEntries(
+        directMessages.map((channel) => {
+          const otherParticipantPubkey =
+            otherParticipantByChannelId[channel.id];
+          const status = otherParticipantPubkey
+            ? dmUserStatusQuery.data?.[otherParticipantPubkey]
+            : null;
+          return [channel.id, isMeetingStatus(status?.text)];
+        }),
+      ) satisfies Record<string, boolean>,
+    [directMessages, dmUserStatusQuery.data, otherParticipantByChannelId],
   );
   const dmChannelLabels = React.useMemo(
     () =>
@@ -140,6 +173,7 @@ export function useDmSidebarMetadata({
 
   return {
     dmChannelLabels,
+    dmInMeetingByChannelId,
     dmParticipantsByChannelId,
     dmPresenceByChannelId,
   };

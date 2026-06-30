@@ -1,4 +1,5 @@
 import * as React from "react";
+import { CalendarDays } from "lucide-react";
 
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -17,6 +18,7 @@ import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
   activeWorkspace: Workspace | null;
+  calendarBusyLabel?: string | null;
   isPresencePending?: boolean;
   onOpenAddWorkspace: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
@@ -38,6 +40,7 @@ type SidebarProfileCardProps = {
 
 export function SidebarProfileCard({
   activeWorkspace,
+  calendarBusyLabel,
   isPresencePending,
   onOpenAddWorkspace,
   onOpenSettings,
@@ -74,6 +77,7 @@ export function SidebarProfileCard({
     [toggleProfilePopover],
   );
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
+  const hasCalendarBusy = Boolean(calendarBusyLabel);
   const workspaceLabel = activeWorkspace?.name ?? "No workspace";
   const readonlyWorkspaceLabel = (
     <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
@@ -143,6 +147,7 @@ export function SidebarProfileCard({
             currentStatus={selfPresenceStatus}
             displayName={resolvedDisplayName}
             isStatusPending={isPresencePending}
+            calendarBusyLabel={calendarBusyLabel}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
             onSetStatus={onSetPresenceStatus ?? (() => {})}
@@ -180,7 +185,7 @@ export function SidebarProfileCard({
             </button>
           </ProfilePopover>
 
-          {hasStatus ? (
+          {hasStatus || hasCalendarBusy ? (
             <div className="relative mt-0.5">
               <button
                 aria-label={`Open profile menu for ${resolvedDisplayName}`}
@@ -195,13 +200,22 @@ export function SidebarProfileCard({
                 }}
                 type="button"
               >
-                {selfUserStatus?.emoji ? (
-                  <StatusEmoji
-                    className="mr-1 w-4 shrink-0 text-xs"
-                    value={selfUserStatus.emoji}
-                  />
-                ) : null}
-                <span className="truncate">{selfUserStatus?.text}</span>
+                {hasStatus ? (
+                  <>
+                    {selfUserStatus?.emoji ? (
+                      <StatusEmoji
+                        className="mr-1 w-4 shrink-0 text-xs"
+                        value={selfUserStatus.emoji}
+                      />
+                    ) : null}
+                    <span className="truncate">{selfUserStatus?.text}</span>
+                  </>
+                ) : (
+                  <>
+                    <CalendarDays className="mr-1 h-3.5 w-3.5 shrink-0 text-sidebar-foreground/55" />
+                    <span className="truncate">{calendarBusyLabel}</span>
+                  </>
+                )}
               </button>
               <div
                 className={cn(

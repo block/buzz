@@ -1,6 +1,7 @@
 import type * as React from "react";
 import {
   BellOff,
+  CalendarDays,
   ChevronDown,
   CircleDot,
   FileText,
@@ -234,6 +235,7 @@ export function ChannelMenuButton({
   activeWorking,
   isMuted,
   dmParticipants,
+  dmInMeeting,
   presenceStatus,
   onSelectChannel,
 }: {
@@ -245,6 +247,7 @@ export function ChannelMenuButton({
   activeWorking?: ActiveChannelTurnSummary;
   isMuted?: boolean;
   dmParticipants?: SidebarDmParticipant[];
+  dmInMeeting?: boolean;
   presenceStatus?: PresenceStatus;
   onSelectChannel: (channelId: string) => void;
 }) {
@@ -275,6 +278,19 @@ export function ChannelMenuButton({
         presenceStatus={presenceStatus}
       />
       <span className="min-w-0 flex-1 truncate">{resolvedLabel}</span>
+      {dmInMeeting ? (
+        <CalendarDays
+          aria-label="In meeting"
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            isActive
+              ? "text-sidebar-active-foreground/70"
+              : "text-sidebar-foreground/45",
+          )}
+          data-testid={`channel-meeting-status-${channel.name}`}
+          role="img"
+        />
+      ) : null}
       {ephemeralDisplay ? (
         <EphemeralChannelBadge
           display={ephemeralDisplay}
@@ -318,6 +334,7 @@ export function SidebarSection({
   action,
   activeWorkingByChannelId,
   dmParticipantsByChannelId,
+  dmInMeetingByChannelId,
   emptyState,
   items,
   channelLabels,
@@ -341,6 +358,7 @@ export function SidebarSection({
   action?: React.ReactNode;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
   dmParticipantsByChannelId?: Record<string, SidebarDmParticipant[]>;
+  dmInMeetingByChannelId?: Record<string, boolean>;
   emptyState?: React.ReactNode;
   items: Channel[];
   channelLabels?: Record<string, string>;
@@ -413,6 +431,7 @@ export function SidebarSection({
                       channel={channel}
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       dmParticipants={dmParticipantsByChannelId?.[channel.id]}
+                      dmInMeeting={dmInMeetingByChannelId?.[channel.id]}
                       hasUnread={unreadChannelIds.has(channel.id)}
                       unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}

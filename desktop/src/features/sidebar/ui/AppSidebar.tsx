@@ -7,6 +7,10 @@ import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import type { Workspace } from "@/features/workspaces/types";
 import { AddWorkspaceDialog } from "@/features/workspaces/ui/AddWorkspaceDialog";
+import {
+  formatCalendarBusyLabel,
+  useCurrentGoogleCalendarEvent,
+} from "@/features/calendar/hooks";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
 import {
   useChannelSections,
@@ -224,6 +228,8 @@ export function AppSidebar({
   onUnstarChannel,
 }: AppSidebarProps) {
   const activeWorkingByChannelId = useActiveWorkingChannelsById();
+  const { currentEvent: currentCalendarEvent, nextEvent: nextCalendarEvent } =
+    useCurrentGoogleCalendarEvent();
   const { status: updateStatus } = useUpdaterContext();
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
   const sidebarRelayConnectionCard = useSidebarRelayConnectionCard(
@@ -449,14 +455,18 @@ export function AppSidebar({
     immediate: isSelectedDirectMessage,
     timeoutMs: 400,
   });
-  const { dmChannelLabels, dmParticipantsByChannelId, dmPresenceByChannelId } =
-    useDmSidebarMetadata({
-      currentPubkey,
-      directMessages,
-      enabled: shouldLoadDmMetadata,
-      fallbackDisplayName,
-      profileDisplayName: profile?.displayName,
-    });
+  const {
+    dmChannelLabels,
+    dmInMeetingByChannelId,
+    dmParticipantsByChannelId,
+    dmPresenceByChannelId,
+  } = useDmSidebarMetadata({
+    currentPubkey,
+    directMessages,
+    enabled: shouldLoadDmMetadata,
+    fallbackDisplayName,
+    profileDisplayName: profile?.displayName,
+  });
   const sortedDirectMessages = React.useMemo(
     () => sortDmChannelsByLabel(directMessages, dmChannelLabels),
     [directMessages, dmChannelLabels],
@@ -473,6 +483,9 @@ export function AppSidebar({
     profile?.displayName?.trim() ||
     fallbackDisplayName?.trim() ||
     "Current identity";
+  const calendarBusyLabel = currentCalendarEvent
+    ? formatCalendarBusyLabel(currentCalendarEvent)
+    : null;
   const {
     scrollToNextAbove,
     scrollToNextBelow,
@@ -525,6 +538,8 @@ export function AppSidebar({
         data-testid="app-sidebar-scroll-anchor"
       >
         <AppSidebarPinnedHeader
+          calendarEvent={currentCalendarEvent ?? nextCalendarEvent}
+          calendarNow={Date.now()}
           channelLabels={dmChannelLabels}
           currentPubkey={currentPubkey}
           homeBadgeCount={homeBadgeCount}
@@ -735,6 +750,7 @@ export function AppSidebar({
                     </div>
                   }
                   dmParticipantsByChannelId={dmParticipantsByChannelId}
+                  dmInMeetingByChannelId={dmInMeetingByChannelId}
                   isCollapsed={collapsedGroups.directMessages}
                   isActiveChannel={selectedView === "channel"}
                   activeWorkingByChannelId={activeWorkingByChannelId}
@@ -810,6 +826,7 @@ export function AppSidebar({
               <SidebarMenuItem>
                 <SidebarProfileCard
                   activeWorkspace={activeWorkspace}
+                  calendarBusyLabel={calendarBusyLabel}
                   isPresencePending={isPresencePending}
                   onOpenAddWorkspace={onOpenAddWorkspace}
                   onOpenSettings={onSelectSettings}

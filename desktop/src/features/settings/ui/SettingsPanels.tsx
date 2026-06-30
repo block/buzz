@@ -12,6 +12,7 @@ import {
   Monitor,
   MonitorCog,
   Moon,
+  Plug,
   Search,
   Smartphone,
   Smile,
@@ -27,6 +28,7 @@ import type {
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
+import { ConnectionsSettingsCard } from "@/features/calendar/ui/CalendarSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
@@ -50,6 +52,7 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 export type SettingsSection =
   | "profile"
   | "notifications"
+  | "connections"
   | "experimental"
   | "agents"
   | "channel-templates"
@@ -67,6 +70,7 @@ export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "profile",
   "notifications",
+  "connections",
   "experimental",
   "agents",
   "channel-templates",
@@ -136,6 +140,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Agents",
     icon: Bot,
     featureGate: "managed-agents",
+  },
+  {
+    value: "connections",
+    label: "Connections",
+    icon: Plug,
   },
   {
     value: "channel-templates",
@@ -370,6 +379,8 @@ export function renderSettingsSection(
           onSetSoundForSlot={props.onSetSoundForSlot}
         />
       );
+    case "connections":
+      return <ConnectionsSettingsCard />;
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":

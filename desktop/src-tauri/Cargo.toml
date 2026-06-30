@@ -78,7 +78,7 @@ serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
-reqwest = { version = "0.13", features = ["json", "query", "stream"] }
+reqwest = { version = "0.13", features = ["form", "json", "query", "stream"] }
 url = "2"
 buzz_core_pkg = { package = "buzz-core", path = "../../crates/buzz-core" }
 buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona" }

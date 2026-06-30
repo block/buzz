@@ -1,6 +1,11 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Activity, Headphones, MessageSquare } from "lucide-react";
+import {
+  Activity,
+  CalendarDays,
+  Headphones,
+  MessageSquare,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -42,6 +47,10 @@ import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
+import {
+  formatCalendarBusyLabel,
+  useCurrentGoogleCalendarEvent,
+} from "@/features/calendar/hooks";
 
 type UserProfilePopoverProps = {
   children: React.ReactNode;
@@ -216,6 +225,13 @@ export function UserProfilePopover({
   const isSelf =
     currentPubkey !== undefined &&
     currentPubkey.toLowerCase() === pubkey.toLowerCase();
+  const { currentEvent: selfCalendarEvent } = useCurrentGoogleCalendarEvent({
+    enabled: open && isSelf,
+  });
+  const selfCalendarBusyLabel = selfCalendarEvent
+    ? formatCalendarBusyLabel(selfCalendarEvent)
+    : null;
+  const hasSelfCalendarBusy = Boolean(selfCalendarBusyLabel);
   const showProfileActions = currentPubkey !== undefined && !isSelf;
   const selfProfileQuery = useProfileQuery(open && showProfileActions);
   const isCurrentUserOwner =
@@ -573,7 +589,7 @@ export function UserProfilePopover({
             </button>
           ) : null}
 
-          {hasUserStatus || showProfileActions ? (
+          {hasUserStatus || hasSelfCalendarBusy || showProfileActions ? (
             <>
               <div
                 aria-hidden="true"
@@ -590,6 +606,12 @@ export function UserProfilePopover({
                   {userStatusText ? (
                     <span className="truncate">{userStatusText}</span>
                   ) : null}
+                </StatusLine>
+              ) : null}
+              {hasSelfCalendarBusy ? (
+                <StatusLine>
+                  <CalendarDays className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{selfCalendarBusyLabel}</span>
                 </StatusLine>
               ) : null}
               {showProfileActions ? (
