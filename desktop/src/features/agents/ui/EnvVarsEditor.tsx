@@ -1,4 +1,4 @@
-import { Plus, X } from "lucide-react";
+import { AlertCircle, Lock, Plus, X } from "lucide-react";
 import * as React from "react";
 
 import { Button } from "@/shared/ui/button";
@@ -27,6 +27,15 @@ type EnvVarsEditorProps = {
   helperText?: string;
   /** Disables all editing. */
   disabled?: boolean;
+  /**
+   * Env var keys that are required for the agent to start with the currently
+   * selected runtime + provider. Each key renders as a locked first-class row
+   * at the top of the editor: the key is pre-filled and read-only; the value
+   * is editable. If the value is already set in `value`, it is shown; otherwise
+   * the row is empty and marked with a "Required" badge so the user knows to
+   * fill it in.
+   */
+  requiredKeys?: readonly string[];
 };
 
 type Row = { id: string; key: string; value: string };
@@ -47,6 +56,7 @@ export function EnvVarsEditor({
   label = "Environment variables",
   helperText,
   disabled = false,
+  requiredKeys = [],
 }: EnvVarsEditorProps) {
   // Local ordered row state. Synced from `value` on mount and when the
   // parent supplies a value we did NOT just emit (e.g., dialog reopened
@@ -82,6 +92,13 @@ export function EnvVarsEditor({
     emit([...rows, { id: crypto.randomUUID(), key: "", value: "" }]);
   }
 
+  // Required rows are rendered before the user-editable rows. They are not
+  // part of `rows` state — they read from / write to `value` directly via
+  // `onChange`, using their key as the stable identity.
+  function updateRequiredValue(key: string, newValue: string) {
+    onChange({ ...value, [key]: newValue });
+  }
+
   return (
     <div className="space-y-2" data-testid="env-vars-editor">
       <div>
@@ -91,7 +108,76 @@ export function EnvVarsEditor({
         ) : null}
       </div>
       <div className="space-y-2">
-        {rows.length === 0 ? (
+        {/* Required credential rows — shown first, key is read-only */}
+        {requiredKeys.map((key) => {
+          const currentValue = value[key] ?? "";
+          const isMissing = currentValue.length === 0;
+          return (
+            <div key={key} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    "flex min-h-11 flex-1 items-center gap-1.5 px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                    "border-amber-500/40 bg-amber-50/30 dark:bg-amber-950/20",
+                  )}
+                >
+                  <Lock className="h-3 w-3 shrink-0 text-muted-foreground/60" aria-hidden />
+                  <span
+                    className="font-mono text-sm leading-6 text-foreground/80"
+                    data-testid="env-vars-required-key"
+                  >
+                    {key}
+                  </span>
+                  {isMissing ? (
+                    <span className="ml-1 flex items-center gap-0.5 rounded-sm bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+                      <AlertCircle className="h-2.5 w-2.5" aria-hidden />
+                      Required
+                    </span>
+                  ) : null}
+                </div>
+                <div
+                  className={cn(
+                    "flex min-h-11 flex-[2] items-center px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  <Input
+                    aria-label={`Value for ${key}`}
+                    className={cn(
+                      "h-8 px-0 py-0 font-mono leading-6",
+                      PERSONA_FIELD_CONTROL_CLASS,
+                    )}
+                    data-testid="env-vars-required-value"
+                    disabled={disabled}
+                    onChange={(event) =>
+                      updateRequiredValue(key, event.target.value)
+                    }
+                    placeholder="value"
+                    type="password"
+                    value={currentValue}
+                  />
+                </div>
+                {/* Spacer to align with the remove-button column */}
+                <div className="h-9 w-9 shrink-0" aria-hidden />
+              </div>
+              {(() => {
+                const inheritedValue = inheritedFrom?.[key];
+                return inheritedValue !== undefined ? (
+                  <p className="ml-1 text-xs text-muted-foreground">
+                    Overrides {inheritedLabel} value{" "}
+                    <span className="font-mono">
+                      {maskInherited(inheritedValue)}
+                    </span>
+                  </p>
+                ) : null;
+              })()}
+            </div>
+          );
+        })}
+
+        {/* User-managed rows */}
+        {rows.length === 0 && requiredKeys.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">
             No variables set.
           </p>

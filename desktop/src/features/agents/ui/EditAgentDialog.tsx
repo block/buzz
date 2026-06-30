@@ -32,6 +32,7 @@ import {
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
+  requiredCredentialEnvKeys,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
@@ -229,6 +230,18 @@ export function EditAgentDialog({
   );
 
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
+
+  // Required credential env keys for the currently selected runtime + provider.
+  // These are surfaced as first-class required rows in the EnvVarsEditor so the
+  // user sees exactly what is missing before attempting to start the agent.
+  const requiredEnvKeys = React.useMemo(
+    () =>
+      requiredCredentialEnvKeys(
+        selectedRuntime?.id ?? selectedRuntimeId,
+        providerForDiscovery,
+      ),
+    [selectedRuntime?.id, selectedRuntimeId, providerForDiscovery],
+  );
 
   const {
     discoveredModelOptions,
@@ -686,6 +699,7 @@ export function EditAgentDialog({
               inheritedFrom={inheritedEnvVars}
               inheritedLabel="persona"
               onChange={setEnvVars}
+              requiredKeys={requiredEnvKeys}
               value={envVars}
             />
 

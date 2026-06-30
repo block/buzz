@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   runtimeSupportsLlmProviderSelection,
   getPersonaProviderOptions,
+  requiredCredentialEnvKeys,
 } from "./personaDialogPickers.tsx";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel.ts";
 
@@ -992,4 +993,64 @@ test("editAgent_bugA_unknownCommandStillFallsBackToCustom", () => {
     "custom",
     "unknown command/id must still fall back to 'custom'",
   );
+});
+
+// ── requiredCredentialEnvKeys ──────────────────────────────────────────────
+//
+// Guards the provider-aware credential requirements surface so Phase 2
+// required env rows stay correct as providers and runtimes change.
+
+test("requiredCredentialEnvKeys: buzz-agent + anthropic → ANTHROPIC_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + openai → OPENAI_COMPAT_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "openai");
+  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + databricks → DATABRICKS_HOST only (no token)", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+  assert.deepEqual(keys, ["DATABRICKS_HOST"]);
+  assert.ok(
+    !keys.includes("DATABRICKS_TOKEN"),
+    "DATABRICKS_TOKEN must not be required (OAuth PKCE is the normal auth path)",
+  );
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + databricks_v2 → DATABRICKS_HOST only", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "databricks_v2");
+  assert.deepEqual(keys, ["DATABRICKS_HOST"]);
+});
+
+test("requiredCredentialEnvKeys: goose + anthropic → ANTHROPIC_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("goose", "anthropic");
+  assert.deepEqual(keys, ["ANTHROPIC_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: goose + openai → OPENAI_COMPAT_API_KEY", () => {
+  const keys = requiredCredentialEnvKeys("goose", "openai");
+  assert.deepEqual(keys, ["OPENAI_COMPAT_API_KEY"]);
+});
+
+test("requiredCredentialEnvKeys: buzz-agent + no provider → empty (provider not yet selected)", () => {
+  const keys = requiredCredentialEnvKeys("buzz-agent", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: claude → empty (uses CLI login, not env keys)", () => {
+  const keys = requiredCredentialEnvKeys("claude", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: codex → empty (uses CLI login, not env keys)", () => {
+  const keys = requiredCredentialEnvKeys("codex", "");
+  assert.deepEqual(keys, []);
+});
+
+test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
+  const keys = requiredCredentialEnvKeys("my-custom-harness", "anthropic");
+  assert.deepEqual(keys, []);
 });

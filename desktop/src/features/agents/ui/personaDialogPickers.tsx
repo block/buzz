@@ -75,6 +75,45 @@ function isKnownLlmProvider(
   return (KNOWN_LLM_PROVIDER_IDS as readonly string[]).includes(providerId);
 }
 
+/**
+ * Returns the credential env-var keys that are required for a given
+ * runtime + provider combination. These are the keys that must be present
+ * in the agent's effective env for it to start successfully.
+ *
+ * Used by EnvVarsEditor to render first-class "required" rows that make the
+ * gap visible before the user tries to save or start the agent.
+ *
+ * Mirrors the Rust `readiness::buzz_agent_requirements` /
+ * `readiness::goose_requirements` logic — keep in sync.
+ */
+export function requiredCredentialEnvKeys(
+  runtimeId: string,
+  provider: string,
+): readonly string[] {
+  const normalizedRuntime = runtimeId.trim();
+  const normalizedProvider = provider.trim().toLowerCase();
+
+  // buzz-agent and goose both use provider-specific credentials.
+  if (
+    normalizedRuntime === "buzz-agent" ||
+    normalizedRuntime === "goose"
+  ) {
+    if (normalizedProvider === "anthropic") return ["ANTHROPIC_API_KEY"];
+    if (normalizedProvider === "openai") return ["OPENAI_COMPAT_API_KEY"];
+    if (
+      normalizedProvider === "databricks" ||
+      normalizedProvider === "databricks_v2"
+    ) {
+      // DATABRICKS_TOKEN is NOT required — OAuth PKCE is the normal path.
+      return ["DATABRICKS_HOST"];
+    }
+  }
+
+  // claude and codex handle auth via CLI login (not env keys) — those
+  // requirements are surfaced separately via the CliLogin surface.
+  return [];
+}
+
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
   return runtimeId === "buzz-agent" || runtimeId === "goose";
 }
