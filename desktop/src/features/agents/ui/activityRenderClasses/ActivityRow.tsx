@@ -50,7 +50,7 @@ export function ActivityRow({
   if (contentChildren.length === 0) {
     return (
       <div
-        className={cn("not-prose flex items-center gap-1.5", className)}
+        className={cn("not-prose flex min-h-6 items-center gap-1.5", className)}
         data-testid={testId}
       >
         {children}
@@ -68,7 +68,7 @@ export function ActivityRow({
       data-testid={testId}
       open={defaultOpen}
     >
-      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
+      <summary className="inline-flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
         {summaryChildren}
         <ChevronDown
           className={cn(
