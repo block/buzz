@@ -161,7 +161,9 @@ export function ChannelManagementSheet({
     );
   }, [currentPubkey, ownerMemberPubkeys, ownerProfilesQuery.data]);
 
-  const isOwner = selfMember?.role === "owner" || canManageOwnedAgentChannel;
+  const isSelfOwner = selfMember?.role === "owner";
+  // Capability: may delete this channel (self-owner OR owns the agent-owner).
+  const canDeleteChannel = isSelfOwner || canManageOwnedAgentChannel;
   const canManageChannel =
     selfMember?.role === "owner" ||
     selfMember?.role === "admin" ||
@@ -383,7 +385,7 @@ export function ChannelManagementSheet({
             isArchived={isArchived}
             isDark={isDark}
             isDeleteDialogOpen={isDeleteDialogOpen}
-            isOwner={isOwner}
+            isOwner={canDeleteChannel}
             mode={auxiliaryPanelMode}
             transparentChrome={transparentChrome}
             joinChannelMutation={joinChannelMutation}
@@ -429,7 +431,7 @@ export function ChannelManagementSheet({
               isArchived={isArchived}
               isDark={isDark}
               isDeleteDialogOpen={isDeleteDialogOpen}
-              isOwner={isOwner}
+              isOwner={canDeleteChannel}
               mode={auxiliaryPanelMode}
               transparentChrome={transparentChrome}
               joinChannelMutation={joinChannelMutation}
@@ -665,7 +667,7 @@ type ChannelManagementPanelContentProps = {
   isArchived: boolean;
   isDark: boolean;
   isDeleteDialogOpen: boolean;
-  isOwner: boolean;
+  isOwner: boolean; // true when caller may delete the channel
   mode: AuxiliaryPanelMode;
   transparentChrome?: boolean;
   joinChannelMutation: ChannelMutation;

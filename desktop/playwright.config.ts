@@ -58,6 +58,7 @@ export default defineConfig({
         "**/overscroll-boundary.spec.ts",
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
+        "**/human-edit-agent-content.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

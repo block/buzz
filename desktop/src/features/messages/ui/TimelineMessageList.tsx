@@ -14,14 +14,10 @@ import {
   hasVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
-import {
-  ownsAuthorAgent,
-  type UserProfileLookup,
-} from "@/features/profile/lib/identity";
+import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -339,19 +335,13 @@ function MessageRowItem({
   videoReviewContext,
 }: MessageRowItemProps) {
   const { message, summary } = entry;
-  const isMutableMessage = message.kind !== KIND_HUDDLE_STARTED;
-  const isOwnMessage = !!currentPubkey && message.pubkey === currentPubkey;
-  const isOwnedAgentMessage =
-    !!message.pubkey &&
-    ownsAuthorAgent(profiles?.[normalizePubkey(message.pubkey)], currentPubkey);
-  const canDelete =
-    isMutableMessage && onDelete && (isOwnMessage || isOwnedAgentMessage)
-      ? onDelete
-      : undefined;
-  const canEdit =
-    isMutableMessage && onEdit && (isOwnMessage || isOwnedAgentMessage)
-      ? onEdit
-      : undefined;
+  const canManage = canManageMessageForCurrentUser(
+    message,
+    currentPubkey,
+    profiles,
+  );
+  const canDelete = canManage && onDelete ? onDelete : undefined;
+  const canEdit = canManage && onEdit ? onEdit : undefined;
 
   if (summary && onReply) {
     const isHighlighted = message.id === highlightedMessageId;

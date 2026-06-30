@@ -7,6 +7,7 @@ import {
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -103,16 +104,7 @@ type MessageThreadPanelSkeletonProps = {
   transparentChrome?: boolean;
 };
 
-function canManageMessage(
-  message: TimelineMessage,
-  currentPubkey: string | undefined,
-): boolean {
-  return Boolean(
-    currentPubkey &&
-      message.pubkey &&
-      currentPubkey.toLowerCase() === message.pubkey.toLowerCase(),
-  );
-}
+// canManageMessage moved to the shared helper canManageMessageForCurrentUser
 
 function hasLaterVisibleSibling(
   entries: readonly MainTimelineEntry[],
@@ -583,12 +575,22 @@ export function MessageThreadPanel({
               layoutVariant="thread-reply"
               message={threadHead}
               onDelete={
-                onDelete && canManageMessage(threadHead, currentPubkey)
+                onDelete &&
+                canManageMessageForCurrentUser(
+                  threadHead,
+                  currentPubkey,
+                  profiles,
+                )
                   ? onDelete
                   : undefined
               }
               onEdit={
-                onEdit && canManageMessage(threadHead, currentPubkey)
+                onEdit &&
+                canManageMessageForCurrentUser(
+                  threadHead,
+                  currentPubkey,
+                  profiles,
+                )
                   ? onEdit
                   : undefined
               }
@@ -717,13 +719,21 @@ export function MessageThreadPanel({
                         }
                         onDelete={
                           onDelete &&
-                          canManageMessage(entry.message, currentPubkey)
+                          canManageMessageForCurrentUser(
+                            entry.message,
+                            currentPubkey,
+                            profiles,
+                          )
                             ? onDelete
                             : undefined
                         }
                         onEdit={
                           onEdit &&
-                          canManageMessage(entry.message, currentPubkey)
+                          canManageMessageForCurrentUser(
+                            entry.message,
+                            currentPubkey,
+                            profiles,
+                          )
                             ? onEdit
                             : undefined
                         }

@@ -6236,6 +6236,23 @@ async function handleSendManagedAgentChannelMessage(
 }
 
 /**
+ * Mock the `delete_message` Tauri command. Removes the event from the
+ * in-memory mock store so the query-cache invalidation in
+ * `useDeleteMessageMutation.onSuccess` (which filters by eventId) finds
+ * nothing to keep, and the row disappears from the timeline.
+ */
+function handleDeleteMessage(args: {
+  channelId: string;
+  eventId: string;
+}): void {
+  const history = mockMessages.get(args.channelId);
+  if (history) {
+    const index = history.findIndex((ev) => ev.id === args.eventId);
+    if (index !== -1) history.splice(index, 1);
+  }
+}
+
+/**
  * Mock the `edit_message` Tauri command. Mirrors the real Rust command
  * (`build_message_edit`): emit a kind:40003 edit event carrying `["e", target]`
  * plus the new content, media (imeta) tags, and NIP-30 emoji tags. The timeline
@@ -7478,6 +7495,11 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
           activeConfig,
         );
+      case "delete_message":
+        handleDeleteMessage(
+          payload as Parameters<typeof handleDeleteMessage>[0],
+        );
+        return null;
       case "edit_message":
         return handleEditMessage(
           payload as Parameters<typeof handleEditMessage>[0],
