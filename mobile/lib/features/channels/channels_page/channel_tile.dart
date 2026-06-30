@@ -246,14 +246,14 @@ class _ChannelTile extends ConsumerWidget {
                     leading: Icon(
                       LucideIcons.folder,
                       color: sectionId == section.id
-                          ? Theme.of(sheetContext).colorScheme.primary
+                          ? sheetContext.colors.primary
                           : null,
                     ),
                     title: Text(section.name),
                     trailing: sectionId == section.id
                         ? Icon(
                             LucideIcons.check,
-                            color: Theme.of(sheetContext).colorScheme.primary,
+                            color: sheetContext.colors.primary,
                           )
                         : null,
                     onTap: () {

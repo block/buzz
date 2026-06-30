@@ -281,9 +281,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                           onPressed: () => Navigator.pop(context, true),
                           child: Text(
                             'Delete',
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
-                            ),
+                            style: TextStyle(color: context.colors.error),
                           ),
                         ),
                       ],

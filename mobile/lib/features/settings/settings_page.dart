@@ -26,7 +26,7 @@ class SettingsPage extends HookConsumerWidget {
     final config = ref.watch(relayConfigProvider);
     final selectedAccent = ref.watch(accentProvider);
     final selectedScheme = ref.watch(schemeProvider);
-    final colorScheme = Theme.of(context).colorScheme;
+    final colorScheme = context.colors;
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
 
@@ -210,9 +210,7 @@ class SettingsPage extends HookConsumerWidget {
               Navigator.of(context).popUntil((route) => route.isFirst);
               ref.read(authProvider.notifier).signOut();
             },
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
+            style: FilledButton.styleFrom(backgroundColor: ctx.colors.error),
             child: const Text('Remove'),
           ),
         ],
