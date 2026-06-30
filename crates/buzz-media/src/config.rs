@@ -8,6 +8,10 @@ fn default_max_file_bytes() -> u64 {
     104_857_600 // 100 MB
 }
 
+fn default_s3_region() -> String {
+    "us-east-1".to_string()
+}
+
 /// Configuration for media storage (S3/MinIO).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MediaConfig {
@@ -19,6 +23,14 @@ pub struct MediaConfig {
     pub s3_secret_key: String,
     /// S3 bucket name.
     pub s3_bucket: String,
+    /// AWS region for SigV4 request signing (e.g. "us-west-2").
+    ///
+    /// Must match the region of `s3_endpoint` for real AWS S3, otherwise
+    /// requests are signed with the wrong credential scope and AWS rejects
+    /// them. Defaults to "us-east-1" to preserve MinIO/local behavior, where
+    /// the value is not meaningfully checked.
+    #[serde(default = "default_s3_region")]
+    pub s3_region: String,
     /// Maximum upload size for images (bytes). Default: 50 MB.
     pub max_image_bytes: u64,
     /// Maximum upload size for animated GIFs (bytes). Default: 10 MB.
