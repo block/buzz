@@ -3,9 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Bot,
   Captions,
+  EllipsisVertical,
   MessageSquareText,
   PhoneOff,
   SmilePlus,
+  UsersRound,
 } from "lucide-react";
 import * as React from "react";
 
@@ -24,13 +26,23 @@ import {
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
 import { MicControls, SpeakerControls } from "./MicControls";
-import { HuddleParticipantsControl } from "./ParticipantList";
+import { HuddleParticipantsPanel } from "./ParticipantList";
+import { SpotifyHuddleControl } from "./SpotifyHuddleControl";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -524,6 +536,31 @@ export function HuddleBar({
     onOpenThread?.(parentChannelId, huddleThreadEventId);
   }
 
+  async function handleRemoveAgentFromHuddle(pubkey: string) {
+    const channelId = barState?.ephemeral_channel_id;
+    if (!channelId) return;
+    const confirmed = window.confirm("Remove this agent from the huddle?");
+    if (!confirmed) return;
+    try {
+      await invoke("remove_channel_member", {
+        channelId,
+        pubkey,
+      });
+      // Optimistically remove from local state — the backend's 15s membership
+      // poll will eventually converge.
+      setState((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          participants: prev.participants.filter((p) => p !== pubkey),
+          agent_pubkeys: prev.agent_pubkeys.filter((p) => p !== pubkey),
+        };
+      });
+    } catch (e) {
+      console.error("Failed to remove agent from huddle:", e);
+    }
+  }
+
   return (
     <div
       aria-hidden={isDrawerClosing}
@@ -668,41 +705,6 @@ export function HuddleBar({
               View thread
             </TooltipContent>
           </Tooltip>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <HuddleParticipantsControl
-            participants={barState.participants}
-            activeSpeakers={activeSpeakers}
-            agentPubkeys={barState.agent_pubkeys}
-            onRemoveAgent={async (pubkey) => {
-              if (!barState.ephemeral_channel_id) return;
-              const confirmed = window.confirm(
-                "Remove this agent from the huddle?",
-              );
-              if (!confirmed) return;
-              try {
-                await invoke("remove_channel_member", {
-                  channelId: barState.ephemeral_channel_id,
-                  pubkey,
-                });
-                // Optimistically remove from local state — the backend's
-                // 15s membership poll will eventually converge.
-                setState((prev) => {
-                  if (!prev) return prev;
-                  return {
-                    ...prev,
-                    participants: prev.participants.filter((p) => p !== pubkey),
-                    agent_pubkeys: prev.agent_pubkeys.filter(
-                      (p) => p !== pubkey,
-                    ),
-                  };
-                });
-              } catch (e) {
-                console.error("Failed to remove agent from huddle:", e);
-              }
-            }}
-          />
 
           <Popover
             onOpenChange={setIsReactionPickerOpen}
@@ -740,47 +742,74 @@ export function HuddleBar({
             </PopoverContent>
           </Popover>
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label={
-                  transcriptionEnabled ? "Stop transcript" : "Start transcript"
-                }
-                aria-pressed={transcriptionEnabled}
-                className={cn(
-                  "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
-                  transcriptionEnabled && "text-foreground",
-                )}
-                onClick={() => void handleToggleTranscript()}
-                size="icon"
-                type="button"
-                variant={transcriptionEnabled ? "secondary" : "ghost"}
-              >
-                <Captions className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              {transcriptionEnabled ? "Stop transcript" : "Start transcript"}
-            </TooltipContent>
-          </Tooltip>
+          <SpotifyHuddleControl
+            agentPubkeys={barState.agent_pubkeys}
+            currentPubkey={currentPubkey}
+            isHuddleVisible={isHuddleVisible}
+            participants={barState.participants}
+            reactionChannelId={reactionChannelId}
+            reactionSenderName={reactionSenderName}
+          />
 
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Add agent to huddle"
-                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
-                onClick={() => setShowAddAgent(true)}
-                size="icon"
-                type="button"
-                variant="secondary"
-              >
+          <DropdownMenu modal={false}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label="More huddle actions"
+                    className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                    size="icon"
+                    type="button"
+                    variant="secondary"
+                  >
+                    <EllipsisVertical className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent className="buzz-huddle-tooltip" side="top">
+                More
+              </TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent
+              align="end"
+              className="w-56"
+              side="top"
+              sideOffset={10}
+            >
+              <DropdownMenuItem onSelect={() => setShowAddAgent(true)}>
                 <Bot className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="buzz-huddle-tooltip" side="top">
-              Add agent
-            </TooltipContent>
-          </Tooltip>
+                Add agent
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void handleToggleTranscript()}>
+                <Captions className="h-4 w-4" />
+                {transcriptionEnabled ? "Stop transcript" : "Start transcript"}
+              </DropdownMenuItem>
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger
+                  disabled={barState.participants.length === 0}
+                >
+                  <UsersRound className="h-4 w-4" />
+                  Participants
+                  {barState.participants.length > 0 ? (
+                    <span className="text-xs text-muted-foreground">
+                      ({barState.participants.length})
+                    </span>
+                  ) : null}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent className="w-72 p-0" sideOffset={8}>
+                  <HuddleParticipantsPanel
+                    participants={barState.participants}
+                    activeSpeakers={activeSpeakers}
+                    agentPubkeys={barState.agent_pubkeys}
+                    onRemoveAgent={(pubkey) =>
+                      void handleRemoveAgentFromHuddle(pubkey)
+                    }
+                    className="p-3"
+                  />
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <Tooltip>

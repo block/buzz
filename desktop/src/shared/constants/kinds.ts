@@ -22,10 +22,12 @@ export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
 export const KIND_TYPING_INDICATOR = 20002;
 export const KIND_HUDDLE_REACTION = 24810;
+export const KIND_HUDDLE_SPOTIFY_DJ_LIVE = 24811;
 export const KIND_HUDDLE_STARTED = 48100;
 export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
+export const KIND_HUDDLE_SPOTIFY_DJ = 48104;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes", "channel-stars").
 export const KIND_READ_STATE = 30078;
@@ -132,6 +134,7 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102
   KIND_HUDDLE_ENDED, // 48103
+  KIND_HUDDLE_SPOTIFY_DJ, // 48104
 ]);
 
 // Whether a timeline message kind should count toward unread tallies. An

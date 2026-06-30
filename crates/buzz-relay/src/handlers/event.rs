@@ -44,7 +44,7 @@ fn bounded_kind_label(kind: u32) -> String {
         44100..=44101 => kind.to_string(),
         45001..=45003 => kind.to_string(),
         46001..=46012 | 46020 | 46030..=46031 => kind.to_string(),
-        48001 | 48100..=48103 | 48106 => kind.to_string(),
+        48001 | 48100..=48104 | 48106 => kind.to_string(),
         49001 => kind.to_string(),
         _ => "other".to_string(),
     }

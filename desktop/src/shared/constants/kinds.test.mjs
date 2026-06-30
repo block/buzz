@@ -17,6 +17,7 @@ import {
   KIND_HUDDLE_PARTICIPANT_JOINED,
   KIND_HUDDLE_PARTICIPANT_LEFT,
   KIND_HUDDLE_ENDED,
+  KIND_HUDDLE_SPOTIFY_DJ,
 } from "./kinds.ts";
 
 test("isConversationalUnreadKind_streamMessage_counts", () => {
@@ -57,6 +58,7 @@ test("isConversationalUnreadKind_huddleLifecycle_excluded", () => {
     KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT,
     KIND_HUDDLE_ENDED,
+    KIND_HUDDLE_SPOTIFY_DJ,
   ]) {
     assert.equal(isConversationalUnreadKind(kind), false, `kind ${kind}`);
   }

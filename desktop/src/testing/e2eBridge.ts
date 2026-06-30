@@ -2055,6 +2055,10 @@ const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
+let mockSpotifyConnected = false;
+let mockSpotifyIsPlaying = false;
+let mockSpotifyProgressMs = 0;
+let mockSpotifyTrackIndex = 0;
 
 // Mesh-compute mock state — TEST-ONLY.
 //
@@ -2089,6 +2093,72 @@ function resetMockMesh() {
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
+}
+
+function resetMockSpotify() {
+  mockSpotifyConnected = false;
+  mockSpotifyIsPlaying = false;
+  mockSpotifyProgressMs = 0;
+  mockSpotifyTrackIndex = 0;
+}
+
+function mockSpotifyStatus() {
+  return {
+    configured: true,
+    connected: mockSpotifyConnected,
+    connected_at: mockSpotifyConnected ? 1_700_000_000 : null,
+    scopes: [
+      "user-read-playback-state",
+      "user-read-currently-playing",
+      "user-modify-playback-state",
+    ],
+  };
+}
+
+function mockSpotifyDevices() {
+  return mockSpotifyConnected
+    ? [
+        {
+          id: "mock-spotify-device",
+          name: "Mock Spotify device",
+          device_type: "Computer",
+          is_active: true,
+          is_restricted: false,
+          volume_percent: 50,
+        },
+      ]
+    : [];
+}
+
+const mockSpotifyTracks = [
+  {
+    artists: ["The Mock Tones"],
+    duration_ms: 182_000,
+    image_url: "https://i.scdn.co/image/mock-spotify-one",
+    item_type: "track",
+    name: "Huddle groove",
+    uri: "spotify:track:mock-huddle-groove",
+  },
+  {
+    artists: ["Buzz Quartet"],
+    duration_ms: 205_000,
+    image_url: "https://i.scdn.co/image/mock-spotify-two",
+    item_type: "track",
+    name: "Pair programming",
+    uri: "spotify:track:mock-pair-programming",
+  },
+];
+
+function mockSpotifyPlaybackState() {
+  if (!mockSpotifyConnected) return null;
+  return {
+    context_uri: "spotify:playlist:mock-huddle-playlist",
+    device: mockSpotifyDevices()[0] ?? null,
+    is_playing: mockSpotifyIsPlaying,
+    item: mockSpotifyTracks[mockSpotifyTrackIndex],
+    progress_ms: mockSpotifyProgressMs,
+    timestamp: Date.now(),
+  };
 }
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
@@ -6773,6 +6843,7 @@ export function maybeInstallE2eTauriMocks() {
   seedMockSearchProfiles(config);
   resetMockWorkflows();
   resetMockMesh();
+  resetMockSpotify();
   resetMockUserStatuses();
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
@@ -7490,6 +7561,57 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "get_media_proxy_port":
         return MOCK_MEDIA_PROXY_PORT;
+      case "get_spotify_status":
+        return mockSpotifyStatus();
+      case "connect_spotify":
+        mockSpotifyConnected = true;
+        return mockSpotifyStatus();
+      case "disconnect_spotify":
+        mockSpotifyConnected = false;
+        return mockSpotifyStatus();
+      case "get_spotify_devices":
+        return mockSpotifyDevices();
+      case "get_spotify_playback_state":
+        return mockSpotifyPlaybackState();
+      case "start_spotify_playback":
+        if (!mockSpotifyConnected) {
+          throw new Error("Connect Spotify before controlling playback.");
+        }
+        mockSpotifyIsPlaying = true;
+        mockSpotifyProgressMs = 0;
+        return undefined;
+      case "pause_spotify_playback":
+        if (!mockSpotifyConnected) {
+          throw new Error("Connect Spotify before controlling playback.");
+        }
+        mockSpotifyIsPlaying = false;
+        return undefined;
+      case "skip_spotify_next":
+        if (!mockSpotifyConnected) {
+          throw new Error("Connect Spotify before controlling playback.");
+        }
+        mockSpotifyTrackIndex =
+          (mockSpotifyTrackIndex + 1) % mockSpotifyTracks.length;
+        mockSpotifyProgressMs = 0;
+        return undefined;
+      case "skip_spotify_previous":
+        if (!mockSpotifyConnected) {
+          throw new Error("Connect Spotify before controlling playback.");
+        }
+        mockSpotifyTrackIndex =
+          (mockSpotifyTrackIndex - 1 + mockSpotifyTracks.length) %
+          mockSpotifyTracks.length;
+        mockSpotifyProgressMs = 0;
+        return undefined;
+      case "seek_spotify_playback":
+        if (!mockSpotifyConnected) {
+          throw new Error("Connect Spotify before controlling playback.");
+        }
+        mockSpotifyProgressMs = Number(
+          (payload as { input?: { positionMs?: number } }).input?.positionMs ??
+            0,
+        );
+        return undefined;
       case "pick_and_upload_media":
         return await resolveMockUploadDescriptors(activeConfig);
       case "upload_media_bytes":
@@ -7599,6 +7721,8 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       case "plugin:process|restart":
         return handleRestart(activeConfig);
+      case "plugin:opener|open_url":
+        return null;
       case "get_channel_workflows":
         return handleGetChannelWorkflows(
           payload as Parameters<typeof handleGetChannelWorkflows>[0],

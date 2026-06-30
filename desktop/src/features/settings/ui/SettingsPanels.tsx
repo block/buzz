@@ -12,8 +12,8 @@ import {
   Monitor,
   MonitorCog,
   Moon,
+  Plug,
   Search,
-  Smartphone,
   Smile,
   Stethoscope,
   Sun,
@@ -27,6 +27,7 @@ import type {
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
+import { ConnectionsSettingsCard } from "@/features/spotify/ui/ConnectionsSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
@@ -40,7 +41,6 @@ import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
-import { MobilePairingCard } from "./MobilePairingCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
@@ -50,6 +50,7 @@ import { SettingsSectionHeader } from "./SettingsSectionHeader";
 export type SettingsSection =
   | "profile"
   | "notifications"
+  | "connections"
   | "experimental"
   | "agents"
   | "channel-templates"
@@ -58,7 +59,6 @@ export type SettingsSection =
   | "shortcuts"
   | "relay-members"
   | "custom-emoji"
-  | "mobile"
   | "updates"
   | "doctor";
 
@@ -67,6 +67,7 @@ export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "profile",
   "notifications",
+  "connections",
   "experimental",
   "agents",
   "channel-templates",
@@ -75,7 +76,6 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "shortcuts",
   "relay-members",
   "custom-emoji",
-  "mobile",
   "updates",
   "doctor",
 ];
@@ -127,6 +127,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: BellRing,
   },
   {
+    value: "connections",
+    label: "Connections",
+    icon: Plug,
+  },
+  {
     value: "experimental",
     label: "Experiments",
     icon: FlaskConical,
@@ -163,11 +168,6 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Custom Emoji",
     icon: Smile,
     featureGate: "custom-emoji",
-  },
-  {
-    value: "mobile",
-    label: "Mobile",
-    icon: Smartphone,
   },
   {
     value: "updates",
@@ -370,6 +370,8 @@ export function renderSettingsSection(
           onSetSoundForSlot={props.onSetSoundForSlot}
         />
       );
+    case "connections":
+      return <ConnectionsSettingsCard />;
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
@@ -386,8 +388,6 @@ export function renderSettingsSection(
       return <RelayMembersSettingsCard currentPubkey={props.currentPubkey} />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
-    case "mobile":
-      return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":
       return <UpdateChecker />;
     case "doctor":

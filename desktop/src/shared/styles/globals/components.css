@@ -141,6 +141,67 @@
     width: 0.25rem;
   }
 
+  .buzz-spotify-floating-notes {
+    inset: 0;
+    overflow: visible;
+    pointer-events: none;
+    position: absolute;
+  }
+
+  .buzz-spotify-floating-note {
+    animation: buzz-spotify-floating-note
+      var(--buzz-spotify-note-duration, 1600ms) linear forwards;
+    bottom: 58%;
+    color: currentcolor;
+    display: block;
+    height: var(--buzz-spotify-note-size, 0.75rem);
+    left: 50%;
+    opacity: 0;
+    position: absolute;
+    transform-origin: center;
+    width: var(--buzz-spotify-note-size, 0.75rem);
+    will-change: transform, opacity;
+  }
+
+  @keyframes buzz-spotify-floating-note {
+    0% {
+      opacity: 0;
+      transform: translate(-50%, 6%) translate(0, 0) scale(0.82)
+        rotate(var(--buzz-spotify-note-rotation, 0deg));
+    }
+
+    18% {
+      opacity: 0.42;
+    }
+
+    56% {
+      opacity: 0.26;
+    }
+
+    92% {
+      opacity: 0;
+    }
+
+    100% {
+      opacity: 0;
+      transform: translate(-50%, 6%)
+        translate(
+          calc(
+            var(--buzz-spotify-note-x, 0rem) +
+            var(--buzz-spotify-note-drift, 0rem)
+          ),
+          calc(var(--buzz-spotify-note-lift, 2.8rem) * -1)
+        )
+        scale(1)
+        rotate(
+          calc(
+            var(--buzz-spotify-note-rotation, 0deg) +
+            var(--buzz-spotify-note-rotation-delta, 0deg)
+          )
+        );
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .buzz-side-panel-enter {
       animation: none;
@@ -153,6 +214,10 @@
 
     .buzz-huddle-mic-meter-bar {
       transition: none;
+    }
+
+    .buzz-spotify-floating-notes {
+      display: none;
     }
   }
 

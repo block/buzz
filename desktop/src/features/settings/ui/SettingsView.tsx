@@ -63,10 +63,10 @@ const settingsNavGroups: Array<{
   {
     label: "App",
     sections: [
+      "connections",
       "agents",
       "compute",
       "experimental",
-      "mobile",
       "updates",
       "doctor",
     ],
