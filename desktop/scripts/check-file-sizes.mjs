@@ -74,14 +74,6 @@ const overrides = new Map([
   // re-introduced after 826d735fe removal (config-bridge caller still needs it).
   // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
   ["src-tauri/src/managed_agents/runtime.rs", 2150],
-  // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
-  // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
-  // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
-  // event_d_tag/parse_deletion_coordinate helpers, and the preserve/overwrite +
-  // secret-injection + tombstone test coverage. Load-bearing feature growth,
-  // queued to split with the list. The two `agents-data-changed` emits (live
-  // UI refresh on inbound reconcile + tombstone) add the latest growth.
-  ["src-tauri/src/commands/personas.rs", 1279],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
