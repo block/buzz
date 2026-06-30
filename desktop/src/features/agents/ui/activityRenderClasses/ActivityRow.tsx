@@ -156,14 +156,10 @@ ActivityRowContent.marker = ACTIVITY_ROW_CONTENT_MARKER;
 
 function ActivityRowStatsView({ stats }: { stats: ActivityRowStats }) {
   return (
-    <>
-      <span className="shrink-0 text-xs font-semibold text-green-600 dark:text-green-400">
-        +{stats.additions}
-      </span>
-      <span className="shrink-0 text-xs font-semibold text-red-500 dark:text-red-400">
-        -{stats.deletions}
-      </span>
-    </>
+    <span className="inline-flex shrink-0 items-center gap-1 text-xs font-semibold leading-5 tabular-nums">
+      <span className="text-status-added">+{stats.additions}</span>
+      <span className="text-status-deleted">-{stats.deletions}</span>
+    </span>
   );
 }
 
