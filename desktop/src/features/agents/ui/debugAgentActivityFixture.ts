@@ -14,6 +14,10 @@ const reviewerPubkey =
   "2222222222222222222222222222222222222222222222222222222222222222";
 export const DEBUG_AGENT_ACTIVITY_PROMPT_EVENT_ID =
   "3333333333333333333333333333333333333333333333333333333333333333";
+const DEBUG_AGENT_ACTIVITY_SENT_MESSAGE_EVENT_ID =
+  "4444444444444444444444444444444444444444444444444444444444444444";
+const DEBUG_AGENT_ACTIVITY_PUSHED_REPORT_EVENT_ID =
+  "5555555555555555555555555555555555555555555555555555555555555555";
 const baseTimestamp = Date.parse("2026-06-30T00:00:00.000Z");
 const workspacePath = "/Users/tho/.buzz/REPOS/buzz-pr-3-activity-feed-rebuild";
 export const DEBUG_AGENT_ACTIVITY_AGENT_NAME = "Fixture Agent";
@@ -574,7 +578,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       timeout_ms: 120000,
     },
     result: shellResultJson(
-      '{"accepted":true,"event_id":"debug-openable-message"}\n',
+      `{"accepted":true,"event_id":"${DEBUG_AGENT_ACTIVITY_SENT_MESSAGE_EVENT_ID}"}\n`,
     ),
     isError: false,
     timestamp: timestamp(12),
@@ -840,7 +844,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       timeout_ms: 120000,
     },
     result: shellResultJson(
-      '{"accepted":true,"event_id":"debug-openable-pushed-report"}\n',
+      `{"accepted":true,"event_id":"${DEBUG_AGENT_ACTIVITY_PUSHED_REPORT_EVENT_ID}"}\n`,
     ),
     isError: false,
     timestamp: timestamp(25.2),
