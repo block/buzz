@@ -26,6 +26,13 @@ export function deriveLatestSessionId(
   return null;
 }
 
+export function resolveDisplayEvents(
+  scopedEvents: ObserverEvent[],
+  rawEventsOverride: ObserverEvent[] | undefined,
+): ObserverEvent[] {
+  return rawEventsOverride ?? scopedEvents;
+}
+
 export type RawRailLayout =
   | { mode: "hidden" }
   | { mode: "exclusive" }

@@ -23,6 +23,7 @@ import type {
 } from "./agentSessionTypes";
 import {
   deriveLatestSessionId,
+  resolveDisplayEvents,
   resolveRawRailLayout,
   scopeByChannel,
 } from "./agentSessionPanelLayout";
@@ -40,6 +41,7 @@ type ManagedAgentSessionPanelProps = {
   showHeader?: boolean;
   showRaw?: boolean;
   profiles?: UserProfileLookup;
+  rawEventsOverride?: ObserverEvent[];
   transcriptOverride?: TranscriptItem[];
 };
 
@@ -52,6 +54,7 @@ export function ManagedAgentSessionPanel({
   showHeader = true,
   showRaw = true,
   profiles,
+  rawEventsOverride,
   transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = isManagedAgentActive(agent);
@@ -72,10 +75,14 @@ export function ManagedAgentSessionPanel({
     () => scopeByChannel(events, channelId),
     [channelId, events],
   );
+  const displayEvents = React.useMemo(
+    () => resolveDisplayEvents(scopedEvents, rawEventsOverride),
+    [rawEventsOverride, scopedEvents],
+  );
 
   const latestSessionId = React.useMemo(
-    () => deriveLatestSessionId(scopedEvents),
-    [scopedEvents],
+    () => deriveLatestSessionId(displayEvents),
+    [displayEvents],
   );
 
   return (
@@ -88,7 +95,7 @@ export function ManagedAgentSessionPanel({
       {showHeader ? (
         <SessionHeader
           connectionState={connectionState}
-          eventCount={scopedEvents.length}
+          eventCount={displayEvents.length}
           hasObserver={hasObserver}
           latestSessionId={latestSessionId}
         />
@@ -101,7 +108,7 @@ export function ManagedAgentSessionPanel({
         connectionState={connectionState}
         emptyDescription={emptyDescription}
         errorMessage={errorMessage}
-        events={scopedEvents}
+        events={displayEvents}
         hasObserver={hasObserver}
         hasTranscriptOverride={transcriptOverride != null}
         profiles={profiles}

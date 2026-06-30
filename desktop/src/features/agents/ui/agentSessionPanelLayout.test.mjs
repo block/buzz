@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveLatestSessionId,
+  resolveDisplayEvents,
   resolveRawRailLayout,
   scopeByChannel,
 } from "./agentSessionPanelLayout.ts";
@@ -61,6 +62,22 @@ test("deriveLatestSessionId skips trailing events without a sessionId", () => {
 test("deriveLatestSessionId returns null when no event carries a sessionId", () => {
   const events = [{ seq: 1, sessionId: null }, { seq: 2 }];
   assert.equal(deriveLatestSessionId(events), null);
+});
+
+// ---- resolveDisplayEvents ----
+
+test("resolveDisplayEvents returns raw override events unchanged", () => {
+  const scopedEvents = [{ seq: 1, channelId: "channel-1" }];
+  const rawEventsOverride = [{ seq: 2, channelId: "debug-channel" }];
+  assert.equal(
+    resolveDisplayEvents(scopedEvents, rawEventsOverride),
+    rawEventsOverride,
+  );
+});
+
+test("resolveDisplayEvents falls back to scoped live events", () => {
+  const scopedEvents = [{ seq: 1, channelId: "channel-1" }];
+  assert.equal(resolveDisplayEvents(scopedEvents, undefined), scopedEvents);
 });
 
 // ---- resolveRawRailLayout (raw-ACP view toggle) ----

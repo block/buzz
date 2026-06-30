@@ -9,6 +9,7 @@ import {
   DEBUG_AGENT_ACTIVITY_FIXTURE,
   DEBUG_AGENT_ACTIVITY_PROFILES,
 } from "@/features/agents/ui/debugAgentActivityFixture";
+import { DEBUG_AGENT_ACTIVITY_RAW_EVENTS } from "@/features/agents/ui/debugAgentActivityRawFixture";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
@@ -284,6 +285,9 @@ export function AgentSessionThreadPanel({
               : `Mention ${agent.name} in any channel to see its work here.`
           }
           profiles={debugProfiles}
+          rawEventsOverride={
+            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_RAW_EVENTS : undefined
+          }
           rawLayout="exclusive"
           showHeader={false}
           showRaw={showRawFeed}
