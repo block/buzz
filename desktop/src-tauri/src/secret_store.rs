@@ -194,9 +194,16 @@ impl SecretStore {
         }
     }
 
-    /// Atomically load the blob, apply `f` to the map, write back, and update
-    /// the cache — all while holding the cache mutex. This serializes concurrent
-    /// writes so no caller can observe a partial update.
+    /// Atomically load the blob, apply `f` to the map, write back if changed,
+    /// and update the cache — all while holding the cache mutex. This serializes
+    /// concurrent writes so no caller can observe a partial update.
+    ///
+    /// **Idempotent**: when `f` leaves the map byte-for-byte equal to the
+    /// snapshot taken before the call, `write_blob_raw` is skipped entirely.
+    /// On macOS the legacy `SecKeychain` API treats a write as a distinct ACL
+    /// operation from the "Always Allow"-ed read, so skipping no-op writes
+    /// eliminates the keychain prompt that fires when saving an agent whose
+    /// model changed but whose key did not.
     ///
     /// Deadlock-free: `read_blob_raw` and `write_blob_raw` do not acquire the
     /// cache mutex. `load_blob` does acquire it, but `mutate_blob` does not call
@@ -223,7 +230,19 @@ impl SecretStore {
         }
 
         let map = guard.as_mut().expect("just initialized above");
+
+        // Snapshot before mutation so we can detect no-op writes. `HashMap`
+        // `PartialEq` compares by content (key-value pairs), not iteration
+        // order, so this is safe regardless of serialization order.
+        let before = map.clone();
         f(map);
+
+        // Skip the keychain write when the map is unchanged — the in-memory
+        // cache already holds the current value and no real write is needed.
+        // This is the critical path for persona/model edits that touch no key.
+        if *map == before {
+            return Ok(());
+        }
 
         // Write to keyring while still holding the lock.
         let json = serde_json::to_string(map).map_err(|e| format!("blob serialize: {e}"))?;
@@ -512,6 +531,30 @@ mod tests {
             store.load("identity").unwrap(),
             Some("nsec1test".to_string())
         );
+    }
+
+    #[test]
+    fn mutate_blob_skips_write_when_map_unchanged() {
+        // The idempotent-write guarantee: when the closure leaves the map
+        // identical to its pre-call state, `write_blob_raw` must NOT be
+        // invoked. On an unsigned CI build (no keychain entitlement) any real
+        // write would return an error, so a successful `Ok(())` here proves
+        // the skip path fired. The service name is unique so test isolation is
+        // guaranteed even if the test runs locally on a machine with a keychain.
+        let mut map = HashMap::new();
+        map.insert("identity".to_string(), "nsec1test".to_string());
+        let store = SecretStore::with_cache("buzz-test-idempotent-skip", Some(map));
+
+        // Re-storing the exact same value must succeed without touching the
+        // keychain (which would fail on unsigned CI).
+        let result = store.store("identity", "nsec1test");
+        assert!(
+            result.is_ok(),
+            "no-op store must not reach write_blob_raw: {result:?}"
+        );
+        // A genuinely new key DOES change the map — this branch requires a
+        // real keychain and is therefore left to the #[ignore] integration
+        // tests; here we only verify the skip path.
     }
 
     #[test]
