@@ -334,10 +334,11 @@ test("persona model options follow the selected LLM provider", async ({
   const llmProviderMenu = page.getByRole("menu").filter({
     has: page.getByRole("menuitemradio", { name: "OpenAI", exact: true }),
   });
-  await llmProviderMenu
+  const defaultOption = llmProviderMenu
     .last()
-    .getByRole("menuitemradio", { name: "Default", exact: true })
-    .click();
+    .getByRole("menuitemradio", { name: "Default", exact: true });
+  await expect(defaultOption).toBeVisible();
+  await defaultOption.click();
   await expect(model).toBeVisible();
   await expect(model).toContainText("Default model");
 });
