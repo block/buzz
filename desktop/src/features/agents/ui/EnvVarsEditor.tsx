@@ -133,7 +133,7 @@ export function EnvVarsEditor({
                     {key}
                   </span>
                   {isMissing ? (
-                    <span className="ml-1 flex items-center gap-0.5 rounded-sm bg-amber-100 px-1 py-0.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+                    <span className="ml-1 flex items-center gap-0.5 rounded-sm bg-amber-100 px-1 py-0.5 text-2xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
                       <AlertCircle className="h-2.5 w-2.5" aria-hidden />
                       Required
                     </span>
