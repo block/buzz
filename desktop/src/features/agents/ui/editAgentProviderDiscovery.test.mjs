@@ -93,24 +93,22 @@ test("editAgent_providerOptions_includesCurrentIfCustom", () => {
 // fall back to staticModelOptions (length > 0), so we always have options.
 
 test("editAgent_requiredDropdownField_onlyMarksMissingKnownField", async () => {
-  const { isMissingRequiredDropdownField, runtimeRequiresNormalizedField } =
-    await import("./personaDialogPickers.tsx");
+  const { isMissingRequiredDropdownField } = await import(
+    "./personaDialogPickers.tsx"
+  );
 
   assert.equal(
-    isMissingRequiredDropdownField(true, ""),
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
     true,
     "missing required dropdown value must be marked required",
   );
   assert.equal(
-    isMissingRequiredDropdownField(true, "configured"),
+    isMissingRequiredDropdownField({ isRequired: true }, "configured"),
     false,
     "configured required dropdown value must not show the missing-required mark",
   );
   assert.equal(
-    isMissingRequiredDropdownField(
-      runtimeRequiresNormalizedField("buzz-agent", "unknownField"),
-      "",
-    ),
+    isMissingRequiredDropdownField(null, ""),
     false,
     "unknown normalized field names are ignored because they do not map to a dropdown",
   );
