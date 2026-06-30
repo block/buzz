@@ -21,7 +21,7 @@ describe("resolveActiveWorkingChannelNames", () => {
     assert.deepEqual(resolved.agentNames, ["Ned", "Bart"]);
   });
 
-  it("uses a generic label when an active agent name is unresolved", () => {
+  it("omits unresolved active agents from the resolved names", () => {
     const resolved = resolveActiveWorkingChannelNames(
       {
         channelId: "chan-1",
@@ -32,6 +32,6 @@ describe("resolveActiveWorkingChannelNames", () => {
       [{ pubkey: "aaaa", name: "Ned" }],
     );
 
-    assert.deepEqual(resolved.agentNames, ["Ned", "another agent"]);
+    assert.deepEqual(resolved.agentNames, ["Ned"]);
   });
 });

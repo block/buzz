@@ -9,8 +9,6 @@ import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
-const UNKNOWN_WORKING_AGENT_LABEL = "another agent";
-
 export function resolveActiveWorkingChannelNames(
   summary: ActiveChannelTurnSummary,
   managedAgents: readonly { pubkey: string; name: string }[],
@@ -21,11 +19,10 @@ export function resolveActiveWorkingChannelNames(
 
   return {
     ...summary,
-    agentNames: summary.agentPubkeys.map(
-      (pubkey) =>
-        namesByPubkey.get(normalizePubkey(pubkey)) ??
-        UNKNOWN_WORKING_AGENT_LABEL,
-    ),
+    agentNames: summary.agentPubkeys.flatMap((pubkey) => {
+      const name = namesByPubkey.get(normalizePubkey(pubkey));
+      return name ? [name] : [];
+    }),
   };
 }
 

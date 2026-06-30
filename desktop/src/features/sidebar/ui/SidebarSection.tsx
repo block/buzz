@@ -99,45 +99,25 @@ function UnreadDotBadge({
   );
 }
 
-const UNKNOWN_WORKING_AGENT_LABEL = "another agent";
-
-function formatAgentList(names: readonly string[]) {
-  if (names.length <= 1) return names[0] ?? UNKNOWN_WORKING_AGENT_LABEL;
-  if (names.length === 2) return `${names[0]} and ${names[1]}`;
-  return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+function formatAgentCount(count: number) {
+  return `${count} ${count === 1 ? "agent" : "agents"}`;
 }
 
 export function formatWorkingTooltip(
   summary: ActiveChannelTurnSummary,
 ): string {
-  const names =
-    summary.agentNames && summary.agentNames.length > 0
-      ? summary.agentNames
-      : summary.agentPubkeys.map(() => UNKNOWN_WORKING_AGENT_LABEL);
-  const resolvedNames = names.filter(
-    (name) => name !== UNKNOWN_WORKING_AGENT_LABEL,
-  );
-  const visibleNames = resolvedNames.slice(0, 3);
-  const hiddenCount = summary.agentCount - visibleNames.length;
+  const leadName = summary.agentNames?.[0];
 
-  if (hiddenCount <= 0) {
-    return `${formatAgentList(visibleNames)} working`;
+  if (!leadName) {
+    return `${formatAgentCount(summary.agentCount)} working`;
   }
 
-  if (visibleNames.length === 0) {
-    const subject =
-      hiddenCount === 1
-        ? UNKNOWN_WORKING_AGENT_LABEL
-        : `${UNKNOWN_WORKING_AGENT_LABEL} and ${hiddenCount - 1} more`;
-    return `${subject} working`;
+  const remainingAgentCount = summary.agentCount - 1;
+  if (remainingAgentCount <= 0) {
+    return `${leadName} working`;
   }
 
-  const tail =
-    hiddenCount === 1 && visibleNames.length < 3
-      ? UNKNOWN_WORKING_AGENT_LABEL
-      : `${hiddenCount} more`;
-
-  return `${formatAgentList([...visibleNames, tail])} working`;
+  return `${leadName} and ${formatAgentCount(remainingAgentCount)} working`;
 }
 
 function ChannelWorkingBadge({
