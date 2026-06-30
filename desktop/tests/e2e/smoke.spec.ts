@@ -2,6 +2,9 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
+const DEFAULT_AGENT_ACTIVITY_PUBKEY =
+  "db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36";
+
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
@@ -80,6 +83,42 @@ async function selectHomeInboxFilter(
   await page.getByRole("menuitemradio", { name: label }).click();
 }
 
+async function readCommandPayloadLog(page: import("@playwright/test").Page) {
+  return page.evaluate(() => {
+    return (
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
+            command: string;
+            payload: unknown;
+          }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
+    );
+  });
+}
+
+async function readStartHuddleMemberPubkeys(
+  page: import("@playwright/test").Page,
+) {
+  const commandLog = await readCommandPayloadLog(page);
+  return commandLog.flatMap((entry) => {
+    if (entry.command !== "start_huddle") {
+      return [];
+    }
+
+    const payload =
+      entry.payload && typeof entry.payload === "object"
+        ? (entry.payload as {
+            memberPubkeys?: unknown;
+            member_pubkeys?: unknown;
+          })
+        : null;
+    const memberPubkeys = payload?.memberPubkeys ?? payload?.member_pubkeys;
+    return Array.isArray(memberPubkeys) ? memberPubkeys.map(String) : [];
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -115,11 +154,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
 
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
-  await page
-    .getByTestId("agents-library-personas")
-    .getByRole("button", { name: "New", exact: true })
-    .click();
-  await page.getByText("Custom Agent").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByText("Custom agent").click();
 
   await page.getByTestId("agent-name-input").fill(agentName);
   await page.getByRole("button", { name: "Advanced setup" }).click();
@@ -137,12 +173,21 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     agentName,
   );
-  const inlineLog = page
-    .getByTestId("agents-library-personas")
-    .getByTestId("managed-agent-log-content");
 
-  await expect(inlineLog).toContainText("parallelism=3");
-  await expect(inlineLog).toContainText("system prompt override configured");
+  // Logs now live in the profile sidebar (PR #1274), not an inline panel.
+  // Open the new agent's card to reveal the profile panel, then read the
+  // harness log from the diagnostics view.
+  await page
+    .getByRole("button", { name: `${agentName} agent profile` })
+    .click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+
+  await page.getByTestId("user-profile-tab-runtime").click();
+  await page.getByTestId("user-profile-diagnostics-ingress").click();
+
+  const log = page.getByTestId("managed-agent-log-content");
+  await expect(log).toContainText("parallelism=3");
+  await expect(log).toContainText("system prompt override configured");
 });
 
 test("opens a mocked channel from the inbox feed", async ({ page }) => {
@@ -183,6 +228,29 @@ test("inbox feed shows channel and agent activity sections", async ({
   await expect(page.getByTestId("home-inbox-detail")).toContainText(
     "Agent progress: channel index complete.",
   );
+});
+
+test("inbox agent hover huddle passes the agent pubkey", async ({ page }) => {
+  await page.goto("/");
+
+  await selectHomeInboxFilter(page, "Agents");
+  const agentRow = page.getByTestId("home-inbox-item-mock-feed-agent");
+  await expect(agentRow).toContainText(
+    "Agent progress: channel index complete.",
+  );
+
+  await agentRow.getByTestId("home-inbox-avatar-mock-feed-agent").hover();
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await profilePopover
+    .getByTestId(`user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`)
+    .click();
+
+  await expect
+    .poll(() => readStartHuddleMemberPubkeys(page))
+    .toEqual(expect.arrayContaining([DEFAULT_AGENT_ACTIVITY_PUBKEY]));
 });
 
 test("opens a mocked forum activity item from the inbox feed", async ({

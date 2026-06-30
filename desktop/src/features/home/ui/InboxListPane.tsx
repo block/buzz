@@ -13,9 +13,11 @@ import {
   type InboxItem,
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -96,6 +98,7 @@ function ActivityLabel({
 
 type InboxListPaneProps = {
   activeReminderEventIds?: ReadonlySet<string>;
+  agentPubkeys?: ReadonlySet<string>;
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
@@ -115,6 +118,7 @@ type InboxListPaneProps = {
 
 export function InboxListPane({
   activeReminderEventIds,
+  agentPubkeys,
   doneSet,
   filter,
   items,
@@ -153,6 +157,9 @@ export function InboxListPane({
     const hasActiveReminder = activeReminderEventIds?.has(item.id) ?? false;
     const hasChannelTarget = Boolean(item.item.channelId);
     const typeLabel = getInboxTypeLabel(item);
+    const isSenderAgent =
+      agentPubkeys?.has(normalizePubkey(item.item.pubkey)) === true;
+    const profileRole = isSenderAgent ? "bot" : undefined;
     const rowHighlightColor = isSelected
       ? "color-mix(in srgb, hsl(var(--background)) 70%, hsl(var(--muted)) 30%)"
       : "color-mix(in srgb, hsl(var(--background)) 75%, hsl(var(--muted)) 25%)";
@@ -169,30 +176,59 @@ export function InboxListPane({
       >
         <button
           className={cn(
-            "relative block w-full border-l px-3 py-4 text-left transition-colors after:pointer-events-none after:absolute after:bottom-0 after:left-[3.625rem] after:right-0 after:h-px after:bg-border/45 after:content-['']",
-            isSelected
-              ? "border-l-transparent bg-[var(--inbox-row-highlight-bg)]"
-              : "border-l-transparent group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] active:bg-muted/40",
+            "relative block w-full border-l border-l-transparent px-3 py-4 text-left after:pointer-events-none after:absolute after:bottom-0 after:left-[3.625rem] after:right-3 after:h-px after:bg-border/45 after:content-['']",
             index === items.length - 1 && "after:hidden",
           )}
           onClick={() => onSelect(item.id)}
           type="button"
         >
-          <div className="flex min-w-0 items-start gap-2.5">
+          <span
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute inset-y-0 left-0 right-3 transition-colors",
+              isSelected
+                ? "bg-[var(--inbox-row-highlight-bg)]"
+                : "group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-active/inbox-item:bg-muted/40",
+            )}
+          />
+          <div className="relative flex min-w-0 items-start gap-2.5">
             <div className="relative shrink-0">
-              <UserAvatar
-                avatarUrl={item.avatarUrl}
-                className="h-9 w-9"
-                displayName={item.senderLabel}
-                size="md"
-              />
+              <UserProfilePopover
+                botIdenticonValue={item.senderLabel}
+                enableProfilePanel={false}
+                pubkey={item.item.pubkey}
+                role={profileRole}
+                triggerElement="span"
+              >
+                <span
+                  className="inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  data-testid={`home-inbox-avatar-${item.id}`}
+                >
+                  <UserAvatar
+                    avatarUrl={item.avatarUrl}
+                    className="h-9 w-9"
+                    displayName={item.senderLabel}
+                    size="md"
+                  />
+                </span>
+              </UserProfilePopover>
             </div>
 
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 items-start gap-2">
-                <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-4 text-foreground">
-                  {item.senderLabel}
-                </p>
+                <span className="min-w-0 flex-1">
+                  <UserProfilePopover
+                    botIdenticonValue={item.senderLabel}
+                    enableProfilePanel={false}
+                    pubkey={item.item.pubkey}
+                    role={profileRole}
+                    triggerElement="span"
+                  >
+                    <span className="block max-w-full truncate rounded text-sm font-semibold leading-4 text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+                      {item.senderLabel}
+                    </span>
+                  </UserProfilePopover>
+                </span>
                 <span
                   className={cn(
                     "flex shrink-0 items-center gap-1.5 text-xs leading-4 text-muted-foreground/70 transition-opacity group-hover/inbox-item:opacity-0 group-focus-within/inbox-item:opacity-0",
@@ -233,7 +269,7 @@ export function InboxListPane({
           </div>
         </button>
 
-        <div className="pointer-events-none absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-full bg-[var(--inbox-row-highlight-bg)] p-1 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
+        <div className="pointer-events-none absolute right-3 top-2 z-10 flex items-center gap-0.5 rounded-full bg-[var(--inbox-row-highlight-bg)] p-1 opacity-0 transition-opacity duration-150 ease-out group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:opacity-100">
           {isDone ? (
             <InboxRowActionButton
               label="Mark unread"
@@ -444,7 +480,7 @@ export function InboxListPane({
         </div>
       ) : (
         <div
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"
           data-testid="home-inbox-list"
           ref={scrollRef}
         >

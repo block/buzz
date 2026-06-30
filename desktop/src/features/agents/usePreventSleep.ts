@@ -1,6 +1,13 @@
 import * as React from "react";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
+import {
+  getAgentObserverSnapshot,
+  subscribeAgentObserverStore,
+  useManagedAgentObserverBridge,
+} from "@/features/agents/observerRelayStore";
+import { createPreventSleepActivityTracker } from "@/features/agents/preventSleepActivity";
 import { setPreventSleepActive } from "@/shared/api/tauri";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { listen } from "@tauri-apps/api/event";
 
 // Intentionally not scoped per-pubkey — multi-user desktop is rare and the
@@ -51,10 +58,30 @@ function usePreventSleepInternal() {
 
   // Only local "running" agents need sleep prevention. Remote "deployed"
   // agents run on provider infrastructure and are unaffected by local sleep.
-  const hasRunningAgents = React.useMemo(
-    () => agents?.some((agent) => agent.status === "running") ?? false,
+  const runningAgentPubkeys = React.useMemo(
+    () =>
+      (agents ?? [])
+        .filter((agent) => agent.status === "running")
+        .map((agent) => normalizePubkey(agent.pubkey))
+        .sort(),
     [agents],
   );
+
+  const runningAgentPubkeyKey = runningAgentPubkeys.join(",");
+  const runningObserverAgents = React.useMemo(
+    () =>
+      enabled && runningAgentPubkeyKey
+        ? runningAgentPubkeyKey.split(",").map((pubkey) => ({
+            pubkey,
+            status: "running" as const,
+          }))
+        : [],
+    [enabled, runningAgentPubkeyKey],
+  );
+
+  useManagedAgentObserverBridge(runningObserverAgents);
+
+  const hasRunningAgents = runningAgentPubkeys.length > 0;
 
   const [expired, setExpired] = React.useState(false);
 
@@ -76,6 +103,30 @@ function usePreventSleepInternal() {
       void unlisten.then((fn) => fn());
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!enabled || !runningAgentPubkeyKey) return;
+
+    const observedPubkeys = runningAgentPubkeyKey.split(",");
+    const tracker = createPreventSleepActivityTracker();
+    const observeActivity = () => {
+      const hasNewActivity = tracker.observe(
+        observedPubkeys.map((pubkey) => ({
+          pubkey,
+          events: getAgentObserverSnapshot(pubkey, true).events,
+        })),
+      );
+      if (!hasNewActivity) return;
+
+      if (expired) {
+        setExpired(false);
+      }
+      void setPreventSleepActive(true);
+    };
+
+    observeActivity();
+    return subscribeAgentObserverStore(observeActivity);
+  }, [enabled, expired, runningAgentPubkeyKey]);
 
   return {
     enabled,

@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Bot, PhoneOff, SmilePlus } from "lucide-react";
+import {
+  Bot,
+  Captions,
+  MessageSquareText,
+  PhoneOff,
+  SmilePlus,
+} from "lucide-react";
 import * as React from "react";
 
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
@@ -11,7 +17,10 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
-import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
+import {
+  KIND_HUDDLE_REACTION,
+  KIND_HUDDLE_STARTED,
+} from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
@@ -37,12 +46,14 @@ type HuddleState = {
   participants: string[]; // pubkey hex strings
   agent_pubkeys: string[];
   tts_enabled: boolean;
+  transcription_enabled: boolean;
   is_creator: boolean;
   voice_input_mode: "push_to_talk" | "voice_activity";
 };
 
 type HuddleBarProps = {
   className?: string;
+  onOpenThread?: (channelId: string, messageId: string) => void;
   onVisibilityChange?: (visible: boolean) => void;
 };
 
@@ -55,6 +66,17 @@ function isVisibleHuddleState(state: HuddleState | null) {
 
 function firstTagValue(event: RelayEvent, name: string): string | null {
   return event.tags.find((tag) => tag[0] === name)?.[1] ?? null;
+}
+
+function parseEphemeralChannelId(content: string): string | null {
+  try {
+    const parsed = JSON.parse(content) as { ephemeral_channel_id?: unknown };
+    return typeof parsed.ephemeral_channel_id === "string"
+      ? parsed.ephemeral_channel_id
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function customEmojiShortcode(emoji: string): string | null {
@@ -119,7 +141,11 @@ function huddleReactionTags(
   return tags;
 }
 
-export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
+export function HuddleBar({
+  className,
+  onOpenThread,
+  onVisibilityChange,
+}: HuddleBarProps) {
   const {
     localAudioTrack,
     leaveHuddle,
@@ -160,6 +186,12 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [reactionError, setReactionError] = React.useState<string | null>(null);
+  const [transcriptError, setTranscriptError] = React.useState<string | null>(
+    null,
+  );
+  const [huddleThreadEventId, setHuddleThreadEventId] = React.useState<
+    string | null
+  >(null);
   const [modelStatus, setModelStatus] = React.useState<{
     stt: string;
     tts: string;
@@ -296,6 +328,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
 
   const barState = isHuddleVisible && state ? state : renderedState;
   const reactionChannelId = barState?.ephemeral_channel_id ?? null;
+  const parentChannelId = barState?.parent_channel_id ?? null;
   const currentPubkey = identityQuery.data?.pubkey ?? null;
   const reactionSenderName = React.useMemo(
     () =>
@@ -358,6 +391,40 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
     };
   }, [burstHuddleReaction, currentPubkey, reactionChannelId]);
 
+  React.useEffect(() => {
+    if (!parentChannelId || !reactionChannelId) {
+      setHuddleThreadEventId(null);
+      return;
+    }
+
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+    setHuddleThreadEventId(null);
+
+    void relayClient
+      .subscribeToHuddleEvents(parentChannelId, (event) => {
+        if (disposed || event.kind !== KIND_HUDDLE_STARTED) return;
+        if (parseEphemeralChannelId(event.content) !== reactionChannelId)
+          return;
+        setHuddleThreadEventId(event.id);
+      })
+      .then((dispose) => {
+        if (disposed) {
+          void dispose();
+          return;
+        }
+        cleanup = () => void dispose();
+      })
+      .catch((error) => {
+        console.error("[huddle] Failed to find huddle thread:", error);
+      });
+
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [parentChannelId, reactionChannelId]);
+
   const handleHuddleReactionSelect = React.useCallback(
     (emoji: string) => {
       const trimmedEmoji = emoji.trim();
@@ -405,6 +472,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
 
   const isDrawerClosing = !isHuddleVisible;
   const ttsEnabled = barState.tts_enabled;
+  const transcriptionEnabled = barState.transcription_enabled;
 
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
@@ -434,6 +502,26 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
     } finally {
       setIsLeaving(false);
     }
+  }
+
+  async function handleToggleTranscript() {
+    setTranscriptError(null);
+    try {
+      await invoke("set_huddle_transcription_enabled", {
+        enabled: !transcriptionEnabled,
+      });
+      const s = await invoke<HuddleState>("get_huddle_state");
+      setState(s);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setTranscriptError(`Transcript failed: ${message}`);
+      console.error("Failed to toggle huddle transcript:", e);
+    }
+  }
+
+  function handleOpenThread() {
+    if (!parentChannelId || !huddleThreadEventId) return;
+    onOpenThread?.(parentChannelId, huddleThreadEventId);
   }
 
   return (
@@ -467,12 +555,15 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
 
         {/* Model download progress */}
         {modelStatus &&
-          (modelStatus.stt !== "ready" || modelStatus.tts !== "ready") && (
+          ((transcriptionEnabled && modelStatus.stt !== "ready") ||
+            modelStatus.tts !== "ready") && (
             <output className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
               <span className="truncate animate-pulse">
-                {modelStatus.stt !== "ready" && modelStatus.tts !== "ready"
+                {transcriptionEnabled &&
+                modelStatus.stt !== "ready" &&
+                modelStatus.tts !== "ready"
                   ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.tts}`
-                  : modelStatus.stt !== "ready"
+                  : transcriptionEnabled && modelStatus.stt !== "ready"
                     ? `STT model: ${modelStatus.stt}`
                     : `TTS model: ${modelStatus.tts}`}
               </span>
@@ -488,6 +579,12 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
         {reactionError && (
           <span className="max-w-[160px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
             {reactionError}
+          </span>
+        )}
+
+        {transcriptError && (
+          <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            {transcriptError}
           </span>
         )}
 
@@ -552,6 +649,25 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
             selectedOutputDevice={selectedOutputDevice}
             onSelectOutputDevice={setSelectedOutputDevice}
           />
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                aria-label="View huddle thread"
+                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                disabled={!parentChannelId || !huddleThreadEventId}
+                onClick={handleOpenThread}
+                size="icon"
+                type="button"
+                variant="secondary"
+              >
+                <MessageSquareText className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="buzz-huddle-tooltip" side="top">
+              View thread
+            </TooltipContent>
+          </Tooltip>
         </div>
 
         <div className="flex items-center gap-2">
@@ -627,6 +743,30 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
+                aria-label={
+                  transcriptionEnabled ? "Stop transcript" : "Start transcript"
+                }
+                aria-pressed={transcriptionEnabled}
+                className={cn(
+                  "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
+                  transcriptionEnabled && "text-foreground",
+                )}
+                onClick={() => void handleToggleTranscript()}
+                size="icon"
+                type="button"
+                variant={transcriptionEnabled ? "secondary" : "ghost"}
+              >
+                <Captions className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="buzz-huddle-tooltip" side="top">
+              {transcriptionEnabled ? "Stop transcript" : "Start transcript"}
+            </TooltipContent>
+          </Tooltip>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
                 aria-label="Add agent to huddle"
                 className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
                 onClick={() => setShowAddAgent(true)}
@@ -673,6 +813,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
           : "In huddle, no microphone"}
         {`, voice input: ${isPttMode ? "push to talk, press Ctrl+Space to transmit" : "voice activity detection"}`}
         {modelStatus &&
+          transcriptionEnabled &&
           modelStatus.stt !== "ready" &&
           `, STT model ${modelStatus.stt}`}
         {modelStatus &&

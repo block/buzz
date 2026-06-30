@@ -52,34 +52,6 @@ services:
       com.buzz.env: "dev"
     restart: unless-stopped
 
-  typesense:
-    image: typesense/typesense:30.2
-    container_name: buzz-typesense
-    environment:
-      TYPESENSE_DATA_DIR: /data
-      TYPESENSE_API_KEY: buzz_dev_key
-      TYPESENSE_ENABLE_CORS: "true"
-    ports:
-      - "8108:8108"
-    volumes:
-      - typesense-data:/data
-    networks:
-      - buzz-net
-    healthcheck:
-      test: ["CMD-SHELL", "ls /proc/1/exe > /dev/null 2>&1 && kill -0 1 2>/dev/null || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 256m
-    labels:
-      com.buzz.service: "typesense"
-      com.buzz.env: "dev"
-    restart: unless-stopped
-
   adminer:
     image: adminer:latest
     container_name: buzz-adminer
@@ -202,10 +174,6 @@ volumes:
     name: buzz-postgres-data
     labels:
       com.buzz.volume: "postgres"
-  typesense-data:
-    name: buzz-typesense-data
-    labels:
-      com.buzz.volume: "typesense"
   minio-data:
     name: buzz-minio-data
     labels:

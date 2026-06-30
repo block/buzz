@@ -83,7 +83,7 @@ import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { auxiliaryPanelContentPaddingClass } from "@/shared/layout/AuxiliaryPanelHeader";
+import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import { cn } from "@/shared/lib/cn";
 import type {
   AgentPersona,
@@ -95,7 +95,6 @@ import type {
 } from "@/shared/api/types";
 import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFrame";
 import { getUserProfilePanelHeaderContent } from "@/features/profile/ui/UserProfilePanelHeaderContent";
-
 export type { ProfilePanelTab, ProfilePanelView };
 
 export function UserProfilePanel({
@@ -116,9 +115,9 @@ export function UserProfilePanel({
   tab: controlledTab,
   view: controlledView,
   widthPx,
+  transparentChrome = false,
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
-  const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
@@ -804,21 +803,18 @@ export function UserProfilePanel({
       logCopyValue: isDiagnosticsLikeView ? managedAgentLogContent : null,
       logSubtitle: logHeaderSubtitle,
       onBack: () => setView("summary"),
-      onClose,
       view,
       viewerIsOwner,
     },
   );
 
   const profileBody = (
-    <div
+    <AuxiliaryPanelBody
       className={cn(
-        "min-h-0 flex-1 px-4 pb-6",
+        "px-4 pb-6",
         isDiagnosticsLikeView
           ? "flex flex-col overflow-hidden"
           : "overflow-y-auto",
-        isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout && !isFloatingOverlay && "pt-13",
       )}
     >
       {view === "summary" ? (
@@ -927,7 +923,7 @@ export function UserProfilePanel({
           managedAgent={managedAgent}
         />
       ) : null}
-    </div>
+    </AuxiliaryPanelBody>
   );
   const editAgentDialog =
     canEditAgent && managedAgent ? (
@@ -982,7 +978,6 @@ export function UserProfilePanel({
       editAgentDialog={editAgentDialog}
       headerActions={headerActions}
       headerLeftContent={headerLeftContent}
-      isFloatingOverlay={isFloatingOverlay}
       isOverlay={isOverlay}
       isSinglePanelView={isSinglePanelView}
       isSplitLayout={isSplitLayout}
@@ -993,6 +988,7 @@ export function UserProfilePanel({
       profileBody={profileBody}
       splitPaneClamp={splitPaneClamp}
       widthPx={widthPx}
+      transparentChrome={transparentChrome}
     />
   );
 }

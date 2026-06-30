@@ -13,12 +13,13 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
-use buzz_auth::AuthService;
-use buzz_core::event::StoredEvent;
+use buzz_auth::{AuthService, Nip98ReplayGuard};
+use buzz_core::tenant::TenantContext;
+use buzz_core::CommunityId;
 use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
-use buzz_pubsub::PubSubManager;
+use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
 use deadpool_redis;
@@ -32,6 +33,9 @@ use crate::subscription::SubscriptionRegistry;
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
     cancel: CancellationToken,
+    /// Community resolved from the connection host at handshake. This is the
+    /// receiver-side tenant label fan-out must compare against the event label.
+    community_id: CommunityId,
     /// Shared with `ConnectionState` — both direct sends and fan-out
     /// broadcasts track the same consecutive-full counter.
     backpressure_count: Arc<AtomicU8>,
@@ -54,12 +58,17 @@ impl ConnectionManager {
     }
 
     /// Registers a connection with its outbound sender, cancellation token,
-    /// shared backpressure counter, mutable subscription map, and grace limit.
+    /// server-resolved community, shared backpressure counter, mutable
+    /// subscription map, and grace limit.
+    // Each argument is a distinct per-connection attribute stored verbatim in
+    // `ConnEntry`; a params struct would only relocate the same fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
         conn_id: Uuid,
         tx: mpsc::Sender<WsMessage>,
         cancel: CancellationToken,
+        community_id: CommunityId,
         backpressure_count: Arc<AtomicU8>,
         subscriptions: ConnectionSubscriptions,
         grace_limit: u8,
@@ -69,6 +78,7 @@ impl ConnectionManager {
             ConnEntry {
                 tx,
                 cancel,
+                community_id,
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
@@ -116,6 +126,13 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Return the server-resolved community that the connection's host bound to.
+    pub fn community_for_conn(&self, conn_id: Uuid) -> Option<CommunityId> {
+        self.connections
+            .get(&conn_id)
+            .map(|entry| entry.community_id)
     }
 
     /// Return the subscription map for a connection, if it is still live.
@@ -203,32 +220,38 @@ pub struct AppState {
     /// serialization — that's the CAS at the manifest pointer (spec
     /// §Push step 7, `Inv_NoFork`).
     pub git_semaphore: Arc<Semaphore>,
+    /// Semaphore limiting concurrent media upload parsing/transcoding work.
+    pub media_upload_semaphore: Arc<Semaphore>,
 
     /// Workflow engine for background processing.
     pub workflow_engine: Arc<WorkflowEngine>,
     /// Relay signing keypair — used to sign system messages (kind 40099).
     pub relay_keypair: nostr::Keys,
 
-    /// Recently-published event IDs for local-echo deduplication.
-    /// Events fanned out in-process are added here; the Redis subscriber
-    /// consumer skips them to avoid double delivery. Entries expire after
-    /// 60 seconds via moka's TTL eviction — bounded regardless of subscriber health.
-    pub local_event_ids: Arc<moka::sync::Cache<[u8; 32], ()>>,
-    /// Membership cache: (channel_id, pubkey_bytes) → is_member.
+    /// Recently-published event IDs for local-echo deduplication, keyed by
+    /// `(community_id, event_id)`. Events fanned out in-process are added here;
+    /// the Redis subscriber consumer skips them to avoid double delivery.
+    ///
+    /// The community is part of the key because the same Nostr event id can
+    /// legitimately exist in two communities (channel-less events, and
+    /// same-channel-UUID/same-`h` events across tenants). Keying on the bare id
+    /// would let a local publish in community A suppress delivery of a distinct
+    /// event with the same id arriving via Redis for community B — a
+    /// cross-community non-interference violation. Entries expire after 60
+    /// seconds via moka's TTL eviction — bounded regardless of subscriber health.
+    pub local_event_ids: Arc<moka::sync::Cache<(CommunityId, [u8; 32]), ()>>,
+    /// Membership cache: (community_id, channel_id, pubkey_bytes) → is_member.
     /// Short TTL (10s) — membership changes are rare but must propagate.
-    /// Multi-pod: other pods rely on TTL expiry; only local caches are invalidated.
-    pub membership_cache: Arc<moka::sync::Cache<(Uuid, Vec<u8>), bool>>,
-    /// Accessible channel IDs cache: pubkey_bytes → channel UUIDs.
+    #[allow(clippy::type_complexity)]
+    pub membership_cache: Arc<moka::sync::Cache<(CommunityId, Uuid, Vec<u8>), bool>>,
+    /// Accessible channel IDs cache: (community_id, pubkey_bytes) → channel UUIDs.
     /// Short TTL (10s) — invalidated on membership or channel visibility changes.
-    /// Multi-pod: other pods rely on TTL expiry; only local caches are invalidated.
-    pub accessible_channels_cache: Arc<moka::sync::Cache<Vec<u8>, Vec<Uuid>>>,
-    /// Per-channel visibility string, used to gate the private-channel fan-out
+    #[allow(clippy::type_complexity)]
+    pub accessible_channels_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), Vec<Uuid>>>,
+    /// Per-community channel visibility string, used to gate the private-channel fan-out
     /// access check so open channels stay zero-cost. Invalidated on a flip.
-    pub channel_visibility_cache: Arc<moka::sync::Cache<Uuid, String>>,
+    pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
 
-    /// Bounded channel for search indexing — prevents OOM if Typesense is slow/down.
-    /// Capacity 1000: at ~1KB/event that's ~1MB of backlog before we start dropping.
-    pub search_index_tx: mpsc::Sender<StoredEvent>,
     /// Bounded channel for audit logging — backpressure instead of unbounded spawns.
     /// Uses .send().await (blocks caller if full) because audit entries must not be lost.
     pub audit_tx: mpsc::Sender<buzz_audit::NewAuditEntry>,
@@ -244,9 +267,13 @@ pub struct AppState {
     pub shutting_down: Arc<AtomicBool>,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
-    /// NIP-98 replay prevention: recently-seen event IDs.
-    /// 2× the ±60s tolerance window so entries outlive the acceptance window.
-    pub nip98_seen: Arc<moka::sync::Cache<[u8; 32], ()>>,
+    /// Shared, community-scoped NIP-98 replay prevention.
+    ///
+    /// Correctness boundary for stateless workers: every pod must consult the
+    /// same Redis `SET NX EX` seen-set, keyed by resolved community. Do not
+    /// replace this with process-local caching; replay freshness must survive
+    /// cross-pod routing.
+    pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
     /// Key: agent pubkey bytes (32). Value: (count, window_start).
@@ -258,12 +285,24 @@ pub struct AppState {
     /// trusted, but a buggy desktop loop shouldn't make the relay sign+fan
     /// unboundedly. 20/sec is far above any real interactive use.
     pub mesh_connect_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    /// Per-uploader sliding-window rate limiter for media upload starts.
+    /// Key: uploader pubkey bytes (32). Value: (count, window_start).
+    pub media_upload_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    /// Current in-flight media uploads per uploader pubkey.
+    pub media_uploads_in_flight: Arc<DashMap<[u8; 32], u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
     /// Key: (agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// agent_owner_pubkey is immutable so a long TTL (5 min) is safe.
     /// Prevents repeated DB lookups from bursty observer traffic.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(Vec<u8>, Vec<u8>), bool>>,
+
+    /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
+    /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
+    /// record traces for replay against `docs/spec/MultiTenantRelay.tla`.
+    /// See `crates/buzz-conformance/` and `crate::conformance` for the
+    /// schema, emitter helpers, and the independent checker.
+    pub tracer: Arc<dyn buzz_conformance::Tracer>,
 }
 
 impl AppState {
@@ -288,28 +327,6 @@ impl AppState {
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
-
-        let (search_index_tx, mut search_index_rx) = mpsc::channel::<StoredEvent>(1000);
-        let search_for_worker = Arc::clone(&search_arc);
-        tokio::spawn(async move {
-            while let Some(stored_event) = search_index_rx.recv().await {
-                let t = std::time::Instant::now();
-                match search_for_worker.index_event(&stored_event).await {
-                    Ok(()) => {
-                        metrics::histogram!("buzz_search_index_seconds")
-                            .record(t.elapsed().as_secs_f64());
-                    }
-                    Err(e) => {
-                        metrics::counter!("buzz_search_index_errors_total").increment(1);
-                        tracing::error!(
-                            event_id = %stored_event.event.id.to_hex(),
-                            "Search index failed: {e}"
-                        );
-                    }
-                }
-            }
-            tracing::warn!("search index worker exited (expected on shutdown)");
-        });
 
         let audit_arc = Arc::new(audit);
         let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
@@ -347,6 +364,7 @@ impl AppState {
         });
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
+        let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
         let git_store = crate::api::git::store::GitStore::new(
             &config.media.s3_endpoint,
             &config.media.s3_access_key,
@@ -354,6 +372,8 @@ impl AppState {
             &config.media.s3_bucket,
         )
         .expect("media storage was already constructed with this S3 config");
+        let nip98_replay: Arc<dyn Nip98ReplayGuard> =
+            Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let state = Self {
             config: Arc::new(config),
             db,
@@ -367,6 +387,7 @@ impl AppState {
             conn_semaphore: Arc::new(Semaphore::new(max_connections)),
             handler_semaphore: Arc::new(Semaphore::new(max_concurrent_handlers)),
             git_semaphore: Arc::new(Semaphore::new(git_max_concurrent_ops)),
+            media_upload_semaphore: Arc::new(Semaphore::new(media_max_concurrent_uploads)),
             workflow_engine,
             relay_keypair,
 
@@ -394,27 +415,28 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
-            search_index_tx,
             audit_tx,
             media_storage: Arc::new(media_storage),
             git_store,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
-            nip98_seen: Arc::new(
-                moka::sync::Cache::builder()
-                    .max_capacity(10_000)
-                    .time_to_live(std::time::Duration::from_secs(120))
-                    .build(),
-            ),
+            nip98_replay,
             observer_rate_limiter: Arc::new(DashMap::new()),
             mesh_connect_rate_limiter: Arc::new(DashMap::new()),
+            media_upload_rate_limiter: Arc::new(DashMap::new()),
+            media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(1_000)
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
+            // Default to NoopTracer: production builds pay zero cost.
+            // Conformance tests overwrite this with a JsonlTracer after
+            // construction (see test helpers in
+            // `crates/buzz-test-client` once those land).
+            tracer: Arc::new(crate::conformance::NoopTracer),
         };
         (
             state,
@@ -425,25 +447,30 @@ impl AppState {
         )
     }
 
-    /// Record an event ID as locally-published for dedup.
-    /// Called before Redis publish so the multi-node consumer can skip the echo.
-    pub fn mark_local_event(&self, event_id: &nostr::EventId) {
-        self.local_event_ids.insert(event_id.to_bytes(), ());
+    /// Record an event ID as locally-published for dedup, scoped to the
+    /// community it was fanned out in. Called before Redis publish so the
+    /// multi-node consumer can skip the echo for *this* community only — a
+    /// same-id event in another community is a distinct delivery and must not
+    /// be suppressed.
+    pub fn mark_local_event(&self, community: CommunityId, event_id: &nostr::EventId) {
+        self.local_event_ids
+            .insert((community, event_id.to_bytes()), ());
     }
 
     /// Check channel membership with a 10-second cache. Falls back to DB on miss.
     pub async fn is_member_cached(
         &self,
+        community_id: CommunityId,
         channel_id: Uuid,
         pubkey: &[u8],
     ) -> Result<bool, buzz_db::DbError> {
-        let key = (channel_id, pubkey.to_vec());
+        let key = (community_id, channel_id, pubkey.to_vec());
         if let Some(cached) = self.membership_cache.get(&key) {
             metrics::counter!("buzz_membership_cache_hits_total").increment(1);
             return Ok(cached);
         }
         metrics::counter!("buzz_membership_cache_misses_total").increment(1);
-        let result = self.db.is_member(channel_id, pubkey).await?;
+        let result = self.db.is_member(community_id, channel_id, pubkey).await?;
         self.membership_cache.insert(key, result);
         Ok(result)
     }
@@ -454,26 +481,35 @@ impl AppState {
     /// to every other pod over Redis (see [`apply_cache_invalidation`]). The
     /// publish is spawned, not awaited: the local drop is already done, and a
     /// dropped publish is backstopped by the REQ denial-path DB confirmation.
-    pub fn invalidate_membership(&self, channel_id: Uuid, pubkey: &[u8]) {
-        self.invalidate_membership_local(channel_id, pubkey);
-        self.spawn_cache_invalidation(CacheInvalidation::Membership {
-            channel_id,
-            pubkey: pubkey.to_vec(),
-        });
+    pub fn invalidate_membership(&self, tenant: &TenantContext, channel_id: Uuid, pubkey: &[u8]) {
+        self.invalidate_membership_local(tenant.community(), channel_id, pubkey);
+        self.spawn_cache_invalidation(
+            tenant,
+            CacheInvalidation::Membership {
+                channel_id,
+                pubkey: pubkey.to_vec(),
+            },
+        );
     }
 
     /// Local-only membership drop. The cross-pod consumer calls this directly so
     /// applying a received drop never re-publishes it.
-    pub(crate) fn invalidate_membership_local(&self, channel_id: Uuid, pubkey: &[u8]) {
+    pub(crate) fn invalidate_membership_local(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) {
         self.membership_cache
-            .invalidate(&(channel_id, pubkey.to_vec()));
-        self.accessible_channels_cache.invalidate(&pubkey.to_vec());
+            .invalidate(&(community_id, channel_id, pubkey.to_vec()));
+        self.accessible_channels_cache
+            .invalidate(&(community_id, pubkey.to_vec()));
     }
 
     /// Invalidate all users' accessible-channels cache (e.g. new open channel created).
-    pub fn invalidate_all_accessible_channels(&self) {
+    pub fn invalidate_all_accessible_channels(&self, tenant: &TenantContext) {
         self.invalidate_all_accessible_channels_local();
-        self.spawn_cache_invalidation(CacheInvalidation::AccessibleAll);
+        self.spawn_cache_invalidation(tenant, CacheInvalidation::AccessibleAll);
     }
 
     /// Local-only accessible-channels drop. See [`invalidate_membership_local`].
@@ -482,14 +518,19 @@ impl AppState {
     }
 
     /// Invalidate the cached visibility for a single channel (e.g. after a flip).
-    pub fn invalidate_channel_visibility(&self, channel_id: Uuid) {
-        self.invalidate_channel_visibility_local(channel_id);
-        self.spawn_cache_invalidation(CacheInvalidation::Visibility { channel_id });
+    pub fn invalidate_channel_visibility(&self, tenant: &TenantContext, channel_id: Uuid) {
+        self.invalidate_channel_visibility_local(tenant.community(), channel_id);
+        self.spawn_cache_invalidation(tenant, CacheInvalidation::Visibility { channel_id });
     }
 
     /// Local-only visibility drop. See [`invalidate_membership_local`].
-    pub(crate) fn invalidate_channel_visibility_local(&self, channel_id: Uuid) {
-        self.channel_visibility_cache.invalidate(&channel_id);
+    pub(crate) fn invalidate_channel_visibility_local(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) {
+        self.channel_visibility_cache
+            .invalidate(&(community_id, channel_id));
     }
 
     /// Invalidate all caches after a channel is deleted.
@@ -498,9 +539,9 @@ impl AppState {
     /// cache because moka doesn't support prefix-based invalidation on composite
     /// keys, and stale `is_member=true` entries for a deleted channel would bypass
     /// the DB's `deleted_at IS NULL` guard.
-    pub fn invalidate_channel_deleted(&self) {
+    pub fn invalidate_channel_deleted(&self, tenant: &TenantContext) {
         self.invalidate_channel_deleted_local();
-        self.spawn_cache_invalidation(CacheInvalidation::ChannelDeleted);
+        self.spawn_cache_invalidation(tenant, CacheInvalidation::ChannelDeleted);
     }
 
     /// Local-only channel-deleted drop. See [`invalidate_membership_local`].
@@ -513,10 +554,14 @@ impl AppState {
     /// Fire-and-forget publish of a cache-key drop to all other pods. Failures
     /// are logged and swallowed — the REQ denial-path DB confirmation is the
     /// backstop, so a missed publish degrades to a <=10s TTL wait, never a leak.
-    fn spawn_cache_invalidation(&self, invalidation: CacheInvalidation) {
+    fn spawn_cache_invalidation(&self, tenant: &TenantContext, invalidation: CacheInvalidation) {
         let pubsub = Arc::clone(&self.pubsub);
+        let tenant = tenant.clone();
         tokio::spawn(async move {
-            if let Err(e) = pubsub.publish_cache_invalidation(&invalidation).await {
+            if let Err(e) = pubsub
+                .publish_cache_invalidation(&tenant, &invalidation)
+                .await
+            {
                 tracing::warn!("Failed to publish cache invalidation {invalidation:?}: {e}");
             }
         });
@@ -524,16 +569,20 @@ impl AppState {
 
     /// Apply a cache-key drop received from another pod. Calls the local-only
     /// drop variants so a received drop is never re-published (no fan-out loop).
-    pub fn apply_cache_invalidation(&self, invalidation: CacheInvalidation) {
+    pub fn apply_cache_invalidation(
+        &self,
+        community_id: CommunityId,
+        invalidation: CacheInvalidation,
+    ) {
         match invalidation {
             CacheInvalidation::Membership { channel_id, pubkey } => {
-                self.invalidate_membership_local(channel_id, &pubkey);
+                self.invalidate_membership_local(community_id, channel_id, &pubkey);
             }
             CacheInvalidation::AccessibleAll => {
                 self.invalidate_all_accessible_channels_local();
             }
             CacheInvalidation::Visibility { channel_id } => {
-                self.invalidate_channel_visibility_local(channel_id);
+                self.invalidate_channel_visibility_local(community_id, channel_id);
             }
             CacheInvalidation::ChannelDeleted => {
                 self.invalidate_channel_deleted_local();
@@ -544,15 +593,19 @@ impl AppState {
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
     pub async fn get_accessible_channel_ids_cached(
         &self,
+        community_id: CommunityId,
         pubkey: &[u8],
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
-        let key = pubkey.to_vec();
+        let key = (community_id, pubkey.to_vec());
         if let Some(cached) = self.accessible_channels_cache.get(&key) {
             metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
             return Ok(cached);
         }
         metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
-        let result = self.db.get_accessible_channel_ids(pubkey).await?;
+        let result = self
+            .db
+            .get_accessible_channel_ids(community_id, pubkey)
+            .await?;
         self.accessible_channels_cache.insert(key, result.clone());
         Ok(result)
     }
@@ -568,15 +621,23 @@ impl AppState {
     /// <=10s), never a leak.
     pub async fn channel_visibility_cached(
         &self,
+        community_id: CommunityId,
         channel_id: Uuid,
     ) -> Result<String, buzz_db::DbError> {
-        if let Some(cached) = self.channel_visibility_cache.get(&channel_id) {
+        if let Some(cached) = self
+            .channel_visibility_cache
+            .get(&(community_id, channel_id))
+        {
             return Ok(cached);
         }
-        let visibility = self.db.get_channel(channel_id).await?.visibility;
+        let visibility = self
+            .db
+            .get_channel(community_id, channel_id)
+            .await?
+            .visibility;
         if visibility == "private" {
             self.channel_visibility_cache
-                .insert(channel_id, visibility.clone());
+                .insert((community_id, channel_id), visibility.clone());
         }
         Ok(visibility)
     }
@@ -655,6 +716,7 @@ mod tests {
             conn_id,
             tx,
             cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             Arc::clone(&bp),
             Arc::new(Mutex::new(HashMap::new())),
             3,
@@ -722,6 +784,10 @@ mod tests {
 
         let conn = ConnectionState {
             conn_id,
+            tenant: buzz_core::tenant::TenantContext::resolved(
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                "test.local".to_string(),
+            ),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
             auth_state: RwLock::new(AuthState::Failed),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -737,6 +803,7 @@ mod tests {
             conn_id,
             tx,
             cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
             Arc::clone(&bp),
             Arc::clone(&conn.subscriptions),
             3,
@@ -774,7 +841,15 @@ mod tests {
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-        mgr.register(conn_id, tx, cancel, bp, Arc::clone(&subscriptions), 3);
+        mgr.register(
+            conn_id,
+            tx,
+            cancel,
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            bp,
+            Arc::clone(&subscriptions),
+            3,
+        );
 
         let pubkey = vec![7u8; 32];
         mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
@@ -791,7 +866,15 @@ mod tests {
         let cancel = CancellationToken::new();
         let bp = Arc::new(AtomicU8::new(0));
         let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-        mgr.register(conn_id, tx, cancel, bp, subscriptions, 3);
+        mgr.register(
+            conn_id,
+            tx,
+            cancel,
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            bp,
+            subscriptions,
+            3,
+        );
 
         assert_eq!(mgr.pubkey_for_conn(conn_id), None);
         let pubkey = vec![9u8; 32];

@@ -364,10 +364,10 @@ export type CreateManagedAgentInput = {
   acpCommand?: string;
   agentCommand?: string;
   /**
-   * True when `agentCommand` is a runtime the user deliberately picked to
-   * override the linked persona (a deploy-dialog runtime selector). Lets the
-   * backend distinguish a real pin from a missing-runtime fallback. Omit/false
-   * for persona-less creates and fallback divergence — both inherit.
+   * True when `agentCommand` is a runtime command the caller deliberately wants
+   * to preserve instead of inheriting the linked persona command. This covers
+   * deploy-dialog runtime selections and discovered or installed aliases for the
+   * same persona runtime id, while still ignoring missing-runtime fallbacks.
    */
   harnessOverride?: boolean;
   agentArgs?: string[];
@@ -408,6 +408,25 @@ export type ManagedAgentLog = {
 
 export type CancelManagedAgentTurnResult = {
   status: "sent" | "no_active_turn";
+};
+
+/**
+ * Outcome of a live `switch_model` control frame, surfaced asynchronously via
+ * the agent's `control_result` observer frame. Busy path: `sent` (cancel +
+ * requeue on the new model) or `turn_ending` (oneshot already consumed this
+ * turn). Idle path: `switched`, `unsupported_model`, or `no_active_turn`.
+ */
+export type SwitchManagedAgentModelStatus =
+  | "sent"
+  | "turn_ending"
+  | "switched"
+  | "unsupported_model"
+  | "no_active_turn";
+
+export type ControlResultFrame = {
+  type: "cancel_turn" | "switch_model";
+  status: string;
+  modelId?: string;
 };
 
 export type AcpAvailabilityStatus =
@@ -476,6 +495,80 @@ export type AgentModelInfo = {
   name: string | null;
   description: string | null;
 };
+
+// ── Config bridge types ──────────────────────────────────────────────────────
+
+export type ConfigOrigin =
+  | "buzzExplicit"
+  | "acpNativeRead"
+  | "acpConfigOption"
+  | "envVar"
+  | "configFile"
+  | "personaDefault"
+  | "runtimeOverride"
+  | "harnessConstraint";
+
+export type ConfigWriteMechanism =
+  | { type: "respawnWithEnvVar"; envKey: string }
+  | { type: "acpSetConfigOption"; configId: string }
+  | { type: "acpSetSessionModel" }
+  | { type: "gooseNativeConfigWrite"; configKey: string }
+  | { type: "readOnly" };
+
+export type NormalizedField = {
+  value: string | null;
+  origin: ConfigOrigin;
+  writeVia: ConfigWriteMechanism;
+  overriddenValue: string | null;
+  overriddenOrigin: ConfigOrigin | null;
+  /** True if this field must be set for the harness to function. */
+  isRequired: boolean;
+};
+
+export type ConfigFieldType =
+  | { type: "string" }
+  | { type: "number" }
+  | { type: "boolean" }
+  | { type: "enum"; options: string[] };
+
+export type ConfigField = {
+  key: string;
+  label: string;
+  value: string | null;
+  origin: ConfigOrigin;
+  schemaType: ConfigFieldType;
+  writeVia: ConfigWriteMechanism;
+};
+
+export type ConfigTierStatus = "available" | "pending" | "notApplicable";
+
+export type ConfigSourceReport = {
+  acpNative: ConfigTierStatus;
+  acpConfigOptions: ConfigTierStatus;
+  envVars: ConfigTierStatus;
+  configFile: ConfigTierStatus;
+  configFilePath: string | null;
+};
+
+export type NormalizedConfig = {
+  model: NormalizedField | null;
+  provider: NormalizedField | null;
+  mode: NormalizedField | null;
+  thinkingEffort: NormalizedField | null;
+  maxOutputTokens: NormalizedField | null;
+  contextLimit: NormalizedField | null;
+  systemPrompt: NormalizedField | null;
+};
+
+export type RuntimeConfigSurface = {
+  runtimeId: string | null;
+  runtimeLabel: string | null;
+  isPreSpawn: boolean;
+  normalized: NormalizedConfig;
+  advanced: ConfigField[];
+  sources: ConfigSourceReport;
+};
+
 export type UpdateManagedAgentInput = {
   pubkey: string;
   name?: string;

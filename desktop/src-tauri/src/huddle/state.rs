@@ -78,6 +78,8 @@ pub struct HuddleState {
     pub is_creator: bool,
     /// Whether TTS output is enabled (user-toggled).
     pub tts_enabled: bool,
+    /// Whether STT transcript posting is enabled for this huddle.
+    pub transcription_enabled: bool,
     /// Shared flag: true while TTS is playing audio.
     /// Shared with the STT pipeline for barge-in / echo gating.
     #[serde(skip)]
@@ -154,6 +156,7 @@ impl Clone for HuddleState {
             tts_pipeline: None, // Never clone the pipeline handle.
             is_creator: self.is_creator,
             tts_enabled: self.tts_enabled,
+            transcription_enabled: self.transcription_enabled,
             tts_active: Arc::clone(&self.tts_active),
             tts_cancel: Arc::clone(&self.tts_cancel),
             tts_starting: Arc::clone(&self.tts_starting),
@@ -180,6 +183,7 @@ impl Default for HuddleState {
             tts_pipeline: None,
             is_creator: false,
             tts_enabled: true,
+            transcription_enabled: false,
             tts_active: Arc::new(AtomicBool::new(false)),
             tts_cancel: Arc::new(AtomicBool::new(false)),
             tts_starting: Arc::new(AtomicBool::new(false)),
@@ -218,6 +222,8 @@ impl HuddleState {
 pub fn emit_huddle_state(app: &tauri::AppHandle, state: &HuddleState) {
     use tauri::Emitter;
     let _ = app.emit("huddle-state-changed", state);
+    // Reserve Ctrl+Space with the OS only while a huddle is live in PTT mode.
+    crate::ptt_shortcut::sync_registration(app, state);
 }
 
 // ── Response types ────────────────────────────────────────────────────────────

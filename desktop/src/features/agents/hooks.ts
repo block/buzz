@@ -13,6 +13,7 @@ import {
   discoverAcpRuntimes,
   discoverBackendProviders,
   discoverManagedAgentPrereqs,
+  getAgentConfigSurface,
   getManagedAgentLog,
   installAcpRuntime,
   listManagedAgents,
@@ -361,6 +362,17 @@ export function useStartManagedAgentMutation() {
 
   return useMutation({
     mutationFn: (pubkey: string) => startManagedAgent(pubkey),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<ManagedAgent[]>(
+        managedAgentsQueryKey,
+        (current) => {
+          if (!current) return current;
+          return current.map((agent) =>
+            agent.pubkey === updated.pubkey ? updated : agent,
+          );
+        },
+      );
+    },
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
     },
@@ -550,6 +562,19 @@ export function useManagedAgentLogQuery(
     retry: false,
     staleTime: 3_000,
     refetchInterval: pubkey ? 30_000 : false,
+  });
+}
+
+export const agentConfigSurfaceQueryKey = (pubkey: string) =>
+  ["agent-config-surface", pubkey] as const;
+
+export function useAgentConfigSurface(pubkey: string | null) {
+  return useQuery({
+    queryKey: agentConfigSurfaceQueryKey(pubkey ?? ""),
+    queryFn: () => getAgentConfigSurface(pubkey ?? ""),
+    enabled: !!pubkey,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
   });
 }
 

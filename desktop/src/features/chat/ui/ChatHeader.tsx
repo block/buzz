@@ -32,6 +32,8 @@ type ChatHeaderProps = {
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
+  /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
+  transparentChrome?: boolean;
 };
 
 const HEADER_ICON_CLASS = "h-4 w-4 text-muted-foreground";
@@ -93,6 +95,7 @@ export function ChatHeader({
   mode = "channel",
   overlaysContent = false,
   statusBadge,
+  transparentChrome = false,
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
 
@@ -120,7 +123,7 @@ export function ChatHeader({
       <div className="flex h-9 min-w-0 items-center gap-2.5">
         <div className="min-w-0 flex-1">
           <div className="group/title flex min-w-0 items-center gap-[4px] overflow-hidden">
-            <div className="shrink-0">
+            <div className="flex shrink-0 items-center">
               {leadingContent ?? (
                 <ChannelIcon
                   channelType={channelType}
@@ -130,7 +133,10 @@ export function ChatHeader({
               )}
             </div>
             <h1
-              className="min-w-0 translate-y-px truncate text-base font-semibold leading-6 tracking-tight"
+              className={cn(
+                "min-w-0 truncate text-base font-semibold leading-6 tracking-tight",
+                channelType !== "dm" && "translate-y-px",
+              )}
               data-testid="chat-title"
               title={trimmedDescription || undefined}
             >
@@ -171,7 +177,10 @@ export function ChatHeader({
     <div
       ref={chromeWrapperRef}
       className={cn(
-        "pointer-events-none relative z-30 overflow-hidden rounded-tl-xl bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
+        "pointer-events-none relative z-40 overflow-visible rounded-tl-xl",
+        transparentChrome
+          ? "bg-transparent"
+          : "bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
         channelChrome.negativeMargin,
       )}
     >

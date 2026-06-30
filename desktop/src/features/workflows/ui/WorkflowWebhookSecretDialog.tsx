@@ -22,7 +22,7 @@ export function WorkflowWebhookSecretDialog({
   webhookSecret,
   workflowId,
 }: WorkflowWebhookSecretDialogProps) {
-  const webhookUrl = `${relayHttpUrl}/api/workflows/${workflowId}/webhook`;
+  const webhookUrl = `${relayHttpUrl}/hooks/${workflowId}`;
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>

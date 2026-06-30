@@ -49,12 +49,11 @@ import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
-import {
-  THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
-  useThreadPanelWidth,
-} from "@/shared/hooks/useThreadPanelWidth";
+import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
+import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { Button } from "@/shared/ui/button";
 
@@ -183,7 +182,7 @@ export function HomeView({
   const isSinglePanelChannelManagementView =
     isChannelManagementOpen &&
     homeInboxWidthPx > 0 &&
-    homeInboxWidthPx < THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
+    homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
   const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
   const toggleReactionMutation = useToggleReactionMutation();
@@ -212,6 +211,21 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  const inboxAgentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set<string>();
+
+    for (const item of feed?.feed.agentActivity ?? []) {
+      pubkeys.add(normalizePubkey(item.pubkey));
+    }
+
+    for (const [pubkey, profile] of Object.entries(feedProfiles ?? {})) {
+      if (profile.isAgent) {
+        pubkeys.add(normalizePubkey(pubkey));
+      }
+    }
+
+    return pubkeys;
+  }, [feed?.feed.agentActivity, feedProfiles]);
   const inboxItems = React.useMemo(
     () =>
       buildInboxItems({
@@ -279,9 +293,12 @@ export function HomeView({
 
     return timelineMessages.map((message) => {
       const event = eventById.get(message.id);
+      const authorPubkey =
+        message.pubkey ?? event?.pubkey ?? selectedItem.item.pubkey;
       return {
         id: message.id,
         authorLabel: message.author,
+        authorPubkey,
         avatarUrl: message.avatarUrl ?? null,
         content: message.body,
         depth: event ? getContextMessageDepth(event, eventById) : message.depth,
@@ -457,6 +474,7 @@ export function HomeView({
         {showListPane ? (
           <InboxListPane
             activeReminderEventIds={activeReminderEventIds}
+            agentPubkeys={inboxAgentPubkeys}
             doneSet={effectiveDoneSet}
             dueReminderCount={dueReminderCount}
             filter={filter}
@@ -524,6 +542,7 @@ export function HomeView({
 
         {showDetailPane ? (
           <InboxDetailPane
+            agentPubkeys={inboxAgentPubkeys}
             canDelete={canDelete}
             canOpenChannel={Boolean(
               selectedItem?.item.channelId &&
@@ -604,6 +623,7 @@ export function HomeView({
                         pubkey: authorPubkey,
                       })
                     : "You",
+                  authorPubkey,
                   avatarUrl:
                     currentPubkey && feedProfiles
                       ? (feedProfiles[currentPubkey.trim().toLowerCase()]

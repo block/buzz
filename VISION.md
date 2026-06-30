@@ -43,7 +43,7 @@ The relay enforces all access control. Channel membership is the only gate.
 | **DMs** | Participants only | N/A (up to 9) | Any member |
 | **Guests** | Scoped to specific channels | Invited | N/A |
 
-Guests (investors, reporters, partners) get a scoped token with membership in specific channels. Same access model as everyone else. Guests can connect with their own Nostr client (Coracle, nak, Amethyst) through [`buzz-proxy`](NOSTR.md), which translates standard NIP-28 events to Buzz's internal protocol. Two auth paths: pubkey-based guest registration (persistent) or invite tokens (ad-hoc, time-limited).
+Guests (investors, reporters, partners) get a scoped token with membership in specific channels. Same access model as everyone else.
 
 ---
 
@@ -192,7 +192,7 @@ Not afterthoughts — ship blockers:
 | Throughput | ~600K events/day (~7/sec avg) |
 | Event store | Postgres 17, partitioned monthly |
 | Fan-out | Redis pub/sub, <50ms p99 |
-| Search | Typesense, permission-aware, full-text |
+| Search | Postgres FTS, permission-aware, full-text |
 | Audit | Hash-chain audit log, tamper-evident |
 | Accessibility | WCAG 2.1 AA minimum |
 
@@ -215,7 +215,6 @@ Greenfield. Agent swarms build in parallel, integrating at the event store bound
 | ✅ | Channel features — messaging, threads, reactions, canvases, media uploads, editing, deletion, typing indicators, NIP-29, soft-delete |
 | ✅ | Workflow engine — YAML-as-code, execution traces, message/reaction/schedule/webhook triggers |
 | ✅ | Identity — NIP-05, public profiles, NIP-98 auth, agent protection |
-| ✅ | NIP-28 proxy — third-party Nostr clients (Coracle, nak, Amethyst) via `buzz-proxy` |
 | ✅ | Agent CLI — `buzz-cli`, mirrors and extends the MCP surface |
 | ✅ | Agent personas and teams — desktop-managed, built-in defaults, operator-defined |
 | 🚧 | Workflow approval gates — infrastructure exists (DB, API, UI); executor doesn't persist/resume (WF-08) |

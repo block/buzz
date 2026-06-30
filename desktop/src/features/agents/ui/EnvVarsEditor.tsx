@@ -3,6 +3,11 @@ import * as React from "react";
 
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
+import { cn } from "@/shared/lib/cn";
+import {
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+} from "./personaDialogPickers";
 
 export type EnvVarsValue = Record<string, string>;
 
@@ -98,28 +103,48 @@ export function EnvVarsEditor({
           return (
             <div key={row.id} className="space-y-1">
               <div className="flex items-center gap-2">
-                <Input
-                  aria-label="Variable name"
-                  className="flex-1 font-mono text-xs"
-                  data-testid="env-vars-key"
-                  disabled={disabled}
-                  onChange={(event) =>
-                    updateRow(row.id, { key: event.target.value })
-                  }
-                  placeholder="ANTHROPIC_API_KEY"
-                  value={row.key}
-                />
-                <Input
-                  aria-label="Variable value"
-                  className="flex-[2] font-mono text-xs"
-                  data-testid="env-vars-value"
-                  disabled={disabled}
-                  onChange={(event) =>
-                    updateRow(row.id, { value: event.target.value })
-                  }
-                  placeholder="sk-ant-..."
-                  value={row.value}
-                />
+                <div
+                  className={cn(
+                    "flex min-h-11 flex-1 items-center px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  <Input
+                    aria-label="Variable name"
+                    className={cn(
+                      "h-8 px-0 py-0 font-mono leading-6",
+                      PERSONA_FIELD_CONTROL_CLASS,
+                    )}
+                    data-testid="env-vars-key"
+                    disabled={disabled}
+                    onChange={(event) =>
+                      updateRow(row.id, { key: event.target.value })
+                    }
+                    placeholder="VARIABLE_NAME"
+                    value={row.key}
+                  />
+                </div>
+                <div
+                  className={cn(
+                    "flex min-h-11 flex-[2] items-center px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  <Input
+                    aria-label="Variable value"
+                    className={cn(
+                      "h-8 px-0 py-0 font-mono leading-6",
+                      PERSONA_FIELD_CONTROL_CLASS,
+                    )}
+                    data-testid="env-vars-value"
+                    disabled={disabled}
+                    onChange={(event) =>
+                      updateRow(row.id, { value: event.target.value })
+                    }
+                    placeholder="value"
+                    value={row.value}
+                  />
+                </div>
                 <Button
                   aria-label="Remove variable"
                   data-testid="env-vars-remove"

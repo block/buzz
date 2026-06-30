@@ -362,7 +362,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct CapturedRequest {
     path: String,
     authorization: Option<String>,
@@ -466,10 +466,10 @@ impl Drop for AgentHarness {
 }
 
 impl AgentHarness {
-    async fn spawn_databricks(base_url: &str, model: &str) -> Self {
+    async fn spawn_provider(provider: &str, base_url: &str, model: &str) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "databricks")
+        cmd.env("BUZZ_AGENT_PROVIDER", provider)
             .env("DATABRICKS_HOST", base_url)
             .env("DATABRICKS_MODEL", model)
             .env("DATABRICKS_TOKEN", "test-bearer")
@@ -521,23 +521,8 @@ impl AgentHarness {
     }
 }
 
-#[tokio::test]
-async fn databricks_envelope_routes_through_serving_endpoints_and_strips_model() {
-    // One canned chat-completions-shaped response → assistant says "ok"
-    // with end_turn so the agent loop exits cleanly.
-    let canned = vec![json!({
-        "id": "x",
-        "object": "chat.completion",
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": "ok" },
-            "finish_reason": "stop"
-        }]
-    })];
-    let (base, captured) = spawn_capturing_server(canned).await;
-
-    let model = "goose-claude-4-6-sonnet";
-    let mut h = AgentHarness::spawn_databricks(&base, model).await;
+async fn run_single_prompt(provider: &str, base: &str, model: &str) {
+    let mut h = AgentHarness::spawn_provider(provider, base, model).await;
     h.send(
         "initialize",
         json!({ "protocolVersion": 1, "clientCapabilities": {} }),
@@ -554,13 +539,39 @@ async fn databricks_envelope_routes_through_serving_endpoints_and_strips_model()
     )
     .await;
     let _ = h.recv_for(3).await;
+}
+
+async fn run_captured_prompt(
+    provider: &str,
+    model: &str,
+    canned: Vec<serde_json::Value>,
+) -> CapturedRequest {
+    let (base, captured) = spawn_capturing_server(canned).await;
+    run_single_prompt(provider, &base, model).await;
 
     let reqs = captured.lock().await;
     assert_eq!(reqs.len(), 1, "expected exactly one LLM request");
-    let req = &reqs[0];
+    reqs[0].clone()
+}
+
+#[tokio::test]
+async fn databricks_envelope_routes_through_serving_endpoints_and_strips_model() {
+    // One canned chat-completions-shaped response → assistant says "ok"
+    // with end_turn so the agent loop exits cleanly.
+    let canned = vec![json!({
+        "id": "x",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }]
+    })];
+    let model = "goose-claude-4-6-sonnet";
+    let req = run_captured_prompt("databricks", model, canned).await;
 
     assert_eq!(
-        req.path,
+        req.path.as_str(),
         format!("/serving-endpoints/{model}/invocations"),
         "Databricks must route to serving-endpoints/{{model}}/invocations"
     );
@@ -581,5 +592,100 @@ async fn databricks_envelope_routes_through_serving_endpoints_and_strips_model()
             .and_then(|v| v.as_array())
             .is_some(),
         "request body should keep the chat `messages` field"
+    );
+}
+
+#[tokio::test]
+async fn databricks_v2_gpt5_routes_through_ai_gateway_responses() {
+    let canned = vec![json!({
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "content": [{ "type": "output_text", "text": "ok" }]
+        }]
+    })];
+    let model = "databricks-gpt-5-5";
+    let req = run_captured_prompt("databricks_v2", model, canned).await;
+
+    assert_eq!(
+        req.path.as_str(),
+        "/ai-gateway/openai/v1/responses",
+        "Databricks v2 GPT-5 models must route through AI Gateway Responses"
+    );
+    assert_eq!(
+        req.authorization.as_deref(),
+        Some("Bearer test-bearer"),
+        "Authorization must be the static DATABRICKS_TOKEN as a Bearer"
+    );
+    assert_eq!(req.body["model"], model);
+    assert!(
+        req.body.get("input").and_then(|v| v.as_array()).is_some(),
+        "Responses request body should keep `input`: {:?}",
+        req.body
+    );
+}
+
+#[tokio::test]
+async fn databricks_v2_claude_routes_through_ai_gateway_anthropic_messages() {
+    let canned = vec![json!({
+        "stop_reason": "end_turn",
+        "content": [{ "type": "text", "text": "ok" }]
+    })];
+    let model = "databricks-claude-opus-4-7";
+    let req = run_captured_prompt("databricks_v2", model, canned).await;
+
+    assert_eq!(
+        req.path.as_str(),
+        "/ai-gateway/anthropic/v1/messages",
+        "Databricks v2 Claude models must route through AI Gateway Anthropic Messages"
+    );
+    assert_eq!(
+        req.authorization.as_deref(),
+        Some("Bearer test-bearer"),
+        "Authorization must be the static DATABRICKS_TOKEN as a Bearer"
+    );
+    assert_eq!(req.body["model"], model);
+    assert!(
+        req.body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .is_some(),
+        "Anthropic request body should keep `messages`: {:?}",
+        req.body
+    );
+}
+
+#[tokio::test]
+async fn databricks_v2_other_models_route_through_ai_gateway_mlflow_chat() {
+    let canned = vec![json!({
+        "id": "x",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "ok" },
+            "finish_reason": "stop"
+        }]
+    })];
+    let model = "custom-chat-model";
+    let req = run_captured_prompt("databricks_v2", model, canned).await;
+
+    assert_eq!(
+        req.path.as_str(),
+        "/ai-gateway/mlflow/v1/chat/completions",
+        "Databricks v2 fallback models must route through AI Gateway MLflow Chat"
+    );
+    assert_eq!(
+        req.authorization.as_deref(),
+        Some("Bearer test-bearer"),
+        "Authorization must be the static DATABRICKS_TOKEN as a Bearer"
+    );
+    assert_eq!(req.body["model"], model);
+    assert!(
+        req.body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .is_some(),
+        "Chat request body should keep `messages`: {:?}",
+        req.body
     );
 }

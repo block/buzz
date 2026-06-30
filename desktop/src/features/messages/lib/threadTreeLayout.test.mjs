@@ -12,27 +12,29 @@ import {
 
 test("getThreadReplyIndentRem uses a visible Tailwind spacing step", () => {
   assert.equal(getThreadReplyIndentRem(0), 0);
-  assert.equal(getThreadReplyIndentRem(1), 2.25);
-  assert.equal(getThreadReplyIndentRem(2), 4.5);
-  assert.equal(getThreadReplyIndentRem(3), 6.75);
+  assert.equal(getThreadReplyIndentRem(1), 0);
+  assert.equal(getThreadReplyIndentRem(2), 2.25);
+  assert.equal(getThreadReplyIndentRem(3), 4.5);
 });
 
 test("avatar center helpers expose the rail anchor points", () => {
   assert.equal(getThreadReplyAvatarCenterRem(0), 1.875);
-  assert.equal(getThreadReplyAvatarCenterRem(1), 4.125);
+  assert.equal(getThreadReplyAvatarCenterRem(1), 1.875);
+  assert.equal(getThreadReplyAvatarCenterRem(2), 4.125);
   assert.equal(getThreadReplyAvatarCenterYRem(), 1.5);
   assert.equal(getThreadReplyDescendantRailStartYRem(), 2.875);
 });
 
 test("getThreadReplyConnectorLayout stops before the child avatar edge", () => {
   assert.equal(getThreadReplyConnectorLayout(0), null);
-  assert.deepEqual(getThreadReplyConnectorLayout(1), {
+  assert.equal(getThreadReplyConnectorLayout(1), null);
+  assert.deepEqual(getThreadReplyConnectorLayout(2), {
     childOffsetRem: 4.125,
     heightRem: 1.5,
     parentOffsetRem: 1.875,
     widthRem: 0.875,
   });
-  assert.deepEqual(getThreadReplyConnectorLayout(2), {
+  assert.deepEqual(getThreadReplyConnectorLayout(3), {
     childOffsetRem: 6.375,
     heightRem: 1.5,
     parentOffsetRem: 4.125,

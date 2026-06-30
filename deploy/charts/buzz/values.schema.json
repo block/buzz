@@ -62,6 +62,10 @@
         "requireAuthToken": { "type": "boolean" },
         "requireRelayMembership": { "type": "boolean" },
         "allowNipOaAuth": { "type": "boolean" },
+        "huddleAudioAvailable": {
+          "type": ["boolean", "null"],
+          "description": "Whether relay huddle audio is available. null means chart default: true for one replica, false for replicaCount > 1. Explicit true with replicaCount > 1 means the operator accepts/owns external multi-pod audio/SFU behavior."
+        },
         "pubkeyAllowlist": { "type": "boolean" },
         "corsOrigins": {
           "type": "array",
@@ -160,24 +164,6 @@
       "additionalProperties": false,
       "properties": {
         "url": { "type": "string", "pattern": "^(rediss?://.+)?$" }
-      }
-    },
-    "typesense": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "url": { "type": "string", "pattern": "^(https?://.+)?$" },
-        "apiKey": { "type": "string" },
-        "image": { "type": "string", "minLength": 1 },
-        "persistence": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": "boolean" },
-            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
-          }
-        }
       }
     },
     "s3": {

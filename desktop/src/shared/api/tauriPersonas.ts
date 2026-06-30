@@ -10,6 +10,7 @@ type RawParsedPersonaPreview = {
   display_name: string;
   system_prompt: string;
   avatar_data_url: string | null;
+  avatar_ref: string | null;
   runtime: string | null;
   model: string | null;
   provider: string | null;
@@ -32,6 +33,7 @@ export type ParsedPersonaPreview = {
   displayName: string;
   systemPrompt: string;
   avatarDataUrl: string | null;
+  avatarRef: string | null;
   runtime: string | null;
   model: string | null;
   provider: string | null;
@@ -154,7 +156,8 @@ export async function parsePersonaFiles(
     personas: raw.personas.map((p) => ({
       displayName: p.display_name,
       systemPrompt: p.system_prompt,
-      avatarDataUrl: p.avatar_data_url,
+      avatarDataUrl: p.avatar_data_url ?? null,
+      avatarRef: p.avatar_ref ?? null,
       runtime: p.runtime,
       model: p.model,
       provider: p.provider,

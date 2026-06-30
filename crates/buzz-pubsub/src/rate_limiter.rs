@@ -13,6 +13,7 @@ use buzz_auth::{
     error::AuthError,
     rate_limit::{LimitType, RateLimitResult, RateLimiter},
 };
+use buzz_core::TenantContext;
 use nostr::PublicKey;
 use redis::Script;
 
@@ -79,9 +80,11 @@ async fn run_rate_limit(
 
 /// Redis-backed rate limiter using fixed-window counters.
 ///
-/// Each key is `buzz:ratelimit:<pubkey_hex>:<suffix>` (pubkey) or
-/// `buzz:ratelimit:ip:<ip>:conn` (IP). The counter and its TTL are managed
-/// atomically via a Lua script to prevent keys from persisting without expiry.
+/// Pubkey keys are community-scoped via `&TenantContext`:
+/// `buzz:{community}:ratelimit:{pubkey_hex}:{suffix}`. IP keys remain
+/// operator-global: `buzz:ratelimit:ip:{ip}:conn`. The counter and its TTL are
+/// managed atomically via a Lua script to prevent keys from persisting without
+/// expiry.
 pub struct RedisRateLimiter {
     pool: deadpool_redis::Pool,
 }
@@ -96,12 +99,13 @@ impl RedisRateLimiter {
 impl RateLimiter for RedisRateLimiter {
     async fn check_and_increment(
         &self,
+        ctx: &TenantContext,
         pubkey: &PublicKey,
         limit_type: LimitType,
         window_secs: u64,
         limit: u64,
     ) -> Result<RateLimitResult, AuthError> {
-        let key = buzz_auth::rate_limit::rate_limit_key(pubkey, &limit_type);
+        let key = buzz_auth::rate_limit::rate_limit_key(ctx, pubkey, &limit_type);
         run_rate_limit(&self.pool, &key, window_secs, limit).await
     }
 

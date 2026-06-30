@@ -14,6 +14,15 @@ type LinkInteractionExtensionOptions = {
 
 export const linkInteractionKey = new PluginKey("linkInteraction");
 
+const PASTED_LINK_AT_END_RE =
+  /(?:^|\s)((?:https?:\/\/|www\.)[^\s]+|(?:github\.com|linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s]+)$/i;
+
+function isPasteEndingWithLink(text: string): boolean {
+  const trimmedEnd = text.trimEnd();
+  if (!trimmedEnd || trimmedEnd.length !== text.length) return false;
+  return PASTED_LINK_AT_END_RE.test(trimmedEnd);
+}
+
 /**
  * Centralises composer link interactions that depend on ProseMirror editor
  * state: click interception, click-vs-drag selection preservation, and active
@@ -27,6 +36,8 @@ export function createLinkInteractionExtension({
     name: "linkInteraction",
 
     addProseMirrorPlugins() {
+      let suppressSelectionCardUntil = 0;
+
       return [
         new Plugin({
           key: linkInteractionKey,
@@ -42,11 +53,22 @@ export function createLinkInteractionExtension({
                 ) {
                   return;
                 }
-                notifyLinkSelection(nextState, getSelectionChangeHandler);
+                notifyLinkSelection(nextState, getSelectionChangeHandler, {
+                  suppressLinkedSelection:
+                    Date.now() < suppressSelectionCardUntil,
+                });
               },
             };
           },
           props: {
+            handlePaste(_view, event) {
+              const pastedText =
+                event.clipboardData?.getData("text/plain") ?? "";
+              if (isPasteEndingWithLink(pastedText)) {
+                suppressSelectionCardUntil = Date.now() + 500;
+              }
+              return false;
+            },
             handleDOMEvents: {
               // Native anchor default can still win in the WebView before
               // ProseMirror's semantic click hook runs, so intercept editor
@@ -98,6 +120,7 @@ export function createLinkInteractionExtension({
 function notifyLinkSelection(
   state: EditorState,
   getSelectionChangeHandler: LinkInteractionExtensionOptions["getSelectionChangeHandler"],
+  options?: { suppressLinkedSelection?: boolean },
 ) {
   const handler = getSelectionChangeHandler();
   if (!handler) return;
@@ -105,7 +128,8 @@ function notifyLinkSelection(
     handler(null);
     return;
   }
-  handler(resolveLinkAt(state, state.selection.from));
+  const info = resolveLinkAt(state, state.selection.from);
+  handler(options?.suppressLinkedSelection && info ? null : info);
 }
 
 function handleLinkClick({

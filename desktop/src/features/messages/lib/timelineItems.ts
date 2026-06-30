@@ -1,13 +1,9 @@
 /**
  * Flattens the heterogeneous day-grouped timeline tree into a flat
- * discriminated-union item stream that a virtualizer can window over, and
- * builds the `messageId -> itemIndex` map every DOM-query scroll path now
- * resolves against instead of `querySelector`.
+ * discriminated-union item stream the list renders one row per entry.
  *
  * Kept pure (no React, no DOM) so it is covered by the lib-level `*.test.mjs`
- * suite. The list and the index map are produced together from the SAME walk,
- * so they can never drift: a stale map would scroll deep-links to the wrong
- * row, the exact failure virtualization risks.
+ * suite.
  */
 
 import {
@@ -32,37 +28,11 @@ export type TimelineItem =
 
 export type TimelineItemsResult = {
   items: TimelineItem[];
-  /** Maps a top-level message id to its index in `items`. */
-  indexByMessageId: Map<string, number>;
 };
 
 /** Stable per-item key, unique across the flattened stream. */
 export function getTimelineItemKey(item: TimelineItem): string {
   return item.key;
-}
-
-/**
- * The `headingTimestamp` of the day the topmost visible row belongs to: the
- * nearest day-divider at or above `topVisibleIndex`. The floating active-day
- * header reads this so it always shows the current day even when that day's
- * in-stream divider has scrolled out of the virtual window. Returns `null`
- * before any row is in view or when no divider precedes the visible row (an
- * empty stream).
- */
-export function resolveActiveDayTimestamp(
-  items: TimelineItem[],
-  topVisibleIndex: number | null,
-): number | null {
-  if (topVisibleIndex === null) {
-    return null;
-  }
-  for (let i = Math.min(topVisibleIndex, items.length - 1); i >= 0; i--) {
-    const item = items[i];
-    if (item.kind === "day-divider") {
-      return item.headingTimestamp;
-    }
-  }
-  return null;
 }
 
 function entryRenderKey(entry: MainTimelineEntry): string {
@@ -72,16 +42,13 @@ function entryRenderKey(entry: MainTimelineEntry): string {
 /**
  * Walks the (already top-level-filtered) entries once, emitting a day-divider
  * at each calendar-day boundary and an unread-divider above the first unread
- * message, then the message/system row itself. The index map records where
- * each message landed in the flat stream so scroll targets resolve in O(1)
- * without touching the DOM.
+ * message, then the message/system row itself.
  */
 export function buildTimelineItems(
   entries: MainTimelineEntry[],
   firstUnreadMessageId: string | null,
 ): TimelineItemsResult {
   const items: TimelineItem[] = [];
-  const indexByMessageId = new Map<string, number>();
 
   // Index boundaries by their start position so the walk below can look up the
   // prepend-stable section key (start-of-local-day). Keying the divider by
@@ -112,9 +79,8 @@ export function buildTimelineItems(
     }
 
     const kind = message.kind === KIND_SYSTEM_MESSAGE ? "system" : "message";
-    indexByMessageId.set(message.id, items.length);
     items.push({ kind, key: renderKey, entry });
   }
 
-  return { items, indexByMessageId };
+  return { items };
 }

@@ -1,3 +1,4 @@
+mod agent_config;
 mod agent_discovery;
 mod agent_models;
 mod agent_settings;
@@ -11,6 +12,7 @@ mod export_util;
 mod identity;
 mod identity_archive;
 mod legacy_storage;
+mod link_preview;
 mod media;
 mod media_download;
 mod media_transcode;
@@ -29,6 +31,7 @@ mod teams;
 mod workflows;
 mod workspace;
 
+pub use agent_config::*;
 pub use agent_discovery::*;
 pub use agent_models::*;
 pub use agent_settings::*;
@@ -41,6 +44,7 @@ pub use engrams::*;
 pub use identity::*;
 pub use identity_archive::*;
 pub use legacy_storage::*;
+pub use link_preview::*;
 pub use media::*;
 pub use media_download::*;
 #[cfg(feature = "mesh-llm")]

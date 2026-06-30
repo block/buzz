@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::pin::Pin;
 
+use buzz_core::tenant::{CommunityId, TenantContext};
+
 use crate::config::MediaConfig;
 use crate::error::MediaError;
 use bytes::Bytes;
@@ -147,18 +149,118 @@ impl MediaStorage {
         }
     }
 
-    /// Read sidecar JSON for a given sha256 (bare hash, no extension).
-    pub async fn get_sidecar(&self, sha256: &str) -> Result<BlobMeta, MediaError> {
-        let key = format!("_meta/{sha256}.json");
+    /// Build the community-scoped sidecar key for a given sha256 (bare hash).
+    ///
+    /// Raw media bytes remain shared content-addressed CAS (`{sha}.{ext}`), but
+    /// the metadata sidecar is the tenant read gate. A blob in another
+    /// community must never be observable through a global `_meta/{sha}.json`
+    /// lookup.
+    pub fn sidecar_key(community: CommunityId, sha256: &str) -> String {
+        format!("_meta/{community}/{sha256}.json")
+    }
+
+    /// Build the community-scoped sidecar key from the resolved request tenant.
+    pub fn ctx_sidecar_key(ctx: &TenantContext, sha256: &str) -> String {
+        Self::sidecar_key(ctx.community(), sha256)
+    }
+
+    /// Read community-scoped sidecar JSON for a given sha256 (bare hash).
+    pub async fn get_sidecar(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+    ) -> Result<BlobMeta, MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
         let resp = self.bucket.get_object(&key).await?;
         let meta: BlobMeta = serde_json::from_slice(&resp.to_vec())?;
         Ok(meta)
     }
 
-    /// Convenience: read just the MIME type from the sidecar.
-    pub async fn read_sidecar_mime(&self, sha256_ext: &str) -> Option<String> {
+    /// Write community-scoped sidecar JSON for a given sha256 (bare hash).
+    ///
+    /// `ctx` must be the server-resolved request tenant. Callers must never
+    /// derive the community from client-supplied blob metadata, URLs, or event
+    /// tags; this sidecar key is the tenant read gate for otherwise shared CAS
+    /// bytes.
+    pub async fn put_sidecar(
+        &self,
+        ctx: &TenantContext,
+        sha256: &str,
+        meta: &BlobMeta,
+    ) -> Result<(), MediaError> {
+        let key = Self::ctx_sidecar_key(ctx, sha256);
+        let meta_json = serde_json::to_vec(meta)?;
+        self.put(&key, &meta_json, "application/json").await
+    }
+
+    /// Convenience: read just the MIME type from the community sidecar.
+    ///
+    /// Returns `None` for both absent sidecars and storage read failures. Public
+    /// read handlers intentionally collapse that distinction to 404 so an
+    /// A-bound request cannot distinguish a B-only blob from a missing blob.
+    pub async fn read_sidecar_mime(&self, ctx: &TenantContext, sha256_ext: &str) -> Option<String> {
         let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
-        self.get_sidecar(sha256).await.ok().map(|m| m.mime_type)
+        self.get_sidecar(ctx, sha256)
+            .await
+            .ok()
+            .map(|m| m.mime_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn tenant(n: u128) -> TenantContext {
+        TenantContext::resolved(
+            CommunityId::from_uuid(uuid::Uuid::from_u128(n)),
+            "media.example",
+        )
+    }
+
+    #[test]
+    fn sidecar_keys_are_community_scoped() {
+        let a = tenant(1);
+        let b = tenant(2);
+        let sha = "f".repeat(64);
+
+        assert_eq!(
+            MediaStorage::ctx_sidecar_key(&a, &sha),
+            format!("_meta/{}/{sha}.json", a.community())
+        );
+        assert_ne!(
+            MediaStorage::ctx_sidecar_key(&a, &sha),
+            MediaStorage::ctx_sidecar_key(&b, &sha)
+        );
+        assert_ne!(
+            MediaStorage::ctx_sidecar_key(&a, &sha),
+            format!("_meta/{sha}.json")
+        );
+    }
+
+    /// Mutate-bite shape for the media substrate: same CAS bytes/hash can be
+    /// known in A and B, but the sidecar is the read/existence gate. If the
+    /// community segment is dropped from `sidecar_key`, B's metadata overwrites
+    /// A's in this map and A observes B's MIME (wrong answer, not absence).
+    #[test]
+    fn same_sha_sidecars_do_not_bleed_between_communities() {
+        let a = tenant(1);
+        let b = tenant(2);
+        let sha = "a".repeat(64);
+        let mut sidecars = HashMap::new();
+
+        sidecars.insert(MediaStorage::ctx_sidecar_key(&a, &sha), "image/png");
+        sidecars.insert(MediaStorage::ctx_sidecar_key(&b, &sha), "video/mp4");
+
+        assert_eq!(
+            sidecars[&MediaStorage::ctx_sidecar_key(&a, &sha)],
+            "image/png"
+        );
+        assert_eq!(
+            sidecars[&MediaStorage::ctx_sidecar_key(&b, &sha)],
+            "video/mp4"
+        );
     }
 }
 
@@ -167,7 +269,7 @@ pub struct BlobHeadMeta {
     pub size: u64,
 }
 
-/// Full blob metadata — stored as sidecar JSON in `_meta/{sha256}.json`.
+/// Full blob metadata — stored as sidecar JSON in `_meta/{community}/{sha256}.json`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BlobMeta {
     /// Pixel dimensions ("WxH").

@@ -87,13 +87,6 @@ fn buzz_agent_has_mcp_hooks() {
 }
 
 #[test]
-fn databricks_defaults_empty_in_oss_build() {
-    // OSS (and normal test) builds set neither BUZZ_BUILD_DATABRICKS_*,
-    // so nothing is baked in and no DATABRICKS_* is injected on spawn.
-    assert!(super::build_databricks_defaults().is_empty());
-}
-
-#[test]
 fn buzz_agent_resolved_via_path() {
     assert!(known_acp_runtime("/usr/local/bin/buzz-agent").is_some_and(|p| p.mcp_hooks));
 }
@@ -253,11 +246,7 @@ fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
     assert!(err.contains("at least one pubkey"));
 }
 
-// ── resolve_effective_prompt_model_provider tests ───────────────────
-
-fn persona(id: &str, prompt: &str, model: Option<&str>) -> crate::managed_agents::PersonaRecord {
-    persona_with_provider(id, prompt, model, None)
-}
+// ── persona fixture helpers ─────────────────────────────────────────
 
 fn persona_with_provider(
     id: &str,
@@ -282,66 +271,6 @@ fn persona_with_provider(
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
     }
-}
-
-#[test]
-fn linked_persona_wins_over_record_snapshot() {
-    let personas = vec![persona_with_provider(
-        "p1",
-        "fresh",
-        Some("m-fresh"),
-        Some("anthropic"),
-    )];
-    let (prompt, model, provider) = super::resolve_effective_prompt_model_provider(
-        Some("p1"),
-        &personas,
-        Some("stale".into()),
-        Some("m-stale".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("fresh"));
-    assert_eq!(model.as_deref(), Some("m-fresh"));
-    assert_eq!(provider.as_deref(), Some("anthropic"));
-}
-
-#[test]
-fn no_persona_id_falls_back_to_record() {
-    let personas = vec![persona("p1", "fresh", Some("m-fresh"))];
-    let (prompt, model, provider) = super::resolve_effective_prompt_model_provider(
-        None,
-        &personas,
-        Some("record".into()),
-        Some("m-record".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("record"));
-    assert_eq!(model.as_deref(), Some("m-record"));
-    assert_eq!(provider, None);
-}
-
-#[test]
-fn deleted_persona_falls_back_to_record() {
-    let personas = vec![persona("p1", "fresh", None)];
-    let (prompt, model, provider) = super::resolve_effective_prompt_model_provider(
-        Some("gone"),
-        &personas,
-        Some("record".into()),
-        Some("m-record".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("record"));
-    assert_eq!(model.as_deref(), Some("m-record"));
-    assert_eq!(provider, None);
-}
-
-#[test]
-fn persona_with_no_model_clears_stale_record_model() {
-    let personas = vec![persona("p1", "fresh", None)];
-    let (prompt, model, _provider) = super::resolve_effective_prompt_model_provider(
-        Some("p1"),
-        &personas,
-        Some("stale".into()),
-        Some("m-stale".into()),
-    );
-    assert_eq!(prompt.as_deref(), Some("fresh"));
-    assert_eq!(model, None);
 }
 
 // ── persona pin/refresh acceptance (Phase 4) ────────────────────────────
@@ -575,4 +504,98 @@ fn name_matches_interpreter_rejects_node_prefix() {
     assert!(!super::name_matches_interpreter("node_modules"));
     assert!(!super::name_matches_interpreter("nodejs"));
     assert!(!super::name_matches_interpreter("node-gyp"));
+}
+
+// ── PGID-based orphan sweep tests ───────────────────────────────────────
+
+/// Validates the kernel invariant that the orphan sweep PGID fix relies on:
+/// a grandchild process inherits the PGID of the process group leader (the
+/// harness), so checking PGID membership in `skip_pids` correctly identifies
+/// live descendants even when their ppid is an intermediate process (e.g.
+/// goose) rather than the harness itself.
+#[cfg(unix)]
+#[test]
+fn grandchild_inherits_pgid_of_process_group_leader() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    // Spawn a "harness" process in its own process group (mirrors
+    // `command.process_group(0)` in the real spawn path). The harness
+    // spawns an intermediate child which in turn spawns a grandchild.
+    // This mirrors the real tree: buzz-acp → goose → buzz-dev-mcp.
+    //
+    // The intermediate `sh` uses exec to replace itself with another sh
+    // that backgrounds the grandchild, so the grandchild's ppid is the
+    // intermediate (not the harness).
+    let mut harness = {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sh -c 'sleep 10 & echo $!' & wait $!"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0);
+        cmd.spawn().expect("spawn harness")
+    };
+
+    // Read the grandchild PID from stdout.
+    use std::io::BufRead;
+    let stdout = harness.stdout.take().unwrap();
+    let reader = std::io::BufReader::new(stdout);
+    let grandchild_pid: i32 = reader
+        .lines()
+        .next()
+        .expect("should get a line")
+        .expect("should read line")
+        .trim()
+        .parse()
+        .expect("should parse grandchild PID");
+
+    let harness_pid = harness.id() as i32;
+
+    // The harness is the process group leader (PGID == its own PID).
+    let harness_pgid = unsafe { libc::getpgid(harness_pid) };
+    assert_eq!(
+        harness_pgid, harness_pid,
+        "harness should be its own process group leader"
+    );
+
+    // The grandchild's PGID should equal the harness PID — this is the
+    // invariant our orphan sweep fix relies on.
+    let grandchild_pgid = unsafe { libc::getpgid(grandchild_pid) };
+    assert_eq!(
+        grandchild_pgid, harness_pid,
+        "grandchild PGID should match harness PID (process group leader)"
+    );
+
+    // The grandchild's ppid is NOT the harness — it's the intermediate sh.
+    // This proves the ppid-only check would miss it (the regression path).
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<super::BSDInfo>::zeroed();
+        let ret = unsafe {
+            super::proc_pidinfo(
+                grandchild_pid,
+                super::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr() as *mut libc::c_void,
+                std::mem::size_of::<super::BSDInfo>() as libc::c_int,
+            )
+        };
+        assert!(ret > 0, "proc_pidinfo should succeed for grandchild");
+        let info = unsafe { info.assume_init() };
+        assert_ne!(
+            info.pbi_ppid as i32, harness_pid,
+            "grandchild ppid must NOT be the harness (it's the intermediate sh)"
+        );
+    }
+
+    // With skip_pids containing the harness PID, the grandchild's PGID
+    // is in skip_pids — so it would NOT be flagged as an orphan.
+    let skip_pids: Vec<u32> = vec![harness_pid as u32];
+    assert!(
+        skip_pids.contains(&(grandchild_pgid as u32)),
+        "grandchild's PGID should be found in skip_pids"
+    );
+
+    // Cleanup: kill the process group.
+    unsafe { libc::kill(-harness_pid, libc::SIGTERM) };
+    let _ = harness.wait();
 }

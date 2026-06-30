@@ -32,6 +32,7 @@ pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// `git/transport.rs`, and `audio/handler.rs`.
 pub mod relay_members {
     use axum::{http::StatusCode, response::Json};
+    use buzz_core::tenant::CommunityId;
     use tracing::{debug, info};
 
     use crate::state::AppState;
@@ -50,8 +51,12 @@ pub mod relay_members {
     }
 
     /// Check relay membership without committing to an HTTP response shape.
+    ///
+    /// `community` is the server-resolved tenant of the request; membership is
+    /// scoped to it so admitting a pubkey to community A never admits it to B.
     pub async fn check_relay_membership(
         state: &AppState,
+        community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
     ) -> Result<MembershipDecision, String> {
@@ -62,7 +67,7 @@ pub mod relay_members {
         let pubkey_hex = hex::encode(pubkey_bytes);
         let is_member = state
             .db
-            .is_relay_member(&pubkey_hex)
+            .is_relay_member(community, &pubkey_hex)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
         if is_member {
@@ -77,10 +82,11 @@ pub mod relay_members {
                 match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member =
-                            state.db.is_relay_member(&owner_hex).await.map_err(|e| {
-                                format!("relay membership check (owner) failed: {e}")
-                            })?;
+                        let owner_is_member = state
+                            .db
+                            .is_relay_member(community, &owner_hex)
+                            .await
+                            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
                         if owner_is_member {
                             debug!(
                                 agent = %pubkey_hex,
@@ -113,10 +119,11 @@ pub mod relay_members {
     /// no NIP-OA tag is present/applicable (open relay without auth tag).
     pub async fn enforce_relay_membership(
         state: &AppState,
+        community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(state, pubkey_bytes, auth_tag_header).await {
+        match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
             Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
             Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
             Ok(MembershipDecision::Denied) => Err((

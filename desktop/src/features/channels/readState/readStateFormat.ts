@@ -16,6 +16,12 @@ export const MAX_CONTEXTS = 10_000;
 // expansion to ~45 KB ciphertext) while keeping the blob well under both caps.
 export const READ_STATE_MAX_PLAINTEXT_BYTES = 32_768;
 
+// Maximum number of slots a client may publish. Each slot is a separate
+// kind:30078 event. Splitting across slots is the fallback when channel keys
+// alone exceed READ_STATE_MAX_PLAINTEXT_BYTES. 8 slots × ~650 channel keys per
+// slot = ~5,200 channels — well beyond any realistic user.
+export const READ_STATE_MAX_SLOTS = 8;
+
 // Context-key prefix for a per-MESSAGE read marker (LP4 v3). One grow-only
 // marker per reply id; the badge predicate reads effective("msg:<id>") live so
 // reading an ancestor never covers a descendant (Issue 2 by construction).
@@ -102,6 +108,10 @@ export function isValidReadStateDTag(
   if (!value?.startsWith(READ_STATE_D_TAG_PREFIX)) return false;
   const slotId = value.slice(READ_STATE_D_TAG_PREFIX.length);
   return slotId.length > 0 && slotId.length <= 64 && isAscii(slotId);
+}
+
+export function localExtraSlotIdsKey(pubkey: string): string {
+  return `buzz.nip-rs.extra-slot-ids:${pubkey}`;
 }
 
 export function localIsoToUnixSeconds(value: unknown): number | null {

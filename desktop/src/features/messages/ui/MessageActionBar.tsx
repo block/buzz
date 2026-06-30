@@ -31,6 +31,7 @@ import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import { cn } from "@/shared/lib/cn";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -109,7 +110,8 @@ function MoreActionsMenu({
   // get default trigger-restoration (a11y intact for keyboard users).
   const editJustSelectedRef = React.useRef(false);
 
-  const hasCopyActions = !message.pending;
+  const hasCopyActions =
+    !message.pending && message.kind !== KIND_HUDDLE_STARTED;
 
   return (
     <>

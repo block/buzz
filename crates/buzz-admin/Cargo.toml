@@ -28,5 +28,5 @@ hex = { workspace = true }
 deadpool-redis = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true }
-uuid = { workspace = true }
+url = { workspace = true }
 clap = { version = "4", features = ["derive"] }

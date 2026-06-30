@@ -29,14 +29,14 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, resolve_model_switch_method, AcpClient,
-    AcpError, McpServer, ModelSwitchMethod, StopReason,
+    extract_model_config_options, extract_model_state, model_in_catalog,
+    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
-    PromptProfileLookup,
+    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
+    PromptProfile, PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -52,6 +52,13 @@ pub struct TaskMeta {
     /// Control signal for the in-flight prompt task.
     /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
     pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
+    /// Steer request channel for non-cancelling mid-turn delivery.
+    /// Capacity-1; `try_send` from the main loop fails on `Full`/`Closed`,
+    /// in which case the caller must fall back to the universal
+    /// `ControlSignal::Steer` cancel+merge path. `None` for heartbeat
+    /// tasks only — all prompt tasks install a steer channel regardless
+    /// of the agent's name.
+    pub steer_tx: Option<tokio::sync::mpsc::Sender<SteerRequest>>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -132,6 +139,11 @@ pub struct OwnedAgent {
     pub model_capabilities: Option<AgentModelCapabilities>,
     /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
     pub desired_model: Option<String>,
+    /// Whether `desired_model` was set by a live `SwitchModel` control signal
+    /// (as opposed to being derived from config/persona at spawn). Used by the
+    /// desktop reader to distinguish a genuine runtime override from a stale
+    /// session whose persona model was edited. Reset on spawn/restart.
+    pub model_overridden: bool,
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
@@ -173,23 +185,152 @@ pub enum PromptSource {
 fn apply_completed_before_control_signal(
     state: &mut SessionState,
     source: &PromptSource,
-    control_signal: ControlSignal,
+    control_signal: &ControlSignal,
 ) {
-    if control_signal == ControlSignal::Rotate {
+    // Rotate and SwitchModel both invalidate so the next turn creates a fresh
+    // session. For SwitchModel the caller has already set `desired_model`, so
+    // the fresh session applies the new model on its next creation.
+    if matches!(
+        control_signal,
+        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+    ) {
         state.invalidate(source);
     }
 }
 
 /// Control signal for an in-flight channel turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Not `Copy`: `SwitchModel` carries an owned `String`. Callers must clone when
+/// a value is needed after a move, or match by reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
-    /// Stop the current turn and requeue its triggering batch for a merged re-prompt.
+    /// Stop the current turn and requeue its triggering batch for a merged
+    /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
+    /// Stop the current turn and requeue its triggering batch for a merged
+    /// re-prompt framed as a **steer**: a message arrived while the agent was
+    /// working; it should continue its work and incorporate the message if
+    /// relevant, not treat it as a replacement task. This is the default
+    /// mid-turn delivery path (see [`MultipleEventHandling::Steer`]).
+    Steer,
     /// Stop the current turn and drop its triggering batch. The session is
     /// invalidated just like cancel; the next turn creates a fresh session.
     Rotate,
+    /// Switch the agent's model, then requeue the triggering batch so it
+    /// re-runs on a fresh session under the new model. The model lands by
+    /// setting `OwnedAgent::desired_model` before invalidation; the requeued
+    /// turn re-creates the session and re-applies `desired_model`. Runtime-only
+    /// — never persisted, gone on restart/respawn.
+    SwitchModel(String),
+}
+
+/// Goose-native non-cancelling steer request, sent from the main loop to an
+/// in-flight prompt task's read loop via a capacity-1 mpsc channel.
+///
+/// The read loop owns the `AcpClient`'s reader/writer for the duration of the
+/// turn, so we cannot drive a steer write from the main thread directly. The
+/// main loop carries the steer prompt body (already framed by
+/// `queue::native_steer_framing()` + `queue::format_event_block`); the read
+/// loop completes `sessionId` (lexical) and `expectedRunId`
+/// (`AcpClient::active_run_id` at write time) when it actually emits the
+/// JSON-RPC request. The main loop awaits a `SteerAck` on the `ack_tx`
+/// oneshot.
+///
+/// ## Why the read loop fills params, not the main loop
+///
+/// `expectedRunId` is a *moving target*: the read loop updates
+/// `self.active_run_id` as goose emits `session/update` notifications, and
+/// the steer is rejected if the supplied id doesn't match the *current* run.
+/// A snapshot taken at dispatch (or at mode-gate time) can be stale by the
+/// time the read loop actually writes the steer line. Filling params at
+/// write time uses the freshest possible run id and is correct-by-
+/// construction on the one field whose freshness the protocol checks.
+/// `sessionId` is in lexical scope inside the read loop's caller
+/// (`session_prompt_blocks_with_idle_timeout`), so no plumbing is required
+/// for that — only a function parameter pass-through.
+///
+/// If `active_run_id` is `None` at write time (no `session/update` seen yet
+/// — e.g. agents that never emit run-id metadata), the steer cannot form a
+/// valid `expectedRunId` and the read loop acks
+/// [`SteerError::ExpectedRunIdMissing`]. The main loop maps this to the
+/// "Err-before-pending" bucket: no withhold/mark was established at
+/// `pool::send_steer` time because the request was rejected before any
+/// write, so the watcher only needs to release nothing and fall back to the
+/// universal `ControlSignal::Steer` cancel+merge path.
+pub struct SteerRequest {
+    /// Prompt body text blocks. Each entry becomes one `text` content
+    /// block in `params.prompt`. Built by the main loop via
+    /// `queue::native_steer_framing()` + `queue::format_event_block` so
+    /// the wording cannot drift from the cancel+merge fallback path.
+    pub prompt_blocks: Vec<String>,
+    /// Oneshot for the read loop to report the outcome.
+    pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
+}
+
+/// Why a goose-native steer failed.
+///
+/// String and integer fields are intentionally `Debug`-only — read by
+/// `tracing` macros in the main loop's `PoolEvent::SteerAck` arm via
+/// `?ack`. The dead-code lint can't see that path because it doesn't
+/// trace through `Debug` derives, hence the `#[allow]`.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum SteerError {
+    /// The agent returned a JSON-RPC error response to the steer request.
+    ///
+    /// `code` is the JSON-RPC error code:
+    /// - `-32601` (`method_not_found`): the agent does not implement the
+    ///   steer extension. The main loop should fire the cancel+merge
+    ///   fallback so the message still reaches the agent.
+    /// - Any other code: the write landed and the agent rejected it at the
+    ///   application level (e.g. wrong run id). Release the withheld event
+    ///   for normal dispatch; do NOT fire the fallback — the turn is still
+    ///   running or just ended.
+    AgentError { code: i64, message: String },
+    /// Transport-level failure: write error, read EOF, JSON-RPC framing
+    /// violation, etc. The string carries the underlying `AcpError`'s display.
+    Transport(String),
+    /// At steer-write time `AcpClient::active_run_id` was `None`, so the
+    /// read loop couldn't form a valid `expectedRunId`. The read loop drops
+    /// the request without writing anything; the main loop should release
+    /// any withheld event and fall back to the universal cancel+merge
+    /// `ControlSignal::Steer` path. This is in the same "Err-before-pending"
+    /// bucket as `Transport` write failures: no in-process state was
+    /// established, so no in-process cleanup is needed.
+    ExpectedRunIdMissing,
+    /// The read loop never got to dispatch the steer because the prompt
+    /// completed first. Delivery state for the underlying message is
+    /// unknown after prompt completion — the main loop must treat this as
+    /// "release the withheld event so normal dispatch handles it" with no
+    /// claims that the agent did or did not incorporate it.
+    ///
+    /// Returned synchronously by `send_steer` when no task is in flight
+    /// for the channel. Never sent through the ack channel — the ack
+    /// watcher is only spawned on `send_steer` success.
+    PromptCompleted,
+}
+
+/// Outcome of a goose-native steer, sent from the read loop back to the
+/// main loop's ack watcher.
+#[derive(Debug)]
+pub enum SteerAck {
+    /// The agent returned a successful response to the steer request.
+    /// The main loop must drop the withheld event (`remove_event`) — it
+    /// has been delivered via the non-cancelling path.
+    Success,
+    /// The steer was attempted but failed. Delivery state for the
+    /// underlying message is unknown after prompt completion; the main
+    /// loop must release the withheld event and fall back to the
+    /// universal `Steer` cancel+merge path so the message still reaches
+    /// the agent.
+    Err(SteerError),
+    /// The prompt completed before the read loop selected the steer arm.
+    /// Treated as a benign no-op: release the withheld event for normal
+    /// dispatch. Do not fire the fallback `Steer` signal — there is no
+    /// in-flight turn to signal, and normal dispatch handles delivery.
+    PromptCompletedNeutral,
 }
 
 /// Outcome of a prompt task.
@@ -342,6 +483,46 @@ impl AgentPool {
         &mut self.task_map
     }
 
+    /// Try to send a goose-native steer request to the in-flight task for
+    /// `channel_id`.
+    ///
+    /// Returns `Ok(())` if the request was accepted by the read loop's
+    /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
+    /// write). Returns `Err(SteerError::Transport(_))` on `Full`/`Closed`
+    /// (already-in-flight write, or read loop torn down). Callers must
+    /// fall back to the universal `ControlSignal::Steer` cancel+merge path
+    /// on `Err`.
+    ///
+    /// This does **not** spawn the ack watcher — the caller owns the
+    /// oneshot `ack_tx` inside `SteerRequest` and is responsible for
+    /// awaiting it and applying the locked Success / Err / PromptCompletedNeutral
+    /// semantics. Caller is also responsible for the synchronous
+    /// `queue.mark_native_steer_pending(...)` *before* spawning the
+    /// watcher, to close the result-vs-ack race.
+    ///
+    /// Returns `Err(SteerError::PromptCompleted)` if no task is in flight
+    /// for `channel_id` (the prompt completed between the mode-gate check
+    /// and this call, or the channel was never in flight). This is
+    /// semantically a soft no-op — the caller should release any withheld
+    /// event and let normal dispatch handle delivery.
+    pub fn send_steer(
+        &mut self,
+        channel_id: Uuid,
+        request: SteerRequest,
+    ) -> Result<(), SteerError> {
+        let meta = self
+            .task_map
+            .values_mut()
+            .find(|m| m.channel_id == Some(channel_id))
+            .ok_or(SteerError::PromptCompleted)?;
+        let tx = meta
+            .steer_tx
+            .as_ref()
+            .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
+        tx.try_send(request)
+            .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
         self.result_tx.clone()
     }
@@ -396,6 +577,63 @@ impl AgentPool {
         }
         count
     }
+
+    /// Idle-path model switch: set `desired_model` on the idle agent for
+    /// `channel_id` and invalidate its session so the next turn re-creates the
+    /// session under the new model.
+    ///
+    /// Pre-cancel guard: the desired model is validated against the agent's
+    /// cached catalog *before* the session is invalidated, so an unsupported
+    /// pick is rejected without disturbing the existing session.
+    ///
+    /// Returns [`IdleSwitchResult`] describing what happened. The model does not
+    /// take effect — and the panel does not reflect it — until the agent next
+    /// runs a turn (no live session exists to re-emit `session_config_captured`
+    /// from an idle agent). This lag is intentional: faking the emit would
+    /// surface an override the session has not actually applied.
+    pub fn switch_idle_agent_model(
+        &mut self,
+        channel_id: Uuid,
+        model_id: &str,
+    ) -> IdleSwitchResult {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .flatten()
+            .find(|a| a.state.sessions.contains_key(&channel_id))
+        else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
+
+        // Pre-cancel guard against the cached catalog. None = catalog not yet
+        // populated (no session ever created); defer validation to apply time.
+        if let Some(caps) = agent.model_capabilities.as_ref() {
+            if !model_in_catalog(
+                &caps.config_options_raw,
+                caps.available_models_raw.as_ref(),
+                model_id,
+            ) {
+                return IdleSwitchResult::UnsupportedModel;
+            }
+        }
+
+        agent.desired_model = Some(model_id.to_string());
+        agent.model_overridden = true;
+        agent.state.invalidate_channel(&channel_id);
+        IdleSwitchResult::Switched
+    }
+}
+
+/// Outcome of [`AgentPool::switch_idle_agent_model`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum IdleSwitchResult {
+    /// `desired_model` set and the channel session invalidated.
+    Switched,
+    /// Desired model is not in the agent's cached catalog — pick rejected,
+    /// session untouched.
+    UnsupportedModel,
+    /// No idle agent available (all checked out / none spawned).
+    NoIdleAgent,
 }
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
@@ -456,19 +694,52 @@ async fn create_session_and_apply_model(
     }
 
     // Apply desired_model if set, matching against the fresh session/new response.
-    if let Some(ref desired) = agent.desired_model {
+    // Track whether the switch succeeded so session_config_captured reflects
+    // the post-switch state (not the pre-switch desired state).
+    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                true
             }
             None => {
                 tracing::warn!(
                     target: "pool::model",
                     "desired model {desired} not found in agent's available models — proceeding with agent default"
                 );
+                // Surface the miss so the desktop ModelPicker can reject a live
+                // pick rather than silently no-op. On the busy path the turn has
+                // already been cancelled+requeued by the time we get here, so the
+                // turn restarts on the unchanged model and the user is told no.
+                agent.acp.observe(
+                    "control_result",
+                    serde_json::json!({
+                        "type": "switch_model",
+                        "status": "unsupported_model",
+                        "modelId": desired,
+                    }),
+                );
+                false
             }
         }
-    }
+    } else {
+        false
+    };
+
+    // Emit session config for desktop consumption (config bridge tier 1b).
+    // Emitted AFTER desired_model resolution so the desktop caches the
+    // post-switch state. modelOverridden reflects whether the switch actually
+    // applied — false on the unsupported arm so the panel doesn't show a
+    // stale override badge.
+    agent.acp.observe(
+        "session_config_captured",
+        serde_json::json!({
+            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            "modelOverridden": agent.model_overridden && switch_succeeded,
+        }),
+    );
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
@@ -1203,6 +1474,14 @@ pub async fn run_prompt_task(
                 _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    // Land the model switch before any cancel/requeue work: setting
+                    // `desired_model` here means the fresh session created by the
+                    // requeued turn (busy) or the next turn (already-completed)
+                    // applies the new model. Runtime-only — never persisted.
+                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
+                        agent.desired_model = Some(model_id.clone());
+                        agent.model_overridden = true;
+                    }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
                     if agent.acp.has_in_flight_prompt() {
@@ -1218,10 +1497,9 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1232,10 +1510,9 @@ pub async fn run_prompt_task(
                             }
                             Err(AcpError::AgentExited) => {
                                 agent.state.invalidate_all();
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1247,10 +1524,9 @@ pub async fn run_prompt_task(
                             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
                                 // Cancel drain timed out — agent state uncertain.
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1261,10 +1537,9 @@ pub async fn run_prompt_task(
                             }
                             Err(e) => {
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1289,10 +1564,13 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        if control_signal == ControlSignal::Rotate {
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                        ) {
                             tracing::debug!(
                                 target: "pool::prompt",
-                                "rotate signal arrived but turn already completed — invalidating session"
+                                "rotate/switch signal arrived but turn already completed — invalidating session"
                             );
                         } else {
                             tracing::debug!(
@@ -1303,7 +1581,7 @@ pub async fn run_prompt_task(
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
-                            control_signal,
+                            &control_signal,
                         );
                         let _ = result_tx.send(PromptResult {
                             agent,
@@ -2035,6 +2313,29 @@ fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Opt
     }
 }
 
+/// Map a cancelling [`ControlSignal`] to the [`CancelReason`] that should frame
+/// the merged re-prompt, then requeue the batch (in `Queue` dedup mode) with
+/// that reason stamped onto [`FlushBatch::cancel_reason`]. `Cancel`/`Rotate`
+/// drop the batch entirely. The reason is consumed by the main loop at requeue
+/// time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
+#[inline]
+fn requeue_cancelled_batch(
+    ctx: &PromptContext,
+    signal: ControlSignal,
+    batch: Option<FlushBatch>,
+) -> Option<FlushBatch> {
+    let reason = match signal {
+        ControlSignal::Steer => CancelReason::Steer,
+        ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
+        // Cancel/Rotate discard the batch — no merged re-prompt.
+        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+    };
+    requeue_batch_if_queue(ctx, batch).map(|mut b| {
+        b.cancel_reason = Some(reason);
+        b
+    })
+}
+
 /// Log a stop reason at the appropriate tracing level.
 fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     let label = match source {
@@ -2761,6 +3062,7 @@ mod tests {
                 received_at: std::time::Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -2901,7 +3203,7 @@ mod tests {
         apply_completed_before_control_signal(
             &mut s,
             &PromptSource::Channel(ch_a),
-            ControlSignal::Rotate,
+            &ControlSignal::Rotate,
         );
 
         assert!(!s.sessions.contains_key(&ch_a));
@@ -2922,7 +3224,7 @@ mod tests {
         apply_completed_before_control_signal(
             &mut s,
             &PromptSource::Channel(ch_a),
-            ControlSignal::Cancel,
+            &ControlSignal::Cancel,
         );
 
         assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
@@ -3045,6 +3347,27 @@ mod tests {
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
+    // ── ControlSignal::SwitchModel (Phase 3a, Option ii) ─────────────────────
+
+    #[test]
+    fn test_switch_model_after_natural_completion_invalidates_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        // SwitchModel must invalidate just like Rotate so the requeued turn
+        // re-creates a fresh session that re-applies the new desired_model.
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            &ControlSignal::SwitchModel("gpt-5".into()),
+        );
+
+        assert!(!s.has_channel_state(&ch_a));
+        // ch_b untouched — the switch is channel-scoped.
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+    }
+
+    // ── turn liveness emission ───────────────────────────────────────────────
     // `run_turn_liveness` is raced against a "prompt" future the same way
     // `run_prompt_task` does it: the prompt wins the select and the liveness
     // future is dropped. We assert what the observer saw.

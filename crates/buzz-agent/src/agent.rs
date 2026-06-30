@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::builtin;
@@ -31,6 +31,11 @@ pub struct RunCtx<'a> {
     pub skills: &'a [SkillEntry],
     pub wire: &'a WireSender,
     pub cancel: &'a mut watch::Receiver<bool>,
+    /// Mid-turn steer queue. Drained at each round boundary (before the next
+    /// LLM call): queued messages are appended to history as user turns so the
+    /// model sees them on its next request, without restarting the turn. Fed by
+    /// the `_goose/unstable/session/steer` handler.
+    pub steer: &'a mut mpsc::UnboundedReceiver<Vec<ContentBlock>>,
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
@@ -78,6 +83,11 @@ impl RunCtx<'_> {
             if *self.cancel.borrow() {
                 return Ok(StopReason::Cancelled);
             }
+            // Round boundary: fold in any steer messages queued since the last
+            // round. They land as user turns so the model incorporates them on
+            // its next request — the turn continues, it is not restarted. Drain
+            // non-blocking; an empty queue is the common case.
+            self.drain_steers();
             match self.maybe_handoff().await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
                 // Context was just reset — the prior request's token count no
@@ -133,13 +143,21 @@ impl RunCtx<'_> {
             // exactly the history that was just sent to `complete()` (the
             // assistant response is appended below, after this point). Pairing
             // them lets the gate add a conservative estimate for any history
-            // appended before the next request. Preserve both when a response
-            // omits usage (`None`) rather than clobbering — a one-off missing
-            // field shouldn't blind the gate or zero the growth baseline.
+            // appended before the next request. Uses `context_pressure_bytes`
+            // (the same measure the gate's `current_bytes` uses) so the
+            // `grown` delta is coherent — an image contributes its visual-
+            // token equivalent here, not its base64 length. Preserve both when
+            // a response omits usage (`None`) rather than clobbering — a
+            // one-off missing field shouldn't blind the gate or zero the
+            // growth baseline.
             if let Some(tokens) = response.input_tokens {
                 *self.last_request_input_tokens = Some(tokens);
-                *self.last_request_history_bytes =
-                    Some(self.history.iter().map(HistoryItem::estimated_bytes).sum());
+                *self.last_request_history_bytes = Some(
+                    self.history
+                        .iter()
+                        .map(HistoryItem::context_pressure_bytes)
+                        .sum(),
+                );
             }
 
             if !response.text.is_empty() {
@@ -215,6 +233,27 @@ impl RunCtx<'_> {
 
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);
+            }
+        }
+    }
+
+    /// Non-blocking drain of the steer queue. Each queued steer is appended to
+    /// history as a user turn so the model picks it up on its next request. A
+    /// steer whose blocks all fail to render (e.g. unsupported content) is
+    /// skipped rather than aborting the turn — steering is best-effort
+    /// augmentation, not a hard input contract like the initial prompt.
+    fn drain_steers(&mut self) {
+        while let Ok(blocks) = self.steer.try_recv() {
+            match prompt_to_text(blocks) {
+                Ok(text) if !text.trim().is_empty() => {
+                    self.history.push(HistoryItem::User(text));
+                }
+                Ok(_) => {
+                    tracing::debug!("dropping empty steer message");
+                }
+                Err(e) => {
+                    tracing::warn!("dropping unrenderable steer message: {e}");
+                }
             }
         }
     }

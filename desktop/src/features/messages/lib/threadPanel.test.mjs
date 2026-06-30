@@ -11,6 +11,7 @@ import {
   hasNestedThreadBranches,
   shouldRenderUnreadDivider,
 } from "./threadPanel.ts";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 
 function message(overrides) {
   return {
@@ -63,6 +64,46 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
       (entry) => entry.message.id,
     ),
     ["root", "broadcast-reply"],
+  );
+});
+
+test("buildMainTimelineEntries keeps huddle thread replies out of the parent timeline summary", () => {
+  const huddleRoot = message({
+    id: "huddle-root",
+    kind: KIND_HUDDLE_STARTED,
+    createdAt: 1,
+    body: JSON.stringify({
+      ephemeral_channel_id: "8d764100-fd8f-44cf-9c98-6d8fbd739b8c",
+    }),
+  });
+  const reply = message({
+    id: "huddle-thread-reply",
+    createdAt: 2,
+    parentId: "huddle-root",
+    rootId: "huddle-root",
+    depth: 1,
+    tags: [["e", "huddle-root", "", "reply"]],
+  });
+
+  const entries = buildMainTimelineEntries([huddleRoot, reply]);
+
+  assert.deepEqual(
+    entries.map((entry) => ({
+      id: entry.message.id,
+      replyCount: entry.summary?.replyCount ?? 0,
+    })),
+    [{ id: "huddle-root", replyCount: 0 }],
+  );
+
+  const panelData = buildThreadPanelData(
+    [huddleRoot, reply],
+    "huddle-root",
+    "huddle-root",
+    new Set(),
+  );
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => entry.message.id),
+    ["huddle-thread-reply"],
   );
 });
 

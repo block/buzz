@@ -30,6 +30,12 @@ pub enum AuthError {
     #[error("NIP-98 HTTP Auth verification failed: {0}")]
     Nip98Invalid(String),
 
+    /// A NIP-98 event with the same id has already been observed within the
+    /// replay-prevention window. The event itself was structurally valid; the
+    /// rejection is on freshness, not validity.
+    #[error("NIP-98 replay: event id already seen within window")]
+    Nip98Replay,
+
     /// The pubkey in the auth event does not match the expected identity.
     #[error("pubkey mismatch: event pubkey does not match authenticated identity")]
     PubkeyMismatch,

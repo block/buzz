@@ -1,19 +1,21 @@
 name: Auto-tag on Release PR Merge
 
-# Three release lanes share this one workflow — adding a lane is one more branch
+# Four release lanes share this one workflow — adding a lane is one more branch
 # prefix, never a forked copy:
 #
 #   version-bump/<v>   → tag v<v>        → dispatch release.yml (desktop app)
 #   relay-release/<v>  → tag relay-v<v>  → dispatch docker.yml (relay image)
+#   chart-release/<v>  → tag chart-v<v>  → dispatch helm-chart.yml (helm chart)
 #   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
 #
-# Both the desktop and relay lanes dispatch their build workflow rather than
+# The desktop, relay, and chart lanes dispatch their build workflow rather than
 # relying on the consumer's `on.push.tags` trigger: auto-tag pushes the tag
 # with the default GITHUB_TOKEN, which GitHub's recursion guard blocks from
-# firing any `on: push` trigger. So release.yml and docker.yml both have a
-# `push.tags` trigger that is dead for auto-pushed tags — the dispatch is the
-# real path. Each dispatch passes the bare version and the tag ref so the
-# consumer builds the tagged commit (github.ref on a dispatch is `main`).
+# firing any `on: push` trigger. So release.yml, docker.yml, and helm-chart.yml
+# all have a `push.tags` trigger that is dead for auto-pushed tags — the
+# dispatch is the real path. Each dispatch passes the bare version and the tag
+# ref so the consumer builds the tagged commit (github.ref on a dispatch is
+# `main`).
 #
 # The mobile lane is push-only by infosec necessity: OSS `block/buzz` CI must
 # not trigger CI in the private `buzz-releases` repo, so auto-dispatch across
@@ -36,6 +38,7 @@ jobs:
       github.event.pull_request.merged == true &&
       (startsWith(github.event.pull_request.head.ref, 'version-bump/') ||
        startsWith(github.event.pull_request.head.ref, 'relay-release/') ||
+       startsWith(github.event.pull_request.head.ref, 'chart-release/') ||
        startsWith(github.event.pull_request.head.ref, 'mobile-release/')) &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
@@ -60,6 +63,10 @@ jobs:
               VERSION="${BRANCH#relay-release/}"
               TAG_PREFIX="relay-v"
               DISPATCH="docker" ;;
+            chart-release/*)
+              VERSION="${BRANCH#chart-release/}"
+              TAG_PREFIX="chart-v"
+              DISPATCH="helm-chart" ;;
             mobile-release/*)
               VERSION="${BRANCH#mobile-release/}"
               TAG_PREFIX="mobile-v"
@@ -113,6 +120,7 @@ jobs:
           case "$DISPATCH" in
             release) WORKFLOW="release.yml" ;;
             docker)  WORKFLOW="docker.yml" ;;
+            helm-chart) WORKFLOW="helm-chart.yml" ;;
             *)
               echo "::error::Unhandled dispatch target: '$DISPATCH'"
               exit 1 ;;

@@ -13,6 +13,10 @@ import {
   KIND_JOB_RESULT,
   KIND_JOB_CANCEL,
   KIND_JOB_ERROR,
+  KIND_HUDDLE_STARTED,
+  KIND_HUDDLE_PARTICIPANT_JOINED,
+  KIND_HUDDLE_PARTICIPANT_LEFT,
+  KIND_HUDDLE_ENDED,
 } from "./kinds.ts";
 
 test("isConversationalUnreadKind_streamMessage_counts", () => {
@@ -42,6 +46,17 @@ test("isConversationalUnreadKind_allJobKinds_excluded", () => {
     KIND_JOB_RESULT,
     KIND_JOB_CANCEL,
     KIND_JOB_ERROR,
+  ]) {
+    assert.equal(isConversationalUnreadKind(kind), false, `kind ${kind}`);
+  }
+});
+
+test("isConversationalUnreadKind_huddleLifecycle_excluded", () => {
+  for (const kind of [
+    KIND_HUDDLE_STARTED,
+    KIND_HUDDLE_PARTICIPANT_JOINED,
+    KIND_HUDDLE_PARTICIPANT_LEFT,
+    KIND_HUDDLE_ENDED,
   ]) {
     assert.equal(isConversationalUnreadKind(kind), false, `kind ${kind}`);
   }

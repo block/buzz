@@ -296,26 +296,18 @@ pub(crate) fn merged_user_env(
     merged
 }
 
-/// Resolve a managed-agent record's persona env_vars, failing closed.
+/// Resolve live env_vars for a linked persona.
 ///
-/// Three outcomes:
-/// - `persona_id` is `None` → returns `Ok({})` (agent has no persona, no env to inherit).
-/// - `persona_id = Some(id)` and the persona exists → returns `Ok(persona.env_vars)`.
-/// - `persona_id = Some(id)` and either personas.json fails to load OR no persona
-///   with that id exists → returns `Err(...)`.
-///
-/// Why fail closed: persona env_vars frequently carry API credentials
-/// (ANTHROPIC_API_KEY, OPENAI_API_KEY, …). If we swallow load errors and
-/// quietly spawn with an empty env, the agent comes up unauthenticated and
-/// the user sees a downstream "401 from provider" with no obvious cause.
-/// Better to surface the persona load failure at spawn/deploy/discovery
-/// time.
+/// Returns the persona's `env_vars` map if a persona_id is provided and found;
+/// returns an empty map if no persona is linked or the persona is not found.
+/// Used by the provider deploy path so remote agents receive current credentials;
+/// local spawn uses only the pinned `record.env_vars` for determinism.
 pub(crate) fn resolve_persona_env(
     app: &tauri::AppHandle,
     persona_id: Option<&str>,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<std::collections::BTreeMap<String, String>, String> {
     let Some(pid) = persona_id else {
-        return Ok(BTreeMap::new());
+        return Ok(std::collections::BTreeMap::new());
     };
     let personas = super::load_personas(app).map_err(|e| {
         format!("failed to load personas while resolving env for persona `{pid}`: {e}")
