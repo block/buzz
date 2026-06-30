@@ -2,6 +2,8 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronDown, Send } from "lucide-react";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { AgentActivityAction, TranscriptItem } from "./agentSessionTypes";
@@ -18,9 +20,12 @@ import {
   type ActivityRowLabelParts,
 } from "./activityRenderClasses/ActivityRow";
 import {
+  asRecord,
   formatCodeValue,
+  getToolString,
   getToolDurationDisplay,
   isInlineImageData,
+  parseToolResultValue,
 } from "./agentSessionUtils";
 
 export function ToolItem({
@@ -35,6 +40,19 @@ export function ToolItem({
   const buzzTool = getBuzzToolInfo(canonicalToolName);
   const compactSummary = buildCompactToolSummary(item);
   const duration = getToolDurationDisplay(item);
+  const messageLink = getSentMessageLink(item);
+  const { goChannel } = useAppNavigation();
+  const openSentMessage = React.useCallback(
+    (event: React.MouseEvent<HTMLAnchorElement>) => {
+      if (!messageLink) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void goChannel(messageLink.channelId, {
+        messageId: messageLink.messageId,
+      });
+    },
+    [goChannel, messageLink],
+  );
   const handleToggle = React.useCallback(
     (event: React.SyntheticEvent<HTMLDetailsElement>) => {
       setIsExpanded(event.currentTarget.open);
@@ -62,6 +80,8 @@ export function ToolItem({
               duration={duration}
               isError={item.isError || item.status === "failed"}
               label={compactSummary.label}
+              messageLink={messageLink}
+              onOpenMessage={openSentMessage}
               preview={compactSummary.preview}
             />
           ) : (
@@ -233,11 +253,15 @@ function CompactMessageSummary({
   duration,
   isError,
   label,
+  messageLink,
+  onOpenMessage,
   preview,
 }: {
   duration: string | null;
   isError: boolean;
   label: string;
+  messageLink: SentMessageLink | null;
+  onOpenMessage: (event: React.MouseEvent<HTMLAnchorElement>) => void;
   preview: string | null;
 }) {
   const mutedTone = compactSummaryTone();
@@ -262,7 +286,21 @@ function CompactMessageSummary({
           {label}
         </span>
         {duration ? (
-          <span className={cn("shrink-0 text-xs", mutedTone)}>{duration}</span>
+          messageLink ? (
+            <a
+              className="shrink-0 rounded-sm text-xs text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              data-testid="transcript-tool-open-message-link"
+              href={messageLink.href}
+              onClick={onOpenMessage}
+              title="Open sent message"
+            >
+              {duration}
+            </a>
+          ) : (
+            <span className={cn("shrink-0 text-xs", mutedTone)}>
+              {duration}
+            </span>
+          )
         ) : null}
         <ChevronDown
           className={cn(
@@ -273,6 +311,78 @@ function CompactMessageSummary({
       </div>
     </div>
   );
+}
+
+type SentMessageLink = {
+  channelId: string;
+  href: string;
+  messageId: string;
+};
+
+function getSentMessageLink(
+  item: Extract<TranscriptItem, { type: "tool" }>,
+): SentMessageLink | null {
+  if (item.status !== "completed" || item.isError) {
+    return null;
+  }
+
+  if (item.descriptor?.renderClass !== "message") {
+    return null;
+  }
+
+  const channelId =
+    item.channelId ?? getToolString(item.args, ["channel_id", "channelId"]);
+  if (!channelId) {
+    return null;
+  }
+
+  const resultRecord = getMessageSendResultRecord(item.result);
+  if (!resultRecord || resultRecord.accepted === false) {
+    return null;
+  }
+
+  const messageId = getToolString(resultRecord, [
+    "event_id",
+    "eventId",
+    "message_id",
+    "messageId",
+  ]);
+  if (!messageId) {
+    return null;
+  }
+
+  return {
+    channelId,
+    href: buildMessageLink({ channelId, messageId }),
+    messageId,
+  };
+}
+
+function getMessageSendResultRecord(
+  result: string,
+): Record<string, unknown> | null {
+  const parsed = parseToolResultValue(result);
+  const directRecord = asRecord(parsed);
+  if (getMessageEventId(directRecord)) {
+    return directRecord;
+  }
+
+  const stdout = getToolString(directRecord, ["stdout"]);
+  if (!stdout) {
+    return null;
+  }
+
+  const stdoutRecord = asRecord(parseToolResultValue(stdout));
+  return getMessageEventId(stdoutRecord) ? stdoutRecord : null;
+}
+
+function getMessageEventId(record: Record<string, unknown>) {
+  return getToolString(record, [
+    "event_id",
+    "eventId",
+    "message_id",
+    "messageId",
+  ]);
 }
 
 function ViewImageToolPreview({

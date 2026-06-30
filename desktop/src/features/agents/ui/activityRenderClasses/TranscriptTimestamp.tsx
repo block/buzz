@@ -1,4 +1,3 @@
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { formatTranscriptTime } from "../agentSessionUtils";
 
 const fullDateTimeFormat = new Intl.DateTimeFormat(undefined, {
@@ -19,13 +18,11 @@ export function TranscriptTimestamp({ timestamp }: { timestamp: string }) {
     ? timestamp
     : fullDateTimeFormat.format(date);
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-xs text-muted-foreground/60">
-          {formatted}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="top">{fullDateTime}</TooltipContent>
-    </Tooltip>
+    <span
+      className="shrink-0 cursor-default text-xs text-muted-foreground/60"
+      title={fullDateTime}
+    >
+      {formatted}
+    </span>
   );
 }

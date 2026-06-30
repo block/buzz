@@ -569,7 +569,9 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       workdir: workspacePath,
       timeout_ms: 120000,
     },
-    result: shellResultJson('{"accepted":true,"event_id":"debug-event"}\n'),
+    result: shellResultJson(
+      '{"accepted":true,"event_id":"debug-openable-message"}\n',
+    ),
     isError: false,
     timestamp: timestamp(12),
     startedAt: timestamp(12),
@@ -834,7 +836,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       timeout_ms: 120000,
     },
     result: shellResultJson(
-      '{"accepted":true,"event_id":"debug-pushed-report"}\n',
+      '{"accepted":true,"event_id":"debug-openable-pushed-report"}\n',
     ),
     isError: false,
     timestamp: timestamp(25.2),
