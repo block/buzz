@@ -701,3 +701,136 @@ async fn test_agent_can_self_delete_channel() {
 
     agent_client.disconnect().await.ok();
 }
+
+// ─── Removed-author rejection tests (Option A regression guard) ─────────────
+//
+// These tests verify that removing a user from a private channel revokes their
+// ability to edit or delete their own historical messages.  Before Option A,
+// adding 40003/9005 to skip_membership also widened the self-author fast-path,
+// allowing removed users to mutate private-channel history.
+
+/// A user removed from a private channel CANNOT edit their own old messages.
+#[tokio::test]
+#[ignore]
+async fn test_removed_author_cannot_edit_own_message_in_private_channel() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let victim_keys = Keys::generate();
+    let channel_id = create_private_agent_owned_channel(&agent_keys).await;
+
+    // Establish NIP-OA ownership; agent is now in the channel.
+    let mut agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+
+    // Agent adds victim to the private channel via kind:9000 (PUT_USER).
+    let add_event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &victim_keys.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let ok = agent_client.send_event(add_event).await.expect("send PUT_USER");
+    assert!(ok.accepted, "agent failed to add victim to private channel: {}", ok.message);
+
+    // Victim connects and sends a message while still a member.
+    let mut victim_client = BuzzTestClient::connect(&relay_url(), &victim_keys)
+        .await
+        .expect("connect victim");
+    let content = format!("victim-msg-{}", uuid::Uuid::new_v4());
+    let ok = victim_client
+        .send_text_message(&victim_keys, &channel_id, &content, 9)
+        .await
+        .expect("victim send message");
+    assert!(ok.accepted, "victim message rejected while still a member: {}", ok.message);
+    let msg_event_id = ok.event_id;
+
+    // Agent removes victim from the channel via kind:9001 (REMOVE_USER).
+    let remove_event = EventBuilder::new(Kind::Custom(9001), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &victim_keys.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let ok = agent_client.send_event(remove_event).await.expect("send REMOVE_USER");
+    assert!(ok.accepted, "agent failed to remove victim from private channel: {}", ok.message);
+    agent_client.disconnect().await.ok();
+
+    // Victim (now removed) attempts to edit their old message — must be rejected.
+    let edit_event = EventBuilder::new(Kind::Custom(40003), "edited content after removal")
+        .tags(vec![
+            Tag::parse(["e", &msg_event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&victim_keys)
+        .unwrap();
+    let ok = victim_client.send_event(edit_event).await.expect("send edit attempt");
+    assert!(
+        !ok.accepted,
+        "removed author should NOT be able to edit old message in private channel, but was accepted"
+    );
+    victim_client.disconnect().await.ok();
+}
+
+/// A user removed from a private channel CANNOT delete their own old messages.
+#[tokio::test]
+#[ignore]
+async fn test_removed_author_cannot_delete_own_message_in_private_channel() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let victim_keys = Keys::generate();
+    let channel_id = create_private_agent_owned_channel(&agent_keys).await;
+
+    // Establish NIP-OA ownership; agent is now in the channel.
+    let mut agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+
+    // Agent adds victim to the private channel via kind:9000 (PUT_USER).
+    let add_event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &victim_keys.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let ok = agent_client.send_event(add_event).await.expect("send PUT_USER");
+    assert!(ok.accepted, "agent failed to add victim to private channel: {}", ok.message);
+
+    // Victim connects and sends a message while still a member.
+    let mut victim_client = BuzzTestClient::connect(&relay_url(), &victim_keys)
+        .await
+        .expect("connect victim");
+    let content = format!("victim-msg-{}", uuid::Uuid::new_v4());
+    let ok = victim_client
+        .send_text_message(&victim_keys, &channel_id, &content, 9)
+        .await
+        .expect("victim send message");
+    assert!(ok.accepted, "victim message rejected while still a member: {}", ok.message);
+    let msg_event_id = ok.event_id;
+
+    // Agent removes victim from the channel via kind:9001 (REMOVE_USER).
+    let remove_event = EventBuilder::new(Kind::Custom(9001), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &victim_keys.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .unwrap();
+    let ok = agent_client.send_event(remove_event).await.expect("send REMOVE_USER");
+    assert!(ok.accepted, "agent failed to remove victim from private channel: {}", ok.message);
+    agent_client.disconnect().await.ok();
+
+    // Victim (now removed) attempts to delete their old message — must be rejected.
+    let delete_event = EventBuilder::new(Kind::Custom(9005), "")
+        .tags(vec![
+            Tag::parse(["e", &msg_event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&victim_keys)
+        .unwrap();
+    let ok = victim_client.send_event(delete_event).await.expect("send delete attempt");
+    assert!(
+        !ok.accepted,
+        "removed author should NOT be able to delete old message in private channel, but was accepted"
+    );
+    victim_client.disconnect().await.ok();
+}

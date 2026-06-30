@@ -555,10 +555,28 @@ pub async fn validate_admin_event(
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
             if author == actor_bytes {
-                return Ok(()); // Author can always delete their own messages
+                // Author deleting their own message: re-gate on membership/open visibility so that
+                // a removed private-channel member cannot mutate old messages after access is revoked.
+                let is_member = state
+                    .is_member_cached(tenant.community(), channel_id, &actor_bytes)
+                    .await?;
+                if is_member {
+                    return Ok(());
+                }
+                let is_open = state
+                    .db
+                    .get_channel(tenant.community(), channel_id)
+                    .await
+                    .map(|ch| ch.visibility == "open")
+                    .unwrap_or(false);
+                if is_open {
+                    return Ok(());
+                }
+                // Not a member and channel is private — fall through to owner/admin/owner-of-agent check.
             }
 
-            // Not the author — must be owner/admin or the owning human of the message's agent-author.
+            // Not the author, or author who is no longer a member of a private channel —
+            // must be owner/admin or the owning human of the message's agent-author.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
             let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
             match actor_member {

@@ -724,7 +724,27 @@ async fn validate_edit_ownership(
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
     let actor = event.pubkey.to_bytes().to_vec();
-    if author != actor {
+    if author == actor {
+        // Author editing their own message: re-gate on membership/open visibility so that
+        // a removed private-channel member cannot mutate old messages after access is revoked.
+        if let Some(ch_id) = target_event.channel_id {
+            let is_member = state
+                .is_member_cached(community_id, ch_id, &actor)
+                .await
+                .map_err(|e| format!("db error checking membership: {e}"))?;
+            if !is_member {
+                let is_open = state
+                    .db
+                    .get_channel(community_id, ch_id)
+                    .await
+                    .map(|ch| ch.visibility == "open")
+                    .unwrap_or(false);
+                if !is_open {
+                    return Err("restricted: not a channel member".to_string());
+                }
+            }
+        }
+    } else {
         // Allow the owning human to edit messages authored by their agent.
         let is_owner = state
             .db
