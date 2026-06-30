@@ -113,6 +113,11 @@ export function EditAgentDialog({
   // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
+  // Tracks whether the user has made an in-dialog runtime selection. When true,
+  // the catalog-arrival effect must not overwrite it (the user's choice wins).
+  // Reset to false each time the dialog opens so a fresh open always re-derives.
+  const runtimeTouched = React.useRef(false);
+
   // Reset form state only when the dialog opens or when switching to a different
   // agent. Omitting the full agent object and its array fields from deps prevents
   // the effect from firing on every 5s background poll (arrays are never
@@ -141,6 +146,9 @@ export function EditAgentDialog({
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       // Re-derive the runtime id from whatever catalog entries have loaded.
+      // If the catalog hasn't arrived yet, the catalog-arrival effect below
+      // will re-derive once it does (guarded by runtimeTouched).
+      runtimeTouched.current = false;
       const matched = runtimes.find(
         (r) => r.command?.trim() === agent.agentCommand.trim(),
       );
@@ -148,6 +156,24 @@ export function EditAgentDialog({
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
+
+  // Re-derive the runtime id when the catalog loads, but ONLY while the user
+  // has not made a manual runtime selection (runtimeTouched === false). This
+  // handles the async race where the dialog opens before runtimes have loaded:
+  // the open-effect sees [], falls back to "custom", and this effect corrects
+  // it once the catalog arrives — without re-firing the full open reset (which
+  // would wipe other edits).
+  React.useEffect(() => {
+    if (!open || runtimeTouched.current || runtimes.length === 0) {
+      return;
+    }
+    const matched = runtimes.find(
+      (r) => r.command?.trim() === agent.agentCommand.trim(),
+    );
+    if (matched) {
+      setSelectedRuntimeId(matched.id);
+    }
+  }, [open, runtimes, agent.agentCommand]);
 
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
@@ -245,6 +271,10 @@ export function EditAgentDialog({
       nextRuntime?.id ?? nextRuntimeId,
     );
 
+    // Mark that the user has made an explicit runtime choice. The catalog-arrival
+    // effect will no longer overwrite selectedRuntimeId after this point.
+    runtimeTouched.current = true;
+
     setSelectedRuntimeId(nextRuntimeId);
 
     // When switching to a catalog-known runtime, update the agent command to
@@ -253,6 +283,11 @@ export function EditAgentDialog({
       setAgentCommand(nextRuntime.command);
       const newArgs = nextRuntime.defaultArgs.join(",");
       setAgentArgs(newArgs);
+      // Selecting a concrete catalog runtime pins the harness — this is the
+      // authoritative override. Disabling inheritance ensures the runtime is
+      // actually persisted and prevents a mismatched provider from being saved
+      // against an inherited runtime that will actually run something else.
+      setInheritHarness(false);
     } else if (nextRuntimeId === "custom") {
       // "Custom" means the user wants to type a command; leave agentCommand as-is.
     }
