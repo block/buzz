@@ -8,6 +8,7 @@ import type {
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
+import { mergeAutoRouteMentionPubkeys } from "@/features/channels/ui/ChannelPane.helpers";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -21,6 +22,7 @@ export function useChannelPaneHandlers({
   deleteMessageMutation,
   editMessageMutation,
   editTargetId,
+  messageAutoRouteAgentPubkeys,
   expandedThreadReplyIds,
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
@@ -33,12 +35,14 @@ export function useChannelPaneHandlers({
   setOpenThreadHeadId,
   setThreadReplyTargetId,
   setThreadScrollTargetId,
+  threadAutoRouteAgentPubkeys,
   threadReplyTargetId,
   toggleReactionMutation,
 }: {
   deleteMessageMutation: ReturnType<typeof useDeleteMessageMutation>;
   editMessageMutation: ReturnType<typeof useEditMessageMutation>;
   editTargetId: string | null;
+  messageAutoRouteAgentPubkeys: readonly string[];
   expandedThreadReplyIds: ReadonlySet<string>;
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
@@ -53,6 +57,7 @@ export function useChannelPaneHandlers({
   setOpenThreadHeadId: (value: string | null) => void;
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
+  threadAutoRouteAgentPubkeys: readonly string[];
   threadReplyTargetId: string | null;
   toggleReactionMutation: ReturnType<typeof useToggleReactionMutation>;
 }) {
@@ -68,6 +73,16 @@ export function useChannelPaneHandlers({
 
   const expandedThreadReplyIdsRef = React.useRef(expandedThreadReplyIds);
   expandedThreadReplyIdsRef.current = expandedThreadReplyIds;
+
+  const messageAutoRouteAgentPubkeysRef = React.useRef(
+    messageAutoRouteAgentPubkeys,
+  );
+  messageAutoRouteAgentPubkeysRef.current = messageAutoRouteAgentPubkeys;
+
+  const threadAutoRouteAgentPubkeysRef = React.useRef(
+    threadAutoRouteAgentPubkeys,
+  );
+  threadAutoRouteAgentPubkeysRef.current = threadAutoRouteAgentPubkeys;
 
   const sendMutateRef = React.useRef(sendMessageMutation.mutateAsync);
   sendMutateRef.current = sendMessageMutation.mutateAsync;
@@ -227,7 +242,10 @@ export function useChannelPaneHandlers({
     ) => {
       await sendMutateRef.current({
         content,
-        mentionPubkeys,
+        mentionPubkeys: mergeAutoRouteMentionPubkeys({
+          autoRouteAgentPubkeys: messageAutoRouteAgentPubkeysRef.current,
+          mentionPubkeys,
+        }),
         mediaTags,
       });
     },
@@ -261,7 +279,10 @@ export function useChannelPaneHandlers({
 
       const sentMessage = await sendMutateRef.current({
         content,
-        mentionPubkeys,
+        mentionPubkeys: mergeAutoRouteMentionPubkeys({
+          autoRouteAgentPubkeys: threadAutoRouteAgentPubkeysRef.current,
+          mentionPubkeys,
+        }),
         parentEventId,
         mediaTags,
       });

@@ -5,6 +5,10 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
 import {
+  buildAgentConversationMarkers,
+  getHiddenAgentConversationMessageIds,
+} from "@/features/agents/agentConversations";
+import {
   useChannelMembersQuery,
   useJoinChannelMutation,
 } from "@/features/channels/hooks";
@@ -18,6 +22,10 @@ import {
   ChannelPane,
   ForumView,
 } from "@/features/channels/ui/ChannelScreenLazyViews";
+import {
+  getDmAutoRouteAgentPubkeys,
+  getThreadAutoRouteAgentPubkeys,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
   useManagedAgentsQuery,
@@ -437,6 +445,23 @@ export function ChannelScreen({
         : [...currentEvents, event],
     );
   }, []);
+  const agentConversationMarkers = React.useMemo(
+    () => buildAgentConversationMarkers(resolvedMessages),
+    [resolvedMessages],
+  );
+  const unreadTimelineMessages = React.useMemo(() => {
+    const hiddenMessageIds = getHiddenAgentConversationMessageIds(
+      timelineMessages,
+      agentConversationMarkers,
+    );
+    if (hiddenMessageIds.size === 0) {
+      return timelineMessages;
+    }
+
+    return timelineMessages.filter(
+      (message) => !hiddenMessageIds.has(message.id),
+    );
+  }, [agentConversationMarkers, timelineMessages]);
   const channelFind = useChannelFind({
     channelId: activeChannelId,
     messages: timelineMessages,
@@ -459,7 +484,7 @@ export function ChannelScreen({
     unreadCount,
   } = useChannelUnreadState({
     activeChannelId,
-    timelineMessages,
+    timelineMessages: unreadTimelineMessages,
     currentPubkey,
     openThreadHeadId,
     threadReplyTargetId,
@@ -476,6 +501,37 @@ export function ChannelScreen({
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
     [editTargetId, timelineMessages],
   );
+  const routingAgentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(agentPubkeys);
+    for (const [pubkey, profile] of Object.entries(messageProfiles)) {
+      if (profile?.isAgent) {
+        pubkeys.add(normalizePubkey(pubkey));
+      }
+    }
+    return pubkeys;
+  }, [agentPubkeys, messageProfiles]);
+  const messageAutoRouteAgentPubkeys = React.useMemo(
+    () =>
+      getDmAutoRouteAgentPubkeys({
+        channel: activeChannel,
+        currentPubkey,
+        knownAgentPubkeys: routingAgentPubkeys,
+      }),
+    [activeChannel, currentPubkey, routingAgentPubkeys],
+  );
+  const threadAutoRouteAgentPubkeys = React.useMemo(() => {
+    if (!openThreadHeadMessage) {
+      return [];
+    }
+
+    return getThreadAutoRouteAgentPubkeys({
+      knownAgentPubkeys: routingAgentPubkeys,
+      messages: [
+        openThreadHeadMessage,
+        ...threadMessages.map((entry) => entry.message),
+      ],
+    });
+  }, [openThreadHeadMessage, routingAgentPubkeys, threadMessages]);
   const {
     handleCancelEdit,
     handleCancelThreadReply,
@@ -493,6 +549,7 @@ export function ChannelScreen({
     deleteMessageMutation,
     editMessageMutation,
     editTargetId,
+    messageAutoRouteAgentPubkeys,
     expandedThreadReplyIds,
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
@@ -505,6 +562,7 @@ export function ChannelScreen({
     setOpenThreadHeadId,
     setThreadReplyTargetId,
     setThreadScrollTargetId,
+    threadAutoRouteAgentPubkeys,
     threadReplyTargetId,
     toggleReactionMutation,
   });
@@ -841,6 +899,7 @@ export function ChannelScreen({
                 <ChannelPane
                   activeChannel={activeChannel}
                   activityAgents={channelAgentSessionAgents}
+                  agentConversationMarkers={agentConversationMarkers}
                   agentPubkeys={agentPubkeys}
                   agentPubkeysPending={agentPubkeysPending}
                   agentSessionAgents={agentSessionAgents}

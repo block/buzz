@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import type * as React from "react";
 import {
   BellOff,
@@ -20,11 +21,13 @@ import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurn
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
+import type { AgentConversation } from "@/features/agents/agentConversations";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
   scaleProfileAvatarStatusGeometry,
 } from "@/features/profile/ui/ProfileAvatarWithStatus";
+import { SidebarAgentConversationChildren } from "@/features/sidebar/ui/SidebarAgentConversationChildren";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
@@ -317,21 +320,26 @@ export function ChannelMenuButton({
 export function SidebarSection({
   action,
   activeWorkingByChannelId,
+  agentConversationsByChannelId,
   dmParticipantsByChannelId,
   emptyState,
   items,
   channelLabels,
   isCollapsed,
   isActiveChannel,
+  isAgentConversationActive,
   presenceByChannelId,
+  selectedAgentConversationId,
   selectedChannelId,
   title,
   testId,
   unreadChannelCounts,
   unreadChannelIds,
+  onHideAgentConversation,
   onHideDm,
   onMarkChannelRead,
   onMarkChannelUnread,
+  onSelectAgentConversation,
   onSelectChannel,
   onToggleCollapsed,
   mutedChannelIds,
@@ -340,13 +348,19 @@ export function SidebarSection({
 }: {
   action?: React.ReactNode;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
+  agentConversationsByChannelId?: ReadonlyMap<
+    string,
+    readonly AgentConversation[]
+  >;
   dmParticipantsByChannelId?: Record<string, SidebarDmParticipant[]>;
   emptyState?: React.ReactNode;
   items: Channel[];
   channelLabels?: Record<string, string>;
   isCollapsed?: boolean;
   isActiveChannel: boolean;
+  isAgentConversationActive?: boolean;
   presenceByChannelId?: Record<string, PresenceStatus>;
+  selectedAgentConversationId?: string | null;
   selectedChannelId: string | null;
   title: string;
   testId: string;
@@ -357,7 +371,9 @@ export function SidebarSection({
     channelId: string,
     lastMessageAt: string | null | undefined,
   ) => void;
+  onHideAgentConversation?: (conversationId: string) => void;
   onMarkChannelUnread?: (channelId: string) => void;
+  onSelectAgentConversation?: (conversationId: string) => void;
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed?: () => void;
   mutedChannelIds?: ReadonlySet<string>;
@@ -409,74 +425,94 @@ export function SidebarSection({
                     key={onMarkChannelUnread ? undefined : channel.id}
                     className="group/menu-item"
                   >
-                    <ChannelMenuButton
-                      channel={channel}
-                      activeWorking={activeWorkingByChannelId?.get(channel.id)}
-                      dmParticipants={dmParticipantsByChannelId?.[channel.id]}
-                      hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
-                      isMuted={mutedChannelIds?.has(channel.id)}
-                      isActive={
-                        isActiveChannel && selectedChannelId === channel.id
-                      }
-                      label={channelLabels?.[channel.id] ?? channel.name}
-                      presenceStatus={presenceByChannelId?.[channel.id]}
-                      onSelectChannel={onSelectChannel}
-                    />
-                    {channel.channelType === "dm" &&
-                    unreadChannelIds.has(channel.id) &&
-                    !(isActiveChannel && selectedChannelId === channel.id) ? (
-                      <UnreadCountBadge
-                        channelName={channel.name}
-                        className={cn(
-                          "pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 transition-opacity",
-                          onHideDm && SIDEBAR_ROW_ACTION_REPLACED_BADGE_CLASS,
+                    <div className="relative">
+                      <ChannelMenuButton
+                        channel={channel}
+                        activeWorking={activeWorkingByChannelId?.get(
+                          channel.id,
                         )}
-                        count={Math.max(
-                          unreadChannelCounts.get(channel.id) ?? 0,
-                          1,
-                        )}
+                        dmParticipants={dmParticipantsByChannelId?.[channel.id]}
+                        hasUnread={unreadChannelIds.has(channel.id)}
+                        unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
+                        isMuted={mutedChannelIds?.has(channel.id)}
+                        isActive={
+                          isActiveChannel && selectedChannelId === channel.id
+                        }
+                        label={channelLabels?.[channel.id] ?? channel.name}
+                        presenceStatus={presenceByChannelId?.[channel.id]}
+                        onSelectChannel={onSelectChannel}
                       />
-                    ) : null}
-                    {channel.channelType === "dm" && onHideDm ? (
-                      <button
-                        aria-label="Close direct message"
-                        className={cn(
-                          "absolute right-1 top-1/2 z-10 -translate-y-1/2 after:absolute after:-inset-2 after:md:hidden group-data-[collapsible=icon]:hidden",
-                          SIDEBAR_ROW_ICON_ACTION_CLASS,
-                          SIDEBAR_ROW_ACTION_VISIBILITY_CLASS,
-                        )}
-                        data-sidebar="menu-action"
-                        data-testid={`hide-dm-${channel.name}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onHideDm(channel.id);
-                        }}
-                        type="button"
-                      >
-                        <X />
-                      </button>
-                    ) : null}
+                      {channel.channelType === "dm" &&
+                      unreadChannelIds.has(channel.id) &&
+                      !(isActiveChannel && selectedChannelId === channel.id) ? (
+                        <UnreadCountBadge
+                          channelName={channel.name}
+                          className={cn(
+                            "pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 transition-opacity",
+                            onHideDm && SIDEBAR_ROW_ACTION_REPLACED_BADGE_CLASS,
+                          )}
+                          count={Math.max(
+                            unreadChannelCounts.get(channel.id) ?? 0,
+                            1,
+                          )}
+                        />
+                      ) : null}
+                      {channel.channelType === "dm" && onHideDm ? (
+                        <button
+                          aria-label="Close direct message"
+                          className={cn(
+                            "absolute right-1 top-1/2 z-10 -translate-y-1/2 after:absolute after:-inset-2 after:md:hidden group-data-[collapsible=icon]:hidden",
+                            SIDEBAR_ROW_ICON_ACTION_CLASS,
+                            SIDEBAR_ROW_ACTION_VISIBILITY_CLASS,
+                          )}
+                          data-sidebar="menu-action"
+                          data-testid={`hide-dm-${channel.name}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onHideDm(channel.id);
+                          }}
+                          type="button"
+                        >
+                          <X />
+                        </button>
+                      ) : null}
+                    </div>
                   </SidebarMenuItem>
                 );
 
                 // The shared menu always renders copy actions, so every row
                 // gets a context menu regardless of read/mute availability.
                 return (
-                  <ContextMenu key={channel.id}>
-                    <ContextMenuTrigger asChild>{menuItem}</ContextMenuTrigger>
-                    <ContextMenuContent>
-                      <ChannelContextMenuItems
-                        channel={channel}
-                        hasUnread={unreadChannelIds.has(channel.id)}
-                        isMuted={mutedChannelIds?.has(channel.id)}
-                        onMarkChannelRead={onMarkChannelRead}
-                        onMarkChannelUnread={onMarkChannelUnread}
-                        onMuteChannel={onMuteChannel}
-                        onUnmuteChannel={onUnmuteChannel}
-                      />
-                    </ContextMenuContent>
-                  </ContextMenu>
+                  <Fragment key={channel.id}>
+                    <ContextMenu>
+                      <ContextMenuTrigger asChild>
+                        {menuItem}
+                      </ContextMenuTrigger>
+                      <ContextMenuContent>
+                        <ChannelContextMenuItems
+                          channel={channel}
+                          hasUnread={unreadChannelIds.has(channel.id)}
+                          isMuted={mutedChannelIds?.has(channel.id)}
+                          onMarkChannelRead={onMarkChannelRead}
+                          onMarkChannelUnread={onMarkChannelUnread}
+                          onMuteChannel={onMuteChannel}
+                          onUnmuteChannel={onUnmuteChannel}
+                        />
+                      </ContextMenuContent>
+                    </ContextMenu>
+                    <SidebarAgentConversationChildren
+                      channelId={channel.id}
+                      conversations={agentConversationsByChannelId?.get(
+                        channel.id,
+                      )}
+                      isConversationViewActive={Boolean(
+                        isAgentConversationActive,
+                      )}
+                      onHideConversation={onHideAgentConversation}
+                      onSelectConversation={onSelectAgentConversation}
+                      selectedConversationId={selectedAgentConversationId}
+                    />
+                  </Fragment>
                 );
               })}
             </SidebarMenu>

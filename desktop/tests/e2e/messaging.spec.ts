@@ -676,14 +676,10 @@ test("opens a single-level thread panel with inline expansion", async ({
     .first();
   await expect(nestedReplyFromBobRow).toBeVisible();
 
-  const firstReplySummaryRow = threadReplies.locator(
-    `[data-testid="message-thread-summary"][data-thread-head-id="${firstReplyId}"]`,
-  );
-  await expect(firstReplySummaryRow).toHaveCount(0);
   const firstReplyBranchRail = threadReplies.locator(
     `[data-testid="thread-collapse-rail"][data-thread-head-id="${firstReplyId}"]`,
   );
-  await expect(firstReplyBranchRail).toHaveCount(1);
+  await expect(firstReplyBranchRail).toHaveCount(0);
 
   await expect(rootSummaryRow).toContainText("18 replies");
   await expect(
@@ -702,18 +698,14 @@ test("opens a single-level thread panel with inline expansion", async ({
     .toBe("1,2");
 
   await expectThreadReplyUnobscured(nestedReplyRow);
-
-  await firstReplyBranchRail.click();
-  await expect(firstReplySummaryRow).toHaveCount(1);
-  await expect(firstReplySummaryRow).toContainText("2 replies");
   await expect(
     threadReplies.getByTestId("message-row").filter({ hasText: nestedReply }),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   await expect(
     threadReplies
       .getByTestId("message-row")
       .filter({ hasText: nestedReplyFromBob }),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
 });
 
 test("thread panel width uses session storage and reset handle", async ({

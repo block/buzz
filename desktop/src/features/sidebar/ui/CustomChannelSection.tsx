@@ -18,6 +18,7 @@ import {
   StarOff,
   Trash2,
 } from "lucide-react";
+import { Fragment } from "react";
 
 import { toast } from "sonner";
 
@@ -38,6 +39,7 @@ import {
   SidebarMenu,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
+import type { AgentConversation } from "@/features/agents/agentConversations";
 import { ChannelMenuButton } from "@/features/sidebar/ui/SidebarSection";
 import {
   DraggableChannelRow,
@@ -45,6 +47,7 @@ import {
   DroppableUngroupedBody,
   SortableSectionShell,
 } from "@/features/sidebar/ui/SidebarDnd";
+import { SidebarAgentConversationChildren } from "@/features/sidebar/ui/SidebarAgentConversationChildren";
 import {
   SECTION_ACTION_VISIBILITY_CLASS,
   SECTION_ICON_BUTTON_CLASS,
@@ -322,6 +325,7 @@ function SectionHeaderActions({
 }
 
 export function ChannelGroupSection({
+  agentConversationsByChannelId,
   browseAriaLabel,
   createAriaLabel,
   draggable,
@@ -330,6 +334,7 @@ export function ChannelGroupSection({
   isCollapsed,
   isActiveChannel,
   activeWorkingByChannelId,
+  isAgentConversationActive,
   items,
   listTestId,
   onBrowseClick,
@@ -337,9 +342,12 @@ export function ChannelGroupSection({
   onMarkAllRead,
   onMarkChannelRead,
   onMarkChannelUnread,
+  onHideAgentConversation,
+  onSelectAgentConversation,
   onSelectChannel,
   onToggleCollapsed,
   selectedChannelId,
+  selectedAgentConversationId,
   title,
   unreadChannelCounts,
   unreadChannelIds,
@@ -356,6 +364,10 @@ export function ChannelGroupSection({
   onUnstarChannel,
   onLeaveChannel,
 }: {
+  agentConversationsByChannelId?: ReadonlyMap<
+    string,
+    readonly AgentConversation[]
+  >;
   browseAriaLabel?: string;
   createAriaLabel: string;
   draggable?: boolean;
@@ -363,6 +375,7 @@ export function ChannelGroupSection({
   isCollapsed: boolean;
   isActiveChannel: boolean;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
+  isAgentConversationActive?: boolean;
   items: Channel[];
   listTestId: string;
   onBrowseClick?: () => void;
@@ -372,9 +385,12 @@ export function ChannelGroupSection({
     lastMessageAt: string | null | undefined,
   ) => void;
   onMarkChannelUnread: (channelId: string) => void;
+  onHideAgentConversation?: (conversationId: string) => void;
+  onSelectAgentConversation?: (conversationId: string) => void;
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
+  selectedAgentConversationId?: string | null;
   title: string;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
@@ -399,59 +415,75 @@ export function ChannelGroupSection({
     items.length > 0 ? (
       <SidebarMenu data-testid={listTestId}>
         {items.map((channel) => (
-          <ContextMenu key={channel.id}>
-            <ContextMenuTrigger asChild>
-              <SidebarMenuItem className="content-visibility-auto-row">
-                {draggable ? (
-                  <DraggableChannelRow channelId={channel.id}>
-                    <ChannelMenuButton
-                      channel={channel}
-                      activeWorking={activeWorkingByChannelId?.get(channel.id)}
-                      hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
-                      isMuted={mutedChannelIds?.has(channel.id)}
-                      isActive={
-                        isActiveChannel && selectedChannelId === channel.id
-                      }
-                      onSelectChannel={onSelectChannel}
-                    />
-                  </DraggableChannelRow>
-                ) : (
-                  <ChannelMenuButton
-                    channel={channel}
-                    activeWorking={activeWorkingByChannelId?.get(channel.id)}
-                    hasUnread={unreadChannelIds.has(channel.id)}
-                    unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
-                    isMuted={mutedChannelIds?.has(channel.id)}
-                    isActive={
-                      isActiveChannel && selectedChannelId === channel.id
-                    }
-                    onSelectChannel={onSelectChannel}
-                  />
-                )}
-              </SidebarMenuItem>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ChannelContextMenuItems
-                channel={channel}
-                hasUnread={unreadChannelIds.has(channel.id)}
-                isMuted={mutedChannelIds?.has(channel.id)}
-                isStarred={starredChannelIds?.has(channel.id)}
-                sections={sections}
-                assignments={assignments}
-                onMarkChannelRead={onMarkChannelRead}
-                onMarkChannelUnread={onMarkChannelUnread}
-                onMuteChannel={onMuteChannel}
-                onUnmuteChannel={onUnmuteChannel}
-                onStarChannel={onStarChannel}
-                onUnstarChannel={onUnstarChannel}
-                onAssignChannel={onAssignChannel}
-                onUnassignChannel={onUnassignChannel}
-                onCreateSectionForChannel={onCreateSectionForChannel}
-                onLeaveChannel={onLeaveChannel}
-              />
-            </ContextMenuContent>
-          </ContextMenu>
+          <Fragment key={channel.id}>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
+                <SidebarMenuItem className="content-visibility-auto-row">
+                  <div className="relative">
+                    {draggable ? (
+                      <DraggableChannelRow channelId={channel.id}>
+                        <ChannelMenuButton
+                          channel={channel}
+                          activeWorking={activeWorkingByChannelId?.get(
+                            channel.id,
+                          )}
+                          hasUnread={unreadChannelIds.has(channel.id)}
+                          unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
+                          isMuted={mutedChannelIds?.has(channel.id)}
+                          isActive={
+                            isActiveChannel && selectedChannelId === channel.id
+                          }
+                          onSelectChannel={onSelectChannel}
+                        />
+                      </DraggableChannelRow>
+                    ) : (
+                      <ChannelMenuButton
+                        channel={channel}
+                        activeWorking={activeWorkingByChannelId?.get(
+                          channel.id,
+                        )}
+                        hasUnread={unreadChannelIds.has(channel.id)}
+                        unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
+                        isMuted={mutedChannelIds?.has(channel.id)}
+                        isActive={
+                          isActiveChannel && selectedChannelId === channel.id
+                        }
+                        onSelectChannel={onSelectChannel}
+                      />
+                    )}
+                  </div>
+                </SidebarMenuItem>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ChannelContextMenuItems
+                  channel={channel}
+                  hasUnread={unreadChannelIds.has(channel.id)}
+                  isMuted={mutedChannelIds?.has(channel.id)}
+                  isStarred={starredChannelIds?.has(channel.id)}
+                  sections={sections}
+                  assignments={assignments}
+                  onMarkChannelRead={onMarkChannelRead}
+                  onMarkChannelUnread={onMarkChannelUnread}
+                  onMuteChannel={onMuteChannel}
+                  onUnmuteChannel={onUnmuteChannel}
+                  onStarChannel={onStarChannel}
+                  onUnstarChannel={onUnstarChannel}
+                  onAssignChannel={onAssignChannel}
+                  onUnassignChannel={onUnassignChannel}
+                  onCreateSectionForChannel={onCreateSectionForChannel}
+                  onLeaveChannel={onLeaveChannel}
+                />
+              </ContextMenuContent>
+            </ContextMenu>
+            <SidebarAgentConversationChildren
+              channelId={channel.id}
+              conversations={agentConversationsByChannelId?.get(channel.id)}
+              isConversationViewActive={Boolean(isAgentConversationActive)}
+              onHideConversation={onHideAgentConversation}
+              onSelectConversation={onSelectAgentConversation}
+              selectedConversationId={selectedAgentConversationId}
+            />
+          </Fragment>
         ))}
       </SidebarMenu>
     ) : null;
@@ -503,13 +535,16 @@ export function ChannelGroupSection({
 }
 
 export function CustomChannelSection({
+  agentConversationsByChannelId,
   section,
   channels,
   hasUnread,
   isCollapsed,
   isActiveChannel,
   activeWorkingByChannelId,
+  isAgentConversationActive,
   selectedChannelId,
+  selectedAgentConversationId,
   unreadChannelCounts,
   unreadChannelIds,
   sections,
@@ -521,6 +556,8 @@ export function CustomChannelSection({
   onMarkChannelRead,
   onMarkChannelUnread,
   onMarkSectionRead,
+  onHideAgentConversation,
+  onSelectAgentConversation,
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
@@ -536,13 +573,19 @@ export function CustomChannelSection({
   onUnstarChannel,
   onLeaveChannel,
 }: {
+  agentConversationsByChannelId?: ReadonlyMap<
+    string,
+    readonly AgentConversation[]
+  >;
   section: ChannelSection;
   channels: Channel[];
   hasUnread: boolean;
   isCollapsed: boolean;
   isActiveChannel: boolean;
   activeWorkingByChannelId?: ReadonlyMap<string, ActiveChannelTurnSummary>;
+  isAgentConversationActive?: boolean;
   selectedChannelId: string | null;
+  selectedAgentConversationId?: string | null;
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   sections: ChannelSection[];
@@ -557,6 +600,8 @@ export function CustomChannelSection({
   ) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkSectionRead: () => void;
+  onHideAgentConversation?: (conversationId: string) => void;
+  onSelectAgentConversation?: (conversationId: string) => void;
   onAssignChannel: (channelId: string, sectionId: string) => void;
   onUnassignChannel: (channelId: string) => void;
   onCreateSectionForChannel: (channelId: string) => void;
@@ -685,52 +730,68 @@ export function CustomChannelSection({
                 {channels.length > 0 ? (
                   <SidebarMenu>
                     {channels.map((channel) => (
-                      <ContextMenu key={channel.id}>
-                        <ContextMenuTrigger asChild>
-                          <SidebarMenuItem>
-                            <DraggableChannelRow channelId={channel.id}>
-                              <ChannelMenuButton
-                                channel={channel}
-                                activeWorking={activeWorkingByChannelId?.get(
-                                  channel.id,
-                                )}
-                                hasUnread={unreadChannelIds.has(channel.id)}
-                                unreadCount={
-                                  unreadChannelCounts.get(channel.id) ?? 0
-                                }
-                                isMuted={mutedChannelIds?.has(channel.id)}
-                                isActive={
-                                  isActiveChannel &&
-                                  selectedChannelId === channel.id
-                                }
-                                onSelectChannel={onSelectChannel}
-                              />
-                            </DraggableChannelRow>
-                          </SidebarMenuItem>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent>
-                          <ChannelContextMenuItems
-                            channel={channel}
-                            hasUnread={unreadChannelIds.has(channel.id)}
-                            isMuted={mutedChannelIds?.has(channel.id)}
-                            isStarred={starredChannelIds?.has(channel.id)}
-                            sections={sections}
-                            assignments={assignments}
-                            onMarkChannelRead={onMarkChannelRead}
-                            onMarkChannelUnread={onMarkChannelUnread}
-                            onMuteChannel={onMuteChannel}
-                            onUnmuteChannel={onUnmuteChannel}
-                            onStarChannel={onStarChannel}
-                            onUnstarChannel={onUnstarChannel}
-                            onAssignChannel={onAssignChannel}
-                            onUnassignChannel={onUnassignChannel}
-                            onCreateSectionForChannel={
-                              onCreateSectionForChannel
-                            }
-                            onLeaveChannel={onLeaveChannel}
-                          />
-                        </ContextMenuContent>
-                      </ContextMenu>
+                      <Fragment key={channel.id}>
+                        <ContextMenu>
+                          <ContextMenuTrigger asChild>
+                            <SidebarMenuItem>
+                              <div className="relative">
+                                <DraggableChannelRow channelId={channel.id}>
+                                  <ChannelMenuButton
+                                    channel={channel}
+                                    activeWorking={activeWorkingByChannelId?.get(
+                                      channel.id,
+                                    )}
+                                    hasUnread={unreadChannelIds.has(channel.id)}
+                                    unreadCount={
+                                      unreadChannelCounts.get(channel.id) ?? 0
+                                    }
+                                    isMuted={mutedChannelIds?.has(channel.id)}
+                                    isActive={
+                                      isActiveChannel &&
+                                      selectedChannelId === channel.id
+                                    }
+                                    onSelectChannel={onSelectChannel}
+                                  />
+                                </DraggableChannelRow>
+                              </div>
+                            </SidebarMenuItem>
+                          </ContextMenuTrigger>
+                          <ContextMenuContent>
+                            <ChannelContextMenuItems
+                              channel={channel}
+                              hasUnread={unreadChannelIds.has(channel.id)}
+                              isMuted={mutedChannelIds?.has(channel.id)}
+                              isStarred={starredChannelIds?.has(channel.id)}
+                              sections={sections}
+                              assignments={assignments}
+                              onMarkChannelRead={onMarkChannelRead}
+                              onMarkChannelUnread={onMarkChannelUnread}
+                              onMuteChannel={onMuteChannel}
+                              onUnmuteChannel={onUnmuteChannel}
+                              onStarChannel={onStarChannel}
+                              onUnstarChannel={onUnstarChannel}
+                              onAssignChannel={onAssignChannel}
+                              onUnassignChannel={onUnassignChannel}
+                              onCreateSectionForChannel={
+                                onCreateSectionForChannel
+                              }
+                              onLeaveChannel={onLeaveChannel}
+                            />
+                          </ContextMenuContent>
+                        </ContextMenu>
+                        <SidebarAgentConversationChildren
+                          channelId={channel.id}
+                          conversations={agentConversationsByChannelId?.get(
+                            channel.id,
+                          )}
+                          isConversationViewActive={Boolean(
+                            isAgentConversationActive,
+                          )}
+                          onHideConversation={onHideAgentConversation}
+                          onSelectConversation={onSelectAgentConversation}
+                          selectedConversationId={selectedAgentConversationId}
+                        />
+                      </Fragment>
                     ))}
                   </SidebarMenu>
                 ) : null}
