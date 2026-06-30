@@ -676,7 +676,8 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
-/// Validate kind:40003 edit ownership — event.pubkey must match target's effective author.
+/// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
+/// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
     community_id: CommunityId,
     event: &Event,
@@ -724,7 +725,15 @@ async fn validate_edit_ownership(
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
     let actor = event.pubkey.to_bytes().to_vec();
     if author != actor {
-        return Err("must be event author to edit".to_string());
+        // Allow the owning human to edit messages authored by their agent.
+        let is_owner = state
+            .db
+            .is_agent_owner(community_id, &author, &actor)
+            .await
+            .map_err(|e| format!("db error checking agent ownership: {e}"))?;
+        if !is_owner {
+            return Err("must be event author to edit".to_string());
+        }
     }
     Ok(())
 }
