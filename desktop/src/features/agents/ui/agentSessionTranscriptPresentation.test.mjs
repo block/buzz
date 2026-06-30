@@ -47,7 +47,7 @@ test("getActivityHeadline formats tool titles and assistant text", () => {
   assert.equal(getActivityHeadline(makeMessage({ text: "   " })), "Responding");
 });
 
-test("isMeaningfulItem ignores lifecycle noise and metadata", () => {
+test("isMeaningfulItem ignores lifecycle noise and raw JSON-RPC metadata", () => {
   assert.equal(
     isMeaningfulItem({
       id: "life:1",
@@ -57,16 +57,45 @@ test("isMeaningfulItem ignores lifecycle noise and metadata", () => {
       timestamp: baseTimestamp,
     }),
     false,
+    "turn started is lifecycle noise → not meaningful",
   );
   assert.equal(
     isMeaningfulItem({
-      id: "meta:1",
+      id: "meta:raw",
       type: "metadata",
+      renderClass: "raw-rail",
+      title: "Raw ACP payload",
+      sections: [],
+      timestamp: baseTimestamp,
+      acpSource: "raw_json_rpc",
+    }),
+    false,
+    "raw_json_rpc metadata is infrastructure noise → not meaningful",
+  );
+  assert.equal(
+    isMeaningfulItem({
+      id: "meta:ctx",
+      type: "metadata",
+      renderClass: "raw-rail",
       title: "Prompt context",
       sections: [],
       timestamp: baseTimestamp,
+      acpSource: "session/prompt:context",
     }),
-    false,
+    true,
+    "prompt context metadata is semantic → meaningful",
+  );
+  assert.equal(
+    isMeaningfulItem({
+      id: "meta:sys",
+      type: "metadata",
+      renderClass: "raw-rail",
+      title: "System prompt",
+      sections: [],
+      timestamp: baseTimestamp,
+    }),
+    true,
+    "system prompt metadata (no acpSource) is semantic → meaningful",
   );
   assert.equal(
     isMeaningfulItem({

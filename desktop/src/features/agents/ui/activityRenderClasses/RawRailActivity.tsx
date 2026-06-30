@@ -17,17 +17,18 @@ export function RawRailActivity(props: ActivityRenderClassItemProps) {
     return null;
   }
 
+  const sectionCount = props.item.sections.length;
+  const sectionSuffix = `${sectionCount} section${sectionCount === 1 ? "" : "s"}`;
+
   return (
     <ActivityRow
       testId="transcript-metadata-item"
       title={formatTranscriptTimestampTitle(props.item.timestamp)}
     >
       <ActivityRowLabel
-        object={`${props.item.sections.length} raw section${
-          props.item.sections.length === 1 ? "" : "s"
-        }`}
+        object={sectionSuffix}
         openToneScope="tool"
-        verb="Captured"
+        verb={props.item.title}
       />
       <ActivityRowContent className="flex flex-col gap-3 py-2">
         {props.item.sections.map((section) => (

@@ -35,6 +35,16 @@ export type TranscriptState = {
   activeMessageKey: Map<string, string>;
   sealedKeys: Set<string>;
   triggeringEventIdsByTurn: Map<string, string[]>;
+  /**
+   * Maps JSON-RPC request id → { itemId, optionNames }.
+   * Populated when a `session/request_permission` request is ingested so the
+   * matching response (which carries the same JSON-RPC id, no `method`) can
+   * correlate and append the outcome to the lifecycle item.
+   */
+  pendingPermissions: Map<
+    string,
+    { itemId: string; optionNames: Map<string, string> }
+  >;
   continuationSeq: number;
   latestSessionId: string | null;
 };
@@ -46,6 +56,7 @@ export function createEmptyTranscriptState(): TranscriptState {
     activeMessageKey: new Map(),
     sealedKeys: new Set(),
     triggeringEventIdsByTurn: new Map(),
+    pendingPermissions: new Map(),
     continuationSeq: 0,
     latestSessionId: null,
   };
@@ -62,6 +73,10 @@ type TranscriptDraft = {
   activeMessageKey: Map<string, string>;
   sealedKeys: Set<string>;
   triggeringEventIdsByTurn: Map<string, string[]>;
+  pendingPermissions: Map<
+    string,
+    { itemId: string; optionNames: Map<string, string> }
+  >;
   continuationSeq: number;
   latestSessionId: string | null;
   changed: boolean;
@@ -74,6 +89,7 @@ function draftFrom(state: TranscriptState): TranscriptDraft {
     activeMessageKey: state.activeMessageKey,
     sealedKeys: state.sealedKeys,
     triggeringEventIdsByTurn: state.triggeringEventIdsByTurn,
+    pendingPermissions: state.pendingPermissions,
     continuationSeq: state.continuationSeq,
     latestSessionId: state.latestSessionId,
     changed: false,
@@ -178,9 +194,24 @@ function describePermissionRequest(payload: Record<string, unknown>) {
   if (title !== "Permission requested") detail.push(title);
   if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
   if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
+
+  // Build optionId → kind map for outcome labeling on the response.
+  const optionNames = new Map<string, string>();
+  if (Array.isArray(params.options)) {
+    for (const option of params.options) {
+      const record = asRecord(option);
+      const optionId = asString(record.optionId);
+      const kind = asString(record.kind);
+      if (optionId && kind) {
+        optionNames.set(optionId, kind);
+      }
+    }
+  }
+
   return {
     title,
     text: detail.join("\n"),
+    optionNames,
     descriptor: {
       renderClass: "permission" as const,
       label: "Permission requested",
@@ -193,6 +224,28 @@ function describePermissionRequest(payload: Record<string, unknown>) {
       groupKey: "permission:request",
     },
   };
+}
+
+/**
+ * Format a human-readable outcome label from a permission response.
+ * kind values from ACP: allow_once, allow_always, reject_once, reject_always.
+ * "reject_*" kinds are denials; anything else that is selected is an approval.
+ */
+function describePermissionOutcome(
+  outcome: string,
+  optionId: string | null,
+  optionNames: Map<string, string>,
+): string {
+  if (outcome === "cancelled") {
+    return "Cancelled";
+  }
+  if (outcome === "selected" && optionId) {
+    const kind = optionNames.get(optionId) ?? optionId;
+    const isDenial = kind.startsWith("reject");
+    const verb = isDenial ? "Denied" : "Approved";
+    return `${verb} (${kind})`;
+  }
+  return outcome;
 }
 
 function describeFreeformStatus(payload: Record<string, unknown>) {
@@ -677,9 +730,10 @@ export function processTranscriptEvent(
 
     if (method === "session/request_permission") {
       const request = describePermissionRequest(payload);
+      const itemId = `permission:${ch}:${event.turnId ?? event.seq}`;
       upsertLifecycleItem(
         d,
-        `permission:${ch}:${event.turnId ?? event.seq}`,
+        itemId,
         "permission",
         "Permission requested",
         request.text,
@@ -688,6 +742,40 @@ export function processTranscriptEvent(
         "permission_request",
         request.descriptor,
       );
+      // Index by JSON-RPC id so the response (acp_write with result.outcome,
+      // no method) can correlate by id rather than by turn/seq.
+      const requestId = asString(payload.id);
+      if (requestId) {
+        d.pendingPermissions = new Map(d.pendingPermissions);
+        d.pendingPermissions.set(requestId, {
+          itemId,
+          optionNames: request.optionNames,
+        });
+      }
+    } else if (event.kind === "acp_write" && !method) {
+      // Permission response: {"id": <same as request>, "result": {"outcome": {...}}}
+      const responseId = asString(payload.id);
+      const result = asRecord(asRecord(payload.result).outcome);
+      const outcomeKind = asString(result.outcome);
+      const pending = responseId ? d.pendingPermissions.get(responseId) : null;
+      if (pending && outcomeKind) {
+        const optionId = asString(result.optionId) ?? null;
+        const outcomeText = describePermissionOutcome(
+          outcomeKind,
+          optionId,
+          pending.optionNames,
+        );
+        const existing = d.itemsById.get(pending.itemId);
+        if (existing?.type === "lifecycle") {
+          replaceItem(d, pending.itemId, {
+            ...existing,
+            text: joinLifecycleText(existing.text, outcomeText),
+          });
+          // Remove from pending map — the outcome is now recorded.
+          d.pendingPermissions = new Map(d.pendingPermissions);
+          d.pendingPermissions.delete(responseId);
+        }
+      }
     } else if (event.kind === "acp_write" && method === "session/prompt") {
       const promptText = extractPromptText(payload);
       if (promptText) {
@@ -918,6 +1006,7 @@ export function processTranscriptEvent(
     activeMessageKey: d.activeMessageKey,
     sealedKeys: d.sealedKeys,
     triggeringEventIdsByTurn: d.triggeringEventIdsByTurn,
+    pendingPermissions: d.pendingPermissions,
     continuationSeq: d.continuationSeq,
     latestSessionId: d.latestSessionId,
   };

@@ -639,3 +639,100 @@ test("buildTranscript separates repeated lifecycle text", () => {
   assert.equal(item.type, "lifecycle");
   assert.equal(item.text, "recovered: first\nrecovered: second");
 });
+
+// --- permission outcome (Fix #3) ---
+
+function makePermissionRequest(seq, requestId, turnId = "turn-1") {
+  return {
+    seq,
+    timestamp: "2026-06-30T10:00:00.000Z",
+    kind: "acp_read",
+    agentIndex: 0,
+    channelId: "channel-1",
+    sessionId: "session-1",
+    turnId,
+    payload: {
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "session/request_permission",
+      params: {
+        title: "Confirm push",
+        toolCallId: "tool-1",
+        options: [
+          { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+          { optionId: "reject_once", kind: "reject_once", name: "Reject" },
+        ],
+      },
+    },
+  };
+}
+
+function makePermissionResponse(seq, requestId, outcome, optionId = null) {
+  const resultOutcome =
+    outcome === "selected" ? { outcome: "selected", optionId } : { outcome };
+  return {
+    seq,
+    timestamp: "2026-06-30T10:00:01.000Z",
+    kind: "acp_write",
+    agentIndex: 0,
+    channelId: "channel-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    payload: {
+      jsonrpc: "2.0",
+      id: requestId,
+      result: { outcome: resultOutcome },
+    },
+  };
+}
+
+test("buildTranscript appends Approved outcome when allow_once is selected", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-1"),
+    makePermissionResponse(2, "req-1", "selected", "allow_once"),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "permission");
+  assert.match(item.text, /Approved \(allow_once\)/);
+});
+
+test("buildTranscript appends Denied outcome when reject_once is selected", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-2"),
+    makePermissionResponse(2, "req-2", "selected", "reject_once"),
+  ]);
+
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.match(item.text, /Denied \(reject_once\)/);
+});
+
+test("buildTranscript appends Cancelled outcome on cancelled response", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-3"),
+    makePermissionResponse(2, "req-3", "cancelled"),
+  ]);
+
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.match(item.text, /Cancelled/);
+});
+
+test("buildTranscript no-ops on a permission response with an unmatched id", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-4"),
+    makePermissionResponse(2, "req-WRONG", "selected", "allow_once"),
+  ]);
+
+  // The permission item exists but has no outcome appended — the mismatched
+  // response id must not crash or attach to the wrong item.
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "permission");
+  assert.doesNotMatch(item.text ?? "", /Approved/);
+  assert.doesNotMatch(item.text ?? "", /Denied/);
+});
