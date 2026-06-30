@@ -3,7 +3,12 @@ import { Octagon, Settings, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
-import { DEBUG_AGENT_ACTIVITY_FIXTURE } from "@/features/agents/ui/debugAgentActivityFixture";
+import {
+  DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL,
+  DEBUG_AGENT_ACTIVITY_AGENT_NAME,
+  DEBUG_AGENT_ACTIVITY_FIXTURE,
+  DEBUG_AGENT_ACTIVITY_PROFILES,
+} from "@/features/agents/ui/debugAgentActivityFixture";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
@@ -83,6 +88,27 @@ export function AgentSessionThreadPanel({
       setShowDebugRenderClasses(checked);
     },
     [],
+  );
+  const debugProfiles = React.useMemo(
+    () =>
+      showDebugRenderClasses
+        ? {
+            ...(profiles ?? {}),
+            ...DEBUG_AGENT_ACTIVITY_PROFILES,
+          }
+        : profiles,
+    [profiles, showDebugRenderClasses],
+  );
+  const debugAgent = React.useMemo(
+    () =>
+      showDebugRenderClasses
+        ? {
+            ...agent,
+            avatarUrl: DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL,
+            name: DEBUG_AGENT_ACTIVITY_AGENT_NAME,
+          }
+        : agent,
+    [agent, showDebugRenderClasses],
   );
 
   async function handleInterruptTurn() {
@@ -249,7 +275,7 @@ export function AgentSessionThreadPanel({
         panelPadding
       >
         <ManagedAgentSessionPanel
-          agent={agent}
+          agent={debugAgent}
           channelId={channel?.id ?? null}
           className="border-0 bg-transparent p-0 shadow-none"
           emptyDescription={
@@ -257,7 +283,7 @@ export function AgentSessionThreadPanel({
               ? `Mention ${agent.name} in the channel to see its work here.`
               : `Mention ${agent.name} in any channel to see its work here.`
           }
-          profiles={profiles}
+          profiles={debugProfiles}
           rawLayout="exclusive"
           showHeader={false}
           showRaw={showRawFeed}
