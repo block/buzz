@@ -6,7 +6,10 @@ import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { TranscriptItem } from "./agentSessionTypes";
 import { getBuzzToolInfo } from "./agentSessionToolCatalog";
-import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import {
+  buildCompactToolSummary,
+  type CompactFileEditSummary,
+} from "./agentSessionToolSummary";
 import {
   formatCodeValue,
   getToolDurationDisplay,
@@ -60,6 +63,7 @@ export function ToolItem({
           ) : (
             <CompactToolSummaryRow
               duration={duration}
+              fileEditSummary={compactSummary.fileEditSummary}
               preview={compactSummary.preview}
               thumbnailSrc={compactSummary.thumbnailSrc}
               label={compactSummary.label}
@@ -98,11 +102,13 @@ function resolveImageSrc(source: string): string {
 
 function CompactToolSummaryRow({
   duration,
+  fileEditSummary,
   label,
   preview,
   thumbnailSrc,
 }: {
   duration: string | null;
+  fileEditSummary: CompactFileEditSummary | null;
   label: string;
   preview: string | null;
   thumbnailSrc: string | null;
@@ -116,10 +122,14 @@ function CompactToolSummaryRow({
 
   return (
     <>
-      <span className={cn("shrink-0 text-sm font-semibold", mutedTone)}>
-        {label}
-      </span>
-      {resolvedThumbnail ? (
+      {fileEditSummary ? (
+        <CompactFileEditSummaryView summary={fileEditSummary} />
+      ) : (
+        <span className={cn("shrink-0 text-sm font-semibold", mutedTone)}>
+          {label}
+        </span>
+      )}
+      {!fileEditSummary && resolvedThumbnail ? (
         <img
           alt=""
           className="h-5 w-auto max-w-12 shrink-0 rounded-sm object-cover"
@@ -129,7 +139,7 @@ function CompactToolSummaryRow({
           src={resolvedThumbnail}
           title={preview ?? undefined}
         />
-      ) : preview ? (
+      ) : !fileEditSummary && preview ? (
         <span
           className={cn("min-w-0 max-w-48 truncate text-sm", mutedTone)}
           title={preview}
@@ -147,6 +157,32 @@ function CompactToolSummaryRow({
         )}
       />
     </>
+  );
+}
+
+function CompactFileEditSummaryView({
+  summary,
+}: {
+  summary: CompactFileEditSummary;
+}) {
+  return (
+    <span
+      className="inline-flex min-w-0 max-w-72 items-center gap-1.5"
+      title={summary.path}
+    >
+      <span className="shrink-0 text-sm font-semibold text-muted-foreground/50 group-open:text-muted-foreground/70">
+        Edited
+      </span>
+      <span className="min-w-0 truncate text-sm font-semibold text-muted-foreground/80 group-open:text-muted-foreground">
+        {summary.filename}
+      </span>
+      <span className="shrink-0 text-xs font-semibold text-green-600 dark:text-green-400">
+        +{summary.additions}
+      </span>
+      <span className="shrink-0 text-xs font-semibold text-red-500 dark:text-red-400">
+        -{summary.deletions}
+      </span>
+    </span>
   );
 }
 

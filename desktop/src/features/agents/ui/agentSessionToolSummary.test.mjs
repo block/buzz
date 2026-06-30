@@ -185,3 +185,78 @@ test("buildCompactToolSummary promotes file edits and todos to first-class class
     "plan",
   );
 });
+
+test("buildCompactToolSummary formats file edits as filename plus diff stats", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "str_replace",
+      args: { path: "desktop/src/app/App.tsx" },
+      result: [
+        "Replaced 1 occurrence.",
+        "",
+        "--- a/desktop/src/app/App.tsx",
+        "+++ b/desktop/src/app/App.tsx",
+        "@@",
+        "-<Switch />",
+        "+<DropdownMenuCheckboxItem />",
+        "+<DropdownMenuSeparator />",
+      ].join("\n"),
+    }),
+  );
+
+  assert.equal(summary.kind, "file-edit");
+  assert.equal(summary.preview, "App.tsx");
+  assert.deepEqual(summary.fileEditSummary, {
+    path: "desktop/src/app/App.tsx",
+    filename: "App.tsx",
+    additions: 2,
+    deletions: 1,
+  });
+});
+
+test("buildCompactToolSummary counts Shiki diff markers for file edit stats", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "str_replace",
+      args: { path: "desktop/src/app/App.tsx" },
+      result: [
+        "const keep = true;",
+        "const next = true; // [!code ++]",
+        "const old = true; // [!code --]",
+      ].join("\n"),
+    }),
+  );
+
+  assert.deepEqual(summary.fileEditSummary, {
+    path: "desktop/src/app/App.tsx",
+    filename: "App.tsx",
+    additions: 1,
+    deletions: 1,
+  });
+});
+
+test("buildCompactToolSummary parses file edit stats from shell JSON stdout", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "str_replace",
+      args: { path: "desktop/src/app/App.tsx" },
+      result: JSON.stringify({
+        stdout: [
+          "diff --git a/desktop/src/app/App.tsx b/desktop/src/app/App.tsx",
+          "--- a/desktop/src/app/App.tsx",
+          "+++ b/desktop/src/app/App.tsx",
+          "@@",
+          "-old",
+          "+new",
+        ].join("\n"),
+      }),
+    }),
+  );
+
+  assert.deepEqual(summary.fileEditSummary, {
+    path: "desktop/src/app/App.tsx",
+    filename: "App.tsx",
+    additions: 1,
+    deletions: 1,
+  });
+});
