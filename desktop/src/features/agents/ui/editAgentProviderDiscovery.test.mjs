@@ -417,9 +417,9 @@ function computeProviderCapability({
   // Inherit path: command match first, then id-based fallback for command:null
   // entries (known runtime with missing local adapter).
   const effectiveRuntimeIdForSubmit = inheritHarness
-    ? ((runtimes.find((r) => r.command?.trim() === agentCommand.trim())?.id) ??
-        (runtimes.find((r) => r.id === agentCommand.trim())?.id) ??
-        "")
+    ? (runtimes.find((r) => r.command?.trim() === agentCommand.trim())?.id ??
+      runtimes.find((r) => r.id === agentCommand.trim())?.id ??
+      "")
     : (selectedRuntime?.id ?? selectedRuntimeId);
 
   // Step 2: look up the catalog entry by id (not command) and classify.
@@ -443,11 +443,7 @@ function computeCanPersistAtSubmit(args) {
 }
 
 // Helper to simulate the full provider submit branch for the tri-state.
-function computeProviderUpdate({
-  capability,
-  savedProvider,
-  currentProvider,
-}) {
+function computeProviderUpdate({ capability, savedProvider, currentProvider }) {
   const normalizedProvider = currentProvider?.trim() || null;
   if (capability === "capable") {
     return normalizedProvider !== (savedProvider ?? null)
@@ -840,5 +836,160 @@ test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () 
     providerUpdate,
     undefined,
     "no-op save on inherited buzz-agent (loaded catalog) must omit provider",
+  );
+});
+
+// ── Bug A fix: inherited-runtime (short-name agentCommand) seeds selectedRuntimeId
+//              correctly via id-fallback when catalog command is the resolved path
+//
+// Problem: buzz-agent stores agentCommand="buzz-agent" (short name) while the
+// catalog entry has command="/Applications/Buzz.app/.../buzz-agent" (resolved path).
+// Command-based matching fails (short name ≠ full path), so selectedRuntimeId
+// stayed "custom" → selectedRuntime=undefined → canDiscoverModelOptions=false →
+// discovery never fired for inherited agents.
+//
+// Fix: both seeding spots (open-effect and catalog-arrival effect) now fall back
+// to id-based matching when command-path matching misses — same id-fallback used
+// by effectiveRuntimeIdForSubmit.
+
+// Helper mirrors the fixed seeding logic from EditAgentDialog.tsx open-effect /
+// catalog-arrival effect.
+function deriveSelectedRuntimeId(agentCommand, runtimes) {
+  const matched =
+    runtimes.find((r) => r.command?.trim() === agentCommand.trim()) ??
+    runtimes.find((r) => r.id === agentCommand.trim());
+  return matched ? matched.id : "custom";
+}
+
+test("editAgent_bugA_inheritedShortName_resolvesViaIdFallback", () => {
+  // The core regression: agentCommand is the short name "buzz-agent" but the
+  // catalog's command is the resolved binary path. Command match fails; id
+  // fallback must rescue it.
+
+  const agentCommand = "buzz-agent"; // short name stored by effective_agent_command
+  const runtimes = [
+    {
+      id: "buzz-agent",
+      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent", // resolved path
+      availability: "available",
+      defaultArgs: [],
+    },
+    {
+      id: "claude",
+      command: "/usr/local/bin/claude-agent-acp",
+      availability: "available",
+      defaultArgs: [],
+    },
+  ];
+
+  const selectedRuntimeId = deriveSelectedRuntimeId(agentCommand, runtimes);
+  assert.equal(
+    selectedRuntimeId,
+    "buzz-agent",
+    "short-name agentCommand must resolve to buzz-agent id via id-fallback when command path differs",
+  );
+});
+
+test("editAgent_bugA_inheritedShortName_commandMatchStillWinsWhenPresent", () => {
+  // Command-path match must still win when it succeeds (no regression for the
+  // explicit-pin path where agentCommand IS the full resolved path).
+
+  const agentCommand = "/usr/local/bin/buzz-agent"; // full path (explicit pin)
+  const runtimes = [
+    {
+      id: "buzz-agent",
+      command: "/usr/local/bin/buzz-agent",
+      availability: "available",
+      defaultArgs: [],
+    },
+  ];
+
+  const selectedRuntimeId = deriveSelectedRuntimeId(agentCommand, runtimes);
+  assert.equal(
+    selectedRuntimeId,
+    "buzz-agent",
+    "command-path match must still win when agentCommand equals catalog command",
+  );
+});
+
+test("editAgent_bugA_inheritedShortName_discoveryGatePasses", () => {
+  // Once selectedRuntimeId is correctly resolved to "buzz-agent" via id-fallback,
+  // selectedRuntime resolves to the available catalog entry, and the discovery gate
+  // (canDiscoverModelOptions) passes so the model list populates.
+  //
+  // Mirrors usePersonaModelDiscovery's canDiscoverModelOptions logic:
+  //   open && modelFieldVisible && selectedRuntime?.availability === "available"
+  //   && discoveryAgentCommand !== null && ...
+
+  const agentCommand = "buzz-agent"; // short name
+  const runtimes = [
+    {
+      id: "buzz-agent",
+      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+      availability: "available",
+      defaultArgs: [],
+    },
+  ];
+
+  // Step 1: derive selectedRuntimeId (the fix).
+  const selectedRuntimeId = deriveSelectedRuntimeId(agentCommand, runtimes);
+  // Step 2: resolve selectedRuntime from the catalog.
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
+  // Step 3: derive discoveryAgentCommand (mirrors usePersonaModelDiscovery:85-87).
+  const discoveryAgentCommand = selectedRuntime?.command?.trim()
+    ? selectedRuntime.command
+    : null;
+  // Step 4: evaluate the discovery gate (mirrors :88-93, simplified).
+  const open = true;
+  const modelFieldVisible = true;
+  const isCustomProviderEditing = false;
+  const trimmedProvider = "databricks_v2";
+  const canDiscoverModelOptions =
+    open &&
+    modelFieldVisible &&
+    selectedRuntime?.availability === "available" &&
+    discoveryAgentCommand !== null &&
+    (!isCustomProviderEditing || trimmedProvider.length > 0);
+
+  assert.equal(
+    selectedRuntimeId,
+    "buzz-agent",
+    "id-fallback must resolve selectedRuntimeId to buzz-agent",
+  );
+  assert.ok(
+    selectedRuntime !== undefined,
+    "selectedRuntime must resolve once selectedRuntimeId is correct",
+  );
+  assert.equal(
+    discoveryAgentCommand,
+    "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+    "discoveryAgentCommand must be the resolved path from the catalog entry",
+  );
+  assert.equal(
+    canDiscoverModelOptions,
+    true,
+    "discovery gate must pass for inherited buzz-agent with databricks_v2 provider once id-fallback resolves the runtime",
+  );
+});
+
+test("editAgent_bugA_unknownCommandStillFallsBackToCustom", () => {
+  // An agentCommand that matches neither catalog command nor catalog id must
+  // still produce "custom" — the id-fallback must not introduce false positives.
+
+  const agentCommand = "/some/custom/binary"; // not in catalog
+  const runtimes = [
+    {
+      id: "buzz-agent",
+      command: "/Applications/Buzz.app/Contents/MacOS/buzz-agent",
+      availability: "available",
+      defaultArgs: [],
+    },
+  ];
+
+  const selectedRuntimeId = deriveSelectedRuntimeId(agentCommand, runtimes);
+  assert.equal(
+    selectedRuntimeId,
+    "custom",
+    "unknown command/id must still fall back to 'custom'",
   );
 });

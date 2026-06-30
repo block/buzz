@@ -149,9 +149,13 @@ export function EditAgentDialog({
       // If the catalog hasn't arrived yet, the catalog-arrival effect below
       // will re-derive once it does (guarded by runtimeTouched).
       runtimeTouched.current = false;
-      const matched = runtimes.find(
-        (r) => r.command?.trim() === agent.agentCommand.trim(),
-      );
+      // Match by command path first (explicit pins store the resolved path).
+      // Fall back to id-match for agents where agentCommand is the short name
+      // (e.g. "buzz-agent") while the catalog stores the resolved binary path —
+      // the same id-fallback used in effectiveRuntimeIdForSubmit.
+      const matched =
+        runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
+        runtimes.find((r) => r.id === agent.agentCommand.trim());
       setSelectedRuntimeId(matched ? matched.id : "custom");
       updateMutation.reset();
     }
@@ -167,9 +171,11 @@ export function EditAgentDialog({
     if (!open || runtimeTouched.current || runtimes.length === 0) {
       return;
     }
-    const matched = runtimes.find(
-      (r) => r.command?.trim() === agent.agentCommand.trim(),
-    );
+    // Same dual-match as the open-effect: command path first, then id fallback
+    // for agents whose agentCommand is the short name (e.g. "buzz-agent").
+    const matched =
+      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim()) ??
+      runtimes.find((r) => r.id === agent.agentCommand.trim());
     if (matched) {
       setSelectedRuntimeId(matched.id);
     }
@@ -433,12 +439,12 @@ export function EditAgentDialog({
       // absent, so id-fallback lets us classify capability correctly without
       // treating a "known adapter missing" as "completely unknown runtime."
       const effectiveRuntimeIdForSubmit = inheritHarness
-        ? ((runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
-            ?.id) ??
-            // Fallback: id-based match for command:null catalog entries (adapter
-            // missing but runtime is known and its capability is still static).
-            (runtimes.find((r) => r.id === agent.agentCommand.trim())?.id) ??
-            "")
+        ? (runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
+            ?.id ??
+          // Fallback: id-based match for command:null catalog entries (adapter
+          // missing but runtime is known and its capability is still static).
+          runtimes.find((r) => r.id === agent.agentCommand.trim())?.id ??
+          "")
         : (selectedRuntime?.id ?? selectedRuntimeId);
 
       // Classify the effective runtime's provider capability as a tri-state so
@@ -598,7 +604,7 @@ export function EditAgentDialog({
                     }
                     type="checkbox"
                   />
-                  Inherit harness from persona
+                  Inherit runtime from persona
                 </label>
                 <p className="text-xs text-muted-foreground">
                   {inheritHarness
@@ -606,8 +612,8 @@ export function EditAgentDialog({
                         linkedPersona.runtime
                           ? ` (${linkedPersona.runtime})`
                           : ""
-                      }. Editing the persona and respawning propagates the new harness.`
-                    : "Pins this agent to a specific harness command, overriding the persona's runtime."}
+                      }. Editing the persona and respawning propagates the new runtime.`
+                    : "Pins this agent to a specific runtime command, overriding the persona's runtime."}
                 </p>
               </div>
             ) : null}
