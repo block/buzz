@@ -80,7 +80,7 @@ impl SubscriptionRegistry {
             .entry(conn_id)
             .or_default()
             .insert(sub_id.clone(), (filters.clone(), community_id, channel_id));
-        metrics::gauge!("buzz_subscriptions_active").increment(1.0);
+        crate::metrics::metrics().subscriptions_active.add(1, &[]);
 
         if let Some(ch_id) = channel_id {
             match extract_kinds_from_filters(&filters) {
@@ -167,7 +167,7 @@ impl SubscriptionRegistry {
         if let Some(mut conn_subs) = self.subs.get_mut(&conn_id) {
             if let Some((filters, community_id, channel_id)) = conn_subs.remove(sub_id) {
                 self.remove_from_index(conn_id, sub_id, &filters, community_id, channel_id);
-                metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
+                crate::metrics::metrics().subscriptions_active.add(-1, &[]);
                 return Some(RemovedSubscription {
                     community_id,
                     channel_id,
@@ -189,7 +189,9 @@ impl SubscriptionRegistry {
                     channel_id: *channel_id,
                 });
             }
-            metrics::gauge!("buzz_subscriptions_active").decrement(count as f64);
+            crate::metrics::metrics()
+                .subscriptions_active
+                .add(-(count as i64), &[]);
         }
         removed
     }
@@ -261,6 +263,7 @@ impl SubscriptionRegistry {
 
     /// Return all (conn_id, sub_id) pairs whose filters match the given event in
     /// one server-resolved community.
+    #[tracing::instrument(skip_all)]
     pub fn fan_out_scoped(
         &self,
         community_id: CommunityId,

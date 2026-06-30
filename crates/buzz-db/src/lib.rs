@@ -131,6 +131,15 @@ pub struct Db {
     pub(crate) pool: PgPool,
 }
 
+/// Snapshot of Postgres connection pool utilisation.
+#[derive(Debug, Clone, Copy)]
+pub struct DbPoolStats {
+    /// Total connections currently in the pool (idle + active).
+    pub size: u32,
+    /// Connections available for immediate reuse.
+    pub idle: u32,
+}
+
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
@@ -217,6 +226,17 @@ impl Db {
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+    }
+
+    /// Returns pool utilisation stats for metrics emission.
+    ///
+    /// `size`  — total connections (idle + active)
+    /// `idle`  — connections available for immediate reuse
+    pub fn pool_stats(&self) -> DbPoolStats {
+        DbPoolStats {
+            size: self.pool.size(),
+            idle: self.pool.num_idle() as u32,
+        }
     }
 
     /// Begin a database transaction for atomic multi-statement operations.

@@ -35,6 +35,8 @@ pub mod state;
 pub mod subscription;
 /// Row-zero host binding: resolve the request community from the connection host.
 pub mod tenant;
+/// OpenTelemetry tracing initialisation (tracer provider + OTLP exporter).
+pub mod telemetry;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].

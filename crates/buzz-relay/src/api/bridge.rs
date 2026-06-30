@@ -744,7 +744,9 @@ pub async fn count_events(
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
-                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            crate::metrics::metrics()
+                                .count_fallback_rejections_total
+                                .add(1, &[]);
                             return Err(api_error(
                                 StatusCode::BAD_REQUEST,
                                 "count filter requires narrower constraints",
@@ -801,7 +803,9 @@ pub async fn count_events(
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
                         if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
-                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            crate::metrics::metrics()
+                                .count_fallback_rejections_total
+                                .add(1, &[]);
                             return Err(api_error(
                                 StatusCode::BAD_REQUEST,
                                 "count filter requires narrower constraints",

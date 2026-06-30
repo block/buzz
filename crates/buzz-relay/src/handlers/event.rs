@@ -27,7 +27,9 @@ use super::ingest::{IngestAuth, IngestError};
 
 /// Increment the rejection counter with a bounded reason label.
 fn reject(reason: &'static str) {
-    metrics::counter!("buzz_events_rejected_total", "reason" => reason).increment(1);
+    crate::metrics::metrics()
+        .events_rejected_total
+        .add(1, &[opentelemetry::KeyValue::new("reason", reason)]);
 }
 
 /// Bound the `kind` label to prevent cardinality explosion from arbitrary Nostr kinds.
@@ -157,7 +159,9 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 ) {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
     let matches = filter_fanout_by_access(state, community_id, stored, matches).await;
-    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
+    crate::metrics::metrics()
+        .fanout_recipients
+        .record(matches.len() as f64, &[]);
     if matches.is_empty() {
         return;
     }
@@ -186,6 +190,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 }
 
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
+#[tracing::instrument(skip_all)]
 pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
     // The Redis topic carries the tenant-local routing scope explicitly:
     // `Channel(id)` for a per-channel event, `Global` for a channel-less one.
@@ -212,7 +217,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
 
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
     let matches = filter_fanout_by_access(state, community_id, &stored, matches).await;
-    metrics::counter!("buzz_multinode_fanout_total").increment(1);
+    crate::metrics::metrics().multinode_fanout_total.add(1, &[]);
     if matches.is_empty() {
         return;
     }
@@ -276,7 +281,9 @@ pub(crate) async fn dispatch_persistent_event(
         .sub_registry
         .fan_out_scoped(tenant.community(), stored_event);
     let matches = filter_fanout_by_access(state, tenant.community(), stored_event, matches).await;
-    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
+    crate::metrics::metrics()
+        .fanout_recipients
+        .record(matches.len() as f64, &[]);
     debug!(
         event_id = %event_id_hex,
         channel_id = ?stored_event.channel_id,
@@ -356,7 +363,7 @@ pub(crate) async fn dispatch_persistent_event(
     };
     if let Err(e) = state.audit_tx.send(audit_entry).await {
         error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
-        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+        crate::metrics::metrics().audit_send_errors_total.add(1, &[]);
     }
 
     // Skip workflow triggering for workflow-execution kinds and relay-signed workflow messages.
@@ -388,8 +395,9 @@ pub(crate) async fn dispatch_persistent_event(
             {
                 tracing::error!(event_id = ?workflow_event.event.id, "Workflow trigger failed: {e}");
             } else {
-                metrics::counter!("buzz_workflow_runs_total", "trigger" => trigger_kind)
-                    .increment(1);
+                crate::metrics::metrics()
+                    .workflow_runs_total
+                    .add(1, &[opentelemetry::KeyValue::new("trigger", trigger_kind)]);
             }
         });
     }
@@ -401,13 +409,16 @@ pub(crate) async fn dispatch_persistent_event(
 ///
 /// Extracts auth from the WS connection, dispatches ephemeral events locally,
 /// and delegates persistent events to [`super::ingest::ingest_event`].
+#[tracing::instrument(skip_all, fields(event_id, kind))]
 pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let start = std::time::Instant::now();
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
     let kind_str = bounded_kind_label(kind_u32);
     debug!(event_id = %event_id_hex, kind = kind_u32, "EVENT");
-    metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
+    crate::metrics::metrics()
+        .events_received_total
+        .add(1, &[opentelemetry::KeyValue::new("kind", kind_str.to_string())]);
 
     let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
         let auth = conn.auth_state.read().await;
@@ -506,7 +517,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
-                metrics::counter!("buzz_events_stored_total", "kind" => kind_str).increment(1);
+                crate::metrics::metrics()
+                    .events_stored_total
+                    .add(1, &[opentelemetry::KeyValue::new("kind", kind_str.to_string())]);
                 info!(
                     event_id = %result.event_id,
                     kind = kind_u32,
@@ -514,8 +527,9 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     "Event ingested"
                 );
             }
-            metrics::histogram!("buzz_event_processing_seconds")
-                .record(start.elapsed().as_secs_f64());
+            crate::metrics::metrics()
+                .event_processing_seconds
+                .record(start.elapsed().as_secs_f64(), &[]);
             conn.send(RelayMessage::ok(
                 &result.event_id,
                 result.accepted,

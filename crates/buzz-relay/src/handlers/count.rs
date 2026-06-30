@@ -164,7 +164,9 @@ pub async fn handle_count(
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
-                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            crate::metrics::metrics()
+                                .count_fallback_rejections_total
+                                .add(1, &[]);
                             conn.send(RelayMessage::closed(
                                 &sub_id,
                                 "restricted: count filter requires narrower constraints",
@@ -227,7 +229,9 @@ pub async fn handle_count(
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
                         if super::req::count_fallback_exceeded(stored_events.len()) {
-                            metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
+                            crate::metrics::metrics()
+                                .count_fallback_rejections_total
+                                .add(1, &[]);
                             conn.send(RelayMessage::closed(
                                 &sub_id,
                                 "restricted: count filter requires narrower constraints",

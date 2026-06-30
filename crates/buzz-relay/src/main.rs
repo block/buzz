@@ -14,6 +14,7 @@ use buzz_relay::config::Config;
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
+use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
 
 fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
@@ -28,9 +29,18 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // JSON-only structured logs — simple, machine-parseable, CAKE-compatible.
+    // If OTEL_EXPORTER_OTLP_ENDPOINT is set, also attach an OpenTelemetry tracing
+    // layer that exports spans via OTLP gRPC alongside the JSON stdout logs.
+    let tracer_provider = telemetry::try_init_tracer();
+    let otel_layer = tracer_provider.as_ref().map(|p| {
+        use opentelemetry::trace::TracerProvider as _;
+        tracing_opentelemetry::layer().with_tracer(p.tracer("buzz-relay"))
+    });
+
     tracing_subscriber::registry()
         .with(fmt::layer().json().flatten_event(true))
         .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
+        .with(otel_layer)
         .init();
 
     info!("Starting buzz-relay");
@@ -48,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
         "Config loaded"
     );
 
-    relay_metrics::install(config.metrics_port);
+    let meter_provider = relay_metrics::install(config.metrics_port);
     info!(
         port = config.metrics_port,
         "Prometheus metrics exporter started"
@@ -646,6 +656,9 @@ async fn main() -> anyhow::Result<()> {
         let state_for_sub = Arc::clone(&state);
         let mut rx = state_for_sub.pubsub.subscribe_local();
         tokio::spawn(async move {
+            let fanout_lag = relay_metrics::meter()
+                .u64_counter("buzz_multinode_fanout_lag_total")
+                .build();
             loop {
                 match rx.recv().await {
                     Ok(channel_event) => {
@@ -656,7 +669,7 @@ async fn main() -> anyhow::Result<()> {
                         .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
+                        fanout_lag.add(n, &[]);
                         tracing::warn!("Multi-node fan-out lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -676,6 +689,9 @@ async fn main() -> anyhow::Result<()> {
         let state_for_cache = Arc::clone(&state);
         let mut rx = state_for_cache.pubsub.subscribe_cache_invalidations();
         tokio::spawn(async move {
+            let cache_inval_lag = relay_metrics::meter()
+                .u64_counter("buzz_cache_invalidation_lag_total")
+                .build();
             loop {
                 match rx.recv().await {
                     Ok(scoped) => {
@@ -687,7 +703,7 @@ async fn main() -> anyhow::Result<()> {
                             .apply_cache_invalidation(scoped.community_id, scoped.invalidation);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);
+                        cache_inval_lag.add(n, &[]);
                         tracing::warn!("Cache-invalidation consumer lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -702,6 +718,42 @@ async fn main() -> anyhow::Result<()> {
     let router = build_router(Arc::clone(&state));
     let health_router = build_health_router(Arc::clone(&state));
 
+    // Pool metrics: periodic background task polling DB + Redis pool stats.
+    {
+        let pool_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10);
+        tokio::spawn(async move {
+            let m = relay_metrics::meter();
+            let db_pool_size = m.u64_gauge("buzz_db_pool_size").build();
+            let db_pool_idle = m.u64_gauge("buzz_db_pool_idle").build();
+            let db_pool_active = m.u64_gauge("buzz_db_pool_active").build();
+            let redis_pool_available = m.u64_gauge("buzz_redis_pool_available").build();
+            let redis_pool_size = m.u64_gauge("buzz_redis_pool_size").build();
+            let redis_pool_max = m.u64_gauge("buzz_redis_pool_max").build();
+            let redis_pool_waiting = m.u64_gauge("buzz_redis_pool_waiting").build();
+
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                let db_stats = pool_state.db.pool_stats();
+                let active = db_stats.size.saturating_sub(db_stats.idle);
+                db_pool_size.record(db_stats.size as u64, &[]);
+                db_pool_idle.record(db_stats.idle as u64, &[]);
+                db_pool_active.record(active as u64, &[]);
+
+                let rs = pool_state.redis_pool.status();
+                redis_pool_available.record(rs.available as u64, &[]);
+                redis_pool_size.record(rs.size as u64, &[]);
+                redis_pool_max.record(rs.max_size as u64, &[]);
+                redis_pool_waiting.record(rs.waiting as u64, &[]);
+            }
+        });
+    }
+
     serve(router, health_router, Arc::clone(&state)).await?;
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -710,6 +762,16 @@ async fn main() -> anyhow::Result<()> {
     audit_shutdown
         .drain(std::time::Duration::from_secs(5))
         .await;
+
+    // Flush pending OTEL spans and metrics before exit.
+    if let Err(e) = meter_provider.shutdown() {
+        tracing::warn!(error = %e, "OTEL meter provider shutdown error");
+    }
+    if let Some(tp) = tracer_provider {
+        if let Err(e) = tp.shutdown() {
+            tracing::warn!(error = %e, "OTEL tracer provider shutdown error");
+        }
+    }
 
     Ok(())
 }

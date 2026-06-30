@@ -92,7 +92,7 @@ impl ConnectionState {
                 let count = self.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if count >= self.grace_limit {
                     warn!(conn_id = %self.conn_id, count, "sustained backpressure — closing slow client");
-                    metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
+                    crate::metrics::metrics().ws_backpressure_disconnects_total.add(1, &[]);
                     self.cancel.cancel();
                 } else {
                     warn!(conn_id = %self.conn_id, count, grace = self.grace_limit, "send buffer full — grace {count}/{}", self.grace_limit);
@@ -153,7 +153,7 @@ pub async fn handle_connection(
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
-    metrics::counter!("buzz_ws_connections_total").increment(1);
+    crate::metrics::metrics().ws_connections_total.add(1, &[]);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
     if tx
@@ -167,7 +167,7 @@ pub async fn handle_connection(
 
     // Gauge incremented AFTER challenge send succeeds — early disconnects
     // don't leak. Decremented in the cleanup path below.
-    metrics::gauge!("buzz_ws_connections_active").increment(1.0);
+    crate::metrics::metrics().ws_connections_active.add(1, &[]);
 
     // Register after challenge succeeds — avoids leaked entries on early disconnect.
     state.conn_manager.register(
@@ -208,7 +208,7 @@ pub async fn handle_connection(
                         timeout_secs = AUTH_TIMEOUT.as_secs(),
                         "NIP-42 auth timeout — closing connection"
                     );
-                    metrics::counter!("buzz_ws_auth_timeouts_total").increment(1);
+                    crate::metrics::metrics().ws_auth_timeouts_total.add(1, &[]);
                     auth_timeout_cancel.cancel();
                 }
             }
@@ -248,7 +248,7 @@ pub async fn handle_connection(
                 .await;
         }
     }
-    metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
+    crate::metrics::metrics().ws_connections_active.add(-1, &[]);
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 
     drop(permit);

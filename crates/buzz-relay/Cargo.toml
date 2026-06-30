@@ -36,6 +36,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-prometheus = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }
+prometheus = "0.14"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
@@ -61,8 +68,6 @@ rand            = { workspace = true }
 hex             = { workspace = true }
 url             = { workspace = true }
 moka            = { workspace = true }
-metrics         = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
 
 [features]
 dev = ["buzz-auth/dev"]
