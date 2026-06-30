@@ -355,7 +355,7 @@ export function PersonaDialog({
     const baseInput = {
       displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
-      systemPrompt: systemPrompt.trim(),
+      systemPrompt: systemPrompt,
       runtime: trimmedRuntime || undefined,
       model:
         trimmedRuntime || modelProviderEditableWithoutRuntime

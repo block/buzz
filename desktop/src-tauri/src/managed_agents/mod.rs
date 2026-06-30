@@ -41,7 +41,7 @@ pub use repos::{
 pub use restore::*;
 pub use runtime::*;
 pub use storage::*;
-pub use team_repair::sync_team_personas;
+pub use team_repair::{sync_team_personas, team_persona_key};
 pub use teams::*;
 pub use types::*;
 

@@ -194,9 +194,24 @@ impl SecretStore {
         }
     }
 
-    /// Atomically load the blob, apply `f` to the map, write back, and update
-    /// the cache — all while holding the cache mutex. This serializes concurrent
-    /// writes so no caller can observe a partial update.
+    /// Atomically load the blob, apply `f` to a candidate map, write back if
+    /// changed, and only then advance the cache — all while holding the cache
+    /// mutex. This serializes concurrent writes so no caller can observe a
+    /// partial update.
+    ///
+    /// **Idempotent**: when `f` leaves the candidate equal to the current cached
+    /// map, `write_blob_raw` is skipped entirely. On macOS the legacy
+    /// `SecKeychain` API treats a write as a distinct ACL operation from the
+    /// "Always Allow"-ed read, so skipping no-op writes eliminates the keychain
+    /// prompt that fires when saving an agent whose model changed but whose key
+    /// did not.
+    ///
+    /// **Copy-on-write**: the candidate `next` is a separate allocation from the
+    /// cached `current`. The cache is only replaced with `next` after
+    /// `write_blob_raw` succeeds. On write failure the cache stays at the last
+    /// known durable state — a transient ACL denial or keychain outage cannot
+    /// advance the cache past durably-written storage and silently drop a later
+    /// write attempt.
     ///
     /// Deadlock-free: `read_blob_raw` and `write_blob_raw` do not acquire the
     /// cache mutex. `load_blob` does acquire it, but `mutate_blob` does not call
@@ -222,14 +237,29 @@ impl SecretStore {
             });
         }
 
-        let map = guard.as_mut().expect("just initialized above");
-        f(map);
+        let current = guard.as_ref().expect("just initialized above");
+
+        // Build the candidate state in a separate allocation so that a write
+        // failure below cannot leave the cache ahead of durable storage.
+        // `HashMap` `PartialEq` compares by content (key-value pairs), not
+        // iteration order, so the equality check is order-safe.
+        let mut next = current.clone();
+        f(&mut next);
+
+        // Skip the keychain write when the candidate equals the current durable
+        // state — the cache already mirrors storage and no I/O is needed.
+        if next == *current {
+            return Ok(());
+        }
 
         // Write to keyring while still holding the lock.
-        let json = serde_json::to_string(map).map_err(|e| format!("blob serialize: {e}"))?;
+        let json = serde_json::to_string(&next).map_err(|e| format!("blob serialize: {e}"))?;
         self.write_blob_raw(json.as_bytes())?;
 
-        // Cache is already up to date (we mutated it in place).
+        // Advance the cache only after the durable write succeeds. On failure
+        // the early return above means we never reach this line, so the cache
+        // remains at the last known durable state.
+        *guard = Some(next);
         Ok(())
     }
 
@@ -512,6 +542,74 @@ mod tests {
             store.load("identity").unwrap(),
             Some("nsec1test".to_string())
         );
+    }
+
+    #[test]
+    fn mutate_blob_skips_write_when_map_unchanged() {
+        // The idempotent-write guarantee: when the closure leaves the map
+        // identical to its pre-call state, `write_blob_raw` must NOT be
+        // invoked. On an unsigned CI build (no keychain entitlement) any real
+        // write would return an error, so a successful `Ok(())` here proves
+        // the skip path fired. The service name is unique so test isolation is
+        // guaranteed even if the test runs locally on a machine with a keychain.
+        let mut map = HashMap::new();
+        map.insert("identity".to_string(), "nsec1test".to_string());
+        let store = SecretStore::with_cache("buzz-test-idempotent-skip", Some(map));
+
+        // Re-storing the exact same value must succeed without touching the
+        // keychain (which would fail on unsigned CI).
+        let result = store.store("identity", "nsec1test");
+        assert!(
+            result.is_ok(),
+            "no-op store must not reach write_blob_raw: {result:?}"
+        );
+        // A genuinely new key DOES change the map — this branch requires a
+        // real keychain and is therefore left to the #[ignore] integration
+        // tests; here we only verify the skip path.
+    }
+
+    #[test]
+    fn mutate_blob_does_not_advance_cache_on_write_failure() {
+        // Copy-on-write safety: if `write_blob_raw` fails (denied prompt,
+        // transient outage, ACL rejection), the cache must stay at the last
+        // known durable state. A subsequent `store()` for the same key/value
+        // must NOT be skipped as a no-op — the equality check must compare
+        // against the durable cache, not an unpersisted candidate.
+        //
+        // On unsigned CI builds the keychain is unreachable, so any `store()`
+        // for a key not already in the warm cache will call `write_blob_raw`
+        // and receive an error. We verify that after the error:
+        //   1. The cache is not advanced (the previously cached key is intact).
+        //   2. The failed key is not present (the dirty candidate was discarded).
+        let mut map = HashMap::new();
+        map.insert("existing".to_string(), "durable_val".to_string());
+        let store = SecretStore::with_cache("buzz-test-cow-write-fail", Some(map));
+
+        // Attempt to add a new key — on unsigned CI this will try write_blob_raw
+        // and fail; with copy-on-write the cache must remain at {existing}.
+        let result = store.store("new_key", "new_val");
+
+        if result.is_err() {
+            // Write failed (expected on unsigned CI): confirm cache was not
+            // advanced — the existing key is still intact and the new key
+            // was never committed to the in-memory state.
+            assert_eq!(
+                store.load("existing").unwrap(),
+                Some("durable_val".to_string()),
+                "cache must remain at last durable state after write failure"
+            );
+            // load("new_key") goes through the unchanged cache (no entry),
+            // then attempts migrate_legacy_key which also fails on unsigned CI,
+            // returning either Ok(None) or Err — either is correct since the
+            // key was never durably stored.
+            let after = store.load("new_key");
+            assert!(
+                matches!(after, Ok(None) | Err(_)),
+                "a key whose write failed must not be visible via load: {after:?}"
+            );
+        }
+        // If result.is_ok() the test ran on a machine with a real keychain and
+        // the write succeeded — no assertion needed for the failure path.
     }
 
     #[test]

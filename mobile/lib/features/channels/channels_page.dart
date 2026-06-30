@@ -39,6 +39,20 @@ enum _QuickAction { createChannel, newDm }
 /// Height of the [_ConnectionBanner]: vertical padding (Grid.quarter + 2) × 2
 /// plus the ~16px row content (12px spinner / labelSmall text).
 const double _kBannerHeight = 24.0;
+const double _kChannelSectionInset = Grid.gutter;
+const double _kChannelLeadingWidth = 22.0;
+const double _kChannelIconSize = 18.0;
+const double _kChannelLabelGap = Grid.xxs;
+const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
+const double _kChannelLabelInset =
+    _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
+const double _kWorkspaceAvatarInset =
+    _kChannelSectionInset - Grid.quarter; // FrostedAppBar adds Grid.quarter.
+const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
+const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
+const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
+const Curve _kSectionCollapseCurve = Curves.easeInCubic;
+const double _kSectionCollapsedScaleY = 0.98;
 
 class _UnreadChannelState {
   final Set<String> ids;
@@ -210,13 +224,15 @@ class ChannelsPage extends HookConsumerWidget {
               MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
             ),
           ),
-          const SizedBox(width: Grid.xs),
+          const SizedBox(width: Grid.twelve + Grid.quarter),
         ],
       ),
       floatingActionButton: FloatingActionButton(
         heroTag: 'channels-fab',
         onPressed: openQuickActions,
         tooltip: 'Create or start conversation',
+        backgroundColor: context.colors.primary,
+        foregroundColor: context.colors.onPrimary,
         shape: const CircleBorder(),
         child: const Icon(LucideIcons.plus),
       ),
@@ -449,6 +465,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               _ChannelSection(
                 title: 'Starred',
                 icon: LucideIcons.star,
+                showTopDivider: false,
                 expanded: starredExpanded.value,
                 onToggle: () => starredExpanded.value = !starredExpanded.value,
                 channels: starredStreamChannels,
@@ -477,6 +494,9 @@ class _SliverChannelsList extends HookConsumerWidget {
                 expanded: sectionExpanded(section.id),
                 isFirst: userSections.first.id == section.id,
                 isLast: userSections.last.id == section.id,
+                showTopDivider:
+                    starredStreamChannels.isNotEmpty ||
+                    userSections.first.id != section.id,
                 onToggle: () => toggleSection(section.id),
                 onRename: () async {
                   final name = await showDialog<String>(
@@ -546,6 +566,8 @@ class _SliverChannelsList extends HookConsumerWidget {
             _ChannelSection(
               title: 'Channels',
               icon: LucideIcons.hash,
+              showTopDivider:
+                  starredStreamChannels.isNotEmpty || userSections.isNotEmpty,
               expanded: channelsExpanded.value,
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
@@ -559,6 +581,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             _ChannelSection(
               title: 'DMs',
               icon: LucideIcons.messagesSquare,
+              showTopDivider: true,
               expanded: dmsExpanded.value,
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: dmChannels,
@@ -586,6 +609,7 @@ class _CustomChannelSection extends StatelessWidget {
   final bool expanded;
   final bool isFirst;
   final bool isLast;
+  final bool showTopDivider;
   final VoidCallback onToggle;
   final VoidCallback onRename;
   final VoidCallback onDelete;
@@ -604,6 +628,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.expanded,
     required this.isFirst,
     required this.isLast,
+    required this.showTopDivider,
     required this.onToggle,
     required this.onRename,
     required this.onDelete,
@@ -618,6 +643,7 @@ class _CustomChannelSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (showTopDivider) const _SectionDivider(),
         _CustomSectionHeader(
           section: section,
           expanded: expanded,
@@ -629,18 +655,25 @@ class _CustomChannelSection extends StatelessWidget {
           onMoveUp: onMoveUp,
           onMoveDown: onMoveDown,
         ),
-        if (expanded)
-          for (final channel in channels)
-            _ChannelTile(
-              channel: channel,
-              unreadCount: unreadChannelCounts[channel.id],
-              isUnread: unreadChannelIds.contains(channel.id),
-              isMuted: mutedChannelIds.contains(channel.id),
-              currentPubkey: currentPubkey,
-              onTap: () => onSelectChannel(channel),
-              onMarkRead: () => onMarkChannelRead(channel),
-              sectionId: section.id,
-            ),
+        _AnimatedSectionBody(
+          expanded: expanded,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final channel in channels)
+                _ChannelTile(
+                  channel: channel,
+                  unreadCount: unreadChannelCounts[channel.id],
+                  isUnread: unreadChannelIds.contains(channel.id),
+                  isMuted: mutedChannelIds.contains(channel.id),
+                  currentPubkey: currentPubkey,
+                  onTap: () => onSelectChannel(channel),
+                  onMarkRead: () => onMarkChannelRead(channel),
+                  sectionId: section.id,
+                ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -671,30 +704,37 @@ class _CustomSectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sectionColor = context.colors.primary;
+
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
-          Grid.xs,
+          Grid.gutter,
           Grid.twelve,
-          Grid.xs,
-          Grid.half,
+          Grid.gutter,
+          _kChannelRowVerticalPadding,
         ),
         child: Row(
           children: [
-            Icon(
-              LucideIcons.folder,
-              size: 14,
-              color: context.colors.onSurfaceVariant,
+            SizedBox(
+              width: _kChannelLeadingWidth,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Icon(
+                  LucideIcons.folder,
+                  size: _kChannelIconSize,
+                  color: sectionColor,
+                ),
+              ),
             ),
-            const SizedBox(width: Grid.half),
+            const SizedBox(width: _kChannelLabelGap),
             Text(
-              section.name.toUpperCase(),
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
+              section.name,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: sectionColor,
                 fontWeight: FontWeight.w600,
-                letterSpacing: 0.8,
               ),
             ),
             const Spacer(),
@@ -738,16 +778,12 @@ class _CustomSectionHeader extends StatelessWidget {
               },
               child: Icon(
                 LucideIcons.ellipsisVertical,
-                size: 14,
-                color: context.colors.onSurfaceVariant,
+                size: _kChannelIconSize,
+                color: sectionColor,
               ),
             ),
             const SizedBox(width: Grid.quarter),
-            Icon(
-              expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-              size: 14,
-              color: context.colors.onSurfaceVariant,
-            ),
+            _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
       ),
@@ -800,6 +836,7 @@ class _ChannelSection extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
+  final bool showTopDivider;
   final Set<String> unreadChannelIds;
   final Map<String, int> unreadChannelCounts;
   final Set<String> mutedChannelIds;
@@ -813,6 +850,7 @@ class _ChannelSection extends StatelessWidget {
     required this.expanded,
     required this.onToggle,
     required this.channels,
+    required this.showTopDivider,
     required this.unreadChannelIds,
     required this.unreadChannelCounts,
     required this.mutedChannelIds,
@@ -826,41 +864,48 @@ class _ChannelSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (showTopDivider) const _SectionDivider(),
         _SectionHeader(
           label: title,
           icon: icon,
           expanded: expanded,
           onToggle: onToggle,
         ),
-        if (expanded) ...[
-          if (channels.isEmpty)
-            Padding(
-              padding: const EdgeInsets.only(
-                left: Grid.xs + Grid.xxs,
-                right: Grid.xs,
-                top: Grid.half,
-                bottom: Grid.half,
-              ),
-              child: Text(
-                emptyLabel,
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
-              ),
-            )
-          else
-            for (final channel in channels)
-              _ChannelTile(
-                channel: channel,
-                unreadCount: unreadChannelCounts[channel.id],
-                isUnread: unreadChannelIds.contains(channel.id),
-                isMuted: mutedChannelIds.contains(channel.id),
-                currentPubkey: currentPubkey,
-                onTap: () => onSelectChannel(channel),
-                onMarkRead: null,
-                sectionId: null,
-              ),
-        ],
+        _AnimatedSectionBody(
+          expanded: expanded,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (channels.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(
+                    left: _kChannelLabelInset,
+                    right: _kChannelSectionInset,
+                    top: Grid.half,
+                    bottom: Grid.half,
+                  ),
+                  child: Text(
+                    emptyLabel,
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              else
+                for (final channel in channels)
+                  _ChannelTile(
+                    channel: channel,
+                    unreadCount: unreadChannelCounts[channel.id],
+                    isUnread: unreadChannelIds.contains(channel.id),
+                    isMuted: mutedChannelIds.contains(channel.id),
+                    currentPubkey: currentPubkey,
+                    onTap: () => onSelectChannel(channel),
+                    onMarkRead: null,
+                    sectionId: null,
+                  ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -896,6 +941,24 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+class _SectionDivider extends StatelessWidget {
+  const _SectionDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+      child: Divider(
+        height: 1,
+        thickness: 1,
+        indent: _kChannelSectionInset,
+        endIndent: _kChannelSectionInset,
+        color: context.colors.outlineVariant.withValues(alpha: 0.72),
+      ),
+    );
+  }
+}
+
 class _SectionHeader extends StatelessWidget {
   final String label;
   final IconData icon;
@@ -911,36 +974,157 @@ class _SectionHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sectionColor = context.colors.primary;
+
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(
-          Grid.xs,
+          Grid.gutter,
           Grid.twelve,
-          Grid.xs,
-          Grid.half,
+          Grid.gutter,
+          _kChannelRowVerticalPadding,
         ),
         child: Row(
           children: [
-            Icon(icon, size: 14, color: context.colors.onSurfaceVariant),
-            const SizedBox(width: Grid.half),
+            SizedBox(
+              width: _kChannelLeadingWidth,
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Icon(icon, size: _kChannelIconSize, color: sectionColor),
+              ),
+            ),
+            const SizedBox(width: _kChannelLabelGap),
             Text(
-              label.toUpperCase(),
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
+              label,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: sectionColor,
                 fontWeight: FontWeight.w600,
-                letterSpacing: 0.8,
               ),
             ),
             const Spacer(),
-            Icon(
-              expanded ? LucideIcons.chevronDown : LucideIcons.chevronRight,
-              size: 14,
-              color: context.colors.onSurfaceVariant,
-            ),
+            _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _SectionChevron extends StatelessWidget {
+  final bool expanded;
+  final Color color;
+
+  const _SectionChevron({required this.expanded, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
+
+    return AnimatedRotation(
+      turns: expanded ? 0 : -0.25,
+      duration: reducedMotion ? Duration.zero : _kSectionExpandDuration,
+      curve: _kSectionExpandCurve,
+      child: Icon(
+        LucideIcons.chevronDown,
+        size: _kChannelIconSize,
+        color: color,
+      ),
+    );
+  }
+}
+
+class _AnimatedSectionBody extends HookWidget {
+  final bool expanded;
+  final Widget child;
+
+  const _AnimatedSectionBody({required this.expanded, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
+    final controller = useAnimationController(
+      duration: reducedMotion ? Duration.zero : _kSectionExpandDuration,
+      reverseDuration: reducedMotion
+          ? Duration.zero
+          : _kSectionCollapseDuration,
+      initialValue: expanded ? 1 : 0,
+    );
+    final curvedAnimation = useMemoized(
+      () => CurvedAnimation(
+        parent: controller,
+        curve: _kSectionExpandCurve,
+        reverseCurve: _kSectionCollapseCurve,
+      ),
+      [controller],
+    );
+    final shouldRender = useState(expanded);
+
+    useEffect(() => curvedAnimation.dispose, [curvedAnimation]);
+
+    useEffect(() {
+      void handleStatus(AnimationStatus status) {
+        if (status == AnimationStatus.dismissed && !expanded) {
+          shouldRender.value = false;
+        }
+      }
+
+      controller.addStatusListener(handleStatus);
+      return () => controller.removeStatusListener(handleStatus);
+    }, [controller, expanded]);
+
+    useEffect(() {
+      controller.duration = reducedMotion
+          ? Duration.zero
+          : _kSectionExpandDuration;
+      controller.reverseDuration = reducedMotion
+          ? Duration.zero
+          : _kSectionCollapseDuration;
+
+      if (expanded) {
+        shouldRender.value = true;
+        if (reducedMotion) {
+          controller.value = 1;
+        } else {
+          unawaited(controller.forward());
+        }
+      } else if (reducedMotion) {
+        controller.value = 0;
+        shouldRender.value = false;
+      } else {
+        unawaited(controller.reverse());
+      }
+
+      return null;
+    }, [controller, expanded, reducedMotion]);
+
+    return ClipRect(
+      child: AnimatedBuilder(
+        animation: curvedAnimation,
+        child: shouldRender.value ? child : const SizedBox.shrink(),
+        builder: (context, child) {
+          final value = curvedAnimation.value.clamp(0.0, 1.0);
+          final scaleY =
+              _kSectionCollapsedScaleY +
+              ((1 - _kSectionCollapsedScaleY) * value);
+
+          return Align(
+            alignment: Alignment.topCenter,
+            heightFactor: value,
+            child: Opacity(
+              opacity: value,
+              child: Transform.scale(
+                alignment: Alignment.topCenter,
+                scaleY: scaleY,
+                child: ExcludeSemantics(
+                  excluding: !expanded,
+                  child: IgnorePointer(ignoring: !expanded, child: child),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -974,96 +1158,91 @@ class _ChannelTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hasActivity = channel.lastMessageAt != null;
-
     return InkWell(
       borderRadius: BorderRadius.circular(Radii.md),
       onTap: onTap,
       onLongPress: () => _showChannelActions(context, ref),
-      child: Opacity(
-        opacity: isMuted && !isUnread ? 0.5 : 1.0,
-        child: Padding(
-          padding: const EdgeInsets.only(
-            left: Grid.xs + Grid.xxs,
-            right: Grid.xs,
-            top: Grid.xxs + Grid.quarter,
-            bottom: Grid.xxs + Grid.quarter,
-          ),
-          child: Row(
-            children: [
-              if (channel.isDm)
-                _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-              else
-                Icon(
-                  channelIcon(channel),
-                  size: 18,
-                  color: isUnread || hasActivity
-                      ? context.colors.onSurface
-                      : context.colors.onSurfaceVariant,
-                ),
-              const SizedBox(width: Grid.xxs),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      resolveDmChannelDisplayLabel(
-                        channel,
-                        currentPubkey: currentPubkey,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.textTheme.bodyMedium?.copyWith(
-                        color: isUnread
-                            ? context.colors.onSurface
-                            : hasActivity
-                            ? context.colors.onSurface
-                            : context.colors.onSurfaceVariant,
-                        fontWeight: isUnread ? FontWeight.w700 : null,
-                      ),
-                    ),
-                  ],
+      child: Padding(
+        padding: const EdgeInsets.only(
+          left: _kChannelSectionInset,
+          right: _kChannelSectionInset,
+          top: _kChannelRowVerticalPadding,
+          bottom: _kChannelRowVerticalPadding,
+        ),
+        child: Row(
+          children: [
+            if (channel.isDm)
+              _DmAvatar(channel: channel, currentPubkey: currentPubkey)
+            else
+              SizedBox(
+                width: _kChannelLeadingWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Icon(
+                    channelIcon(channel),
+                    size: _kChannelIconSize,
+                    color: context.colors.onSurface,
+                  ),
                 ),
               ),
-              if (channel.isEphemeral) ...[
-                const SizedBox(width: Grid.xxs),
-                _EphemeralBadge(channel: channel),
-              ],
-              if (isMuted) ...[
-                const SizedBox(width: Grid.xxs),
-                Icon(
-                  LucideIcons.bellOff,
-                  size: 12,
-                  color: context.colors.onSurfaceVariant,
-                ),
-              ],
-              if (isUnread && !channel.isDm) ...[
-                const SizedBox(width: Grid.xxs),
-                _UnreadBadge(channelId: channel.id, count: unreadCount ?? 0),
-              ],
-              if (!channel.isMember && !channel.isDm)
-                Padding(
-                  padding: const EdgeInsets.only(right: Grid.xxs),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: Grid.half + 2,
-                      vertical: 3,
+            const SizedBox(width: _kChannelLabelGap),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    resolveDmChannelDisplayLabel(
+                      channel,
+                      currentPubkey: currentPubkey,
                     ),
-                    decoration: BoxDecoration(
-                      color: context.colors.primary.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(Radii.sm),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.textTheme.bodyMedium?.copyWith(
+                      color: context.colors.onSurface,
+                      fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),
-                    child: Text(
-                      'Open',
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.primary,
-                        fontWeight: FontWeight.w600,
-                      ),
+                  ),
+                ],
+              ),
+            ),
+            if (channel.isEphemeral) ...[
+              const SizedBox(width: Grid.xxs),
+              _EphemeralBadge(channel: channel),
+            ],
+            if (isMuted) ...[
+              const SizedBox(width: Grid.xxs),
+              Icon(
+                LucideIcons.bellOff,
+                size: 12,
+                color: context.colors.onSurfaceVariant,
+              ),
+            ],
+            if (isUnread && !channel.isDm) ...[
+              const SizedBox(width: Grid.xxs),
+              _UnreadBadge(channelId: channel.id, count: unreadCount ?? 0),
+            ],
+            if (!channel.isMember && !channel.isDm)
+              Padding(
+                padding: const EdgeInsets.only(right: Grid.xxs),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.half + 2,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: context.colors.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(Radii.sm),
+                  ),
+                  child: Text(
+                    'Open',
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: context.colors.primary,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
@@ -1086,7 +1265,12 @@ class _ChannelTile extends ConsumerWidget {
 
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1178,7 +1362,12 @@ class _ChannelTile extends ConsumerWidget {
       builder: (sheetContext) {
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1383,7 +1572,12 @@ class _QuickActionsSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          Grid.xs,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1450,9 +1644,9 @@ class _CreateChannelSheet extends HookConsumerWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.xs,
+        Grid.gutter,
         0,
-        Grid.xs,
+        Grid.gutter,
         MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
       ),
       child: SafeArea(
@@ -1595,9 +1789,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.xs,
+        Grid.gutter,
         0,
-        Grid.xs,
+        Grid.gutter,
         MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
       ),
       child: SafeArea(
@@ -1817,7 +2011,7 @@ class _ConnectionBanner extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.quarter + 2,
       ),
       color: context.colors.surfaceContainerHighest,
@@ -2161,77 +2355,68 @@ class _WorkspaceIndicator extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final activeAsync = ref.watch(activeWorkspaceProvider);
-    final sessionState = ref.watch(relaySessionProvider);
 
     final name = activeAsync.value?.name;
-    final host = activeAsync.value != null
-        ? Uri.tryParse(activeAsync.value!.relayUrl)?.host
-        : null;
 
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.only(left: Grid.xs),
+        padding: const EdgeInsets.only(left: _kWorkspaceAvatarInset),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _statusColor(context, sessionState.status),
-              ),
-            ),
-            const SizedBox(width: Grid.half),
+            _WorkspaceAvatar(name: name),
+            const SizedBox(width: Grid.xxs),
             if (name != null)
               Flexible(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: context.textTheme.labelLarge?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (host != null)
-                      Text(
-                        host,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                          fontSize: 10,
-                        ),
-                      ),
-                  ],
+                child: Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               )
             else
-              const Text('\u{1F331}', style: TextStyle(fontSize: 28)),
-            const SizedBox(width: Grid.quarter),
-            Icon(
-              LucideIcons.chevronDown,
-              size: 14,
-              color: context.colors.onSurfaceVariant,
-            ),
+              Text(
+                'Workspace',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: context.textTheme.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
           ],
         ),
       ),
     );
   }
+}
 
-  Color _statusColor(BuildContext context, SessionStatus status) {
-    return switch (status) {
-      SessionStatus.connected => context.appColors.success,
-      SessionStatus.connecting ||
-      SessionStatus.reconnecting => context.appColors.warning,
-      _ => context.colors.outline,
-    };
+class _WorkspaceAvatar extends StatelessWidget {
+  final String? name;
+
+  const _WorkspaceAvatar({required this.name});
+
+  @override
+  Widget build(BuildContext context) {
+    final trimmedName = name?.trim();
+    final initial = trimmedName != null && trimmedName.isNotEmpty
+        ? trimmedName.substring(0, 1).toUpperCase()
+        : '?';
+
+    return CircleAvatar(
+      radius: 16,
+      backgroundColor: context.colors.primaryContainer,
+      child: Text(
+        initial,
+        style: context.textTheme.labelMedium?.copyWith(
+          color: context.colors.onPrimaryContainer,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
   }
 }
