@@ -104,8 +104,6 @@ type MessageThreadPanelSkeletonProps = {
   transparentChrome?: boolean;
 };
 
-// canManageMessage moved to the shared helper canManageMessageForCurrentUser
-
 function hasLaterVisibleSibling(
   entries: readonly MainTimelineEntry[],
   entryIndex: number,

@@ -167,6 +167,67 @@ test("owner does NOT see Edit or Delete for an unowned agent's message", async (
   ).toHaveCount(0);
 });
 
+// ─── Thread-panel gate ────────────────────────────────────────────────────────
+
+test("owner can delete their owned agent's message from the thread panel", async ({
+  page,
+}) => {
+  // The bridge seeds a message from each managed agent in its channels:
+  //   id: `mock-agents-managed-${pubkey.slice(0, 8)}`
+  const messageId = `mock-agents-managed-${OWNED_AGENT_PUBKEY.slice(0, 8)}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  // Wait for the agent's seeded message to appear in the main timeline.
+  const agentRow = page.locator(`[data-message-id="${messageId}"]`).first();
+  await expect(agentRow).toBeVisible({ timeout: 10_000 });
+
+  // Open the thread panel by hovering the message and clicking Reply.
+  await agentRow.hover();
+  await agentRow.getByRole("button", { name: "Reply" }).click();
+
+  // Wait for the thread panel and confirm the thread head contains the agent message.
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible({ timeout: 5_000 });
+  const threadHead = threadPanel.getByTestId("message-thread-head");
+  await expect(
+    threadHead.locator(`[data-message-id="${messageId}"]`),
+  ).toBeVisible({
+    timeout: 5_000,
+  });
+
+  // Open the more-actions menu for the thread head from inside the thread panel.
+  const headRow = threadHead.locator(`[data-message-id="${messageId}"]`);
+  await headRow.hover();
+  await threadHead.getByTestId(`more-actions-${messageId}`).click();
+  // Wait for the dropdown to mount.
+  await expect(page.locator('[role="menuitem"]').first()).toBeVisible({
+    timeout: 5_000,
+  });
+
+  // Click Delete.
+  // Radix dropdown portals render outside the thread-panel DOM boundary, so we
+  // query from the full page. Only one menu is open, making the testId unique.
+  await page.getByTestId(`delete-message-${messageId}`).click();
+
+  // The AlertDialog must appear. This proves canManageMessageForCurrentUser is
+  // wired into MessageThreadPanel.tsx — the delete handler is reachable from
+  // the thread-panel path (i.e. the thread-panel permission gate is not
+  // accidentally more restrictive than the main-timeline gate). The full
+  // delete-and-cache-invalidation path is already covered by the main-timeline
+  // delete test above; asserting the dialog here is sufficient as a thread-panel
+  // regression guard.
+  await expect(page.getByRole("alertdialog")).toBeVisible({ timeout: 5_000 });
+
+  // Dismiss without confirming — leaves the fixture clean for any subsequent steps.
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("alertdialog")).not.toBeVisible({
+    timeout: 3_000,
+  });
+});
+
 // ─── Channel management gate ──────────────────────────────────────────────────
 
 test("owner can edit channel name via owned-agent-owner path", async ({

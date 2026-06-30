@@ -385,7 +385,7 @@ export function ChannelManagementSheet({
             isArchived={isArchived}
             isDark={isDark}
             isDeleteDialogOpen={isDeleteDialogOpen}
-            isOwner={canDeleteChannel}
+            canDeleteChannel={canDeleteChannel}
             mode={auxiliaryPanelMode}
             transparentChrome={transparentChrome}
             joinChannelMutation={joinChannelMutation}
@@ -431,7 +431,7 @@ export function ChannelManagementSheet({
               isArchived={isArchived}
               isDark={isDark}
               isDeleteDialogOpen={isDeleteDialogOpen}
-              isOwner={canDeleteChannel}
+              canDeleteChannel={canDeleteChannel}
               mode={auxiliaryPanelMode}
               transparentChrome={transparentChrome}
               joinChannelMutation={joinChannelMutation}
@@ -667,7 +667,7 @@ type ChannelManagementPanelContentProps = {
   isArchived: boolean;
   isDark: boolean;
   isDeleteDialogOpen: boolean;
-  isOwner: boolean; // true when caller may delete the channel
+  canDeleteChannel: boolean; // true when caller may delete the channel
   mode: AuxiliaryPanelMode;
   transparentChrome?: boolean;
   joinChannelMutation: ChannelMutation;
@@ -699,7 +699,7 @@ function ChannelManagementPanelContent({
   isArchived,
   isDark,
   isDeleteDialogOpen,
-  isOwner,
+  canDeleteChannel,
   mode,
   transparentChrome = false,
   joinChannelMutation,
@@ -965,7 +965,7 @@ function ChannelManagementPanelContent({
           isArchived={isArchived}
           isDark={isDark}
           isDeleteDialogOpen={isDeleteDialogOpen}
-          isOwner={isOwner}
+          canDeleteChannel={canDeleteChannel}
           resolvedChannelName={resolvedChannel.name}
           unarchiveChannelMutation={unarchiveChannelMutation}
         />
