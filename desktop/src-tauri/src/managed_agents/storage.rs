@@ -546,9 +546,13 @@ mod tests {
     }
 
     fn record_with_key(nsec: &str) -> ManagedAgentRecord {
+        record_with_pubkey_and_key("agent-pubkey", nsec)
+    }
+
+    fn record_with_pubkey_and_key(pubkey: &str, nsec: &str) -> ManagedAgentRecord {
         serde_json::from_str(&format!(
             r#"{{
-                "pubkey": "agent-pubkey",
+                "pubkey": "{pubkey}",
                 "name": "test-agent",
                 "private_key_nsec": "{nsec}",
                 "relay_url": "wss://localhost:3000",
@@ -697,10 +701,12 @@ mod tests {
         // A record carrying an inline key (e.g. first save, or keyring-outage
         // residue) must trigger exactly one write_and_verify per record — and
         // once persisted the inline copy is cleared so the next save is free.
+        // Records use distinct pubkeys so each maps to a distinct keyring name,
+        // verifying the "per record" behaviour rather than a single-key overwrite.
         let store = FakeKeyStore::reachable();
         let mut records = vec![
-            record_with_key("nsec1key_a"),
-            record_with_key("nsec1key_b"),
+            record_with_pubkey_and_key("pubkey-agent-alpha", "nsec1key_a"),
+            record_with_pubkey_and_key("pubkey-agent-beta", "nsec1key_b"),
         ];
 
         persist_agent_keys_with(&store, &mut records);
@@ -709,6 +715,23 @@ mod tests {
             *store.write_count.borrow(),
             2,
             "each record with an inline key must trigger exactly one write"
+        );
+        // Verify the correct keyring name was used for each agent.
+        assert_eq!(
+            store
+                .stored
+                .borrow()
+                .get(&agent_keyring_name("pubkey-agent-alpha"))
+                .map(String::as_str),
+            Some("nsec1key_a"),
+        );
+        assert_eq!(
+            store
+                .stored
+                .borrow()
+                .get(&agent_keyring_name("pubkey-agent-beta"))
+                .map(String::as_str),
+            Some("nsec1key_b"),
         );
         // After persist the inline copies are cleared — next save is zero-write.
         assert!(records[0].private_key_nsec.is_empty());
