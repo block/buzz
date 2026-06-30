@@ -376,9 +376,9 @@ function userMessage(
 }
 
 /**
- * Temporary design-debug fixture: one coherent turn that exercises every
- * AgentActivityRenderClass and every TranscriptItem variant. Keep this isolated
- * so it can be removed surgically before the PR merges.
+ * Design-debug fixture: one coherent turn that exercises every
+ * AgentActivityRenderClass and every TranscriptItem variant. Kept isolated as
+ * a render-class test/reference fixture.
  */
 export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
   {

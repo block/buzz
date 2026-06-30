@@ -131,9 +131,9 @@ const overrides = new Map([
   // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
   // fallback. Queued to split into dedicated discovery modules.
   ["src-tauri/src/commands/agent_models.rs", 1066],
-  // activity-feed design fixture: temporary scaffold for render-class review
-  // that intentionally carries realistic prompt context and tool-heavy chatter.
-  // Remove this with debugAgentActivityFixture.ts before the PR merges.
+  // Kept activity-feed design fixture: realistic prompt context and tool-heavy
+  // chatter for render-class test/reference coverage. Queued to split with the
+  // rest of this list if it grows further.
   ["src/features/agents/ui/debugAgentActivityFixture.ts", 1025],
 ]);
 
