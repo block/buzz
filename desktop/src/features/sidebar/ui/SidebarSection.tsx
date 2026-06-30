@@ -111,7 +111,7 @@ function ChannelWorkingBadge({
   const now = useNow(1000);
   const elapsed = formatElapsed(now - summary.anchorAt);
   const label =
-    summary.agentCount > 1 ? `${summary.agentCount} · ${elapsed}` : elapsed;
+    summary.agentCount > 1 ? `${elapsed} (${summary.agentCount})` : elapsed;
 
   return (
     <span
