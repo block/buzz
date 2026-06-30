@@ -29,8 +29,8 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::acp::{
-    extract_model_config_options, extract_model_state, resolve_model_switch_method, AcpClient,
-    AcpError, McpServer, ModelSwitchMethod, StopReason,
+    extract_model_config_options, extract_model_state, model_in_catalog,
+    resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
 };
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
@@ -139,6 +139,11 @@ pub struct OwnedAgent {
     pub model_capabilities: Option<AgentModelCapabilities>,
     /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
     pub desired_model: Option<String>,
+    /// Whether `desired_model` was set by a live `SwitchModel` control signal
+    /// (as opposed to being derived from config/persona at spawn). Used by the
+    /// desktop reader to distinguish a genuine runtime override from a stale
+    /// session whose persona model was edited. Reset on spawn/restart.
+    pub model_overridden: bool,
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
@@ -180,15 +185,24 @@ pub enum PromptSource {
 fn apply_completed_before_control_signal(
     state: &mut SessionState,
     source: &PromptSource,
-    control_signal: ControlSignal,
+    control_signal: &ControlSignal,
 ) {
-    if control_signal == ControlSignal::Rotate {
+    // Rotate and SwitchModel both invalidate so the next turn creates a fresh
+    // session. For SwitchModel the caller has already set `desired_model`, so
+    // the fresh session applies the new model on its next creation.
+    if matches!(
+        control_signal,
+        ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+    ) {
         state.invalidate(source);
     }
 }
 
 /// Control signal for an in-flight channel turn.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Not `Copy`: `SwitchModel` carries an owned `String`. Callers must clone when
+/// a value is needed after a move, or match by reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
@@ -204,6 +218,12 @@ pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch. The session is
     /// invalidated just like cancel; the next turn creates a fresh session.
     Rotate,
+    /// Switch the agent's model, then requeue the triggering batch so it
+    /// re-runs on a fresh session under the new model. The model lands by
+    /// setting `OwnedAgent::desired_model` before invalidation; the requeued
+    /// turn re-creates the session and re-applies `desired_model`. Runtime-only
+    /// — never persisted, gone on restart/respawn.
+    SwitchModel(String),
 }
 
 /// Goose-native non-cancelling steer request, sent from the main loop to an
@@ -557,6 +577,63 @@ impl AgentPool {
         }
         count
     }
+
+    /// Idle-path model switch: set `desired_model` on the idle agent for
+    /// `channel_id` and invalidate its session so the next turn re-creates the
+    /// session under the new model.
+    ///
+    /// Pre-cancel guard: the desired model is validated against the agent's
+    /// cached catalog *before* the session is invalidated, so an unsupported
+    /// pick is rejected without disturbing the existing session.
+    ///
+    /// Returns [`IdleSwitchResult`] describing what happened. The model does not
+    /// take effect — and the panel does not reflect it — until the agent next
+    /// runs a turn (no live session exists to re-emit `session_config_captured`
+    /// from an idle agent). This lag is intentional: faking the emit would
+    /// surface an override the session has not actually applied.
+    pub fn switch_idle_agent_model(
+        &mut self,
+        channel_id: Uuid,
+        model_id: &str,
+    ) -> IdleSwitchResult {
+        let Some(agent) = self
+            .agents
+            .iter_mut()
+            .flatten()
+            .find(|a| a.state.sessions.contains_key(&channel_id))
+        else {
+            return IdleSwitchResult::NoIdleAgent;
+        };
+
+        // Pre-cancel guard against the cached catalog. None = catalog not yet
+        // populated (no session ever created); defer validation to apply time.
+        if let Some(caps) = agent.model_capabilities.as_ref() {
+            if !model_in_catalog(
+                &caps.config_options_raw,
+                caps.available_models_raw.as_ref(),
+                model_id,
+            ) {
+                return IdleSwitchResult::UnsupportedModel;
+            }
+        }
+
+        agent.desired_model = Some(model_id.to_string());
+        agent.model_overridden = true;
+        agent.state.invalidate_channel(&channel_id);
+        IdleSwitchResult::Switched
+    }
+}
+
+/// Outcome of [`AgentPool::switch_idle_agent_model`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum IdleSwitchResult {
+    /// `desired_model` set and the channel session invalidated.
+    Switched,
+    /// Desired model is not in the agent's cached catalog — pick rejected,
+    /// session untouched.
+    UnsupportedModel,
+    /// No idle agent available (all checked out / none spawned).
+    NoIdleAgent,
 }
 
 /// Timeout for a single pre-prompt context fetch attempt (thread/DM history).
@@ -617,19 +694,52 @@ async fn create_session_and_apply_model(
     }
 
     // Apply desired_model if set, matching against the fresh session/new response.
-    if let Some(ref desired) = agent.desired_model {
+    // Track whether the switch succeeded so session_config_captured reflects
+    // the post-switch state (not the pre-switch desired state).
+    let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
                 apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
+                true
             }
             None => {
                 tracing::warn!(
                     target: "pool::model",
                     "desired model {desired} not found in agent's available models — proceeding with agent default"
                 );
+                // Surface the miss so the desktop ModelPicker can reject a live
+                // pick rather than silently no-op. On the busy path the turn has
+                // already been cancelled+requeued by the time we get here, so the
+                // turn restarts on the unchanged model and the user is told no.
+                agent.acp.observe(
+                    "control_result",
+                    serde_json::json!({
+                        "type": "switch_model",
+                        "status": "unsupported_model",
+                        "modelId": desired,
+                    }),
+                );
+                false
             }
         }
-    }
+    } else {
+        false
+    };
+
+    // Emit session config for desktop consumption (config bridge tier 1b).
+    // Emitted AFTER desired_model resolution so the desktop caches the
+    // post-switch state. modelOverridden reflects whether the switch actually
+    // applied — false on the unsupported arm so the panel doesn't show a
+    // stale override badge.
+    agent.acp.observe(
+        "session_config_captured",
+        serde_json::json!({
+            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            "modelOverridden": agent.model_overridden && switch_succeeded,
+        }),
+    );
 
     // Apply permission mode if not the agent's built-in default AND the agent
     // advertises the requested mode in session/new. Agents that don't support
@@ -1364,6 +1474,14 @@ pub async fn run_prompt_task(
                 _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    // Land the model switch before any cancel/requeue work: setting
+                    // `desired_model` here means the fresh session created by the
+                    // requeued turn (busy) or the next turn (already-completed)
+                    // applies the new model. Runtime-only — never persisted.
+                    if let ControlSignal::SwitchModel(ref model_id) = control_signal {
+                        agent.desired_model = Some(model_id.clone());
+                        agent.model_overridden = true;
+                    }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
                     if agent.acp.has_in_flight_prompt() {
@@ -1381,6 +1499,7 @@ pub async fn run_prompt_task(
                                 agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1393,6 +1512,7 @@ pub async fn run_prompt_task(
                                 agent.state.invalidate_all();
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1406,6 +1526,7 @@ pub async fn run_prompt_task(
                                 agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1418,6 +1539,7 @@ pub async fn run_prompt_task(
                                 agent.state.invalidate(&source);
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
+
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1442,10 +1564,13 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        if control_signal == ControlSignal::Rotate {
+                        if matches!(
+                            control_signal,
+                            ControlSignal::Rotate | ControlSignal::SwitchModel(_)
+                        ) {
                             tracing::debug!(
                                 target: "pool::prompt",
-                                "rotate signal arrived but turn already completed — invalidating session"
+                                "rotate/switch signal arrived but turn already completed — invalidating session"
                             );
                         } else {
                             tracing::debug!(
@@ -1456,7 +1581,7 @@ pub async fn run_prompt_task(
                         apply_completed_before_control_signal(
                             &mut agent.state,
                             &source,
-                            control_signal,
+                            &control_signal,
                         );
                         let _ = result_tx.send(PromptResult {
                             agent,
@@ -2201,7 +2326,7 @@ fn requeue_cancelled_batch(
 ) -> Option<FlushBatch> {
     let reason = match signal {
         ControlSignal::Steer => CancelReason::Steer,
-        ControlSignal::Interrupt => CancelReason::Interrupt,
+        ControlSignal::Interrupt | ControlSignal::SwitchModel(_) => CancelReason::Interrupt,
         // Cancel/Rotate discard the batch — no merged re-prompt.
         ControlSignal::Cancel | ControlSignal::Rotate => return None,
     };
@@ -3078,7 +3203,7 @@ mod tests {
         apply_completed_before_control_signal(
             &mut s,
             &PromptSource::Channel(ch_a),
-            ControlSignal::Rotate,
+            &ControlSignal::Rotate,
         );
 
         assert!(!s.sessions.contains_key(&ch_a));
@@ -3099,7 +3224,7 @@ mod tests {
         apply_completed_before_control_signal(
             &mut s,
             &PromptSource::Channel(ch_a),
-            ControlSignal::Cancel,
+            &ControlSignal::Cancel,
         );
 
         assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
@@ -3222,6 +3347,27 @@ mod tests {
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
+    // ── ControlSignal::SwitchModel (Phase 3a, Option ii) ─────────────────────
+
+    #[test]
+    fn test_switch_model_after_natural_completion_invalidates_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        // SwitchModel must invalidate just like Rotate so the requeued turn
+        // re-creates a fresh session that re-applies the new desired_model.
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            &ControlSignal::SwitchModel("gpt-5".into()),
+        );
+
+        assert!(!s.has_channel_state(&ch_a));
+        // ch_b untouched — the switch is channel-scoped.
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+    }
+
+    // ── turn liveness emission ───────────────────────────────────────────────
     // `run_turn_liveness` is raced against a "prompt" future the same way
     // `run_prompt_task` does it: the prompt wins the select and the liveness
     // future is dropped. We assert what the observer saw.

@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_EVENT_REMINDER,
+    KIND_HUDDLE_STARTED,
 };
 use buzz_core::{CommunityId, StoredEvent};
 
@@ -105,6 +106,16 @@ impl EventQuery {
 /// anything beyond this is either a bug or abuse.
 pub const D_TAG_MAX_LEN: usize = 1024;
 
+/// Maximum huddle-start content bytes considered by the parent-link lookup.
+///
+/// The canonical content is a small JSON object containing one UUID. Rejecting
+/// oversized candidates keeps a malformed lifecycle event from making audio
+/// admission pull large text rows into memory.
+const HUDDLE_LINK_CONTENT_MAX_BYTES: i64 = 512;
+/// Maximum candidate rows inspected after SQL prefiltering by parent, creator,
+/// kind, and UUID substring.
+const HUDDLE_LINK_CANDIDATE_LIMIT: i64 = 32;
+
 /// Extract the `d_tag` value for storage.
 ///
 /// For NIP-33 parameterized replaceable events (kind 30000–39999): returns the first
@@ -148,6 +159,62 @@ pub fn extract_not_before(event: &Event) -> Option<i64> {
             None
         }
     })
+}
+
+fn huddle_started_content_links(content: &str, ephemeral_channel_id: Uuid) -> bool {
+    serde_json::from_str::<serde_json::Value>(content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("ephemeral_channel_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+        })
+        .is_some_and(|id| id == ephemeral_channel_id)
+}
+
+/// Return whether `parent_channel_id` has a creator-signed huddle-start event
+/// that links to `ephemeral_channel_id`.
+///
+/// The creator constraint matters: a member of some unrelated channel can post
+/// their own kind:48100 event there, but they cannot sign as the creator of the
+/// target ephemeral channel.
+pub async fn huddle_started_link_exists(
+    pool: &PgPool,
+    community_id: CommunityId,
+    parent_channel_id: Uuid,
+    ephemeral_channel_id: Uuid,
+    creator_pubkey: &[u8],
+) -> Result<bool> {
+    let uuid_needle = format!("%{}%", ephemeral_channel_id);
+    let candidates: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT content
+        FROM events
+        WHERE deleted_at IS NULL
+          AND community_id = $1
+          AND channel_id = $2
+          AND kind = $3
+          AND pubkey = $4
+          AND octet_length(content) <= $5
+          AND content ILIKE $6
+        ORDER BY created_at DESC, id ASC
+        LIMIT $7
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(parent_channel_id)
+    .bind(KIND_HUDDLE_STARTED as i32)
+    .bind(creator_pubkey)
+    .bind(HUDDLE_LINK_CONTENT_MAX_BYTES)
+    .bind(uuid_needle)
+    .bind(HUDDLE_LINK_CANDIDATE_LIMIT)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(candidates
+        .iter()
+        .any(|content| huddle_started_content_links(content, ephemeral_channel_id)))
 }
 
 /// Insert a Nostr event. Rejects AUTH and ephemeral kinds.
@@ -1708,5 +1775,22 @@ mod tests {
                 .expect("re-claim A after release"),
             "A/X must be reclaimable after its own release"
         );
+    }
+
+    #[test]
+    fn huddle_started_content_requires_matching_ephemeral_field() {
+        let channel_id = Uuid::new_v4();
+        let matching = serde_json::json!({
+            "ephemeral_channel_id": channel_id.to_string(),
+        })
+        .to_string();
+        assert!(huddle_started_content_links(&matching, channel_id));
+
+        let wrong_field = serde_json::json!({
+            "other": channel_id.to_string(),
+        })
+        .to_string();
+        assert!(!huddle_started_content_links(&wrong_field, channel_id));
+        assert!(!huddle_started_content_links("not-json", channel_id));
     }
 }

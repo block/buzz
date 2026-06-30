@@ -90,7 +90,24 @@ Save these. Losing any of them is data loss. See NOTES.txt printed by `helm inst
   currently stands up real Redis and S3 rather than the relay's single-node
   fallbacks. (Full-text search already runs in Postgres, so no separate search
   service is provisioned.)
-- **OCI publish to GHCR + cosign signing** is a follow-up PR. For now, install the chart from source: `helm install buzz ./deploy/charts/buzz` after cloning the repo.
+- **Cosign signing of the published chart** is a follow-up (the relay image is
+  attested via `actions/attest-build-provenance`; the chart is not yet). The
+  chart itself is published to GHCR — see [Releasing](#releasing).
+
+## Releasing
+
+The chart is published to GHCR as an OCI artifact at
+`oci://ghcr.io/block/buzz/charts/buzz` by the `helm chart` workflow
+(`.github/workflows/helm-chart.yml`), versioned independently of the desktop app
+and the relay image via its own `chart-v*` tags. Every PR/`main` push still
+lints, unit-tests, and render-checks the chart; only a `chart-v*` tag publishes,
+so an in-progress `main` can never overwrite a released version.
+
+To cut a release, push a `chart-release/<version>` branch whose `<version>`
+matches `Chart.yaml`'s `version`; merging it auto-tags `chart-v<version>` and
+dispatches the publish job (same lane machinery as the desktop and relay
+releases — see `.github/workflows/auto-tag-on-release-pr-merge.yml`). The publish
+job fails loudly if the tag version and `Chart.yaml` version disagree.
 
 ## Development
 

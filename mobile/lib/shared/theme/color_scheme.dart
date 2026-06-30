@@ -87,10 +87,7 @@ ColorScheme applyAccent(ColorScheme base, int accentIndex) {
   if (accentIndex < 0 || accentIndex >= accentColors.length) {
     return base;
   }
-  final accent = accentColors[accentIndex];
-  final color = base.brightness == Brightness.light
-      ? accent.light
-      : accent.dark;
+  final color = accentColorForScheme(base, accentIndex);
   final onColor = contrastForeground(color);
 
   return base.copyWith(primary: color, onPrimary: onColor, surfaceTint: color);

@@ -567,17 +567,22 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Build `-c` flag pairs that allowlist the relay hostname in Codex's network sandbox.
+/// Build `-c` flag pairs that enable network access and allowlist the relay hostname
+/// in Codex's network sandbox.
 ///
-/// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a local proxy with
-/// a domain allowlist. Without this, `buzz-cli` requests to the relay are blocked before
+/// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a Seatbelt sandbox
+/// that blocks all outbound network by default, plus a managed proxy with a domain
+/// allowlist. Without these flags, `buzz-cli` requests to the relay are blocked before
 /// they reach WARP or any other outbound network path.
 ///
-/// Returns `["-c", "network_proxy.mode=\"full\"", "-c", "network_proxy.domains.\"<host>\"=\"allow\""]`
+/// Returns `["-c", "sandbox_workspace_write.network_access=true", "-c",
+/// "network_proxy.mode=\"full\"", "-c", "network_proxy.domains.\"<host>\"=\"allow\""]`
 /// for Codex agents, or an empty vec for non-Codex agents or when the hostname cannot
 /// be parsed from the relay URL.
 ///
-/// The `network_proxy` keys map to `NetworkProxyConfigToml` in codex-acp's config schema:
+/// The flags form a layered defense:
+/// - `sandbox_workspace_write.network_access=true` opens the Seatbelt sandbox gate so
+///   outbound TCP/TLS connections are allowed at the OS level
 /// - `network_proxy.mode="full"` enables the managed proxy for all outbound traffic
 /// - `network_proxy.domains."<host>"="allow"` adds the relay hostname to the allowlist
 ///
@@ -611,6 +616,8 @@ pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
     tracing::debug!(host, "injecting codex network allowlist for host");
 
     vec![
+        "-c".into(),
+        "sandbox_workspace_write.network_access=true".into(),
         "-c".into(),
         "network_proxy.mode=\"full\"".into(),
         "-c".into(),
@@ -1512,6 +1519,8 @@ mod tests {
             args,
             vec![
                 "-c",
+                "sandbox_workspace_write.network_access=true",
+                "-c",
                 "network_proxy.mode=\"full\"",
                 "-c",
                 "network_proxy.domains.\"sprout-oss.stage.blox.sqprod.co\"=\"allow\"",
@@ -1525,6 +1534,8 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "-c",
+                "sandbox_workspace_write.network_access=true",
                 "-c",
                 "network_proxy.mode=\"full\"",
                 "-c",
@@ -1540,6 +1551,8 @@ mod tests {
             args,
             vec![
                 "-c",
+                "sandbox_workspace_write.network_access=true",
+                "-c",
                 "network_proxy.mode=\"full\"",
                 "-c",
                 "network_proxy.domains.\"relay.example.com\"=\"allow\"",
@@ -1553,6 +1566,8 @@ mod tests {
         assert_eq!(
             args,
             vec![
+                "-c",
+                "sandbox_workspace_write.network_access=true",
                 "-c",
                 "network_proxy.mode=\"full\"",
                 "-c",
@@ -1569,6 +1584,8 @@ mod tests {
             args,
             vec![
                 "-c",
+                "sandbox_workspace_write.network_access=true",
+                "-c",
                 "network_proxy.mode=\"full\"",
                 "-c",
                 "network_proxy.domains.\"relay.example.com\"=\"allow\"",
@@ -1584,6 +1601,8 @@ mod tests {
             args,
             vec![
                 "-c",
+                "sandbox_workspace_write.network_access=true",
+                "-c",
                 "network_proxy.mode=\"full\"",
                 "-c",
                 "network_proxy.domains.\"relay.example.com\"=\"allow\"",
@@ -1596,6 +1615,16 @@ mod tests {
         assert!(codex_network_args("goose", "wss://relay.example.com").is_empty());
         assert!(codex_network_args("claude-agent-acp", "wss://relay.example.com").is_empty());
         assert!(codex_network_args("buzz-agent", "wss://relay.example.com").is_empty());
+    }
+
+    #[test]
+    fn codex_network_args_includes_sandbox_network_access() {
+        // The sandbox gate must be the first flag pair — without it, the Seatbelt
+        // sandbox blocks outbound connections before the proxy can intercept them.
+        let args = codex_network_args("codex-acp", "wss://relay.example.com");
+        assert_eq!(args.len(), 6, "expected 3 flag pairs (6 elements)");
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[1], "sandbox_workspace_write.network_access=true");
     }
 
     #[test]

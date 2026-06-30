@@ -9,6 +9,10 @@ import {
 import { computeThreadReplyUnreadCounts } from "@/features/channels/lib/threadReplyUnreadCounts";
 import { computeThreadBadgeCounts } from "@/features/channels/lib/threadBadgeCounts";
 import {
+  useStableArrayShallow,
+  useStableMap,
+} from "@/shared/hooks/useStableReference";
+import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
 } from "@/features/messages/lib/threadPanel";
@@ -174,7 +178,7 @@ export function useChannelUnreadState({
     ],
   );
   const openThreadHeadMessage = threadPanelData.threadHead;
-  const threadMessages = threadPanelData.visibleReplies;
+  const threadMessages = useStableArrayShallow(threadPanelData.visibleReplies);
   const threadReplyTargetMessage = threadPanelData.replyTargetMessage;
 
   // Oldest unread top-level message + count from the open-time frontier.
@@ -332,7 +336,7 @@ export function useChannelUnreadState({
   // (LP4 Issue 2 by construction). readStateVersion is an intentional recompute
   // trigger so the badge re-reads after any marker advances.
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and forcedUnreadVersion are intentional recompute triggers
-  const threadUnreadCounts = React.useMemo(
+  const threadUnreadCountsRaw = React.useMemo(
     () =>
       computeThreadBadgeCounts(
         timelineMessages,
@@ -353,6 +357,11 @@ export function useChannelUnreadState({
       forcedUnreadVersion,
     ],
   );
+  // Keep the same Map reference across recomputes when the entries are
+  // unchanged. readStateVersion bumps on read-state activity (frequent in busy
+  // channels) and recomputes a fresh Map even when no count changed; without
+  // this, every bump hands the timeline a new prop ref and reconciles all rows.
+  const threadUnreadCounts = useStableMap(threadUnreadCountsRaw);
 
   // Per-message unread predicate for the mark-read/unread menu toggle. Reuses
   // computeThreadUnreadMarker — the exact function the badge counts call

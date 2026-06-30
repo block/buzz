@@ -1,6 +1,6 @@
 import type * as React from "react";
 
-import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
+import { AUXILIARY_PANEL_MIN_WIDTH_PX } from "@/shared/layout/AuxiliaryPanel";
 import { cn } from "@/shared/lib/cn";
 
 type RightAuxiliaryPaneProps = {
@@ -30,7 +30,7 @@ export function RightAuxiliaryPane({
       data-testid={testId}
       style={{
         maxWidth: constrainToAvailableSpace
-          ? `calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px)`
+          ? `calc(100% - ${AUXILIARY_PANEL_MIN_WIDTH_PX}px)`
           : undefined,
         width: widthPx,
       }}

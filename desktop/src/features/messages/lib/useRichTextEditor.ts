@@ -53,7 +53,7 @@ export type AutocompleteEdit = {
 
 export type RichTextEditorOptions = {
   placeholder?: string;
-  onUpdate?: (info: { markdown: string; text: string }) => void;
+  onUpdate?: (info: { text: string; cursor: number }) => void;
   editable?: boolean;
   mentionNames?: string[];
   agentMentionNames?: string[];
@@ -459,13 +459,15 @@ export function useRichTextEditor({
         },
       },
       onUpdate: ({ editor: ed }) => {
-        const markdown = getMarkdownFromEditor(ed);
-        // Use the same plain-text projection that `getPlainTextAndCursor`
-        // uses, so autocomplete detection sees the *same* string the
-        // cursor offset is mapped against. `state.doc.textContent` would
-        // diverge by 1 per hard-break / block boundary.
-        const text = buildPlainTextProjection(ed.state.doc).text;
-        onUpdateRef.current?.({ markdown, text });
+        // Keep the hot typing path lightweight. Markdown serialization is
+        // still available through `getMarkdown()` for send/draft boundaries;
+        // per-keystroke consumers only need textarea-shaped plain text for
+        // autocomplete and empty/non-empty state.
+        const projection = buildPlainTextProjection(ed.state.doc);
+        onUpdateRef.current?.({
+          cursor: projection.mapPMToTextOffset(ed.state.selection.anchor),
+          text: projection.text,
+        });
       },
     },
     [],

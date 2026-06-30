@@ -6,6 +6,7 @@
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::http::header;
 use axum::{
@@ -37,6 +38,75 @@ pub(crate) struct AuthenticatedUpload {
     /// this HTTP door), identical to the WS door in `router.rs` and the bridge
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
     tenant: TenantContext,
+    _upload_permit: UploadPermit,
+}
+
+const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+struct UploadPermit {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    in_flight: Arc<dashmap::DashMap<[u8; 32], u32>>,
+    pubkey: [u8; 32],
+}
+
+impl Drop for UploadPermit {
+    fn drop(&mut self) {
+        use dashmap::mapref::entry::Entry;
+
+        if let Entry::Occupied(mut entry) = self.in_flight.entry(self.pubkey) {
+            if *entry.get() <= 1 {
+                entry.remove();
+            } else {
+                *entry.get_mut() -= 1;
+            }
+        }
+    }
+}
+
+fn upload_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
+    let key: [u8; 32] = pubkey.to_bytes();
+    let now = Instant::now();
+    let limit = state.config.media_uploads_per_minute;
+    let mut entry = state
+        .media_upload_rate_limiter
+        .entry(key)
+        .or_insert((0, now));
+    let (count, window_start) = entry.value_mut();
+    if now.duration_since(*window_start) >= MEDIA_UPLOAD_RATE_WINDOW {
+        *count = 1;
+        *window_start = now;
+        return false;
+    }
+    if *count >= limit {
+        return true;
+    }
+    *count += 1;
+    false
+}
+
+fn acquire_upload_permit(
+    state: &AppState,
+    pubkey: &nostr::PublicKey,
+) -> Result<UploadPermit, MediaError> {
+    let global = state
+        .media_upload_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| MediaError::UploadConcurrencyLimitReached)?;
+
+    let key: [u8; 32] = pubkey.to_bytes();
+    let mut in_flight = state.media_uploads_in_flight.entry(key).or_insert(0);
+    if *in_flight >= state.config.media_max_concurrent_uploads_per_pubkey {
+        return Err(MediaError::UploadConcurrencyLimitReached);
+    }
+    *in_flight += 1;
+    drop(in_flight);
+
+    Ok(UploadPermit {
+        _global: global,
+        in_flight: Arc::clone(&state.media_uploads_in_flight),
+        pubkey: key,
+    })
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
@@ -122,10 +192,21 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
 
+        if upload_rate_limited(state, &auth_event.pubkey) {
+            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
+                .increment(1);
+            return Err(MediaError::UploadRateLimitExceeded);
+        }
+        let upload_permit = acquire_upload_permit(state, &auth_event.pubkey).inspect_err(|_| {
+            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
+                .increment(1);
+        })?;
+
         Ok(AuthenticatedUpload {
             auth_event,
             scopes,
             tenant,
+            _upload_permit: upload_permit,
         })
     }
 }
@@ -147,9 +228,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
 ///   - Raw binary body (the file bytes)
 ///
 /// Returns a [`BlobDescriptor`] JSON on success.
-// TODO(v2): Add per-pubkey upload rate limiting and storage quotas to prevent
-// bandwidth/storage exhaustion from authenticated callers. Currently mitigated by
-// auth requirement (API token + Blossom signature) and body size limit.
+// TODO(v2): Add persistent per-pubkey storage quotas. Admission limits below
+// bound active parser/storage work, but they do not cap durable bytes stored.
 pub async fn upload_blob(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUpload,

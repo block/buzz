@@ -693,6 +693,26 @@ pub async fn build_event_query_from_filter(
     filter_to_query_params(filter, channel_id, community)
 }
 
+/// Maximum SQL candidate rows a non-pushable COUNT filter may inspect before
+/// the client must add narrower constraints.
+///
+/// COUNT needs an exact answer. For filters that require Rust post-filtering,
+/// fetch one extra row so callers can reject over-budget scans rather than
+/// returning a truncated count.
+pub(crate) const COUNT_FALLBACK_CANDIDATE_LIMIT: i64 = 5_000;
+
+/// Apply the bounded candidate budget used by COUNT post-filter fallbacks.
+pub(crate) fn apply_count_fallback_limit(query: &mut EventQuery) {
+    let fetch_limit = COUNT_FALLBACK_CANDIDATE_LIMIT + 1;
+    query.limit = Some(fetch_limit);
+    query.max_limit = Some(fetch_limit);
+}
+
+/// Return whether a COUNT fallback query exceeded its exact-count budget.
+pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
+    candidate_count > COUNT_FALLBACK_CANDIDATE_LIMIT as usize
+}
+
 /// Returns `true` if all constraints in this filter can be fully represented
 /// in SQL by `filter_to_query_params` — meaning `count_events()` will produce
 /// an exact count without post-filtering.
@@ -1164,6 +1184,21 @@ mod tests {
             SingleLetterTag::lowercase(Alphabet::H),
             channel_id.to_string(),
         )
+    }
+
+    #[test]
+    fn count_fallback_fetches_one_extra_candidate() {
+        let mut query =
+            EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()));
+        apply_count_fallback_limit(&mut query);
+        assert_eq!(query.limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
+        assert_eq!(query.max_limit, Some(COUNT_FALLBACK_CANDIDATE_LIMIT + 1));
+        assert!(!count_fallback_exceeded(
+            COUNT_FALLBACK_CANDIDATE_LIMIT as usize
+        ));
+        assert!(count_fallback_exceeded(
+            COUNT_FALLBACK_CANDIDATE_LIMIT as usize + 1
+        ));
     }
 
     #[test]

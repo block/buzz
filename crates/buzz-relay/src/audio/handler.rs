@@ -200,7 +200,8 @@ async fn handle_audio_connection(
         return;
     }
 
-    if let Err(e) = ensure_membership(
+    // ── Step 3: membership check / auto-add ───────────────────────────────────
+    let parent_id_for_event = match ensure_membership(
         &state,
         &tenant,
         channel_id,
@@ -209,16 +210,19 @@ async fn handle_audio_connection(
     )
     .await
     {
-        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership denied: {e}");
-        let _ = ws_send
-            .send(WsMessage::Text(
-                serde_json::json!({"type":"error","message":"not a member"})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
-        return;
-    }
+        Ok(parent_id) => parent_id,
+        Err(e) => {
+            warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio membership denied: {e}");
+            let _ = ws_send
+                .send(WsMessage::Text(
+                    serde_json::json!({"type":"error","message":"not a member"})
+                        .to_string()
+                        .into(),
+                ))
+                .await;
+            return;
+        }
+    };
 
     // Huddle audio guardrail (plan §5b). Audio frames are relayed only within
     // a single pod; under horizontal scaling (any-pod-any-connection) two peers
@@ -380,7 +384,7 @@ async fn handle_audio_connection(
 
     room.broadcast_control(joined_msg);
 
-    let parent_id_for_event = parent_channel_id.unwrap_or(channel_id);
+    // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
     emit_participant_event(
         &state,
         &tenant,
@@ -698,7 +702,7 @@ async fn ensure_membership(
     channel_id: Uuid,
     pubkey_bytes: &[u8],
     parent_channel_id: Option<Uuid>,
-) -> Result<(), String> {
+) -> Result<Uuid, String> {
     // Load channel first — reject archived channels before any membership check.
     // This ensures auto-ended huddles can't be rejoined by existing members.
     let channel = state
@@ -711,6 +715,29 @@ async fn ensure_membership(
         return Err("channel is archived".into());
     }
 
+    // Lifecycle events for an ephemeral huddle belong in its parent channel.
+    // Resolve that parent from a creator-signed kind:48100 event instead of
+    // trusting the UUID supplied by the client during audio auth.
+    let lifecycle_parent_id = if channel.ttl_seconds.is_some() {
+        let parent_id = parent_channel_id.ok_or("ephemeral channel requires parent linkage")?;
+        let linked = state
+            .db
+            .huddle_started_link_exists(
+                tenant.community(),
+                parent_id,
+                channel_id,
+                &channel.created_by,
+            )
+            .await
+            .map_err(|e| format!("db error: {e}"))?;
+        if !linked {
+            return Err("ephemeral channel is not linked to claimed parent".into());
+        }
+        parent_id
+    } else {
+        channel_id
+    };
+
     // Fast path: already a member.
     let is_member = state
         .is_member_cached(tenant.community(), channel_id, pubkey_bytes)
@@ -718,45 +745,35 @@ async fn ensure_membership(
         .map_err(|e| format!("db error: {e}"))?;
 
     if is_member {
-        return Ok(());
+        return Ok(lifecycle_parent_id);
     }
 
     if channel.visibility == "open" {
-        return Ok(());
+        return Ok(lifecycle_parent_id);
     }
 
     // Auto-add path: private ephemeral channel + caller is member of parent.
-    //
-    // TODO(security): parent_channel_id is client-supplied and unverified.
-    // We don't confirm it's the *actual* parent of this ephemeral channel.
-    // Security relies on the ephemeral UUID being unguessable (UUIDv4) and
-    // only discoverable via the kind:48100 event in the real parent channel
-    // — which requires parent membership. A future hardening pass should
-    // verify the parent→ephemeral linkage by checking that a kind:48100
-    // event exists in the claimed parent channel referencing this channel ID.
     if channel.ttl_seconds.is_some() {
-        if let Some(parent_id) = parent_channel_id {
-            let parent_member = state
-                .is_member_cached(tenant.community(), parent_id, pubkey_bytes)
+        let parent_member = state
+            .is_member_cached(tenant.community(), lifecycle_parent_id, pubkey_bytes)
+            .await
+            .map_err(|e| format!("db error: {e}"))?;
+
+        if parent_member {
+            state
+                .db
+                .add_member(
+                    tenant.community(),
+                    channel_id,
+                    pubkey_bytes,
+                    MemberRole::Member,
+                    Some(&channel.created_by),
+                )
                 .await
-                .map_err(|e| format!("db error: {e}"))?;
+                .map_err(|e| format!("auto-add failed: {e}"))?;
+            state.invalidate_membership(tenant, channel_id, pubkey_bytes);
 
-            if parent_member {
-                state
-                    .db
-                    .add_member(
-                        tenant.community(),
-                        channel_id,
-                        pubkey_bytes,
-                        MemberRole::Member,
-                        Some(&channel.created_by),
-                    )
-                    .await
-                    .map_err(|e| format!("auto-add failed: {e}"))?;
-                state.invalidate_membership(tenant, channel_id, pubkey_bytes);
-
-                return Ok(());
-            }
+            return Ok(lifecycle_parent_id);
         }
     }
 

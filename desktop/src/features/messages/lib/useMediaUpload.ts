@@ -530,26 +530,46 @@ export function useMediaUpload() {
 
   const isUploading = uploadingCount > 0;
 
-  return {
-    cancelUpload,
-    handleDragEnter,
-    handleDragLeave,
-    handleDragOver,
-    handleDrop,
-    handlePaperclip,
-    handlePaste,
-    isDragOver,
-    isUploading,
-    pendingImeta,
-    pendingImetaRef,
-    removeAttachment,
-    setPendingImeta,
-    setUploadState,
-    uploadFile,
-    uploadingCount,
-    uploadingPreviews,
-    uploadState,
-  };
+  return React.useMemo(
+    () => ({
+      cancelUpload,
+      handleDragEnter,
+      handleDragLeave,
+      handleDragOver,
+      handleDrop,
+      handlePaperclip,
+      handlePaste,
+      isDragOver,
+      isUploading,
+      pendingImeta,
+      pendingImetaRef,
+      removeAttachment,
+      setPendingImeta,
+      setUploadState,
+      uploadFile,
+      uploadingCount,
+      uploadingPreviews,
+      uploadState,
+    }),
+    [
+      cancelUpload,
+      handleDragEnter,
+      handleDragLeave,
+      handleDragOver,
+      handleDrop,
+      handlePaperclip,
+      handlePaste,
+      isDragOver,
+      isUploading,
+      pendingImeta,
+      removeAttachment,
+      setPendingImeta,
+      uploadFile,
+      uploadingCount,
+      uploadingPreviews,
+      uploadState,
+    ],
+  );
 }
 
 export type MediaUploadController = ReturnType<typeof useMediaUpload>;
