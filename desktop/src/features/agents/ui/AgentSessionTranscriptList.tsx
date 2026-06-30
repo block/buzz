@@ -1,14 +1,9 @@
 import * as React from "react";
 import { CheckCheck, ChevronDown, Radio } from "lucide-react";
 
-import {
-  resolveUserLabel,
-  type UserProfileLookup,
-} from "@/features/profile/lib/identity";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
-import { Markdown } from "@/shared/ui/markdown";
 import { Toggle } from "@/shared/ui/toggle";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
@@ -32,6 +27,7 @@ import {
 } from "./agentSessionTranscriptGrouping";
 import { buildCompactToolSummary } from "./agentSessionToolSummary";
 import { hasFileEditLineDiff } from "./FileEditDiffView";
+import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
 
 const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
 
@@ -391,37 +387,11 @@ function PromptUserMessage({
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
 }) {
   const [contextOpen, setContextOpen] = React.useState(false);
-  const text = item.text.trim();
-  const authorProfile = item.authorPubkey
-    ? profiles?.[item.authorPubkey.toLowerCase()]
-    : null;
-  const authorLabel = item.authorPubkey
-    ? resolveUserLabel({
-        pubkey: item.authorPubkey,
-        fallbackName: item.title,
-        profiles,
-      })
-    : item.title || "User";
 
   return (
-    <div
-      className="flex flex-row items-start justify-end"
-      data-role="user-message"
-      data-testid="transcript-user-message"
-    >
-      <UserAvatar
-        avatarUrl={authorProfile?.avatarUrl ?? null}
-        className="order-last ml-2 mt-1 shrink-0"
-        displayName={authorLabel}
-        size="xs"
-      />
-      <div className="group relative flex max-w-[85%] min-w-0 flex-col items-end gap-1">
-        <div className="w-full min-w-0 rounded-2xl bg-muted p-2.5 text-sm leading-relaxed text-foreground">
-          <Markdown content={text || " "} mediaInset tight />
-          {contextOpen && context ? (
-            <PromptContextSections sections={context.sections} setup={setup} />
-          ) : null}
-        </div>
+    <UserMessageBubble
+      bubbleClassName="p-2.5"
+      footer={
         <TurnSetupFooter
           context={context}
           contextOpen={contextOpen}
@@ -429,8 +399,14 @@ function PromptUserMessage({
           onContextOpenChange={setContextOpen}
           timestamp={item.timestamp}
         />
-      </div>
-    </div>
+      }
+      item={item}
+      profiles={profiles}
+    >
+      {contextOpen && context ? (
+        <PromptContextSections sections={context.sections} setup={setup} />
+      ) : null}
+    </UserMessageBubble>
   );
 }
 
