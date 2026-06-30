@@ -55,16 +55,35 @@ const BLOB_KEY: &str = "secrets";
 // The fix: `mutate_blob` acquires an exclusive advisory file lock, then always
 // performs a fresh `read_blob_raw()` inside the lock, applies the mutation,
 // writes back, and releases. The cache is still updated after a successful
-// write, so same-process reads remain fast. The lock is file-based and lives in
-// the system temp dir so it is reachable from both signed and unsigned builds
-// (no app-sandbox entitlement is set; neither build uses the macOS app sandbox).
+// write, so same-process reads remain fast. The lock is file-based at a fixed
+// per-user path `/tmp/buzz-keychain-<uid>-<service>.lock` on Unix — a path
+// that is invariant to `$TMPDIR`/process environment, so both the GUI-launched
+// signed DMG and a terminal-launched dev build always take the same lock.
 
 /// Return the path of the advisory lockfile for `service`.
 ///
-/// Stored in `std::env::temp_dir()` so it is accessible to all Buzz builds
-/// (signed DMG, unsigned dev, CI) without requiring special entitlements.
+/// The path is `/tmp/buzz-keychain-<uid>-<service>.lock` on Unix — a
+/// deterministic per-user path that is invariant to `$TMPDIR`/process
+/// environment. Both a GUI-launched signed DMG (`launchd`, env-stripped) and a
+/// terminal-launched dev build resolve `/tmp` to the same inode, so they
+/// contend on the same lockfile and achieve mutual exclusion.
+///
+/// On Windows the same name used for the kernel mutex is derived from the
+/// lockfile path, so the service-keyed uniqueness is preserved.
 fn blob_lockfile_path(service: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("buzz-keychain-{service}.lock"))
+    #[cfg(unix)]
+    {
+        // Use the real UID so distinct users get distinct lockfiles.
+        // SAFETY: getuid() is always safe on Unix — it never fails.
+        let uid = unsafe { libc::getuid() };
+        PathBuf::from(format!("/tmp/buzz-keychain-{uid}-{service}.lock"))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: no lockfile used (named mutex instead); this path is only
+        // used to derive the mutex name and for test assertions.
+        std::env::temp_dir().join(format!("buzz-keychain-{service}.lock"))
+    }
 }
 
 /// Acquire an exclusive advisory file lock for the blob identified by `service`.
@@ -86,7 +105,10 @@ fn acquire_blob_lock(service: &str) -> Result<BlobLockGuard, String> {
 /// needed). The Windows mutex handle is released on drop.
 #[cfg(feature = "system-keyring")]
 struct BlobLockGuard {
+    /// The open lockfile. Never read — held purely for RAII: closing the fd
+    /// releases the `flock(LOCK_EX)` on Unix.
     #[cfg(unix)]
+    #[allow(dead_code)]
     file: std::fs::File,
     #[cfg(windows)]
     mutex_handle: windows_sys::Win32::Foundation::HANDLE,
@@ -133,8 +155,7 @@ impl BlobLockGuard {
             use windows_sys::Win32::System::Threading::{
                 CreateMutexW, WaitForSingleObject, INFINITE,
             };
-            let handle =
-                unsafe { CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr()) };
+            let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name_wide.as_ptr()) };
             if handle == 0 {
                 let err = std::io::Error::last_os_error();
                 return Err(format!("blob lock CreateMutexW: {err}"));
@@ -146,10 +167,14 @@ impl BlobLockGuard {
                 if wait_result != 0x80 {
                     let err = std::io::Error::last_os_error();
                     unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
-                    return Err(format!("blob lock WaitForSingleObject: {wait_result} / {err}"));
+                    return Err(format!(
+                        "blob lock WaitForSingleObject: {wait_result} / {err}"
+                    ));
                 }
             }
-            return Ok(BlobLockGuard { mutex_handle: handle });
+            return Ok(BlobLockGuard {
+                mutex_handle: handle,
+            });
         }
 
         // Fallback for exotic platforms: no-op lock (only Unix/Windows ship).
@@ -362,8 +387,10 @@ impl SecretStore {
         F: FnOnce(&mut HashMap<String, String>),
     {
         // Acquire the interprocess advisory lock first. All Buzz processes
-        // using the same service name contend on the same lockfile in temp dir,
-        // so only one process performs a read-modify-write at a time.
+        // using the same service name contend on the same lockfile at
+        // /tmp/buzz-keychain-<uid>-<service>.lock (a deterministic per-user
+        // path invariant to $TMPDIR), so only one process performs a
+        // read-modify-write at a time.
         let _lock = acquire_blob_lock(&self.service)?;
 
         // Always do a fresh read from the keychain while holding the lock —
@@ -695,22 +722,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mutate_blob_skips_write_when_map_unchanged() {
-        // The idempotent-write guarantee: when the closure leaves the map
-        // identical to the freshly-read keychain state, `write_blob_raw` must
-        // NOT be invoked.
-        //
-        // With the cross-process lock fix, mutate_blob always calls
-        // read_blob_raw() first (even with a warm cache), so this test now
-        // requires a reachable keychain. It is marked #[ignore] and runs
-        // locally — on CI the store() call returns Err because the keychain
-        // is unavailable, which is expected and correct.
-        //
-        // Run locally:
-        //   cargo test -p buzz-desktop -- --ignored mutate_blob_skips_write_when
-    }
-
     // ── Cross-process race tests (require real OS keychain) ────────────────
 
     #[ignore = "requires real OS keychain (run locally)"]
@@ -746,9 +757,21 @@ mod tests {
 
         // Verify via a third reader (clean cache).
         let reader = SecretStore::keyring(svc);
-        assert_eq!(reader.load("k1").unwrap(), Some("v1".to_string()), "k1 must survive");
-        assert_eq!(reader.load("k2").unwrap(), Some("v2".to_string()), "k2 must not be dropped");
-        assert_eq!(reader.load("k3").unwrap(), Some("v3".to_string()), "k3 must be written");
+        assert_eq!(
+            reader.load("k1").unwrap(),
+            Some("v1".to_string()),
+            "k1 must survive"
+        );
+        assert_eq!(
+            reader.load("k2").unwrap(),
+            Some("v2".to_string()),
+            "k2 must not be dropped"
+        );
+        assert_eq!(
+            reader.load("k3").unwrap(),
+            Some("v3".to_string()),
+            "k3 must be written"
+        );
 
         // Cleanup.
         let _ = reader.delete("k1");
@@ -791,21 +814,41 @@ mod tests {
     }
 
     #[test]
-    fn test_blob_lockfile_path_is_in_temp_dir() {
-        // The lockfile must be in the system temp dir, not in the nest or any
-        // app-specific dir, so both signed and unsigned builds can access it.
+    fn test_blob_lockfile_path_is_in_tmp_with_uid() {
+        // The lockfile must be at a deterministic per-user path under /tmp —
+        // invariant to $TMPDIR — so both a GUI-launched DMG (env-stripped by
+        // launchd) and a terminal-launched dev build resolve the same inode and
+        // achieve mutual exclusion.
         let path = blob_lockfile_path("buzz-desktop");
-        let tmp = std::env::temp_dir();
-        assert!(
-            path.starts_with(&tmp),
-            "lockfile {path:?} must be under temp dir {tmp:?}"
-        );
-        assert!(
-            path.file_name()
+        #[cfg(unix)]
+        {
+            let uid = unsafe { libc::getuid() };
+            assert!(
+                path.starts_with("/tmp"),
+                "lockfile {path:?} must start with /tmp (not $TMPDIR)"
+            );
+            let name = path
+                .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.contains("buzz-keychain")),
-            "lockfile name must contain 'buzz-keychain'"
-        );
+                .unwrap_or_default();
+            assert!(
+                name.contains(&uid.to_string()),
+                "lockfile {path:?} must contain uid {uid}"
+            );
+            assert!(
+                name.contains("buzz-keychain"),
+                "lockfile name must contain 'buzz-keychain'"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains("buzz-keychain")),
+                "lockfile name must contain 'buzz-keychain'"
+            );
+        }
     }
 
     #[test]

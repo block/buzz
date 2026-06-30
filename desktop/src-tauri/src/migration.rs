@@ -132,12 +132,24 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // operation that calls nest_dir(). The discriminator matches the existing
     // pattern used by reconcile_target_dir: dev instances have an app-data-dir
     // name starting with CANONICAL_DEV_IDENTIFIER.
-    if let Ok(data_dir) = app.path().app_data_dir() {
-        let is_dev = data_dir
+    let is_dev = if let Ok(data_dir) = app.path().app_data_dir() {
+        let dev = data_dir
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
-        crate::managed_agents::init_nest_dir(is_dev);
+        crate::managed_agents::init_nest_dir(dev);
+        dev
+    } else {
+        false
+    };
+
+    // On dev builds, copy `.repos-dir` from ~/.buzz → ~/.buzz-dev BEFORE
+    // control returns to lib.rs where resolve_repos_at_boot() reads it. This
+    // ensures the dev nest boots with the correct workspace on its first launch,
+    // matching what the prod nest had configured. Skip-if-dest-exists so it is
+    // idempotent and never clobbers a value the dev nest already set explicitly.
+    if is_dev {
+        migrate_dev_repos_dir();
     }
 
     migrate_legacy_app_data_dir(app);
@@ -283,6 +295,54 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
     true
 }
 
+/// Filename of the completion sentinel written after a successful dev-nest
+/// knowledge migration. Presence of this file means `~/.buzz` content has
+/// already been copied into `~/.buzz-dev` and subsequent boots can skip the
+/// copy. Using an explicit marker instead of checking for RESEARCH/PLANS
+/// content decouples the dev migration from the `.sprout` migration, which
+/// also copies into `~/.buzz-dev` and could otherwise set the sentinel early.
+const DEV_NEST_MIGRATED_SENTINEL: &str = ".dev-nest-migrated";
+
+/// Copy the `.repos-dir` dotfile from `~/.buzz` → `~/.buzz-dev`, non-destructively.
+///
+/// Must be called on dev builds BEFORE `resolve_repos_at_boot()` reads the
+/// dotfile, so the dev nest boots with the correct workspace configuration on
+/// its first launch. Skip-if-dest-exists so it is idempotent and never
+/// overwrites a value set directly by the dev nest.
+fn migrate_dev_repos_dir() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let src = home.join(".buzz").join(".repos-dir");
+    if !src.exists() {
+        return;
+    }
+    let Some(dev_nest) = crate::managed_agents::nest_dir() else {
+        return;
+    };
+    let dst = dev_nest.join(".repos-dir");
+    // Skip if the dev nest already has its own .repos-dir.
+    if dst.exists() {
+        return;
+    }
+    // Ensure the dev nest directory itself exists — this migration runs before
+    // ensure_nest() in the boot sequence, so the directory may not yet exist.
+    if let Err(e) = std::fs::create_dir_all(&dev_nest) {
+        eprintln!(
+            "buzz-desktop: dev-nest-migration: failed to create dev nest {}: {e}",
+            dev_nest.display()
+        );
+        return;
+    }
+    match std::fs::copy(&src, &dst) {
+        Ok(_) => eprintln!(
+            "buzz-desktop: dev-nest-migration: migrated .repos-dir to {}",
+            dst.display()
+        ),
+        Err(e) => eprintln!("buzz-desktop: dev-nest-migration: failed to migrate .repos-dir: {e}"),
+    }
+}
+
 /// One-time migration of dev-build nest contents from `~/.buzz` → `~/.buzz-dev`.
 ///
 /// When a dev build first boots after this change ships, it switches from the
@@ -293,6 +353,12 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
 /// Migration is non-destructive: `copy_dir_all` skips files already at the
 /// destination, so a partially-migrated state is safe to re-run. The source
 /// `~/.buzz` is never deleted — prod builds continue to use it normally.
+///
+/// Completion is tracked by a [`DEV_NEST_MIGRATED_SENTINEL`] file written into
+/// `~/.buzz-dev`. Using an explicit sentinel (rather than RESEARCH/PLANS file
+/// presence) decouples this migration from the `.sprout` → `~/.buzz-dev`
+/// migration that runs earlier in the same boot, which might otherwise populate
+/// RESEARCH/PLANS and incorrectly suppress the `~/.buzz` copy.
 ///
 /// Only runs on dev builds (checked by the caller). Returns `true` when
 /// contents were copied (useful for a one-time log message, not required).
@@ -307,23 +373,23 @@ pub fn migrate_dev_nest() -> bool {
     if !legacy.exists() {
         return false;
     }
-    // If the destination RESEARCH/ directory already contains any files, assume
-    // migration already ran and skip. Using `ensure_nest()` creates an empty
-    // RESEARCH/ dir, so we check for files (not just directory existence) to
-    // avoid a false positive on a fresh first boot.
-    if dir_has_any_file(&current.join("RESEARCH")) || dir_has_any_file(&current.join("PLANS")) {
+    // Skip if migration has already run (explicit sentinel, not content-based).
+    if current.join(DEV_NEST_MIGRATED_SENTINEL).exists() {
         return false;
     }
-    migrate_legacy_nest_at(&legacy, &current)
-}
-
-/// Returns `true` when `dir` exists AND contains at least one file entry
-/// (recursion depth 1 — does not descend into subdirectories).
-fn dir_has_any_file(dir: &Path) -> bool {
-    std::fs::read_dir(dir)
-        .ok()
-        .map(|mut rd| rd.next().is_some())
-        .unwrap_or(false)
+    let copied = migrate_legacy_nest_at(&legacy, &current);
+    // Write the sentinel so future boots skip the copy. Non-fatal if it fails
+    // — worst case we re-run the (idempotent) migration on the next boot.
+    if copied {
+        let sentinel = current.join(DEV_NEST_MIGRATED_SENTINEL);
+        if let Err(e) = std::fs::write(&sentinel, "") {
+            eprintln!(
+                "buzz-desktop: dev-nest-migration: failed to write sentinel {}: {e}",
+                sentinel.display()
+            );
+        }
+    }
+    copied
 }
 
 /// Copy a single file only if the destination does not already exist, matching
