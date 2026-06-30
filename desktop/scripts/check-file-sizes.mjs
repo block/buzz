@@ -93,7 +93,10 @@ const overrides = new Map([
   // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
-  ["src-tauri/src/managed_agents/runtime.rs", 2150],
+  ["src-tauri/src/managed_agents/runtime.rs", 2207],
+  // config-bridge setup-payload env-boundary fix adds readiness wiring in
+  // spawn_agent_child; load-bearing security fix, queued to split.
+  ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
