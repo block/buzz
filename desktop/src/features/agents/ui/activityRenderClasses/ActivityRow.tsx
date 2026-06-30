@@ -68,14 +68,21 @@ export function ActivityRow({
       data-testid={testId}
       open={defaultOpen}
     >
-      <summary className="inline-flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
+      <summary
+        className={cn(
+          "inline-flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
+          openToneScope === "summary"
+            ? "group-open/summary:text-foreground"
+            : "group-open:text-foreground",
+        )}
+      >
         {summaryChildren}
         <ChevronDown
           className={cn(
-            "h-4 w-4 shrink-0 transition-transform",
+            "h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform",
             openToneScope === "summary"
-              ? "group-open/summary:rotate-180"
-              : "group-open:rotate-180",
+              ? "group-open/summary:rotate-180 group-open/summary:text-foreground"
+              : "group-open:rotate-180 group-open:text-foreground",
           )}
         />
       </summary>
@@ -116,8 +123,8 @@ export function ActivityRowLabel({
           openToneScope === "none"
             ? null
             : openToneScope === "summary"
-              ? "group-open/summary:text-muted-foreground/70"
-              : "group-open:text-muted-foreground/70",
+              ? "group-open/summary:text-foreground"
+              : "group-open:text-foreground",
         )}
       >
         {verb}
@@ -129,8 +136,8 @@ export function ActivityRowLabel({
             openToneScope === "none"
               ? null
               : openToneScope === "summary"
-                ? "group-open/summary:text-muted-foreground/80"
-                : "group-open:text-muted-foreground/80",
+                ? "group-open/summary:text-foreground"
+                : "group-open:text-foreground",
           )}
         >
           {object}

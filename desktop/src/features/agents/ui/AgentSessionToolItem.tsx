@@ -101,7 +101,7 @@ export function ToolItem({
 }
 
 function compactSummaryTone() {
-  return "text-muted-foreground/60 group-open:text-muted-foreground";
+  return "text-muted-foreground/60 group-open:text-foreground";
 }
 
 function resolveImageSrc(source: string): string {
