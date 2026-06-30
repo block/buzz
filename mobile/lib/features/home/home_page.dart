@@ -107,6 +107,7 @@ class _FloatingTabBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final reducedMotion = MediaQuery.of(context).disableAnimations;
     if (destinations.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -199,7 +200,9 @@ class _FloatingTabBar extends StatelessWidget {
                             children: [
                               AnimatedAlign(
                                 alignment: selectedAlignment,
-                                duration: const Duration(milliseconds: 180),
+                                duration: reducedMotion
+                                    ? Duration.zero
+                                    : const Duration(milliseconds: 180),
                                 curve: Curves.easeOutCubic,
                                 child: FractionallySizedBox(
                                   widthFactor: 1 / destinationCount,
