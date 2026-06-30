@@ -2,8 +2,6 @@ import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronDown, Send } from "lucide-react";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { AgentActivityAction, TranscriptItem } from "./agentSessionTypes";
@@ -19,6 +17,7 @@ import {
   splitActivityRowLabel,
   type ActivityRowLabelParts,
 } from "./activityRenderClasses/ActivityRow";
+import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
 import {
   asRecord,
   formatCodeValue,
@@ -41,18 +40,6 @@ export function ToolItem({
   const compactSummary = buildCompactToolSummary(item);
   const duration = getToolDurationDisplay(item);
   const messageLink = getSentMessageLink(item);
-  const { goChannel } = useAppNavigation();
-  const openSentMessage = React.useCallback(
-    (event: React.MouseEvent<HTMLAnchorElement>) => {
-      if (!messageLink) return;
-      event.preventDefault();
-      event.stopPropagation();
-      void goChannel(messageLink.channelId, {
-        messageId: messageLink.messageId,
-      });
-    },
-    [goChannel, messageLink],
-  );
   const handleToggle = React.useCallback(
     (event: React.SyntheticEvent<HTMLDetailsElement>) => {
       setIsExpanded(event.currentTarget.open);
@@ -81,8 +68,8 @@ export function ToolItem({
               isError={item.isError || item.status === "failed"}
               label={compactSummary.label}
               messageLink={messageLink}
-              onOpenMessage={openSentMessage}
               preview={compactSummary.preview}
+              timestamp={item.timestamp}
             />
           ) : (
             <CompactToolSummaryRow
@@ -254,15 +241,15 @@ function CompactMessageSummary({
   isError,
   label,
   messageLink,
-  onOpenMessage,
   preview,
+  timestamp,
 }: {
   duration: string | null;
   isError: boolean;
   label: string;
   messageLink: SentMessageLink | null;
-  onOpenMessage: (event: React.MouseEvent<HTMLAnchorElement>) => void;
   preview: string | null;
+  timestamp: string;
 }) {
   const mutedTone = compactSummaryTone();
   return (
@@ -286,22 +273,9 @@ function CompactMessageSummary({
           {label}
         </span>
         {duration ? (
-          messageLink ? (
-            <a
-              className="shrink-0 rounded-sm text-xs text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              data-testid="transcript-tool-open-message-link"
-              href={messageLink.href}
-              onClick={onOpenMessage}
-              title="Open sent message"
-            >
-              {duration}
-            </a>
-          ) : (
-            <span className={cn("shrink-0 text-xs", mutedTone)}>
-              {duration}
-            </span>
-          )
+          <span className={cn("shrink-0 text-xs", mutedTone)}>{duration}</span>
         ) : null}
+        <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
         <ChevronDown
           className={cn(
             "h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180",
@@ -315,7 +289,6 @@ function CompactMessageSummary({
 
 type SentMessageLink = {
   channelId: string;
-  href: string;
   messageId: string;
 };
 
@@ -353,7 +326,6 @@ function getSentMessageLink(
 
   return {
     channelId,
-    href: buildMessageLink({ channelId, messageId }),
     messageId,
   };
 }

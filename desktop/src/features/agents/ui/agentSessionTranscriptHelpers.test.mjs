@@ -20,6 +20,7 @@ test("parsePromptText returns the empty/Prompt fallback for whitespace-only inpu
     userText: "",
     userTitle: "Prompt",
     userPubkey: null,
+    userEventId: null,
   });
 });
 
@@ -36,14 +37,16 @@ test("parsePromptText wraps header-less free text in a single Prompt section", (
   assert.equal(result.userText, "");
   assert.equal(result.userTitle, "Buzz event");
   assert.equal(result.userPubkey, null);
+  assert.equal(result.userEventId, null);
 });
 
-test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () => {
+test("parsePromptText extracts event id, content, hex pubkey, and a title-cased kind", () => {
   const text = [
     "[System]",
     "system preamble here",
     "",
     "[Buzz event: @mention]",
+    `Event ID: ${HEX_UPPER}`,
     "Channel: demo",
     `From: Wes (hex: ${HEX})`,
     "Content: hello @Brain please look",
@@ -53,6 +56,7 @@ test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () 
 
   assert.equal(result.userText, "hello @Brain please look");
   assert.equal(result.userPubkey, HEX);
+  assert.equal(result.userEventId, HEX);
   // titleCase capitalizes after word boundaries but leaves the leading "@"
   // (a non-word char) in place: "@mention" -> "@Mention".
   assert.equal(result.userTitle, "@Mention");
@@ -92,6 +96,7 @@ test("parsePromptText preserves multiline event content in the user bubble text"
     ].join("\n"),
   );
   assert.equal(result.userPubkey, HEX);
+  assert.equal(result.userEventId, null);
 });
 
 test("parsePromptText lowercases the extracted hex pubkey", () => {

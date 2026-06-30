@@ -73,6 +73,7 @@ export type TranscriptItem =
       title: string;
       text: string;
       timestamp: string;
+      messageId?: string | null;
       acpSource?: TranscriptAcpSource;
       authorPubkey?: string | null;
     } & TranscriptItemIdentity)

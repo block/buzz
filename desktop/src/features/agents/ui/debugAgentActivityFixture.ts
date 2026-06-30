@@ -12,6 +12,8 @@ const userPubkey =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const reviewerPubkey =
   "2222222222222222222222222222222222222222222222222222222222222222";
+export const DEBUG_AGENT_ACTIVITY_PROMPT_EVENT_ID =
+  "3333333333333333333333333333333333333333333333333333333333333333";
 const baseTimestamp = Date.parse("2026-06-30T00:00:00.000Z");
 const workspacePath = "/Users/tho/.buzz/REPOS/buzz-pr-3-activity-feed-rebuild";
 export const DEBUG_AGENT_ACTIVITY_AGENT_NAME = "Fixture Agent";
@@ -407,6 +409,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     title: "Taylor Ho",
     text: "@Agent audit the activity feed taxonomy and show me the risky spots before you edit.",
     timestamp: timestamp(2),
+    messageId: DEBUG_AGENT_ACTIVITY_PROMPT_EVENT_ID,
     acpSource: "session/prompt:user",
     authorPubkey: userPubkey,
     turnId,
@@ -437,6 +440,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       {
         title: "Buzz event: @mention",
         body: [
+          `Event ID: ${DEBUG_AGENT_ACTIVITY_PROMPT_EVENT_ID}`,
           `From: Taylor Ho (hex: ${userPubkey})`,
           "Kind: channel message",
           "Content: @Agent audit the activity feed taxonomy and show me the risky spots before you edit.",

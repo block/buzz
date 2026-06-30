@@ -13,6 +13,7 @@ const baseEvent = {
   sessionId: "sess-1",
   turnId: "turn-1",
 };
+const PROMPT_EVENT_ID = "c".repeat(64);
 
 function acpToolUpdate(seq, update) {
   return {
@@ -75,7 +76,7 @@ test("buildTranscript renders Prompt context + user message for a multi-block se
           { type: "text", text: "[Context]\nScope: thread" },
           {
             type: "text",
-            text: `[Buzz event: @mention]\nFrom: x (hex: ${"a".repeat(64)})\nContent: hello`,
+            text: `[Buzz event: @mention]\nEvent ID: ${PROMPT_EVENT_ID.toUpperCase()}\nFrom: x (hex: ${"a".repeat(64)})\nContent: hello`,
           },
         ],
       },
@@ -94,6 +95,40 @@ test("buildTranscript renders Prompt context + user message for a multi-block se
     ["Agent Memory — core", "Context", "Buzz event: @mention"],
     "every section header is counted",
   );
+  const userMessage = items.find((i) => i.type === "message");
+  assert.equal(userMessage.messageId, PROMPT_EVENT_ID);
+});
+
+test("buildTranscript falls back to a single turn trigger id for older prompt frames", () => {
+  const promptEvent = {
+    ...baseEvent,
+    seq: 2,
+    payload: {
+      method: "session/prompt",
+      params: {
+        sessionId: "sess-1",
+        prompt: [
+          {
+            type: "text",
+            text: `[Buzz event: @mention]\nFrom: x (hex: ${"a".repeat(64)})\nContent: hello`,
+          },
+        ],
+      },
+    },
+  };
+  const [userMessage] = buildTranscript([
+    {
+      ...baseEvent,
+      seq: 1,
+      kind: "turn_started",
+      payload: {
+        triggeringEventIds: [PROMPT_EVENT_ID],
+      },
+    },
+    promptEvent,
+  ]).filter((candidate) => candidate.type === "message");
+
+  assert.equal(userMessage.messageId, PROMPT_EVENT_ID);
 });
 
 test("buildTranscript keeps read_file activity categorized by the actual tool when output names Buzz tools", () => {
@@ -236,6 +271,23 @@ test("buildTranscript preserves author pubkeys on user message chunks", () => {
 
   assert.equal(item.role, "user");
   assert.equal(item.authorPubkey, authorPubkey);
+  assert.equal(item.messageId, null);
+});
+
+test("buildTranscript preserves real event ids on user message chunks", () => {
+  const authorPubkey = "b".repeat(64);
+  const messageId = "d".repeat(64);
+  const [item] = buildTranscript([
+    sessionUpdate(26, {
+      sessionUpdate: "user_message_chunk",
+      messageId,
+      authorPubkey,
+      content: { type: "text", text: "this came from a channel message" },
+    }),
+  ]).filter((candidate) => candidate.type === "message");
+
+  assert.equal(item.role, "user");
+  assert.equal(item.messageId, messageId);
 });
 
 test("buildTranscript de-duplicates repeated tool updates into one canonical row", () => {

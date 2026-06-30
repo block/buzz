@@ -18,6 +18,7 @@ export function parsePromptText(text: string): {
   userText: string;
   userTitle: string;
   userPubkey: string | null;
+  userEventId: string | null;
 } {
   const sections = parsePromptSections(text).filter(
     (s) => s.body.trim().length > 0,
@@ -28,12 +29,13 @@ export function parsePromptText(text: string): {
       userText: text.trim(),
       userTitle: "Prompt",
       userPubkey: null,
+      userEventId: null,
     };
   }
 
   const eventSection = sections.find((section) => {
     const title = section.title.toLowerCase();
-    return title.startsWith("buzz event") || title.startsWith("buzz event");
+    return title.startsWith("buzz event");
   });
   const eventContent = eventSection
     ? extractEventContent(eventSection.body)
@@ -41,6 +43,7 @@ export function parsePromptText(text: string): {
   const eventAuthorPubkey = eventSection
     ? extractEventAuthorPubkey(eventSection.body)
     : null;
+  const eventId = eventSection ? extractEventId(eventSection.body) : null;
   const eventKind = eventSection?.title.split(":").slice(1).join(":").trim();
 
   return {
@@ -48,6 +51,7 @@ export function parsePromptText(text: string): {
     userText: eventContent,
     userTitle: eventKind ? titleCase(eventKind) : "Buzz event",
     userPubkey: eventAuthorPubkey,
+    userEventId: eventId,
   };
 }
 
@@ -167,6 +171,11 @@ function extractEventAuthorPubkey(body: string): string | null {
   return fromMatch?.[1]?.toLowerCase() ?? null;
 }
 
+function extractEventId(body: string): string | null {
+  const eventIdMatch = body.match(/^Event ID:\s*([0-9a-fA-F]{64})\b/m);
+  return eventIdMatch?.[1]?.toLowerCase() ?? null;
+}
+
 export function extractContentText(value: unknown): string {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(extractBlockText).join("\n");
@@ -272,13 +281,17 @@ export function extractToolResult(update: Record<string, unknown>): string {
   return extractBlockText(update.rawOutput);
 }
 
-export function describeTurnStarted(payload: unknown): string {
+export function extractTriggeringEventIds(payload: unknown): string[] {
   const record = asRecord(payload);
-  const ids = Array.isArray(record.triggeringEventIds)
+  return Array.isArray(record.triggeringEventIds)
     ? record.triggeringEventIds.filter(
         (id): id is string => typeof id === "string",
       )
     : [];
+}
+
+export function describeTurnStarted(payload: unknown): string {
+  const ids = extractTriggeringEventIds(payload);
   return ids.length > 0
     ? `Triggered by ${ids.length === 1 ? "1 event" : `${ids.length} events`}.`
     : "";

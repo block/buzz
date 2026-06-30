@@ -17,6 +17,7 @@ import {
   extractBlockText,
   extractContentText,
   extractPromptText,
+  extractTriggeringEventIds,
   extractToolArgs,
   extractToolIdentity,
   extractToolResult,
@@ -31,6 +32,7 @@ export type TranscriptState = {
   itemsById: Map<string, TranscriptItem>;
   activeMessageKey: Map<string, string>;
   sealedKeys: Set<string>;
+  triggeringEventIdsByTurn: Map<string, string[]>;
   continuationSeq: number;
   latestSessionId: string | null;
 };
@@ -41,6 +43,7 @@ export function createEmptyTranscriptState(): TranscriptState {
     itemsById: new Map(),
     activeMessageKey: new Map(),
     sealedKeys: new Set(),
+    triggeringEventIdsByTurn: new Map(),
     continuationSeq: 0,
     latestSessionId: null,
   };
@@ -56,6 +59,7 @@ type TranscriptDraft = {
   itemsById: Map<string, TranscriptItem>;
   activeMessageKey: Map<string, string>;
   sealedKeys: Set<string>;
+  triggeringEventIdsByTurn: Map<string, string[]>;
   continuationSeq: number;
   latestSessionId: string | null;
   changed: boolean;
@@ -67,6 +71,7 @@ function draftFrom(state: TranscriptState): TranscriptDraft {
     itemsById: state.itemsById,
     activeMessageKey: state.activeMessageKey,
     sealedKeys: state.sealedKeys,
+    triggeringEventIdsByTurn: state.triggeringEventIdsByTurn,
     continuationSeq: state.continuationSeq,
     latestSessionId: state.latestSessionId,
     changed: false,
@@ -110,6 +115,34 @@ function sealOpenMessages(d: TranscriptDraft) {
   }
 }
 
+function turnMapKey(channelKey: string, turnKey: string | number | null) {
+  return `${channelKey}:${turnKey ?? "unknown"}`;
+}
+
+function rememberTriggeringEventIds(
+  d: TranscriptDraft,
+  channelKey: string,
+  turnKey: string | number | null,
+  ids: string[],
+) {
+  if (ids.length === 0) return;
+  d.triggeringEventIdsByTurn = new Map(d.triggeringEventIdsByTurn);
+  d.triggeringEventIdsByTurn.set(turnMapKey(channelKey, turnKey), ids);
+}
+
+function getSingleTriggeringEventId(
+  d: TranscriptDraft,
+  channelKey: string,
+  turnKey: string | number | null,
+) {
+  const ids = d.triggeringEventIdsByTurn.get(turnMapKey(channelKey, turnKey));
+  return ids?.length === 1 ? maybeNostrEventId(ids[0]) : null;
+}
+
+function maybeNostrEventId(id: string | null | undefined) {
+  return id && /^[0-9a-fA-F]{64}$/.test(id) ? id : null;
+}
+
 type TranscriptItemContext = {
   channelId: string | null;
   turnId: string | null;
@@ -126,6 +159,7 @@ function upsertMessage(
   ctx: TranscriptItemContext,
   authorPubkey: string | null = null,
   acpSource?: string,
+  messageId: string | null = null,
 ) {
   const currentKey = d.activeMessageKey.get(id);
 
@@ -140,6 +174,7 @@ function upsertMessage(
         sessionId: ctx.sessionId ?? existing.sessionId,
         authorPubkey: authorPubkey ?? existing.authorPubkey,
         acpSource: acpSource ?? existing.acpSource,
+        messageId: messageId ?? existing.messageId,
       });
       return;
     }
@@ -155,6 +190,7 @@ function upsertMessage(
     title,
     text,
     timestamp,
+    messageId,
     channelId: ctx.channelId,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
@@ -447,6 +483,12 @@ export function processTranscriptEvent(
   };
 
   if (event.kind === "turn_started") {
+    rememberTriggeringEventIds(
+      d,
+      ch,
+      event.turnId ?? event.seq,
+      extractTriggeringEventIds(event.payload),
+    );
     upsertTextItem(
       d,
       `turn:${ch}:${event.turnId ?? event.seq}`,
@@ -514,6 +556,8 @@ export function processTranscriptEvent(
             ctx,
             parsedPrompt.userPubkey,
             "session/prompt:user",
+            parsedPrompt.userEventId ??
+              getSingleTriggeringEventId(d, ch, event.turnId ?? event.seq),
           );
         }
         if (parsedPrompt.sections.length > 0) {
@@ -566,6 +610,8 @@ export function processTranscriptEvent(
             event.timestamp,
             ctx,
             parsedPrompt.userPubkey,
+            undefined,
+            parsedPrompt.userEventId,
           );
         }
         if (parsedPrompt.sections.length > 0) {
@@ -604,6 +650,7 @@ export function processTranscriptEvent(
         const steerKey = `steer:${ch}:${event.turnId ?? event.seq}`;
         const authorPubkey = asString(update.authorPubkey);
         if (!d.itemsById.has(steerKey)) {
+          const channelMessageId = maybeNostrEventId(messageId);
           upsertMessage(
             d,
             `user:${ch}:${messageId ?? turnKey}`,
@@ -614,6 +661,7 @@ export function processTranscriptEvent(
             ctx,
             authorPubkey,
             updateType,
+            channelMessageId,
           );
         }
       } else if (updateType === "agent_thought_chunk") {
@@ -688,6 +736,7 @@ export function processTranscriptEvent(
     itemsById: d.itemsById,
     activeMessageKey: d.activeMessageKey,
     sealedKeys: d.sealedKeys,
+    triggeringEventIdsByTurn: d.triggeringEventIdsByTurn,
     continuationSeq: d.continuationSeq,
     latestSessionId: d.latestSessionId,
   };

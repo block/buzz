@@ -165,31 +165,16 @@ export function shortenMiddle(value: string, maxLength: number) {
   return `${value.slice(0, edgeLength)}...${value.slice(-edgeLength)}`;
 }
 
-const sameDayTimeFormat = new Intl.DateTimeFormat(undefined, {
+const transcriptTimeFormat = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
+  hour12: true,
   minute: "2-digit",
-  second: "2-digit",
-});
-
-const crossDayTimeFormat = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  second: "2-digit",
 });
 
 export function formatTranscriptTime(isoTimestamp: string): string | null {
   const date = new Date(isoTimestamp);
   if (Number.isNaN(date.getTime())) return null;
-  const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  return sameDay
-    ? sameDayTimeFormat.format(date)
-    : crossDayTimeFormat.format(date);
+  return transcriptTimeFormat.format(date);
 }
 
 export function formatDuration(

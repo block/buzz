@@ -1,6 +1,9 @@
 import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
 import { buildTranscript } from "./agentSessionTranscript";
-import { DEBUG_AGENT_ACTIVITY_FIXTURE } from "./debugAgentActivityFixture";
+import {
+  DEBUG_AGENT_ACTIVITY_FIXTURE,
+  DEBUG_AGENT_ACTIVITY_PROMPT_EVENT_ID,
+} from "./debugAgentActivityFixture";
 
 function rawContent(text: string) {
   return [
@@ -128,7 +131,7 @@ function payloadForItem(item: TranscriptItem): unknown {
   if (item.acpSource === "turn_started") {
     return {
       type: "turn_started",
-      triggeringEventIds: ["debug-trigger-event"],
+      triggeringEventIds: [DEBUG_AGENT_ACTIVITY_PROMPT_EVENT_ID],
     };
   }
 

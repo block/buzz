@@ -403,6 +403,7 @@ function PromptUserMessage({
             context={context}
             contextOpen={contextOpen}
             items={setup}
+            messageLink={getTranscriptMessageLink(item)}
             onContextOpenChange={setContextOpen}
             timestamp={item.timestamp}
           />
@@ -545,12 +546,14 @@ function TurnSetupFooter({
   context = null,
   contextOpen = false,
   items,
+  messageLink = null,
   onContextOpenChange,
   timestamp,
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
   contextOpen?: boolean;
   items: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  messageLink?: { channelId: string; messageId: string } | null;
   onContextOpenChange?: (open: boolean) => void;
   timestamp: string;
 }) {
@@ -561,7 +564,9 @@ function TurnSetupFooter({
   const showContext = context != null && context.sections.length > 0;
 
   if (!showSetup && !showContext) {
-    return <TranscriptTimestamp timestamp={timestamp} />;
+    return (
+      <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
+    );
   }
 
   const contextToggle = showContext ? (
@@ -594,9 +599,19 @@ function TurnSetupFooter({
         </button>
       ) : null}
       {showContext && !showSetup ? contextToggle : null}
-      <TranscriptTimestamp timestamp={timestamp} />
+      <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
     </div>
   );
+}
+
+function getTranscriptMessageLink(
+  item: Extract<TranscriptItem, { type: "message" }>,
+) {
+  if (!item.channelId || !item.messageId) return null;
+  return {
+    channelId: item.channelId,
+    messageId: item.messageId,
+  };
 }
 
 function TranscriptItemRow({

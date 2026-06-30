@@ -45,6 +45,7 @@ function MessageItem({
 }) {
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
+  const messageLink = getTranscriptMessageLink(item);
   const agentProfile = profiles?.[normalizePubkey(agentPubkey)] ?? null;
   const assistantLabel = resolveUserLabel({
     pubkey: agentPubkey,
@@ -57,7 +58,12 @@ function MessageItem({
   if (!isAssistant) {
     return (
       <UserMessageBubble
-        footer={<TranscriptTimestamp timestamp={item.timestamp} />}
+        footer={
+          <TranscriptTimestamp
+            messageLink={messageLink}
+            timestamp={item.timestamp}
+          />
+        }
         item={item}
         profiles={profiles}
       />
@@ -82,7 +88,10 @@ function MessageItem({
           <span className="text-sm font-semibold text-foreground">
             {assistantLabel}
           </span>
-          <TranscriptTimestamp timestamp={item.timestamp} />
+          <TranscriptTimestamp
+            messageLink={messageLink}
+            timestamp={item.timestamp}
+          />
         </div>
         <div className="w-full min-w-0 text-sm">
           <Markdown content={text || " "} tight />
@@ -90,4 +99,14 @@ function MessageItem({
       </div>
     </div>
   );
+}
+
+function getTranscriptMessageLink(
+  item: Extract<TranscriptItem, { type: "message" }>,
+) {
+  if (!item.channelId || !item.messageId) return null;
+  return {
+    channelId: item.channelId,
+    messageId: item.messageId,
+  };
 }
