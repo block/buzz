@@ -2,8 +2,9 @@ import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
 
-import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import {
   AgentDetailsRows,
   AgentInstructionRow,
@@ -15,6 +16,7 @@ import {
 } from "@/features/profile/ui/UserProfilePanelFields";
 import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtils";
 import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -257,14 +259,18 @@ export function ProfileTabBar({
 }
 
 export function ProfileInfoTabContent({
+  activeTurns,
   agentInfoFields,
+  channelIdToName,
   isArchived,
   managedAgent,
   onOpenActivity,
   pubkey,
   showActivityIngress,
 }: {
+  activeTurns: ActiveTurnSummary[];
   agentInfoFields: ProfileField[];
+  channelIdToName: Record<string, string>;
   isArchived: boolean;
   managedAgent?: ManagedAgent;
   onOpenActivity: () => void;
@@ -284,7 +290,6 @@ export function ProfileInfoTabContent({
       ]
     : agentInfoFields;
   const hasInfoFields = infoFields.length > 0;
-  const activeTurns = useActiveAgentTurns(managedAgent?.pubkey ?? null);
   const showLiveActivityEmbed = showActivityIngress && activeTurns.length > 0;
 
   if (!hasInfoFields && !showActivityIngress) {
@@ -296,6 +301,8 @@ export function ProfileInfoTabContent({
       {showActivityIngress ? (
         showLiveActivityEmbed && managedAgent ? (
           <ProfileLiveActivityEmbed
+            activeTurns={activeTurns}
+            channelIdToName={channelIdToName}
             managedAgent={managedAgent}
             onOpenActivity={onOpenActivity}
           />
@@ -315,12 +322,39 @@ export function ProfileInfoTabContent({
 }
 
 function ProfileLiveActivityEmbed({
+  activeTurns,
+  channelIdToName,
   managedAgent,
   onOpenActivity,
 }: {
+  activeTurns: ActiveTurnSummary[];
+  channelIdToName: Record<string, string>;
   managedAgent: ManagedAgent;
   onOpenActivity: () => void;
 }) {
+  const [selectedChannelId, setSelectedChannelId] = React.useState<
+    string | null
+  >(() => activeTurns[0]?.channelId ?? null);
+  const now = useNow(1000);
+
+  React.useEffect(() => {
+    if (activeTurns.length === 0) {
+      setSelectedChannelId(null);
+      return;
+    }
+
+    if (!activeTurns.some((turn) => turn.channelId === selectedChannelId)) {
+      setSelectedChannelId(activeTurns[0]?.channelId ?? null);
+    }
+  }, [activeTurns, selectedChannelId]);
+
+  const selectedTurn =
+    activeTurns.find((turn) => turn.channelId === selectedChannelId) ??
+    activeTurns[0] ??
+    null;
+  const activeChannelId = selectedTurn?.channelId ?? null;
+  const showSwitcher = activeTurns.length > 1;
+
   const handleClick = React.useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (event.defaultPrevented) {
@@ -366,17 +400,60 @@ function ProfileLiveActivityEmbed({
     // biome-ignore lint/a11y/useSemanticElements: The embedded transcript contains its own buttons and links, so the clickable shell cannot be a semantic button.
     <div
       aria-label="Open live activity feed"
-      className="group cursor-pointer overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="group flex h-48 cursor-pointer flex-col overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`user-profile-live-activity-${managedAgent.pubkey}`}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
       role="button"
       tabIndex={0}
     >
+      {showSwitcher ? (
+        <div className="border-border/60 border-b px-3 py-2">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span className="font-medium text-foreground">Live activity</span>
+            {selectedTurn ? (
+              <span className="shrink-0 text-muted-foreground">
+                {formatElapsed(now - selectedTurn.anchorAt)}
+              </span>
+            ) : null}
+          </div>
+          <div
+            aria-label="Choose active channel feed"
+            className="mt-2 flex gap-1 overflow-x-auto pb-0.5"
+            role="tablist"
+          >
+            {activeTurns.map((turn) => {
+              const isSelected = turn.channelId === activeChannelId;
+              const channelName =
+                channelIdToName[turn.channelId] ?? turn.channelId;
+
+              return (
+                <button
+                  aria-selected={isSelected}
+                  className={cn(
+                    "max-w-36 shrink-0 truncate rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
+                    isSelected
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                  key={turn.channelId}
+                  onClick={() => setSelectedChannelId(turn.channelId)}
+                  role="tab"
+                  title={channelName}
+                  type="button"
+                >
+                  #{channelName}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
       <ManagedAgentSessionPanel
         agent={managedAgent}
         autoTail={true}
-        className="h-48 overflow-y-auto rounded-none border-0 bg-transparent p-3 shadow-none"
+        channelId={activeChannelId}
+        className="min-h-0 flex-1 overflow-y-auto rounded-none border-0 bg-transparent p-3 shadow-none"
         emptyDescription="Live activity will appear here."
         rawLayout="responsive"
         showHeader={false}

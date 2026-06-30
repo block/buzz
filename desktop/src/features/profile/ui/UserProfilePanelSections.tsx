@@ -396,7 +396,9 @@ export function ProfileSummaryView({
           ) : null}
           {activeTab === "info" ? (
             <ProfileInfoTabContent
+              activeTurns={activeTurns}
               agentInfoFields={agentInfoFields}
+              channelIdToName={channelIdToName}
               isArchived={isArchived}
               managedAgent={managedAgent}
               onOpenActivity={onOpenActivity}
