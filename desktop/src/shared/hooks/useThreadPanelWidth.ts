@@ -2,17 +2,25 @@ import * as React from "react";
 
 import {
   AUXILIARY_PANEL_DEFAULT_WIDTH_PX,
-  AUXILIARY_PANEL_MAX_WIDTH_PX,
-  AUXILIARY_PANEL_MIN_WIDTH_PX,
+  clampAuxiliaryPanelWidth,
 } from "@/shared/layout/AuxiliaryPanel";
 
 const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
 
+function getViewportWidth(): number {
+  return typeof window === "undefined" ? 0 : window.innerWidth;
+}
+
+/**
+ * Clamp the stored panel width for the current viewport.
+ *
+ * The upper bound grows with the viewport (see {@link clampAuxiliaryPanelWidth}) so
+ * the pane can expand on ultrawide displays. `AuxiliaryPanelShell` additionally
+ * clamps the rendered width to `calc(100% - MIN)` at paint time, so a stored width
+ * larger than the current viewport never collapses the main pane.
+ */
 function clampThreadPanelWidth(width: number): number {
-  return Math.max(
-    AUXILIARY_PANEL_MIN_WIDTH_PX,
-    Math.min(AUXILIARY_PANEL_MAX_WIDTH_PX, width),
-  );
+  return clampAuxiliaryPanelWidth(width, getViewportWidth());
 }
 
 function getInitialThreadPanelWidth(): number {

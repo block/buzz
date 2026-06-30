@@ -25,4 +25,6 @@ export {
   AUXILIARY_PANEL_MAX_WIDTH_PX,
   AUXILIARY_PANEL_MIN_WIDTH_PX,
   AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
+  clampAuxiliaryPanelWidth,
+  getAuxiliaryPanelMaxWidth,
 } from "@/shared/layout/auxiliaryPanelLayout";
