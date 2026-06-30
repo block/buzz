@@ -284,3 +284,44 @@ test("buildTranscriptDisplayBlocks groups consecutive file edit tool runs", () =
     ["edit:1", "edit:2"],
   );
 });
+
+test("buildTranscriptDisplayBlocks keeps non-contiguous same-kind runs expanded", () => {
+  const mkTool = (id, label, renderClass = "generic", groupKey = label) => ({
+    id,
+    type: "tool",
+    renderClass,
+    descriptor: {
+      renderClass,
+      label,
+      preview: id,
+      source: "harness",
+      groupKey,
+    },
+    title: label,
+    toolName: label,
+    buzzToolName: null,
+    status: "completed",
+    args: {},
+    result: "",
+    isError: false,
+    timestamp: "2026-06-18T00:00:00Z",
+    startedAt: "2026-06-18T00:00:00Z",
+    completedAt: "2026-06-18T00:00:01Z",
+    turnId: "turn-1",
+    sessionId: "sess-1",
+    channelId: "chan-1",
+  });
+
+  const [block] = buildTranscriptDisplayBlocks([
+    mkTool("read-1", "Read file", "generic", "read_file"),
+    mkTool("shell-1", "Ran command", "shell", "shell:command"),
+    mkTool("read-2", "Read file", "generic", "read_file"),
+    mkTool("read-3", "Read file", "generic", "read_file"),
+  ]);
+
+  assert.equal(block.kind, "turn");
+  assert.deepEqual(
+    block.segments.map((segment) => segment.kind),
+    ["item", "item", "item", "item"],
+  );
+});

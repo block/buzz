@@ -2,7 +2,10 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
-import { getActivityHeadline } from "@/features/agents/ui/agentSessionTranscriptPresentation";
+import {
+  getActivityHeadline,
+  isMeaningfulItem,
+} from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -65,7 +68,11 @@ export function BotActivityComposerAction({
       : transcript;
 
     for (let i = scopedTranscript.length - 1; i >= 0; i--) {
-      const headline = getActivityHeadline(scopedTranscript[i]);
+      const item = scopedTranscript[i];
+      if (!isMeaningfulItem(item)) {
+        continue;
+      }
+      const headline = getActivityHeadline(item);
       if (!headline || seen.has(headline)) {
         continue;
       }

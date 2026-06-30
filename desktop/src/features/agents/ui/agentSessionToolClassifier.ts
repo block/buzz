@@ -334,7 +334,9 @@ function classifyDeveloperToolName(value: string | null | undefined) {
   return null;
 }
 
-function parseBuzzCliCommand(command: string): AgentActivityDescriptor | null {
+export function parseBuzzCliCommand(
+  command: string,
+): AgentActivityDescriptor | null {
   const tokens = tokenizeShellCommand(command);
   const range = findBuzzCommand(tokens);
   if (!range) return null;
@@ -562,7 +564,7 @@ function getFlagValue(tokens: string[], start: number, flag: string) {
   return null;
 }
 
-function extractSimpleEchoPipeContent(
+export function extractSimpleEchoPipeContent(
   tokens: string[],
   buzzIndex: number,
 ): string | null {

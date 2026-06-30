@@ -1,4 +1,6 @@
 import type {
+  AgentActivityDescriptor,
+  AgentActivityRenderClass,
   ObserverEvent,
   PromptSection,
   ToolStatus,
@@ -10,7 +12,7 @@ import {
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
 import { classifyTool } from "./agentSessionToolClassifier";
-import { asRecord, asString } from "./agentSessionUtils";
+import { asRecord, asString, titleCase } from "./agentSessionUtils";
 import {
   describeTurnStarted,
   describeSessionResolved,
@@ -143,6 +145,69 @@ function maybeNostrEventId(id: string | null | undefined) {
   return id && /^[0-9a-fA-F]{64}$/.test(id) ? id : null;
 }
 
+function stringifyPayload(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function describePermissionRequest(payload: Record<string, unknown>) {
+  const params = asRecord(payload.params);
+  const title =
+    asString(params.title) ??
+    asString(params.message) ??
+    asString(params.reason) ??
+    "Permission requested";
+  const toolCallId =
+    asString(params.toolCallId) ?? asString(params.tool_call_id);
+  const options = Array.isArray(params.options)
+    ? params.options
+        .map((option) => {
+          const record = asRecord(option);
+          return (
+            asString(record.name) ??
+            asString(record.kind) ??
+            asString(record.optionId)
+          );
+        })
+        .filter((option): option is string => Boolean(option))
+    : [];
+  const detail = [title];
+  if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
+  if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
+  return {
+    title,
+    text: detail.join("\n"),
+    descriptor: {
+      renderClass: "permission" as const,
+      label: "Permission requested",
+      preview: title,
+      action: { verb: "Requested", object: title },
+      tone: "admin" as const,
+      operation: "session/request_permission",
+      object: title,
+      source: "acp" as const,
+      groupKey: "permission:request",
+    },
+  };
+}
+
+function describeFreeformStatus(payload: Record<string, unknown>) {
+  const statusType = asString(payload.type) ?? asString(payload.status);
+  const title =
+    asString(payload.title) ?? (statusType ? titleCase(statusType) : null);
+  const text = asString(payload.text) ?? asString(payload.message);
+  if (!title || !text) return null;
+  return { statusType: statusType ?? title.toLowerCase(), title, text };
+}
+
+function rawPayloadTitle(payload: unknown) {
+  const record = asRecord(payload);
+  return asString(record.method) ?? asString(record.type) ?? "raw_json_rpc";
+}
+
 type TranscriptItemContext = {
   channelId: string | null;
   turnId: string | null;
@@ -240,13 +305,57 @@ function upsertTextItem(
     return;
   }
 
-  pushItem(d, {
+  upsertLifecycleItem(
+    d,
     id,
-    type: "lifecycle",
-    renderClass: title.toLowerCase().includes("error") ? "error" : "status",
+    title.toLowerCase().includes("error") ? "error" : "status",
     title,
     text,
     timestamp,
+    ctx,
+    acpSource,
+  );
+}
+
+function upsertLifecycleItem(
+  d: TranscriptDraft,
+  id: string,
+  renderClass: Extract<
+    AgentActivityRenderClass,
+    "status" | "permission" | "error"
+  >,
+  title: string,
+  text: string,
+  timestamp: string,
+  ctx: TranscriptItemContext,
+  acpSource?: string,
+  descriptor?: AgentActivityDescriptor,
+) {
+  const existing = d.itemsById.get(id);
+  if (existing?.type === "lifecycle") {
+    replaceItem(d, id, {
+      ...existing,
+      renderClass,
+      title,
+      text: existing.text + text,
+      descriptor: descriptor ?? existing.descriptor,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
+      acpSource: acpSource ?? existing.acpSource,
+    });
+    return;
+  }
+
+  sealOpenMessages(d);
+  pushItem(d, {
+    id,
+    type: "lifecycle",
+    renderClass,
+    title,
+    text,
+    timestamp,
+    descriptor,
     channelId: ctx.channelId,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
@@ -456,7 +565,7 @@ function upsertTool(
     isError,
     timestamp,
     startedAt: timestamp,
-    completedAt: null,
+    completedAt: isTerminalToolStatus(status) ? timestamp : null,
     channelId: ctx.channelId,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
@@ -482,7 +591,22 @@ export function processTranscriptEvent(
     sessionId: event.sessionId ?? d.latestSessionId,
   };
 
-  if (event.kind === "turn_started") {
+  if (event.kind === "raw_json_rpc") {
+    upsertMetadata(
+      d,
+      `raw-json-rpc:${ch}:${event.seq}`,
+      "Raw ACP payload",
+      [
+        {
+          title: rawPayloadTitle(event.payload),
+          body: stringifyPayload(event.payload),
+        },
+      ],
+      event.timestamp,
+      ctx,
+      event.kind,
+    );
+  } else if (event.kind === "turn_started") {
     rememberTriggeringEventIds(
       d,
       ch,
@@ -541,7 +665,20 @@ export function processTranscriptEvent(
     const payload = asRecord(event.payload);
     const method = asString(payload.method);
 
-    if (event.kind === "acp_write" && method === "session/prompt") {
+    if (method === "session/request_permission") {
+      const request = describePermissionRequest(payload);
+      upsertLifecycleItem(
+        d,
+        `permission:${ch}:${event.turnId ?? event.seq}`,
+        "permission",
+        "Permission requested",
+        request.text,
+        event.timestamp,
+        ctx,
+        "permission_request",
+        request.descriptor,
+      );
+    } else if (event.kind === "acp_write" && method === "session/prompt") {
       const promptText = extractPromptText(payload);
       if (promptText) {
         const parsedPrompt = parsePromptText(promptText);
@@ -722,6 +859,40 @@ export function processTranscriptEvent(
           ctx,
           updateType,
           `plan-update:${ch}:${turnKey}:${event.seq}`,
+        );
+      } else {
+        // Free-form observer status records are not part of the ACP session/update
+        // union. Surface only explicit title/text payloads; leave all other
+        // unknown frames out of the feed instead of guessing at semantics.
+        const status = describeFreeformStatus(payload);
+        if (status) {
+          upsertLifecycleItem(
+            d,
+            `status:${ch}:${event.turnId ?? event.seq}:${status.statusType}`,
+            "status",
+            status.title,
+            status.text,
+            event.timestamp,
+            ctx,
+            status.statusType,
+          );
+        }
+      }
+    } else {
+      // Free-form observer status records are not part of the ACP JSON-RPC
+      // method set. Surface only explicit title/text payloads; leave all other
+      // unknown frames out of the feed instead of guessing at semantics.
+      const status = describeFreeformStatus(payload);
+      if (status) {
+        upsertLifecycleItem(
+          d,
+          `status:${ch}:${event.turnId ?? event.seq}:${status.statusType}`,
+          "status",
+          status.title,
+          status.text,
+          event.timestamp,
+          ctx,
+          status.statusType,
         );
       }
     }

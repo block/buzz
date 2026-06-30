@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { buildTranscript } from "./agentSessionTranscript.ts";
 import { formatToolTitle } from "./agentSessionToolCatalog.ts";
+import { DEBUG_AGENT_ACTIVITY_TRANSCRIPT } from "./debugAgentActivityRawFixture.ts";
 
 const baseEvent = {
   seq: 1,
@@ -478,4 +479,91 @@ test("buildTranscript stores first-class render class descriptors for tool items
   assert.equal(item.renderClass, "file-edit");
   assert.equal(item.descriptor.label, "Edited file");
   assert.equal(item.descriptor.preview, "src/app.ts");
+});
+
+test("buildTranscript surfaces session/request_permission as a permission lifecycle item", () => {
+  const transcript = buildTranscript([
+    {
+      seq: 1,
+      timestamp: "2026-06-30T09:00:00.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        method: "session/request_permission",
+        params: {
+          toolCallId: "tool-1",
+          title: "Confirm force-with-lease push to block/buzz.",
+          options: [
+            { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+            { optionId: "reject_once", kind: "reject_once", name: "Reject" },
+          ],
+        },
+      },
+    },
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].type, "lifecycle");
+  assert.equal(transcript[0].renderClass, "permission");
+  assert.equal(transcript[0].title, "Permission requested");
+  assert.match(transcript[0].text, /Confirm force-with-lease push/);
+});
+
+test("buildTranscript stamps completedAt when a terminal tool update is inserted first", () => {
+  const transcript = buildTranscript([
+    {
+      seq: 1,
+      timestamp: "2026-06-30T09:00:00.000Z",
+      kind: "acp_read",
+      agentIndex: 0,
+      channelId: "channel-1",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "tool-1",
+            toolName: "dev__shell",
+            status: "completed",
+            rawInput: { command: "echo hi" },
+            content: [{ type: "text", text: "hi" }],
+          },
+        },
+      },
+    },
+  ]);
+
+  assert.equal(transcript[0].type, "tool");
+  assert.equal(transcript[0].completedAt, "2026-06-30T09:00:00.000Z");
+});
+
+test("debug raw fixture makes permission, free-form status, and raw rail screenshotable", () => {
+  assert.ok(
+    DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(
+      (item) =>
+        item.id.startsWith("permission:") && item.renderClass === "permission",
+    ),
+    "permission request should flow through the reducer",
+  );
+  assert.ok(
+    DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(
+      (item) =>
+        item.renderClass === "status" && item.title === "Observer connected",
+    ),
+    "free-form status fixture should flow through the reducer",
+  );
+  assert.ok(
+    DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(
+      (item) => item.type === "metadata" && item.renderClass === "raw-rail",
+    ),
+    "raw_json_rpc fixture should flow through the reducer",
+  );
 });

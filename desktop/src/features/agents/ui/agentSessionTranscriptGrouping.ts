@@ -52,14 +52,6 @@ function isSetupLifecycle(
   );
 }
 
-function isErrorLifecycle(
-  item: TranscriptItem,
-): item is Extract<TranscriptItem, { type: "lifecycle" }> {
-  return (
-    item.type === "lifecycle" && item.title.toLowerCase().includes("error")
-  );
-}
-
 type TurnBucket = {
   turnId: string;
   items: TranscriptItem[];
@@ -93,10 +85,6 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
   ];
 
   for (const item of activity) {
-    if (isErrorLifecycle(item)) {
-      segments.push({ kind: "item", item });
-      continue;
-    }
     segments.push({ kind: "item", item });
   }
 
