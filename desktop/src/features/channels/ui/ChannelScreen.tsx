@@ -20,6 +20,10 @@ import {
 } from "@/features/channels/ui/ChannelScreenLazyViews";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
+  useActiveAgentTurnsBridge,
+  useActiveAgentTurnsByChannel,
+} from "@/features/agents/activeAgentTurnsStore";
+import {
   useManagedAgentsQuery,
   usePersonasQuery,
   useRelayAgentsQuery,
@@ -360,6 +364,15 @@ export function ChannelScreen({
     relayAgents,
     typingEntries,
   });
+  const activeAgentChannelTurns = useActiveAgentTurnsByChannel();
+  const channelHasActiveAgentTurns = React.useMemo(
+    () =>
+      Boolean(activeChannelId) &&
+      activeAgentChannelTurns.some(
+        (turn) => turn.channelId === activeChannelId,
+      ),
+    [activeAgentChannelTurns, activeChannelId],
+  );
   const observerBridgeAgents = React.useMemo(() => {
     if (
       !profilePanelPubkey ||
@@ -383,6 +396,7 @@ export function ChannelScreen({
     ];
   }, [managedAgents, openAgentSessionPubkey, profilePanelPubkey]);
   useManagedAgentObserverBridge(observerBridgeAgents);
+  useActiveAgentTurnsBridge(observerBridgeAgents);
   const messageProfiles = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(
@@ -852,6 +866,7 @@ export function ChannelScreen({
                   agentSessionAgents={agentSessionAgents}
                   botTypingEntries={botTypingEntries}
                   channelFind={channelFind}
+                  channelHasActiveAgentTurns={channelHasActiveAgentTurns}
                   channelManagementOpen={channelManagementOpen}
                   currentPubkey={currentPubkey}
                   canResetThreadPanelWidth={canResetThreadPanelWidth}

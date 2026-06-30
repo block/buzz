@@ -62,6 +62,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   activityAgents = agentSessionAgents,
   botTypingEntries,
   channelFind,
+  channelHasActiveAgentTurns = false,
   channelManagementOpen = false,
   currentPubkey,
   editTarget = null,
@@ -337,7 +338,9 @@ export const ChannelPane = React.memo(function ChannelPane({
     }
     return pubkeys;
   }, [botTypingEntries]);
-  const hasComposerBotActivity = composerBotTypingPubkeys.length > 0;
+  const hasComposerBotActivity =
+    composerBotTypingPubkeys.length > 0 ||
+    (channelHasActiveAgentTurns && activityAgents.length > 0);
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) {
       return [];

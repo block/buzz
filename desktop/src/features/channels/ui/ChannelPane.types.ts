@@ -20,6 +20,7 @@ export type ChannelPaneProps = {
   agentSessionAgents: ChannelAgentSessionAgent[];
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
+  channelHasActiveAgentTurns?: boolean;
   channelManagementOpen?: boolean;
   currentPubkey?: string;
   editTarget?: {

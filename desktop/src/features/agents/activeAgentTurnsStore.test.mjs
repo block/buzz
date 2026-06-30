@@ -5,6 +5,7 @@ import {
   syncAgentTurnsFromEvents,
   getActiveTurnsForAgent,
   getActiveTurnsByChannel,
+  getActiveAgentPubkeysForChannel,
   resetActiveAgentTurnsStore,
   subscribeActiveAgentTurns,
 } from "./activeAgentTurnsStore.ts";
@@ -203,6 +204,21 @@ describe("activeAgentTurnsStore", () => {
         summaries[0].anchorAt,
         getActiveTurnsForAgent(AGENT)[0].anchorAt,
       );
+    });
+
+    it("lists active agent pubkeys for a channel", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "agent-1", channelId: "shared" }),
+      ]);
+      syncAgentTurnsFromEvents(AGENT_2, [
+        makeEvent({ seq: 1, turnId: "agent-2", channelId: "shared" }),
+      ]);
+
+      assert.deepEqual(getActiveAgentPubkeysForChannel("shared"), [
+        AGENT,
+        AGENT_2,
+      ]);
+      assert.deepEqual(getActiveAgentPubkeysForChannel("other"), []);
     });
 
     it("removes a channel summary when the last active turn ends", () => {

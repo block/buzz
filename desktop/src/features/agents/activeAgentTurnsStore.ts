@@ -76,6 +76,7 @@ const clockOffsetByAgent = new Map<string, number>();
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedTurnSummaries = new Map<string, ActiveTurnSummary[]>();
 let cachedChannelTurnSummaries: ActiveChannelTurnSummary[] | null = null;
+const cachedAgentPubkeysByChannel = new Map<string, string[]>();
 
 // Composite watermark per agent: the newest observer event processed, by
 // (timestamp, seq) ordering. An event is processed only if it is strictly
@@ -96,6 +97,7 @@ let pruneInterval: ReturnType<typeof setInterval> | null = null;
 function invalidateCache(agentKey: string) {
   cachedTurnSummaries.delete(agentKey);
   cachedChannelTurnSummaries = null;
+  cachedAgentPubkeysByChannel.clear();
 }
 
 function notifyListeners() {
@@ -437,6 +439,7 @@ export function getActiveTurnsForAgent(
 
 const EMPTY_TURNS: ActiveTurnSummary[] = [];
 const EMPTY_CHANNEL_TURNS: ActiveChannelTurnSummary[] = [];
+const EMPTY_AGENT_PUBKEYS: string[] = [];
 
 /**
  * Returns active working channels across all tracked agents, sorted by
@@ -484,6 +487,30 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
   return result;
 }
 
+export function getActiveAgentPubkeysForChannel(
+  channelId: string | null | undefined,
+): string[] {
+  if (!channelId || activeTurnsByAgent.size === 0) return EMPTY_AGENT_PUBKEYS;
+
+  const cached = cachedAgentPubkeysByChannel.get(channelId);
+  if (cached) return cached;
+
+  const pubkeys: string[] = [];
+  for (const [agentKey, agentTurns] of activeTurnsByAgent) {
+    for (const turn of agentTurns.values()) {
+      if (turn.channelId === channelId) {
+        pubkeys.push(agentKey);
+        break;
+      }
+    }
+  }
+
+  if (pubkeys.length === 0) return EMPTY_AGENT_PUBKEYS;
+  pubkeys.sort((a, b) => a.localeCompare(b));
+  cachedAgentPubkeysByChannel.set(channelId, pubkeys);
+  return pubkeys;
+}
+
 /**
  * Synchronize the active-turns store with the latest observer events for a
  * given agent.
@@ -524,6 +551,17 @@ export function useActiveAgentTurnsByChannel(): ActiveChannelTurnSummary[] {
   );
 }
 
+export function useActiveAgentPubkeysForChannel(
+  channelId: string | null | undefined,
+): string[] {
+  const getSnapshot = React.useCallback(
+    () => getActiveAgentPubkeysForChannel(channelId),
+    [channelId],
+  );
+
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
+}
+
 /**
  * Bridge hook: processes observer events into the active-turns store.
  * Should be called by a parent component that has access to the observer events.
@@ -551,6 +589,7 @@ export function resetActiveAgentTurnsStore() {
   clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
   cachedChannelTurnSummaries = null;
+  cachedAgentPubkeysByChannel.clear();
   terminalAtByAgent.clear();
   notifyListeners();
 }
