@@ -132,6 +132,8 @@ Zero is the default. You opt in to noise, not out.
 
 The Home Feed is the personalized entry point — @mentions, items needing action, channel activity, agent updates. Fan-out-on-read, assembled at query time. Agents read the same feed via MCP.
 
+See [VISION_ACTIVITY.md](VISION_ACTIVITY.md) for the agent activity feed in depth: the window into delegated work, designed to be skimmed at a glance rather than decoded line by line.
+
 ---
 
 ## Channel Features
