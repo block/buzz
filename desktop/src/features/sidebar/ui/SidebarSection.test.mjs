@@ -8,7 +8,9 @@ function summary(agentNames, agentCount = agentNames.length) {
     channelId: "chan-1",
     anchorAt: 0,
     agentCount,
-    agentPubkeys: agentNames.map((name) => `${name.toLowerCase()}-pubkey`),
+    agentPubkeys: agentNames.map(
+      (name, index) => `${name.toLowerCase()}-${index}-pubkey`,
+    ),
     agentNames,
   };
 }
@@ -18,24 +20,45 @@ describe("formatWorkingTooltip", () => {
     assert.equal(formatWorkingTooltip(summary(["Ned"])), "Ned working");
   });
 
-  it("joins two agent names with an ampersand", () => {
+  it("joins two agent names with and", () => {
     assert.equal(
       formatWorkingTooltip(summary(["Ned", "Bart"])),
-      "Ned & Bart working",
+      "Ned and Bart working",
     );
   });
 
   it("lists up to three agent names", () => {
     assert.equal(
       formatWorkingTooltip(summary(["Ned", "Bart", "Carl"])),
-      "Ned, Bart, & Carl working",
+      "Ned, Bart, and Carl working",
     );
   });
 
-  it("uses the others count after three agent names", () => {
+  it("uses the more count after three agent names", () => {
     assert.equal(
       formatWorkingTooltip(summary(["Ned", "Bart", "Carl", "Marge", "Lisa"])),
-      "Ned, Bart, Carl, & 2 others working",
+      "Ned, Bart, Carl, and 2 more working",
+    );
+  });
+
+  it("uses and 1 more for the four-agent boundary", () => {
+    assert.equal(
+      formatWorkingTooltip(summary(["Ned", "Bart", "Carl", "Marge"])),
+      "Ned, Bart, Carl, and 1 more working",
+    );
+  });
+
+  it("uses a generic label for one unresolved agent", () => {
+    assert.equal(
+      formatWorkingTooltip(summary(["Ned", "another agent"])),
+      "Ned and another agent working",
+    );
+  });
+
+  it("collapses multiple unresolved agents into the more count", () => {
+    assert.equal(
+      formatWorkingTooltip(summary(["Ned", "another agent", "another agent"])),
+      "Ned and 2 more working",
     );
   });
 });
