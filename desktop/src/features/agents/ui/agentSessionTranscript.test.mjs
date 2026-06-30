@@ -546,12 +546,18 @@ test("buildTranscript stamps completedAt when a terminal tool update is inserted
 });
 
 test("debug raw fixture makes permission, free-form status, and raw rail screenshotable", () => {
+  const permissionItem = DEBUG_AGENT_ACTIVITY_TRANSCRIPT.find(
+    (item) =>
+      item.id.startsWith("permission:") && item.renderClass === "permission",
+  );
   assert.ok(
-    DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(
-      (item) =>
-        item.id.startsWith("permission:") && item.renderClass === "permission",
-    ),
+    permissionItem,
     "permission request should flow through the reducer",
+  );
+  assert.doesNotMatch(
+    permissionItem.text,
+    /^Permission requested\b/,
+    "permission detail should not duplicate the row title",
   );
   assert.ok(
     DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(

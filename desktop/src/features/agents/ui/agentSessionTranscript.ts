@@ -174,7 +174,8 @@ function describePermissionRequest(payload: Record<string, unknown>) {
         })
         .filter((option): option is string => Boolean(option))
     : [];
-  const detail = [title];
+  const detail: string[] = [];
+  if (title !== "Permission requested") detail.push(title);
   if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
   if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
   return {
