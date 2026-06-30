@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildChannelAgentConversationMarkerFilter,
   buildChannelAuxDeletionFilter,
   buildChannelAuxFilter,
   buildChannelReactionAuxFilter,
@@ -42,4 +43,11 @@ test("buildChannelStructuralAuxFilter excludes reactions", () => {
   assert.deepEqual(filter.kinds, [5, 9005, 40003]);
   assert.deepEqual(filter["#e"], IDS);
   assert.equal("#h" in filter, false);
+});
+
+test("buildChannelAgentConversationMarkerFilter scopes task markers by channel and references", () => {
+  const filter = buildChannelAgentConversationMarkerFilter(CHANNEL, IDS);
+  assert.deepEqual(filter.kinds, [40004, 40010]);
+  assert.deepEqual(filter["#h"], [CHANNEL]);
+  assert.deepEqual(filter["#e"], IDS);
 });
