@@ -403,7 +403,7 @@ const MessageTimelineBase = React.forwardRef<
         ) : null}
         <div
           className={cn(
-            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1 [overflow-anchor:none]",
+            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1",
             hasComposerOverlay ? "pb-24" : "pb-4",
           )}
           data-buzz-conversation-scroll
