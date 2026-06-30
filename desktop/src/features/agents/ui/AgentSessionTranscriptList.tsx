@@ -11,7 +11,6 @@ import {
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Toggle } from "@/shared/ui/toggle";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
@@ -518,7 +517,10 @@ function PromptContextDialog({
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
             <DialogTitle>Prompt context</DialogTitle>
             {setupText ? (
-              <DialogDescription>{setupText}</DialogDescription>
+              <div className="flex items-center gap-1.5">
+                <CheckCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <DialogDescription>{setupText}</DialogDescription>
+              </div>
             ) : null}
           </DialogHeader>
 
@@ -572,8 +574,7 @@ function TurnSetupFooter({
       size="xs"
       variant="ghost"
     >
-      {showSetup ? <CheckCheck aria-hidden="true" /> : null}
-      Context
+      <CheckCheck aria-hidden="true" />
     </Toggle>
   ) : null;
 
@@ -582,29 +583,15 @@ function TurnSetupFooter({
       className="flex items-center gap-1.5 text-muted-foreground/80"
       data-testid="transcript-turn-setup"
     >
-      {showContext && showSetup ? (
-        <Tooltip>
-          <TooltipTrigger asChild>{contextToggle}</TooltipTrigger>
-          <TooltipContent side="top">
-            <p>{tooltipText}</p>
-          </TooltipContent>
-        </Tooltip>
-      ) : null}
+      {showContext && showSetup ? contextToggle : null}
       {!showContext && showSetup ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              type="button"
-            >
-              <CheckCheck className="h-3.5 w-3.5" />
-              <span className="sr-only">{tooltipText}</span>
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="top">
-            <p>{tooltipText}</p>
-          </TooltipContent>
-        </Tooltip>
+        <button
+          className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          type="button"
+        >
+          <CheckCheck className="h-3.5 w-3.5" />
+          <span className="sr-only">{tooltipText}</span>
+        </button>
       ) : null}
       {showContext && !showSetup ? contextToggle : null}
       <TranscriptTimestamp timestamp={timestamp} />
