@@ -171,10 +171,28 @@ const transcriptTimeFormat = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
+const transcriptTitleTimeFormat = new Intl.DateTimeFormat(undefined, {
+  weekday: "long",
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 export function formatTranscriptTime(isoTimestamp: string): string | null {
   const date = new Date(isoTimestamp);
   if (Number.isNaN(date.getTime())) return null;
   return transcriptTimeFormat.format(date);
+}
+
+export function formatTranscriptTimestampTitle(
+  isoTimestamp: string,
+): string | undefined {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) return isoTimestamp || undefined;
+  return transcriptTitleTimeFormat.format(date);
 }
 
 export function formatDuration(

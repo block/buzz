@@ -6,7 +6,7 @@ import {
   ActivityRowLabel,
 } from "./ActivityRow";
 import { ToolActivity } from "./ToolActivity";
-import { TranscriptTimestamp } from "./TranscriptTimestamp";
+import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import type { ActivityRenderClassItemProps } from "./types";
 
 export function RawRailActivity(props: ActivityRenderClassItemProps) {
@@ -18,7 +18,10 @@ export function RawRailActivity(props: ActivityRenderClassItemProps) {
   }
 
   return (
-    <ActivityRow testId="transcript-metadata-item">
+    <ActivityRow
+      testId="transcript-metadata-item"
+      title={formatTranscriptTimestampTitle(props.item.timestamp)}
+    >
       <ActivityRowLabel
         object={`${props.item.sections.length} raw section${
           props.item.sections.length === 1 ? "" : "s"
@@ -26,7 +29,6 @@ export function RawRailActivity(props: ActivityRenderClassItemProps) {
         openToneScope="tool"
         verb="Captured"
       />
-      <TranscriptTimestamp timestamp={props.item.timestamp} />
       <ActivityRowContent className="flex flex-col gap-3 py-2">
         {props.item.sections.map((section) => (
           <details

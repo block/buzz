@@ -21,6 +21,7 @@ import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp
 import {
   asRecord,
   formatCodeValue,
+  formatTranscriptTimestampTitle,
   getToolString,
   getToolDurationDisplay,
   isInlineImageData,
@@ -40,6 +41,7 @@ export function ToolItem({
   const compactSummary = buildCompactToolSummary(item);
   const duration = getToolDurationDisplay(item);
   const messageLink = getSentMessageLink(item);
+  const timestampTitle = formatTranscriptTimestampTitle(item.timestamp);
   const handleToggle = React.useCallback(
     (event: React.SyntheticEvent<HTMLDetailsElement>) => {
       setIsExpanded(event.currentTarget.open);
@@ -48,7 +50,11 @@ export function ToolItem({
   );
 
   return (
-    <div className="not-prose w-full" data-testid="transcript-tool-item">
+    <div
+      className="not-prose w-full"
+      data-testid="transcript-tool-item"
+      title={timestampTitle}
+    >
       <details
         className="group w-full"
         onToggle={handleToggle}

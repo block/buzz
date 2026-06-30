@@ -5,7 +5,7 @@ import {
   ActivityRowLabel,
 } from "./ActivityRow";
 import { ToolActivity } from "./ToolActivity";
-import { TranscriptTimestamp } from "./TranscriptTimestamp";
+import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import type { ActivityRenderClassItemProps } from "./types";
 
 export function ThoughtActivity(props: ActivityRenderClassItemProps) {
@@ -17,9 +17,11 @@ export function ThoughtActivity(props: ActivityRenderClassItemProps) {
   }
 
   return (
-    <ActivityRow testId="transcript-thought-item">
+    <ActivityRow
+      testId="transcript-thought-item"
+      title={formatTranscriptTimestampTitle(props.item.timestamp)}
+    >
       <ActivityRowLabel openToneScope="tool" verb={props.item.title} />
-      <TranscriptTimestamp timestamp={props.item.timestamp} />
       <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-6 text-muted-foreground">
         <Markdown compact content={props.item.text.trim() || " "} />
       </ActivityRowContent>

@@ -32,6 +32,7 @@ import {
   type TranscriptTurnSegment,
 } from "./agentSessionTranscriptGrouping";
 import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import { formatTranscriptTimestampTitle } from "./agentSessionUtils";
 import { hasFileEditLineDiff } from "./FileEditDiffView";
 import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
 
@@ -265,9 +266,9 @@ function SameKindSummaryItem({
       className="flex flex-col gap-0.5"
       openToneScope="summary"
       testId="transcript-same-kind-summary"
+      title={formatTranscriptTimestampTitle(summary.timestamp)}
     >
       <ToolRunSummaryLabel label={summary.label} stats={groupedFileEditStats} />
-      <TranscriptTimestamp timestamp={summary.timestamp} />
       <ActivityRowContent
         className={cn(
           "flex flex-col",
@@ -548,6 +549,7 @@ function TurnSetupFooter({
   items,
   messageLink = null,
   onContextOpenChange,
+  showTimestamp = true,
   timestamp,
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
@@ -555,6 +557,7 @@ function TurnSetupFooter({
   items: Extract<TranscriptItem, { type: "lifecycle" }>[];
   messageLink?: { channelId: string; messageId: string } | null;
   onContextOpenChange?: (open: boolean) => void;
+  showTimestamp?: boolean;
   timestamp: string;
 }) {
   const label = formatTurnSetupLabel(items);
@@ -564,9 +567,9 @@ function TurnSetupFooter({
   const showContext = context != null && context.sections.length > 0;
 
   if (!showSetup && !showContext) {
-    return (
+    return showTimestamp ? (
       <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
-    );
+    ) : null;
   }
 
   const contextToggle = showContext ? (
@@ -599,7 +602,9 @@ function TurnSetupFooter({
         </button>
       ) : null}
       {showContext && !showSetup ? contextToggle : null}
-      <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
+      {showTimestamp ? (
+        <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
+      ) : null}
     </div>
   );
 }
@@ -651,8 +656,15 @@ function TurnSetupStatus({
   }
 
   return (
-    <div className="rounded-md px-2">
-      <TurnSetupFooter items={items} timestamp={timestamp} />
+    <div
+      className="rounded-md px-2"
+      title={formatTranscriptTimestampTitle(timestamp)}
+    >
+      <TurnSetupFooter
+        items={items}
+        showTimestamp={false}
+        timestamp={timestamp}
+      />
     </div>
   );
 }

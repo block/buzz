@@ -3,17 +3,10 @@ import * as React from "react";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { cn } from "@/shared/lib/cn";
-import { formatTranscriptTime } from "../agentSessionUtils";
-
-const fullDateTimeFormat = new Intl.DateTimeFormat(undefined, {
-  weekday: "long",
-  year: "numeric",
-  month: "long",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  second: "2-digit",
-});
+import {
+  formatTranscriptTime,
+  formatTranscriptTimestampTitle,
+} from "../agentSessionUtils";
 
 export type TranscriptTimestampMessageLink = {
   channelId: string;
@@ -45,10 +38,7 @@ export function TranscriptTimestamp({
   );
 
   if (!formatted) return null;
-  const date = new Date(timestamp);
-  const fullDateTime = Number.isNaN(date.getTime())
-    ? timestamp
-    : fullDateTimeFormat.format(date);
+  const fullDateTime = formatTranscriptTimestampTitle(timestamp);
 
   if (href) {
     return (

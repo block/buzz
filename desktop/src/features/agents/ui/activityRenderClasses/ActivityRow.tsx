@@ -20,6 +20,7 @@ type ActivityRowProps = {
   className?: string;
   openToneScope?: Exclude<ActivityRowToneScope, "none">;
   testId?: string;
+  title?: string;
 };
 
 type ActivityRowContentProps = {
@@ -38,6 +39,7 @@ export function ActivityRow({
   className,
   openToneScope = "tool",
   testId,
+  title,
 }: ActivityRowProps) {
   const childArray = React.Children.toArray(children);
   const summaryChildren = childArray.filter(
@@ -50,6 +52,7 @@ export function ActivityRow({
       <div
         className={cn("not-prose flex min-h-6 items-center gap-1.5", className)}
         data-testid={testId}
+        title={title}
       >
         {children}
       </div>
@@ -64,6 +67,7 @@ export function ActivityRow({
         className,
       )}
       data-testid={testId}
+      title={title}
     >
       <summary
         className={cn(

@@ -1,8 +1,8 @@
 import { AlertCircle } from "lucide-react";
 
+import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import { ActivityRow, ActivityRowLabel } from "./ActivityRow";
 import { ToolActivity } from "./ToolActivity";
-import { TranscriptTimestamp } from "./TranscriptTimestamp";
 import type { ActivityRenderClassItemProps } from "./types";
 
 export function LifecycleActivity(props: ActivityRenderClassItemProps) {
@@ -16,31 +16,31 @@ export function LifecycleActivity(props: ActivityRenderClassItemProps) {
   const isError =
     props.item.renderClass === "error" ||
     props.item.title.toLowerCase().includes("error");
+  const timestampTitle = formatTranscriptTimestampTitle(props.item.timestamp);
 
   if (isError) {
     return (
       <div
         className="flex items-center justify-start gap-1.5 rounded-md border border-destructive/20 bg-destructive/5 px-2 py-1.5 text-left text-xs text-destructive"
         data-testid="transcript-lifecycle-item"
+        title={timestampTitle}
       >
         <AlertCircle className="h-3.5 w-3.5 shrink-0" />
         <span className="font-medium">{props.item.title}</span>
         {props.item.text ? (
           <span className="opacity-80">· {props.item.text}</span>
         ) : null}
-        <TranscriptTimestamp timestamp={props.item.timestamp} />
       </div>
     );
   }
 
   return (
-    <ActivityRow testId="transcript-lifecycle-item">
+    <ActivityRow testId="transcript-lifecycle-item" title={timestampTitle}>
       <ActivityRowLabel
         object={[props.item.title, props.item.text].filter(Boolean).join(" · ")}
         openToneScope="none"
         verb="Status"
       />
-      <TranscriptTimestamp timestamp={props.item.timestamp} />
     </ActivityRow>
   );
 }

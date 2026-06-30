@@ -5,7 +5,7 @@ import {
   ActivityRowLabel,
 } from "./ActivityRow";
 import { ToolActivity } from "./ToolActivity";
-import { TranscriptTimestamp } from "./TranscriptTimestamp";
+import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import type { ActivityRenderClassItemProps } from "./types";
 
 export function PlanActivity(props: ActivityRenderClassItemProps) {
@@ -18,21 +18,25 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
 
   if (props.item.isUpdate) {
     return (
-      <ActivityRow testId="transcript-plan-update-item">
+      <ActivityRow
+        testId="transcript-plan-update-item"
+        title={formatTranscriptTimestampTitle(props.item.timestamp)}
+      >
         <ActivityRowLabel
           object={["plan", props.item.text].filter(Boolean).join(" · ")}
           openToneScope="none"
           verb="Updated"
         />
-        <TranscriptTimestamp timestamp={props.item.timestamp} />
       </ActivityRow>
     );
   }
 
   return (
-    <ActivityRow testId="transcript-plan-item">
+    <ActivityRow
+      testId="transcript-plan-item"
+      title={formatTranscriptTimestampTitle(props.item.timestamp)}
+    >
       <ActivityRowLabel object="plan" openToneScope="tool" verb="Updated" />
-      <TranscriptTimestamp timestamp={props.item.timestamp} />
       <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-5 text-muted-foreground">
         <Markdown
           content={props.item.text.trim() || "No plan details."}
