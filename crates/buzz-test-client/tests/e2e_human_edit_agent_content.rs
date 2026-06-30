@@ -18,9 +18,8 @@
 //! ```
 
 
-
 use buzz_sdk::nip_oa;
-use buzz_test_client::{BuzzTestClient, RelayMessage};
+use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 
 fn relay_url() -> String {
@@ -499,6 +498,182 @@ async fn test_third_party_cannot_delete_agent_channel() {
     third_party_client.disconnect().await.ok();
 }
 
+/// Create a fresh **private** channel owned by `agent_keys`, return the channel UUID string.
+async fn create_private_agent_owned_channel(agent_keys: &Keys) -> String {
+    let http = reqwest::Client::new();
+    let channel_uuid = uuid::Uuid::new_v4();
+
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
+            Tag::parse(["name", &format!("haec-private-test-{}", channel_uuid.simple())]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+        ])
+        .sign_with_keys(agent_keys)
+        .unwrap();
+
+    let resp = http
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &agent_keys.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit create-private-channel event");
+    assert!(
+        resp.status().is_success(),
+        "private channel creation failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "private channel creation not accepted: {body}"
+    );
+    channel_uuid.to_string()
+}
+
+// ─── Private-channel coverage (Fix 1 regression guard) ──────────────────────
+//
+// These tests verify that the membership-gate bypass works on private channels —
+// i.e., a non-member owning human can act on private agent-owned content.
+// Previously all four predicates were unreachable for private channels because
+// check_channel_membership rejected non-members before the per-kind validators ran.
+
+/// Owner can edit a message in a private agent-owned channel (non-member owner allowed).
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_edit_agent_message_in_private_channel() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let channel_id = create_private_agent_owned_channel(&agent_keys).await;
+
+    // Establish NIP-OA ownership; agent sends a message.
+    let mut agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+    let content = format!("private-agent-msg-{}", uuid::Uuid::new_v4());
+    let ok = agent_client
+        .send_text_message(&agent_keys, &channel_id, &content, 9)
+        .await
+        .expect("agent send message to private channel");
+    assert!(ok.accepted, "agent message to private channel rejected: {}", ok.message);
+    let msg_event_id = ok.event_id;
+    agent_client.disconnect().await.ok();
+
+    // Owner (not a channel member) edits the agent's message.
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner_keys)
+        .await
+        .expect("connect owner");
+    let edit_event = EventBuilder::new(Kind::Custom(40003), "edited content")
+        .tags(vec![
+            Tag::parse(["e", &msg_event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = owner_client.send_event(edit_event).await.expect("send edit");
+    assert!(
+        ok.accepted,
+        "owner edit of agent message in private channel rejected (membership gate not bypassed): {}",
+        ok.message
+    );
+    owner_client.disconnect().await.ok();
+}
+
+/// Owner can delete a message in a private agent-owned channel (non-member owner allowed).
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_delete_agent_message_in_private_channel() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let channel_id = create_private_agent_owned_channel(&agent_keys).await;
+
+    let mut agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+    let content = format!("private-agent-msg-{}", uuid::Uuid::new_v4());
+    let ok = agent_client
+        .send_text_message(&agent_keys, &channel_id, &content, 9)
+        .await
+        .expect("agent send message to private channel");
+    assert!(ok.accepted, "agent message to private channel rejected: {}", ok.message);
+    let msg_event_id = ok.event_id;
+    agent_client.disconnect().await.ok();
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner_keys)
+        .await
+        .expect("connect owner");
+    let delete_event = EventBuilder::new(Kind::Custom(9005), "")
+        .tags(vec![
+            Tag::parse(["e", &msg_event_id]).unwrap(),
+            Tag::parse(["h", &channel_id]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = owner_client.send_event(delete_event).await.expect("send delete");
+    assert!(
+        ok.accepted,
+        "owner delete of agent message in private channel rejected (membership gate not bypassed): {}",
+        ok.message
+    );
+    owner_client.disconnect().await.ok();
+}
+
+/// Owner can edit metadata of a private agent-owned channel (non-member owner allowed).
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_edit_metadata_of_private_agent_channel() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let channel_id = create_private_agent_owned_channel(&agent_keys).await;
+
+    let agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+    agent_client.disconnect().await.ok();
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner_keys)
+        .await
+        .expect("connect owner");
+    let edit_event = EventBuilder::new(Kind::Custom(9002), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["name", "owner-renamed-private-channel"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = owner_client.send_event(edit_event).await.expect("send edit metadata");
+    assert!(
+        ok.accepted,
+        "owner edit of private agent channel metadata rejected (membership gate not bypassed): {}",
+        ok.message
+    );
+    owner_client.disconnect().await.ok();
+}
+
+/// Owner can delete a private agent-owned channel (non-member owner allowed).
+#[tokio::test]
+#[ignore]
+async fn test_owner_can_delete_private_agent_channel() {
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let channel_id = create_private_agent_owned_channel(&agent_keys).await;
+
+    let agent_client = connect_agent_with_owner(&agent_keys, &owner_keys).await;
+    agent_client.disconnect().await.ok();
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner_keys)
+        .await
+        .expect("connect owner");
+    let delete_event = EventBuilder::new(Kind::Custom(9008), "")
+        .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
+        .sign_with_keys(&owner_keys)
+        .unwrap();
+    let ok = owner_client.send_event(delete_event).await.expect("send delete group");
+    assert!(
+        ok.accepted,
+        "owner delete of private agent channel rejected (membership gate not bypassed): {}",
+        ok.message
+    );
+    owner_client.disconnect().await.ok();
+}
+
 /// Agent itself can still delete its own channel (self-delete unchanged).
 #[tokio::test]
 #[ignore]
@@ -526,6 +701,3 @@ async fn test_agent_can_self_delete_channel() {
 
     agent_client.disconnect().await.ok();
 }
-
-// Suppress unused import warnings for the `Duration`/`Filter`/etc. imports
-// that are referenced only in the helper functions above.

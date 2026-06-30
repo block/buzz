@@ -216,6 +216,30 @@ pub async fn validate_standard_deletion_event(
     Ok(())
 }
 
+/// Returns `true` if `actor_bytes` is the NIP-OA owner of **any** active owner-role
+/// member in `members`. Used by kind:9002 and kind:9008 to authorize the owning
+/// human of a channel's agent-owner(s) even when the human is not a channel member.
+///
+/// Checking all active owners (not just the first) is correct under co-ownership:
+/// an agent may be promoted to owner later, or multiple agents may co-own a channel.
+async fn actor_owns_any_owner_agent(
+    state: &Arc<AppState>,
+    community_id: buzz_core::CommunityId,
+    members: &[buzz_db::channel::MemberRecord],
+    actor_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    for owner in members.iter().filter(|m| m.role == "owner") {
+        if state
+            .db
+            .is_agent_owner(community_id, &owner.pubkey, actor_bytes)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -460,20 +484,18 @@ pub async fn validate_admin_event(
                 match actor_member {
                     Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
                     _ => {
-                        // Allow the owning human of the channel's agent-owner even when not
-                        // a channel member — diverges from kind:9001 intentionally.
-                        let channel_owner_agent = members
-                            .iter()
-                            .find(|m| m.role == "owner")
-                            .map(|m| m.pubkey.clone());
-                        if let Some(agent_bytes) = channel_owner_agent {
-                            if state
-                                .db
-                                .is_agent_owner(tenant.community(), &agent_bytes, &actor_bytes)
-                                .await?
-                            {
-                                return Ok(());
-                            }
+                        // Allow the owning human of any active owner-role agent in the
+                        // channel, even when the human is not a channel member —
+                        // diverges from kind:9001 intentionally.
+                        if actor_owns_any_owner_agent(
+                            state,
+                            tenant.community(),
+                            &members,
+                            &actor_bytes,
+                        )
+                        .await?
+                        {
+                            return Ok(());
                         }
                         Err(anyhow::anyhow!(
                             "actor not authorized for name/about/archived/visibility/ttl changes"
@@ -565,20 +587,18 @@ pub async fn validate_admin_event(
             match actor_member {
                 Some(m) if m.role == "owner" => Ok(()),
                 _ => {
-                    // Allow the owning human of the channel's agent-owner even when not
-                    // a channel member — diverges from kind:9001 intentionally.
-                    let channel_owner_agent = members
-                        .iter()
-                        .find(|m| m.role == "owner")
-                        .map(|m| m.pubkey.clone());
-                    if let Some(agent_bytes) = channel_owner_agent {
-                        if state
-                            .db
-                            .is_agent_owner(tenant.community(), &agent_bytes, &actor_bytes)
-                            .await?
-                        {
-                            return Ok(());
-                        }
+                    // Allow the owning human of any active owner-role agent in the
+                    // channel, even when the human is not a channel member —
+                    // diverges from kind:9001 intentionally.
+                    if actor_owns_any_owner_agent(
+                        state,
+                        tenant.community(),
+                        &members,
+                        &actor_bytes,
+                    )
+                    .await?
+                    {
+                        return Ok(());
                     }
                     Err(anyhow::anyhow!("only owner can delete group"))
                 }
