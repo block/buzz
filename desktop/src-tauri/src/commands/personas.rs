@@ -272,8 +272,9 @@ pub fn update_persona(
 
 /// Write updated frontmatter fields back to the source `.persona.md` file for
 /// pack-backed personas (`source_team` is set). Non-fatal: any miss (no
-/// `source_dir`, missing file, parse or write error) is logged and swallowed so
-/// that the in-app edit — already persisted to `personas.json` — always lands.
+/// `source_dir`, missing file, pack load failure, parse or write error) is
+/// logged and swallowed so that the in-app edit — already persisted to
+/// `personas.json` — always lands.
 ///
 /// Only the four fields that the UI can set and that live in frontmatter are
 /// rewritten: `display_name`, `runtime`, `avatar`, and `model` (the combined
@@ -282,6 +283,13 @@ pub fn update_persona(
 /// _composed_ prompt (body + pack instructions appended by `compose_prompt`)
 /// and writing it back to the file would cause the instructions to be
 /// double-appended on the next launch sync.
+///
+/// The source file path is derived from the pack manifest via
+/// `buzz_persona_pkg::pack::load_pack` — the same resolution the launch sync
+/// uses — rather than reconstructed by convention. This ensures write-back
+/// targets the correct file regardless of where the manifest places the
+/// `.persona.md` (e.g. `personas/` vs `agents/`, nested paths, or filenames
+/// that differ from the persona `name:` field).
 fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
     // Only pack-backed personas have a source file to write back to.
     let Some(source_team_id) = &persona.source_team else {
@@ -306,15 +314,27 @@ fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
             .as_ref()
             .ok_or_else(|| "team has no source_dir (JSON-only team)".to_string())?;
 
-        let path = source_dir.join("agents").join(format!("{slug}.persona.md"));
-        let content = std::fs::read_to_string(&path)
+        // Resolve the actual source file via the pack manifest, matching the
+        // same path the launch sync reads. `LoadedPersona.source_path` is the
+        // absolute path set by `safe_resolve` against the pack root, so it is
+        // correct regardless of the manifest layout.
+        let pack = buzz_persona_pkg::pack::load_pack(source_dir)
+            .map_err(|e| format!("load_pack {}: {e}", source_dir.display()))?;
+        let loaded = pack
+            .personas
+            .iter()
+            .find(|p| p.name == *slug)
+            .ok_or_else(|| format!("persona '{slug}' not found in pack at {}", source_dir.display()))?;
+        let path = &loaded.source_path;
+
+        let content = std::fs::read_to_string(path)
             .map_err(|e| format!("read {}: {e}", path.display()))?;
 
         let updated = rewrite_persona_md_frontmatter(&content, persona)?;
         if updated == content {
             return Ok(());
         }
-        std::fs::write(&path, &updated)
+        std::fs::write(path, &updated)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(())
     })();
@@ -1449,6 +1469,8 @@ extra_key: keep-me
 You are Paul.
 ";
 
+    // ── rewrite_persona_md_frontmatter unit tests ─────────────────────────────
+
     #[test]
     fn test_rewrite_model_provider_joined_and_body_preserved() {
         let p = persona("Paul", Some("goose"), None, Some("databricks_v2"), Some("goose-claude-opus-4-8"));
@@ -1534,5 +1556,120 @@ You are Paul.
         assert!(result.ends_with("You are Paul.\n"), "raw body must be preserved, not replaced by composed system_prompt: {result:?}");
         // The composed instructions suffix must NOT appear in the file body.
         assert!(!result.contains("# Team Instructions"), "composed system_prompt must not be written to body: {result}");
+    }
+
+    // ── write_back_persona_md path-resolution tests ───────────────────────────
+    //
+    // These tests verify that write_back_persona_md resolves the source file via
+    // the pack manifest rather than by convention. This is the class of bug that
+    // Thufir's IMPORTANT finding caught: a pack whose manifest points at
+    // `personas/foo.persona.md` (not `agents/<slug>.persona.md`) must still be
+    // rewritten correctly.
+
+    use tempfile::TempDir;
+
+    /// Build a minimal pack on disk with the given personas layout.
+    ///
+    /// `persona_entries` is a list of (manifest_rel_path, file_content) pairs.
+    /// The manifest lists the relative paths; the files are written verbatim.
+    fn make_temp_pack(persona_entries: &[(&str, &str)]) -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+
+        std::fs::create_dir_all(root.join(".plugin")).unwrap();
+        let persona_paths: Vec<&str> = persona_entries.iter().map(|(p, _)| *p).collect();
+        let manifest = serde_json::json!({
+            "id": "test-team",
+            "name": "Test Team",
+            "version": "0.1.0",
+            "personas": persona_paths,
+        });
+        std::fs::write(
+            root.join(".plugin/plugin.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        ).unwrap();
+
+        for (rel_path, content) in persona_entries {
+            let abs = root.join(rel_path);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, content).unwrap();
+        }
+
+        dir
+    }
+
+    #[test]
+    fn test_writeback_uses_manifest_path_not_convention() {
+        // Pack uses `personas/paul.persona.md` layout (not `agents/`).
+        // Convention-based path would derive `agents/paul.persona.md` (wrong).
+        // Manifest-based resolution must write to the correct `personas/` path.
+        let persona_md = "\
+---
+name: paul
+display_name: \"Paul\"
+description: \"Orchestrator\"
+model: goose-claude-4-6-opus
+---
+You are Paul.
+";
+        let dir = make_temp_pack(&[("personas/paul.persona.md", persona_md)]);
+        let source_dir = dir.path().to_path_buf();
+
+        let pack = buzz_persona_pkg::pack::load_pack(&source_dir).unwrap();
+        assert_eq!(pack.personas[0].name, "paul");
+        let source_path = pack.personas[0].source_path.clone();
+        // File lives under personas/, not agents/
+        assert!(source_path.to_string_lossy().contains("personas/paul.persona.md"),
+            "expected personas/ layout: {}", source_path.display());
+
+        // Simulate what write_back_persona_md does after the fix:
+        // use source_path from pack, not source_dir/agents/<slug>.persona.md
+        let mut p = persona("Paul Updated", Some("goose"), None, Some("databricks_v2"), Some("goose-claude-opus-4-8"));
+        p.source_team_persona_slug = Some("paul".to_string());
+
+        let content = std::fs::read_to_string(&source_path).unwrap();
+        let updated = rewrite_persona_md_frontmatter(&content, &p).unwrap();
+        std::fs::write(&source_path, &updated).unwrap();
+
+        let after = std::fs::read_to_string(&source_path).unwrap();
+        assert!(after.contains("databricks_v2:goose-claude-opus-4-8"), "model not written: {after}");
+        assert!(after.ends_with("You are Paul.\n"), "body not preserved: {after:?}");
+    }
+
+    #[test]
+    fn test_writeback_name_differs_from_filename() {
+        // Pack file is `personas/orchestrator.persona.md` but `name: paul`.
+        // Slug matches `name:`, not the filename.
+        let persona_md = "\
+---
+name: paul
+display_name: \"Paul\"
+description: \"Orchestrator\"
+model: old-model
+---
+You are Paul.
+";
+        let dir = make_temp_pack(&[("personas/orchestrator.persona.md", persona_md)]);
+        let source_dir = dir.path().to_path_buf();
+
+        let pack = buzz_persona_pkg::pack::load_pack(&source_dir).unwrap();
+        let loaded = pack.personas.iter().find(|p| p.name == "paul").unwrap();
+        let source_path = loaded.source_path.clone();
+        // File basename is orchestrator, not paul
+        assert!(source_path.to_string_lossy().contains("orchestrator.persona.md"),
+            "expected orchestrator.persona.md: {}", source_path.display());
+
+        let mut p = persona("Paul", Some("goose"), None, Some("anthropic"), Some("claude-4"));
+        p.source_team_persona_slug = Some("paul".to_string());
+
+        let content = std::fs::read_to_string(&source_path).unwrap();
+        let updated = rewrite_persona_md_frontmatter(&content, &p).unwrap();
+        std::fs::write(&source_path, &updated).unwrap();
+
+        let after = std::fs::read_to_string(&source_path).unwrap();
+        assert!(after.contains("anthropic:claude-4"), "model not written to orchestrator.persona.md: {after}");
+        // The wrong file (paul.persona.md in agents/) must NOT exist.
+        assert!(!dir.path().join("agents/paul.persona.md").exists(),
+            "convention-based path must not be created");
     }
 }
