@@ -136,7 +136,9 @@ const overrides = new Map([
   // +2: baked build env folded under merged_env in both get_agent_models and
   // discover_agent_models so in-process discovery sees baked provider config on
   // a GUI-launched DMG (the discovery_env_with_baked_floor fold).
-  ["src-tauri/src/commands/agent_models.rs", 1068],
+  // +3: provider tri-state applied in update_managed_agent handler
+  // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
+  ["src-tauri/src/commands/agent_models.rs", 1071],
 ]);
 
 await runFileSizeCheck({

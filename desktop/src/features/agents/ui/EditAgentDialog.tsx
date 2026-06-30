@@ -21,12 +21,23 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import {
+  AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  formatRuntimeOptionLabel,
+  getModelSelectValue,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
+  hasPersonaModelOption,
+  NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
+  shouldClearKnownModelForSelectionScope,
+  sortPersonaRuntimes,
+  type PersonaDropdownOption,
   type PersonaModelOption,
 } from "./personaDialogPickers";
+import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
 import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
 import {
   CreateAgentBasicsFields,
@@ -34,10 +45,10 @@ import {
 } from "./CreateAgentDialogSections";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
-import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
-
-const AUTO_MODEL_VALUE = "__auto_model__";
-const CUSTOM_MODEL_VALUE = "__custom_model__";
+import {
+  MODEL_DISCOVERY_LOADING_VALUE,
+  usePersonaModelDiscovery,
+} from "./usePersonaModelDiscovery";
 
 export function EditAgentDialog({
   agent,
@@ -77,6 +88,7 @@ export function EditAgentDialog({
     agent.systemPrompt ?? "",
   );
   const [model, setModel] = React.useState(agent.model ?? "");
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState(agent.provider ?? "");
   const [isCustomProviderEditing, setIsCustomProviderEditing] =
     React.useState(false);
@@ -96,6 +108,10 @@ export function EditAgentDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     agent.respondToAllowlist,
   );
+
+  // Runtime selector: defaults to "custom" until the dialog opens and the
+  // catalog loads. The open-effect re-derives the correct id from the catalog.
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
 
   // Reset form state only when the dialog opens or when switching to a different
   // agent. Omitting the full agent object and its array fields from deps prevents
@@ -118,27 +134,67 @@ export function EditAgentDialog({
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
       setModel(agent.model ?? "");
+      setIsCustomModelEditing(false);
       setProvider(agent.provider ?? "");
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
+      // Re-derive the runtime id from whatever catalog entries have loaded.
+      const matched = runtimes.find(
+        (r) => r.command?.trim() === agent.agentCommand.trim(),
+      );
+      setSelectedRuntimeId(matched ? matched.id : "custom");
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
 
-  // Derive selectedRuntime from the catalog — needed by usePersonaModelDiscovery.
-  const selectedRuntime = React.useMemo(
-    () => runtimes.find((r) => r.command?.trim() === agentCommand.trim()),
-    [runtimes, agentCommand],
+  // Build the sorted runtime catalog for the dropdown.
+  const sortedRuntimes = React.useMemo(
+    () => sortPersonaRuntimes(runtimes),
+    [runtimes],
   );
 
-  // Show the provider picker when the agent command maps to a runtime that
-  // supports LLM-provider selection, or when the agent already has a provider
-  // saved (so a pre-existing value is always editable).
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(selectedRuntime?.id ?? "") ||
-    (agent.provider != null && agent.provider.trim().length > 0);
+  // selectedRuntime: catalog entry for the live-selected runtime id.
+  // When "custom" or an unknown id, falls back to undefined.
+  const selectedRuntime = React.useMemo(
+    () => runtimes.find((r) => r.id === selectedRuntimeId),
+    [runtimes, selectedRuntimeId],
+  );
+
+  // Runtime dropdown options: catalog entries plus "Custom command" fallback.
+  // Always include the current id in case it came from an unavailable runtime.
+  const runtimeDropdownValue = selectedRuntimeId || NO_RUNTIME_DROPDOWN_VALUE;
+
+  const runtimeDropdownOptions: PersonaDropdownOption[] = React.useMemo(() => {
+    const options: PersonaDropdownOption[] = [
+      ...sortedRuntimes.map((candidate) => ({
+        label: formatRuntimeOptionLabel(candidate),
+        value: candidate.id,
+      })),
+      { label: "Custom command", value: "custom" },
+    ];
+    // If the current selection isn't in the list, add it so the dropdown isn't blank.
+    if (
+      selectedRuntimeId &&
+      selectedRuntimeId !== "custom" &&
+      !options.some((o) => o.value === selectedRuntimeId)
+    ) {
+      options.push({
+        label: `${selectedRuntimeId} (current)`,
+        value: selectedRuntimeId,
+      });
+    }
+    return options;
+  }, [sortedRuntimes, selectedRuntimeId]);
+
+  // Provider field is visible only when the LIVE selected runtime supports
+  // LLM-provider selection. Keying on the live runtime (not the saved provider)
+  // prevents a stale saved provider from staying visible after switching to a
+  // locked runtime (e.g. Claude).
+  const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
+    selectedRuntime?.id ?? selectedRuntimeId,
+  );
 
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
 
@@ -154,6 +210,132 @@ export function EditAgentDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
+
+  // When the provider scope changes and the current model is no longer valid
+  // for the new scope, clear it (mirrors Persona's useEffect for the same).
+  React.useEffect(() => {
+    if (
+      !open ||
+      isCustomModelEditing ||
+      !shouldClearKnownModelForSelectionScope({
+        model,
+        provider: providerForDiscovery,
+        runtime: selectedRuntime?.id ?? selectedRuntimeId,
+      })
+    ) {
+      return;
+    }
+
+    setModel("");
+    setIsCustomModelEditing(false);
+  }, [
+    isCustomModelEditing,
+    model,
+    open,
+    providerForDiscovery,
+    selectedRuntime,
+    selectedRuntimeId,
+  ]);
+
+  function handleRuntimeDropdownChange(nextValue: string) {
+    const nextRuntimeId = nextValue;
+    const previousRuntimeId = selectedRuntimeId;
+    const nextRuntime = runtimes.find((r) => r.id === nextRuntimeId);
+    const nextCanChooseProvider = runtimeSupportsLlmProviderSelection(
+      nextRuntime?.id ?? nextRuntimeId,
+    );
+
+    setSelectedRuntimeId(nextRuntimeId);
+
+    // When switching to a catalog-known runtime, update the agent command to
+    // its resolved command so the command field stays consistent.
+    if (nextRuntime?.command) {
+      setAgentCommand(nextRuntime.command);
+      const newArgs = nextRuntime.defaultArgs.join(",");
+      setAgentArgs(newArgs);
+    } else if (nextRuntimeId === "custom") {
+      // "Custom" means the user wants to type a command; leave agentCommand as-is.
+    }
+
+    // Clear model when switching away from a runtime with a different model scope.
+    if (
+      shouldClearModelForRuntimeChange(previousRuntimeId, nextRuntimeId) ||
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider,
+        runtime: nextRuntime?.id ?? nextRuntimeId,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+
+    // When switching to a provider-locked runtime, clear provider state so no
+    // conflicting provider is persisted on a runtime that doesn't support it.
+    if (!nextCanChooseProvider) {
+      const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
+      if (previousProviderApiKeyEnvVar) {
+        setEnvVars((current) => {
+          const next = { ...current };
+          delete next[previousProviderApiKeyEnvVar];
+          return next;
+        });
+      }
+      setIsCustomModelEditing(false);
+      setIsCustomProviderEditing(false);
+      setProvider("");
+    }
+  }
+
+  function handleProviderDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
+      if (previousProviderApiKeyEnvVar) {
+        setEnvVars((current) => {
+          const next = { ...current };
+          delete next[previousProviderApiKeyEnvVar];
+          return next;
+        });
+      }
+      setIsCustomProviderEditing(true);
+      setProvider("");
+      return;
+    }
+
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+
+    // Clear the old provider API key when switching providers.
+    const previousProviderApiKeyEnvVar = getProviderApiKeyEnvVar(provider);
+    const nextProviderApiKeyEnvVar = getProviderApiKeyEnvVar(nextProvider);
+    if (
+      previousProviderApiKeyEnvVar &&
+      previousProviderApiKeyEnvVar !== nextProviderApiKeyEnvVar
+    ) {
+      setEnvVars((current) => {
+        const next = { ...current };
+        delete next[previousProviderApiKeyEnvVar];
+        return next;
+      });
+    }
+
+    setIsCustomProviderEditing(false);
+    setProvider(nextProvider);
+
+    // Clear the model when switching to a provider that requires a different
+    // explicit model selection.
+    if (
+      !isCustomModelEditing &&
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider: nextProvider,
+        runtime: selectedRuntime?.id ?? selectedRuntimeId,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
+  }
 
   function handleOpenChange(next: boolean) {
     onOpenChange(next);
@@ -247,9 +429,14 @@ export function EditAgentDialog({
             ? normalizedModel
             : undefined,
         // Tri-state: send null to clear, value to set, omit if unchanged.
-        provider:
-          normalizedProvider !== (agent.provider ?? null)
+        // Only persist provider when the live runtime supports provider selection;
+        // switching to a locked runtime clears the provider.
+        provider: llmProviderFieldVisible
+          ? normalizedProvider !== (agent.provider ?? null)
             ? normalizedProvider
+            : undefined
+          : (agent.provider ?? null) !== null
+            ? null
             : undefined,
         envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
@@ -303,9 +490,11 @@ export function EditAgentDialog({
             <EditAgentModelField
               disabled={updateMutation.isPending}
               discoveredModelOptions={discoveredModelOptions}
+              isCustomModelEditing={isCustomModelEditing}
               model={model}
               modelDiscoveryLoading={modelDiscoveryLoading}
               modelDiscoveryStatus={modelDiscoveryStatus}
+              onIsCustomModelEditingChange={setIsCustomModelEditing}
               onModelChange={setModel}
             />
 
@@ -313,8 +502,7 @@ export function EditAgentDialog({
               <EditAgentProviderField
                 disabled={updateMutation.isPending}
                 isCustomProviderEditing={isCustomProviderEditing}
-                onIsCustomProviderEditingChange={setIsCustomProviderEditing}
-                onProviderChange={setProvider}
+                onProviderChange={handleProviderDropdownChange}
                 provider={provider}
                 selectedRuntime={selectedRuntime}
               />
@@ -348,6 +536,37 @@ export function EditAgentDialog({
               </div>
             ) : null}
 
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="agent-runtime">
+                Agent runtime
+              </label>
+              <select
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+                disabled={updateMutation.isPending}
+                id="agent-runtime"
+                onChange={(event) =>
+                  handleRuntimeDropdownChange(event.target.value)
+                }
+                value={runtimeDropdownValue}
+              >
+                {runtimeDropdownOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {selectedRuntime ? (
+                <p className="text-xs text-muted-foreground">
+                  Detected at{" "}
+                  <span className="font-medium">
+                    {selectedRuntime.binaryPath ??
+                      selectedRuntime.command ??
+                      selectedRuntime.id}
+                  </span>
+                </p>
+              ) : null}
+            </div>
+
             <CreateAgentRuntimeFields
               acpCommand={acpCommand}
               agentArgs={agentArgs}
@@ -368,7 +587,13 @@ export function EditAgentDialog({
               // "custom" surfaces the agent-command input so a user can pin a
               // harness; when inheriting we hide it (any non-"custom" id) since
               // the command comes from the persona's runtime.
-              selectedRuntimeId={inheritHarness ? "inherit" : "custom"}
+              selectedRuntimeId={
+                inheritHarness
+                  ? "inherit"
+                  : selectedRuntimeId === "custom"
+                    ? "custom"
+                    : "inherit"
+              }
               systemPrompt={systemPrompt}
               turnTimeoutSeconds={turnTimeoutSeconds}
             />
@@ -416,37 +641,53 @@ export function EditAgentDialog({
 function EditAgentModelField({
   disabled,
   discoveredModelOptions,
+  isCustomModelEditing,
   model,
   modelDiscoveryLoading,
   modelDiscoveryStatus,
+  onIsCustomModelEditingChange,
   onModelChange,
 }: {
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
+  isCustomModelEditing: boolean;
   model: string;
   modelDiscoveryLoading: boolean;
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
+  onIsCustomModelEditingChange: (value: boolean) => void;
   onModelChange: (value: string) => void;
 }) {
-  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const trimmedModel = model.trim();
-  const hasDiscoveredOptions =
-    discoveredModelOptions !== null && discoveredModelOptions.length > 0;
-  const selectedKnownModel =
-    hasDiscoveredOptions &&
-    discoveredModelOptions.some((option) => option.id === trimmedModel);
-  const hasCustomModel = trimmedModel.length > 0 && !selectedKnownModel;
-  const showCustomModelInput = isCustomModelEditing || hasCustomModel;
-  const modelSelectValue = showCustomModelInput
-    ? CUSTOM_MODEL_VALUE
-    : trimmedModel.length === 0
-      ? AUTO_MODEL_VALUE
-      : selectedKnownModel
-        ? trimmedModel
-        : CUSTOM_MODEL_VALUE;
-  // Discovery is "active" when we have live options from usePersonaModelDiscovery.
-  const selectDisabled =
-    disabled || modelDiscoveryLoading || !hasDiscoveredOptions;
+
+  // Mirror Persona: static options serve as the fallback when discovery hasn't
+  // returned yet. Discovered options are ADDITIVE — we never disable the picker
+  // or hide the custom input just because discovery returned null.
+  const staticModelOptions: readonly PersonaModelOption[] = [
+    { id: "", label: "Default model" },
+  ];
+  const effectiveModelOptions = discoveredModelOptions ?? staticModelOptions;
+
+  // isModelCustom: true when the current model isn't in any known option set.
+  // We check discovered options (when available) or runtime-static options so
+  // a previously-saved custom model stays in custom mode even before discovery.
+  const isModelCustom = !hasPersonaModelOption(
+    effectiveModelOptions,
+    trimmedModel,
+  );
+
+  const modelSelectValue = getModelSelectValue({
+    isCustomModelEditing,
+    isModelCustom,
+    model,
+  });
+
+  // The select is only disabled for mutation pending — never for missing discovery.
+  // Default/custom options remain usable regardless of discovery state.
+  const selectDisabled = disabled || modelDiscoveryLoading;
+
+  // Show the custom model input whenever custom mode is active or the current
+  // model is already custom — not gated on discovery having returned.
+  const showCustomModelInput = isCustomModelEditing || isModelCustom;
 
   return (
     <div className="space-y-1.5">
@@ -459,31 +700,36 @@ function EditAgentModelField({
         id="agent-model"
         onChange={(event) => {
           const nextValue = event.target.value;
-          if (nextValue === AUTO_MODEL_VALUE) {
-            setIsCustomModelEditing(false);
+          if (nextValue === AUTO_MODEL_DROPDOWN_VALUE) {
+            onIsCustomModelEditingChange(false);
             onModelChange("");
             return;
           }
-          if (nextValue === CUSTOM_MODEL_VALUE) {
-            setIsCustomModelEditing(true);
+          if (nextValue === CUSTOM_MODEL_DROPDOWN_VALUE) {
+            onIsCustomModelEditingChange(true);
             return;
           }
-          setIsCustomModelEditing(false);
+          onIsCustomModelEditingChange(false);
           onModelChange(nextValue);
         }}
         value={modelSelectValue}
       >
-        {(discoveredModelOptions ?? []).map((option) => (
-          <option key={option.id} value={option.id || AUTO_MODEL_VALUE}>
+        {effectiveModelOptions.map((option) => (
+          <option
+            key={option.id}
+            value={option.id || AUTO_MODEL_DROPDOWN_VALUE}
+          >
             {option.label}
           </option>
         ))}
-        {!hasDiscoveredOptions ? (
-          <option value={AUTO_MODEL_VALUE}>Default model</option>
+        {modelDiscoveryLoading && discoveredModelOptions === null ? (
+          <option disabled value={MODEL_DISCOVERY_LOADING_VALUE}>
+            Loading models...
+          </option>
         ) : null}
-        <option value={CUSTOM_MODEL_VALUE}>Custom model...</option>
+        <option value={CUSTOM_MODEL_DROPDOWN_VALUE}>Custom model...</option>
       </select>
-      {showCustomModelInput && hasDiscoveredOptions ? (
+      {showCustomModelInput ? (
         <Input
           aria-label="Custom model ID"
           autoCorrect="off"
@@ -498,7 +744,7 @@ function EditAgentModelField({
           ? "Loading models..."
           : modelDiscoveryStatus !== null
             ? modelDiscoveryStatus.message
-            : hasDiscoveredOptions
+            : discoveredModelOptions !== null
               ? "Saved changes take effect on the next start."
               : "Select a provider above to see available models."}
       </p>
@@ -509,14 +755,12 @@ function EditAgentModelField({
 function EditAgentProviderField({
   disabled,
   isCustomProviderEditing,
-  onIsCustomProviderEditingChange,
   onProviderChange,
   provider,
   selectedRuntime,
 }: {
   disabled: boolean;
   isCustomProviderEditing: boolean;
-  onIsCustomProviderEditingChange: (value: boolean) => void;
   onProviderChange: (value: string) => void;
   provider: string;
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -539,20 +783,7 @@ function EditAgentProviderField({
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
         disabled={disabled}
         id="agent-provider"
-        onChange={(event) => {
-          const nextValue = event.target.value;
-          if (nextValue === AUTO_PROVIDER_DROPDOWN_VALUE) {
-            onIsCustomProviderEditingChange(false);
-            onProviderChange("");
-            return;
-          }
-          if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
-            onIsCustomProviderEditingChange(true);
-            return;
-          }
-          onIsCustomProviderEditingChange(false);
-          onProviderChange(nextValue);
-        }}
+        onChange={(event) => onProviderChange(event.target.value)}
         value={providerSelectValue}
       >
         {providerOptions.map((option) => (
