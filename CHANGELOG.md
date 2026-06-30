@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.40
+
+- fix(desktop): stabilize channel-timeline scrollback with per-row height reserves ([#1413](https://github.com/block/buzz/pull/1413)) ([`4fdc68f1`](https://github.com/block/buzz/commit/4fdc68f1568364b3e44d7003c83a9a4ad961e1ee))
+- fix(sidebar): trim working badge label and name working agents in tooltip ([#1408](https://github.com/block/buzz/pull/1408)) ([`697f63dd`](https://github.com/block/buzz/commit/697f63ddcc45df71e48a0c0ac81adada67a056e1))
+- Mobile tab bar polish ([#1368](https://github.com/block/buzz/pull/1368)) ([`c444e344`](https://github.com/block/buzz/commit/c444e3445bba4967246f790a296237cc597336a9))
+- feat(desktop): let thread pane expand on ultrawide monitors ([#1407](https://github.com/block/buzz/pull/1407)) ([`f86f97bb`](https://github.com/block/buzz/commit/f86f97bbde1e3ee914ef2d6ef385482f15a43d6a))
+
+
 ## v0.3.39
 
 - fix: close cross-process keychain race and namespace dev-build nest ([#1409](https://github.com/block/buzz/pull/1409)) ([`e8adc3383`](https://github.com/block/buzz/commit/e8adc3383fae3060124ed212d00538d543be0054))
