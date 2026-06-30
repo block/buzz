@@ -1732,17 +1732,16 @@ You are Paul.
     }
 
     #[test]
-    fn test_find_team_uuid_alone_does_not_match_manifest_id() {
-        // Regression test: the old `team.id == source_team` predicate would
-        // incorrectly miss legacy teams. Confirm UUID alone doesn't match when
-        // source_team holds the manifest dir name.
+    fn test_find_team_manifest_dir_name_matches_regardless_of_uuid_id() {
+        // Regression: the old predicate `team.id == source_team` missed legacy
+        // teams when source_team holds the manifest dir name, not the UUID.
+        // This test confirms that searching by manifest dir name always works
+        // even when team.id is a UUID.
         let teams = vec![make_team("some-uuid-123", Some("/teams/com.test.pack"))];
-        let _not_found = find_team_for_persona_source(&teams, "some-uuid-123");
-        // The UUID IS the team.id, but the persona source_team is "com.test.pack",
-        // not the UUID, so this lookup is expected to match via id (harmless).
-        // The important invariant: searching by manifest dir name finds the team.
+        // source_team holds the manifest dir name "com.test.pack", not the UUID.
         let by_dir = find_team_for_persona_source(&teams, "com.test.pack");
-        assert!(by_dir.is_some(), "manifest dir name must always find the team");
+        assert!(by_dir.is_some(), "manifest dir name must find the legacy team");
+        assert_eq!(by_dir.unwrap().id, "some-uuid-123");
     }
 
     #[test]
