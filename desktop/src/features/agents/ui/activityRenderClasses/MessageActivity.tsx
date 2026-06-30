@@ -100,7 +100,7 @@ function MessageItem({
               size="xs"
               testId="transcript-assistant-avatar"
             />
-            <span className="text-xs font-semibold text-foreground">
+            <span className="text-sm font-semibold text-foreground">
               {assistantLabel}
             </span>
             <TranscriptTimestamp timestamp={item.timestamp} />
