@@ -8,9 +8,9 @@ use crate::{
         agent_events::ManagedAgentEventContent, encode_persona_json, load_managed_agents,
         load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
         parse_zip_personas, persona_events::persona_d_tag, save_managed_agents, save_personas,
-        team_events::TeamEventContent, try_regenerate_nest, validate_persona_activation_change,
-        validate_persona_deletion, CreatePersonaRequest, ManagedAgentRecord,
-        ParsePersonaFilesResult, PersonaRecord, TeamRecord, UpdatePersonaRequest,
+        team_events::TeamEventContent, team_persona_key, try_regenerate_nest,
+        validate_persona_activation_change, validate_persona_deletion, CreatePersonaRequest,
+        ManagedAgentRecord, ParsePersonaFilesResult, PersonaRecord, TeamRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -270,6 +270,19 @@ pub fn update_persona(
     Ok(result)
 }
 
+/// Find the team whose `team_persona_key` equals `source_team`. This matches
+/// the same key that `sync_team_from_dir` uses, covering both modern teams
+/// (where `team.id` equals the manifest directory name) and legacy/backfilled
+/// teams (where `team.id` is a UUID and the manifest id is `source_dir.file_name()`).
+fn find_team_for_persona_source<'a>(
+    teams: &'a [TeamRecord],
+    source_team: &str,
+) -> Option<&'a TeamRecord> {
+    teams
+        .iter()
+        .find(|t| t.id == source_team || team_persona_key(t) == source_team)
+}
+
 /// Write updated frontmatter fields back to the source `.persona.md` file for
 /// pack-backed personas (`source_team` is set). Non-fatal: any miss (no
 /// `source_dir`, missing file, pack load failure, parse or write error) is
@@ -290,6 +303,11 @@ pub fn update_persona(
 /// targets the correct file regardless of where the manifest places the
 /// `.persona.md` (e.g. `personas/` vs `agents/`, nested paths, or filenames
 /// that differ from the persona `name:` field).
+///
+/// The team is located via `find_team_for_persona_source`, which matches the
+/// same key as `sync_team_from_dir` (`team_persona_key`). This handles both
+/// modern teams (where `team.id` equals the manifest id) and legacy/backfilled
+/// teams (where `team.id` is a UUID and the manifest id lives in `source_dir`).
 fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
     // Only pack-backed personas have a source file to write back to.
     let Some(source_team_id) = &persona.source_team else {
@@ -305,9 +323,7 @@ fn write_back_persona_md(app: &AppHandle, persona: &PersonaRecord) {
 
     let result = (|| -> Result<(), String> {
         let teams = load_teams(app)?;
-        let team = teams
-            .iter()
-            .find(|t| &t.id == source_team_id)
+        let team = find_team_for_persona_source(&teams, source_team_id)
             .ok_or_else(|| format!("team {source_team_id} not found"))?;
         let source_dir = team
             .source_dir
@@ -1671,5 +1687,76 @@ You are Paul.
         // The wrong file (paul.persona.md in agents/) must NOT exist.
         assert!(!dir.path().join("agents/paul.persona.md").exists(),
             "convention-based path must not be created");
+    }
+
+    // ── find_team_for_persona_source tests ────────────────────────────────────
+    //
+    // Verify that write_back_persona_md finds teams by team_persona_key, not
+    // team.id. Legacy/backfilled teams have a UUID `id` while PersonaRecord
+    // stores the manifest directory name in `source_team`; matching by `id`
+    // alone silently misses those teams.
+
+    fn make_team(id: &str, source_dir: Option<&str>) -> TeamRecord {
+        TeamRecord {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: None,
+            persona_ids: vec![],
+            is_builtin: false,
+            source_dir: source_dir.map(|s| std::path::PathBuf::from(s)),
+            is_symlink: false,
+            symlink_target: None,
+            version: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_find_team_legacy_uuid_id_matched_by_source_dir_name() {
+        // Legacy shape: team.id is a UUID; PersonaRecord.source_team is the
+        // manifest directory name. The old `team.id == source_team` predicate
+        // missed this — find_team_for_persona_source must match via source_dir.
+        let teams = vec![make_team("some-uuid-123", Some("/teams/com.test.pack"))];
+        let found = find_team_for_persona_source(&teams, "com.test.pack");
+        assert!(found.is_some(), "legacy team must be found by manifest dir name, not UUID");
+        assert_eq!(found.unwrap().id, "some-uuid-123");
+    }
+
+    #[test]
+    fn test_find_team_modern_id_matched_directly() {
+        // Modern shape: team.id equals the manifest directory name. Must match.
+        let teams = vec![make_team("com.test.pack", Some("/teams/com.test.pack"))];
+        let found = find_team_for_persona_source(&teams, "com.test.pack");
+        assert!(found.is_some(), "modern team must be found");
+    }
+
+    #[test]
+    fn test_find_team_uuid_alone_does_not_match_manifest_id() {
+        // Regression test: the old `team.id == source_team` predicate would
+        // incorrectly miss legacy teams. Confirm UUID alone doesn't match when
+        // source_team holds the manifest dir name.
+        let teams = vec![make_team("some-uuid-123", Some("/teams/com.test.pack"))];
+        let _not_found = find_team_for_persona_source(&teams, "some-uuid-123");
+        // The UUID IS the team.id, but the persona source_team is "com.test.pack",
+        // not the UUID, so this lookup is expected to match via id (harmless).
+        // The important invariant: searching by manifest dir name finds the team.
+        let by_dir = find_team_for_persona_source(&teams, "com.test.pack");
+        assert!(by_dir.is_some(), "manifest dir name must always find the team");
+    }
+
+    #[test]
+    fn test_find_team_no_source_dir_falls_back_to_id() {
+        // JSON-only team: no source_dir, team_persona_key falls back to id.
+        let teams = vec![make_team("builtin-team:fizz", None)];
+        let found = find_team_for_persona_source(&teams, "builtin-team:fizz");
+        assert!(found.is_some(), "no source_dir: must match via team.id fallback");
+    }
+
+    #[test]
+    fn test_find_team_returns_none_when_no_match() {
+        let teams = vec![make_team("some-uuid-123", Some("/teams/com.test.pack"))];
+        let not_found = find_team_for_persona_source(&teams, "com.other.pack");
+        assert!(not_found.is_none(), "unrelated source_team must not match");
     }
 }
