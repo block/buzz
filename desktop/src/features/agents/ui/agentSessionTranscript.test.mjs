@@ -223,6 +223,21 @@ function assistantChunk(seq, messageId, text, overrides = {}) {
   );
 }
 
+test("buildTranscript preserves author pubkeys on user message chunks", () => {
+  const authorPubkey = "b".repeat(64);
+  const [item] = buildTranscript([
+    sessionUpdate(25, {
+      sessionUpdate: "user_message_chunk",
+      messageId: "user-chunk-1",
+      authorPubkey,
+      content: { type: "text", text: "please keep this visible" },
+    }),
+  ]).filter((candidate) => candidate.type === "message");
+
+  assert.equal(item.role, "user");
+  assert.equal(item.authorPubkey, authorPubkey);
+});
+
 test("buildTranscript de-duplicates repeated tool updates into one canonical row", () => {
   const items = toolItems([
     acpToolUpdate(40, {

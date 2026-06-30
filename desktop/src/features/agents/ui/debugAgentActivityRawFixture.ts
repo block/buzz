@@ -67,6 +67,7 @@ function payloadForItem(item: TranscriptItem): unknown {
           ? "agent_message_chunk"
           : "user_message_chunk",
       messageId: item.id,
+      authorPubkey: item.authorPubkey,
       content: rawContent(item.text),
     });
   }

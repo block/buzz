@@ -602,6 +602,7 @@ export function processTranscriptEvent(
         // Suppress user_message_chunk echo when a steer already rendered
         // the user message for this turn (Goose echoes steered content back).
         const steerKey = `steer:${ch}:${event.turnId ?? event.seq}`;
+        const authorPubkey = asString(update.authorPubkey);
         if (!d.itemsById.has(steerKey)) {
           upsertMessage(
             d,
@@ -611,7 +612,7 @@ export function processTranscriptEvent(
             extractContentText(update.content),
             event.timestamp,
             ctx,
-            null,
+            authorPubkey,
             updateType,
           );
         }

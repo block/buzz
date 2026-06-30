@@ -8,15 +8,17 @@ import { debugPlanUpdateItem } from "./debugAgentActivityPlanFixture";
 const sessionId = "debug-session-render-classes";
 const turnId = "debug-turn-render-classes";
 const channelId = "debug-channel-render-classes";
-const userPubkey = "debug-user-render-classes";
-const reviewerPubkey = "debug-reviewer-render-classes";
+const userPubkey =
+  "1111111111111111111111111111111111111111111111111111111111111111";
+const reviewerPubkey =
+  "2222222222222222222222222222222222222222222222222222222222222222";
 const baseTimestamp = Date.parse("2026-06-30T00:00:00.000Z");
 const workspacePath = "/Users/tho/.buzz/REPOS/buzz-pr-3-activity-feed-rebuild";
 export const DEBUG_AGENT_ACTIVITY_AGENT_NAME = "Fixture Agent";
 export const DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL =
   "https://picsum.photos/seed/activity-agent-placeholder/200";
 export const DEBUG_AGENT_ACTIVITY_PROFILES: UserProfileLookup = {
-  [userPubkey]: debugProfile("Taylor Ho", "activity-user-tho", "tho"),
+  [userPubkey]: debugProfile("Taylor Ho", "seedhash", "tho"),
   [reviewerPubkey]: debugProfile("Avery", "activity-user-avery", "avery"),
 };
 
@@ -435,7 +437,7 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
       {
         title: "Buzz event: @mention",
         body: [
-          "From: Taylor Ho (hex: debug-user-render-classes)",
+          `From: Taylor Ho (hex: ${userPubkey})`,
           "Kind: channel message",
           "Content: @Agent audit the activity feed taxonomy and show me the risky spots before you edit.",
         ].join("\n"),
