@@ -24,5 +24,20 @@ export function useEphemeralChannelDisplay(channel: Channel | null) {
     };
   }, [deadlineKey]);
 
-  return channel ? getEphemeralChannelDisplay(channel, Date.now()) : null;
+  const display = channel
+    ? getEphemeralChannelDisplay(channel, Date.now())
+    : null;
+  // Stabilise the reference across renders when the rendered content is
+  // unchanged: this object is recomputed from Date.now() every render, and it
+  // feeds memoised header/timeline subtrees — a fresh ref each render would
+  // defeat their React.memo on every background re-render.
+  const stableRef = React.useRef(display);
+  const prev = stableRef.current;
+  if (
+    prev?.detailLabel !== display?.detailLabel ||
+    prev?.tooltipLabel !== display?.tooltipLabel
+  ) {
+    stableRef.current = display;
+  }
+  return stableRef.current;
 }

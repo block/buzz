@@ -2,13 +2,18 @@
 mod agent;
 pub mod auth;
 mod builtin;
-mod config;
+pub mod catalog;
+pub mod config;
 mod handoff;
 mod hints;
 mod llm;
 mod mcp;
-mod types;
+pub mod types;
 mod wire;
+
+pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use config::Provider;
+pub use types::AgentError;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,10 +28,11 @@ use crate::config::{Config, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
 use crate::hints::SkillEntry;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
-use crate::types::HistoryItem;
+use crate::types::{ContentBlock, HistoryItem};
 use crate::wire::{
     classify, Inbound, InitializeParams, SessionCancelParams, SessionNewParams,
-    SessionPromptParams, WireMsg, WireSender, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
+    SessionPromptParams, SessionSteerParams, WireMsg, WireSender, INVALID_PARAMS, METHOD_NOT_FOUND,
+    PARSE_ERROR,
 };
 
 struct App {
@@ -43,6 +49,16 @@ struct Session {
     history: Vec<HistoryItem>,
     cancel_tx: watch::Sender<bool>,
     busy: bool,
+    /// Run id of the in-flight prompt, set when a prompt starts and cleared
+    /// when it ends. `None` means no active run — a steer request targeting
+    /// this session is rejected. Steer-capable clients learn this value from
+    /// the `params.update._meta.goose.activeRunId` field on `session/update`.
+    active_run_id: Option<String>,
+    /// Sender for mid-turn steer messages. Created fresh per prompt (like
+    /// `cancel_tx`); the running prompt loop holds the matching receiver and
+    /// drains queued steers at round boundaries. `None` when no prompt is in
+    /// flight.
+    steer_tx: Option<mpsc::UnboundedSender<Vec<ContentBlock>>>,
     original_task: Option<String>,
     handoff_count: usize,
     stop_rejections: u32,
@@ -78,13 +94,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
-/// provider and persist the result, then exit. Today the only provider is
-/// `databricks` (OAuth 2.0 PKCE). Reads `DATABRICKS_HOST` from env; needs
-/// a browser on the machine.
+/// provider and persist the result, then exit. Today this supports Databricks
+/// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the
+/// machine.
 async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let provider = args.first().map(String::as_str);
     match provider {
-        Some("databricks") => {
+        Some("databricks" | "databricks_v2" | "databricks-v2") => {
             let host = std::env::var("DATABRICKS_HOST")
                 .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
             let pkce = auth::PkceOAuthConfig {
@@ -193,6 +209,13 @@ async fn handle_request(
         "session/cancel" => {
             cancel_session(app, params).await;
             wire::send(wire_tx, wire::ok(id, Value::Null)).await;
+        }
+        // goose-compatible non-standard extension: inject user input into the
+        // currently active prompt without starting a new one. Mirrors goose's
+        // `_goose/unstable/session/steer` wire contract so a single client-side
+        // delivery path serves both agents.
+        "_goose/unstable/session/steer" => {
+            steer_session(app, id, params, wire_tx).await;
         }
         _ => {
             wire::send(
@@ -334,6 +357,8 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             history: Vec::new(),
             cancel_tx,
             busy: false,
+            active_run_id: None,
+            steer_tx: None,
             original_task: None,
             handoff_count: 0,
             stop_rejections: 0,
@@ -362,6 +387,85 @@ async fn cancel_session(app: &Arc<App>, params: Value) {
     }
 }
 
+/// Handle `_goose/unstable/session/steer`: queue user input into the in-flight
+/// prompt. Validation mirrors goose's `on_steer_session`:
+///   - empty prompt → `invalid_params`
+///   - no active run (no prompt in flight) → `invalid_params`
+///   - `expectedRunId` mismatch → `invalid_params` (caller is steering a turn
+///     that already ended or rotated; it must fall back to cancel+merge)
+///
+/// On success the message is queued for pickup at the next round boundary and
+/// we reply `{ runId, messageId }`, then emit a `queuedSteer` session/update so
+/// the client can correlate the accepted steer with its eventual pickup.
+async fn steer_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    let p: SessionSteerParams = match decode(params, "_goose/unstable/session/steer") {
+        Ok(p) => p,
+        Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
+    };
+    if p.prompt.is_empty() {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "steer: prompt must not be empty",
+        )
+        .await;
+    }
+    if p.expected_run_id.is_empty() {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "steer: expectedRunId must not be empty",
+        )
+        .await;
+    }
+    let message_id = format!("steer_{}", session_token().unwrap_or_else(|_| "x".into()));
+    let run_id = {
+        let sessions = app.sessions.lock().await;
+        let Some(s) = sessions.get(&p.session_id) else {
+            return reject(wire_tx, id, INVALID_PARAMS, "steer: unknown session").await;
+        };
+        let Some(active) = s.active_run_id.as_deref() else {
+            return reject(wire_tx, id, INVALID_PARAMS, "steer: no active run to steer").await;
+        };
+        if active != p.expected_run_id {
+            return reject(
+                wire_tx,
+                id,
+                INVALID_PARAMS,
+                &format!(
+                    "steer: expected active run id `{}` but found `{active}`",
+                    p.expected_run_id
+                ),
+            )
+            .await;
+        }
+        // A live run always has a steer_tx; if the channel is gone the run is
+        // tearing down — treat as no active run rather than queue into the void.
+        match &s.steer_tx {
+            Some(tx) if tx.send(p.prompt).is_ok() => active.to_owned(),
+            _ => return reject(wire_tx, id, INVALID_PARAMS, "steer: no active run to steer").await,
+        }
+    };
+    wire::send(
+        wire_tx,
+        wire::ok(id, json!({ "runId": run_id, "messageId": message_id })),
+    )
+    .await;
+    // Best-effort correlation hint for the client; mirrors goose's
+    // `send_queued_steer_update`. Not load-bearing for delivery.
+    wire::send(
+        wire_tx,
+        wire::session_update_with_goose_meta(
+            &p.session_id,
+            json!({ "sessionUpdate": "session_info_update" }),
+            json!({ "queuedSteer": { "messageId": message_id, "runId": run_id } }),
+        ),
+    )
+    .await;
+}
+
 fn spawn_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender) {
     tokio::spawn(async move { run_prompt(app, id, params, wire_tx).await });
 }
@@ -383,6 +487,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         mut last_request_history_bytes,
         mut cancel_rx,
         effective_system_prompt,
+        run_id,
+        mut steer_rx,
     ) = match acquire_session(&app, &p.session_id).await {
         Ok(v) => v,
         Err(reason) => {
@@ -395,6 +501,17 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
             .await
         }
     };
+    // Advertise the active run id so steer-capable clients can target this turn
+    // via `expectedRunId`. Mirrors goose's `send_active_run_update`.
+    wire::send(
+        &wire_tx,
+        wire::session_update_with_goose_meta(
+            &sid,
+            json!({ "sessionUpdate": "session_info_update" }),
+            json!({ "activeRunId": run_id }),
+        ),
+    )
+    .await;
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         session_id: &sid,
@@ -404,6 +521,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         skills: &skills,
         wire: &wire_tx,
         cancel: &mut cancel_rx,
+        steer: &mut steer_rx,
         history: &mut history,
         original_task: &mut original_task,
         handoff_count: &mut handoff_count,
@@ -414,6 +532,9 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
         s.busy = false;
+        // Clear run state so a late steer can't queue into a finished turn.
+        s.active_run_id = None;
+        s.steer_tx = None;
         s.history = history;
         s.original_task = original_task;
         s.handoff_count = handoff_count;
@@ -449,6 +570,8 @@ async fn acquire_session(
         Option<usize>,
         watch::Receiver<bool>,
         Arc<str>,
+        String,
+        mpsc::UnboundedReceiver<Vec<ContentBlock>>,
     ),
     &'static str,
 > {
@@ -463,6 +586,13 @@ async fn acquire_session(
     // Skills are read-only after session creation; clone the Vec so RunCtx
     // can hold a reference without holding the sessions lock.
     let skills = s.skills.clone();
+    // Fresh run id + steer channel for this turn. The run id lets steer-capable
+    // clients target *this* turn (rejecting steers aimed at a turn that already
+    // ended); the channel carries mid-turn injections to the run loop.
+    let run_id = format!("run_{}", session_token().unwrap_or_else(|_| "x".into()));
+    s.active_run_id = Some(run_id.clone());
+    let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+    s.steer_tx = Some(steer_tx);
     Ok((
         s.id.clone(),
         s.mcp.clone(),
@@ -475,6 +605,8 @@ async fn acquire_session(
         s.last_request_history_bytes,
         rx,
         Arc::clone(&s.effective_system_prompt),
+        run_id,
+        steer_rx,
     ))
 }
 

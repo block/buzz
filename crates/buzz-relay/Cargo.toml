@@ -15,12 +15,9 @@ description = "WebSocket relay server for the Buzz communications platform"
 name = "buzz-relay"
 path = "src/main.rs"
 
-[[bin]]
-name = "buzz-reindex-kind0"
-path = "src/bin/reindex_kind0.rs"
-
 [dependencies]
 buzz-core = { workspace = true }
+buzz-conformance = { workspace = true }
 buzz-db = { workspace = true }
 buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }

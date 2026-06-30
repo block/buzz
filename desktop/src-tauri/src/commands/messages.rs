@@ -100,6 +100,24 @@ pub async fn get_feed(
     })
 }
 
+fn build_search_messages_filter(q: &str, cap: u32, channel_id: Option<&str>) -> serde_json::Value {
+    let mut filter = serde_json::Map::new();
+    filter.insert(
+        "kinds".to_string(),
+        serde_json::json!([9, 40002, 45001, 45003]),
+    );
+    filter.insert("search".to_string(), serde_json::json!(q.trim()));
+    // The desktop topbar is a typeahead surface. This bridge-only extension is
+    // consumed before nostr::Filter parsing on the relay, so general WS/NIP-50
+    // search remains word/lexeme-based.
+    filter.insert("search_mode".to_string(), serde_json::json!("prefix"));
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    if let Some(cid) = channel_id {
+        filter.insert("#h".to_string(), serde_json::json!([cid]));
+    }
+    serde_json::Value::Object(filter)
+}
+
 #[tauri::command]
 pub async fn search_messages(
     q: String,
@@ -108,18 +126,9 @@ pub async fn search_messages(
     state: State<'_, AppState>,
 ) -> Result<SearchResponse, String> {
     let cap = limit.unwrap_or(20).min(100);
-    let mut filter = serde_json::Map::new();
-    filter.insert(
-        "kinds".to_string(),
-        serde_json::json!([9, 40002, 45001, 45003]),
-    );
-    filter.insert("search".to_string(), serde_json::json!(q.trim()));
-    filter.insert("limit".to_string(), serde_json::json!(cap));
-    if let Some(cid) = channel_id {
-        filter.insert("#h".to_string(), serde_json::json!([cid]));
-    }
+    let filter = build_search_messages_filter(&q, cap, channel_id.as_deref());
 
-    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+    let events = query_relay(&state, &[filter]).await?;
     Ok(nostr_convert::search_response_from_events(&events))
 }
 
@@ -566,6 +575,16 @@ mod tests {
             marker_author_for_scope(Some("channel"), "agent-pubkey"),
             None
         );
+    }
+
+    #[test]
+    fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
+        let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"));
+
+        assert_eq!(filter["search"], serde_json::json!("pro"));
+        assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
+        assert_eq!(filter["limit"], serde_json::json!(12));
+        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
     }
 
     #[test]

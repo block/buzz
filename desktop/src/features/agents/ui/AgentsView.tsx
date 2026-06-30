@@ -74,7 +74,7 @@ export function AgentsView() {
               isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
               startingAgentPubkey={agents.startingAgentPubkey}
-              startingPersonaId={agents.startingPersonaId}
+              startingPersonaIds={agents.startingPersonaIds}
               onBulkRemoveStopped={() => {
                 void agents.handleBulkRemoveStopped();
               }}

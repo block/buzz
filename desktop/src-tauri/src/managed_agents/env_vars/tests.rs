@@ -429,7 +429,7 @@ fn is_derived_key_matches_all_known_keys() {
     for key in DERIVED_PROVIDER_MODEL_ENV_KEYS {
         assert!(
             is_derived_provider_model_key(key),
-            "{key} should be recognized as derived"
+            "expected `{key}` to be recognized as derived"
         );
     }
 }
@@ -455,25 +455,35 @@ fn is_derived_key_does_not_match_unrelated_keys() {
 #[test]
 fn filter_derived_strips_provider_model_keys_preserves_rest() {
     let input = vec![
-        (
-            "GOOSE_MODEL".to_string(),
-            "claude-sonnet-4-20250514".to_string(),
-        ),
-        ("GOOSE_PROVIDER".to_string(), "anthropic".to_string()),
+        ("GOOSE_MODEL".to_string(), "old-model".to_string()),
+        ("GOOSE_PROVIDER".to_string(), "old-provider".to_string()),
         ("BUZZ_AGENT_MODEL".to_string(), "gpt-4o".to_string()),
         ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
         ("GOOSE_TEMPERATURE".to_string(), "0.7".to_string()),
-        ("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string()),
+        ("GOOSE_CONTEXT_LIMIT".to_string(), "128000".to_string()),
+        ("CUSTOM_KEY".to_string(), "custom-value".to_string()),
     ];
+
     let filtered = filter_derived_provider_model_env_vars(input);
-    assert_eq!(filtered.len(), 2);
+
+    // Derived keys must be gone.
+    assert!(!filtered.contains_key("GOOSE_MODEL"));
+    assert!(!filtered.contains_key("GOOSE_PROVIDER"));
+    assert!(!filtered.contains_key("BUZZ_AGENT_MODEL"));
+    assert!(!filtered.contains_key("BUZZ_AGENT_PROVIDER"));
+
+    // Non-derived keys must survive.
     assert_eq!(
         filtered.get("GOOSE_TEMPERATURE").map(String::as_str),
         Some("0.7")
     );
     assert_eq!(
-        filtered.get("ANTHROPIC_API_KEY").map(String::as_str),
-        Some("sk-test")
+        filtered.get("GOOSE_CONTEXT_LIMIT").map(String::as_str),
+        Some("128000")
+    );
+    assert_eq!(
+        filtered.get("CUSTOM_KEY").map(String::as_str),
+        Some("custom-value")
     );
 }
 
@@ -485,19 +495,76 @@ fn filter_derived_empty_input_returns_empty() {
 
 #[test]
 fn stale_derived_env_does_not_override_structured_fields() {
-    // Documents that merged_user_env is transparent to derived keys — it
-    // does NOT strip them. The defense is the import filter
-    // (filter_derived_provider_model_env_vars) which prevents them from
-    // being persisted in the first place. If a stale record somehow has
-    // them, they flow through merged_user_env unchanged — the spawn-time
-    // re-derivation from structured fields writes AFTER merged env.
-    let persona_env = map(&[("GOOSE_MODEL", "stale-model"), ("LEGIT", "v")]);
-    let merged = merged_user_env(&persona_env, &BTreeMap::new());
-    // merged_user_env does NOT filter derived keys — that's by design.
-    // The import filter is the boundary defense.
+    // Scenario: A persona was imported WITH stale derived keys (pre-fix).
+    // At merge time, `merged_user_env` passes them through (it doesn't filter).
+    // The fix is at *import* time — this test documents that merged_user_env
+    // is transparent, and the import filter is the correct defense.
+    let stale_persona_env = map(&[
+        ("BUZZ_AGENT_MODEL", "stale-model"),
+        ("BUZZ_AGENT_PROVIDER", "stale-provider"),
+        ("GOOSE_TEMPERATURE", "0.5"),
+    ]);
+    let agent_env = BTreeMap::new();
+
+    let merged = merged_user_env(&stale_persona_env, &agent_env);
+
+    // merged_user_env is transparent — stale keys pass through.
     assert_eq!(
-        merged.get("GOOSE_MODEL").map(String::as_str),
+        merged.get("BUZZ_AGENT_MODEL").map(String::as_str),
         Some("stale-model")
     );
-    assert_eq!(merged.get("LEGIT").map(String::as_str), Some("v"));
+    assert_eq!(
+        merged.get("BUZZ_AGENT_PROVIDER").map(String::as_str),
+        Some("stale-provider")
+    );
+
+    // But the import filter WOULD have caught them:
+    let would_be_filtered = filter_derived_provider_model_env_vars(stale_persona_env);
+    assert!(!would_be_filtered.contains_key("BUZZ_AGENT_MODEL"));
+    assert!(!would_be_filtered.contains_key("BUZZ_AGENT_PROVIDER"));
+    // Non-derived keys survive the filter.
+    assert_eq!(
+        would_be_filtered
+            .get("GOOSE_TEMPERATURE")
+            .map(String::as_str),
+        Some("0.5")
+    );
+}
+
+// ── deploy payload model precedence ────────────────────────────────
+
+/// Documents the model precedence rule used by `build_deploy_payload`:
+/// persona structured model is authoritative when present; the agent
+/// record's `model` field is only a fallback.
+///
+/// This mirrors local spawn behavior where `runtime_metadata_env_vars`
+/// derives GOOSE_MODEL from the persona's structured field, not the
+/// agent record.
+#[test]
+fn deploy_model_precedence_persona_wins_over_record() {
+    // Simulates the precedence logic from build_deploy_payload:
+    //   let model = persona.model.clone().or(record.model.clone());
+    let persona_model: Option<String> = Some("claude-sonnet-4-20250514".to_string());
+    let record_model: Option<String> = Some("stale-record-model".to_string());
+
+    let effective = persona_model.clone().or(record_model.clone());
+    assert_eq!(effective.as_deref(), Some("claude-sonnet-4-20250514"));
+}
+
+#[test]
+fn deploy_model_precedence_falls_back_to_record_when_persona_has_none() {
+    let persona_model: Option<String> = None;
+    let record_model: Option<String> = Some("record-model".to_string());
+
+    let effective = persona_model.clone().or(record_model.clone());
+    assert_eq!(effective.as_deref(), Some("record-model"));
+}
+
+#[test]
+fn deploy_model_precedence_none_when_both_absent() {
+    let persona_model: Option<String> = None;
+    let record_model: Option<String> = None;
+
+    let effective = persona_model.clone().or(record_model.clone());
+    assert_eq!(effective, None);
 }

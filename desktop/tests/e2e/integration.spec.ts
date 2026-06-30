@@ -40,7 +40,7 @@ async function openChannelEditDialog(page: import("@playwright/test").Page) {
 }
 
 async function closeChannelManagement(page: import("@playwright/test").Page) {
-  await page.getByTestId("channel-management-close").click();
+  await page.getByTestId("auxiliary-panel-close").click();
   await expect(page.getByTestId("channel-management-sheet")).not.toBeVisible();
 }
 

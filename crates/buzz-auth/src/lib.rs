@@ -23,6 +23,8 @@ pub mod error;
 pub mod nip42;
 /// NIP-98 HTTP Auth verification (kind:27235).
 pub mod nip98;
+/// NIP-98 replay protection — shared, community-scoped, atomic seen-set.
+pub mod nip98_replay;
 /// Per-connection rate limiting.
 pub mod rate_limit;
 /// OAuth scope parsing and enforcement.
@@ -32,6 +34,9 @@ pub use access::{check_read_access, check_write_access, require_scope, ChannelAc
 pub use error::AuthError;
 pub use nip42::{generate_challenge, verify_nip42_event};
 pub use nip98::verify_nip98_event;
+pub use nip98_replay::{
+    nip98_replay_key, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS,
+};
 pub use rate_limit::{
     ip_rate_limit_key, rate_limit_key, LimitType, RateLimitConfig, RateLimitResult, RateLimiter,
 };
@@ -39,6 +44,8 @@ pub use scope::{parse_scopes, Scope};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use access::MockAccessChecker;
+#[cfg(any(test, feature = "test-utils"))]
+pub use nip98_replay::AlwaysFreshReplayGuard;
 #[cfg(any(test, feature = "test-utils"))]
 pub use rate_limit::AlwaysAllowRateLimiter;
 

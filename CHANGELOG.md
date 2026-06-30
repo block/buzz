@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.3.38
+
+- feat(desktop): provider-agnostic model selection + databricks discovery ([#1307](https://github.com/block/buzz/pull/1307)) ([`eacbbe880`](https://github.com/block/buzz/commit/eacbbe880a50acf400ff7c162b5bc8705ab0063f))
+- release(helm): buzz chart 0.1.1 ([#1374](https://github.com/block/buzz/pull/1374)) ([`2561cbd06`](https://github.com/block/buzz/commit/2561cbd069a4f7a0ca4824f780867aa30ea9f744))
+- Harden relay attack surfaces ([#1369](https://github.com/block/buzz/pull/1369)) ([`29368cf17`](https://github.com/block/buzz/commit/29368cf17b7d5924fe571512b2194e3f48b21a16))
+- ci(helm): publish chart to GHCR on chart-v* tags ([#1372](https://github.com/block/buzz/pull/1372)) ([`2722ce422`](https://github.com/block/buzz/commit/2722ce4226838272ab36dc8630feacd2a90e1775))
+- feat(buzz-agent): add databricks_v2 provider for AI Gateway v2 ([#1311](https://github.com/block/buzz/pull/1311)) ([`15a73aa27`](https://github.com/block/buzz/commit/15a73aa27feb9db72c9535a8b1113189d2be8dd4))
+- refactor(desktop): centralize auxiliary panel shell ([#1343](https://github.com/block/buzz/pull/1343)) ([`e6738c501`](https://github.com/block/buzz/commit/e6738c50153cdb3f78448c912a2e8cd660da5779))
+- perf(desktop): stop typing from re-rendering the channel pane + timeline ([#1364](https://github.com/block/buzz/pull/1364)) ([`db1b617ab`](https://github.com/block/buzz/commit/db1b617ab12792b6c5d90d988e52b9a86d7aa361))
+- fix(desktop): check PGID in orphan sweep and signal correct process groups ([#1359](https://github.com/block/buzz/pull/1359)) ([`59be27ff3`](https://github.com/block/buzz/commit/59be27ff3fa4c0b0b95688565e945f6f5e0d60ef))
+- feat(desktop): harness-agnostic config bridge ([#887](https://github.com/block/buzz/pull/887)) ([`c65989a61`](https://github.com/block/buzz/commit/c65989a61bba7050e4fbc1798630f96d541ab8db))
+- fix(acp): enable sandbox network access for Codex MCP subprocesses ([#1363](https://github.com/block/buzz/pull/1363)) ([`401bb51bf`](https://github.com/block/buzz/commit/401bb51bf2dd64776a1862575548cb25ab41ff70))
+- perf(desktop): don't block channel create on channel-list refetch ([#1360](https://github.com/block/buzz/pull/1360)) ([`cf57bcbea`](https://github.com/block/buzz/commit/cf57bcbea4af355774d499e109238a5d527ae39e))
+- refactor(desktop): split global styles and markdown renderers ([#1361](https://github.com/block/buzz/pull/1361)) ([`c27b4251a`](https://github.com/block/buzz/commit/c27b4251a9304911f2359a3ee22b6f26b13af78b))
+- feat(read-state): multi-slot splitting + no-op suppression for oversized blobs ([#1309](https://github.com/block/buzz/pull/1309)) ([`2612324fd`](https://github.com/block/buzz/commit/2612324fd935b3f19ef78e07885aa05f7ef907f1))
+- fix: unconditionally replace CLI symlink on boot ([#1357](https://github.com/block/buzz/pull/1357)) ([`50873ef98`](https://github.com/block/buzz/commit/50873ef98d9080614720cd770781698c9b16313d))
+
+
+## v0.3.37
+
+- feat(buzz-acp): steering as the default mid-turn mention delivery ([#1160](https://github.com/block/buzz/pull/1160)) ([`e567491a`](https://github.com/block/buzz/commit/e567491a196396658ef4c1d4ff6128efd8b2744e))
+- Multi-tenant Buzz relay: community_id as a server-resolved key (comprehensive rewrite) ([#1321](https://github.com/block/buzz/pull/1321)) ([`14fba21e`](https://github.com/block/buzz/commit/14fba21e57b8d671ebbea473226be52a5f2ae636))
+- Disable persona start while runtime discovery runs ([#1353](https://github.com/block/buzz/pull/1353)) ([`92a5f1fc`](https://github.com/block/buzz/commit/92a5f1fc6624066f391bd5c57e9bb433df613b56))
+- chore(deps): update dependency @tanstack/react-virtual to v3.14.4 ([#1342](https://github.com/block/buzz/pull/1342)) ([`1c221eaa`](https://github.com/block/buzz/commit/1c221eaafd1c8537532c3c8ce76c502330b00bf7))
+- Fix sidebar unread indicator placement ([#1319](https://github.com/block/buzz/pull/1319)) ([`51b2613c`](https://github.com/block/buzz/commit/51b2613c0e42327d9ba0352c3bb3be7e7c4737a6))
+- fix(desktop): un-clip hover action bar's upward bleed under content-visibility ([#1354](https://github.com/block/buzz/pull/1354)) ([`7adbd05b`](https://github.com/block/buzz/commit/7adbd05b45db3db0abb7cc1f5eb0dc7248d47711))
+- Allow Huddle between 2 humans in DM ([#1347](https://github.com/block/buzz/pull/1347)) ([`b58f671b`](https://github.com/block/buzz/commit/b58f671b4ee3d9f6a8fd51ca23f0dc8b8036ed36))
+
+
 ## v0.3.36
 
 - Polish agent runtime cards ([#1327](https://github.com/block/buzz/pull/1327)) ([`a3c4f3f6`](https://github.com/block/buzz/commit/a3c4f3f625a23addb6053c12f11f79f583c394c1))

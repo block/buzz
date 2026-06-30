@@ -17,6 +17,7 @@ use nostr::Event;
 use tracing::{info, warn};
 
 use buzz_core::kind::{RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER};
+use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
@@ -62,7 +63,11 @@ fn extract_tag_value(event: &Event, name: &str) -> Option<String> {
 ///
 /// Returns `Ok(())` on success.  Returns `Err(msg)` — where `msg` is a
 /// human-readable rejection reason — on any validation failure.
-pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> Result<(), String> {
+pub async fn handle_relay_admin_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+) -> Result<(), String> {
     let kind = event.kind.as_u16() as u32;
     let sender_hex = event.pubkey.to_hex();
 
@@ -89,7 +94,7 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
 
     let sender_member = state
         .db
-        .get_relay_member(&sender_hex)
+        .get_relay_member(tenant.community(), &sender_hex)
         .await
         .map_err(|e| format!("database error: {e}"))?;
 
@@ -125,7 +130,7 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
             // to change an existing member's role.
             let was_inserted = state
                 .db
-                .add_relay_member(&target_hex, &role, Some(&sender_hex))
+                .add_relay_member(tenant.community(), &target_hex, &role, Some(&sender_hex))
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
 
@@ -140,10 +145,10 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
             // Only publish NIP-43 announcements when the row was actually inserted —
             // skip on no-op re-adds to avoid spurious kind:8000 events.
             if was_inserted {
-                if let Err(e) = publish_nip43_member_added(state, &target_hex).await {
+                if let Err(e) = publish_nip43_member_added(tenant, state, &target_hex).await {
                     warn!(error = %e, "failed to publish NIP-43 member added event");
                 }
-                if let Err(e) = publish_nip43_membership_list(state).await {
+                if let Err(e) = publish_nip43_membership_list(tenant, state).await {
                     warn!(error = %e, "failed to publish NIP-43 membership list");
                 }
             }
@@ -169,14 +174,14 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
             let remove_result = if sender_role == "admin" {
                 state
                     .db
-                    .remove_relay_member_if_role(&target_hex, "member")
+                    .remove_relay_member_if_role(tenant.community(), &target_hex, "member")
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             } else {
                 // Owner path — atomic delete that refuses to remove other owners.
                 state
                     .db
-                    .remove_relay_member(&target_hex)
+                    .remove_relay_member(tenant.community(), &target_hex)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             };
@@ -200,10 +205,10 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
                 "relay member removed"
             );
 
-            if let Err(e) = publish_nip43_member_removed(state, &target_hex).await {
+            if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
                 warn!(error = %e, "failed to publish NIP-43 member removed event");
             }
-            if let Err(e) = publish_nip43_membership_list(state).await {
+            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
                 warn!(error = %e, "failed to publish NIP-43 membership list");
             }
         }
@@ -235,7 +240,7 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
 
             let updated = state
                 .db
-                .update_relay_member_role(&target_hex, &new_role)
+                .update_relay_member_role(tenant.community(), &target_hex, &new_role)
                 .await
                 .map_err(|e| format!("database error: {e}"))?;
 
@@ -243,7 +248,7 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
                 // Distinguish "owner (protected)" from "doesn't exist"
                 let exists = state
                     .db
-                    .get_relay_member(&target_hex)
+                    .get_relay_member(tenant.community(), &target_hex)
                     .await
                     .map_err(|e| format!("database error: {e}"))?;
                 return Err(if exists.is_some() {
@@ -260,7 +265,7 @@ pub async fn handle_relay_admin_event(state: &Arc<AppState>, event: &Event) -> R
                 "relay member role changed"
             );
 
-            if let Err(e) = publish_nip43_membership_list(state).await {
+            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
                 warn!(error = %e, "failed to publish NIP-43 membership list");
             }
         }

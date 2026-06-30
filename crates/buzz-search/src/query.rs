@@ -1,411 +1,352 @@
-//! Search query building and result parsing.
+//! NIP-50 search query against Postgres FTS, community-scoped.
+//!
+//! The relay never trusts a hit by itself: this layer returns canonical event
+//! ids ordered by relevance, the relay refetches `StoredEvent`s through
+//! buzz-db's `(community_id, event_id)` scoped fetcher, and runs the access
+//! predicate (`search_hit_accepted` in `bridge.rs`) per hit. Search is never
+//! the access boundary — it cannot widen visibility.
+//!
+//! See conformance row 50.
 
-use serde::Deserialize;
-use tracing::debug;
+use buzz_core::CommunityId;
+use sqlx::{PgPool, QueryBuilder, Row};
+use uuid::Uuid;
 
 use crate::error::SearchError;
 
-/// Parameters for a Typesense search request.
+/// Channel-scope filter for a community-scoped FTS query.
+///
+/// Four variants, 1-to-1 with the legacy `(accessible_channels: &[Uuid],
+/// include_global: bool)` matrix from the Typesense relay:
+///
+/// | accessible | include_global | `ChannelScope` |
+/// |---|---|---|
+/// | non-empty  | true  | `ChannelsOrChannelLess(accessible)` |
+/// | non-empty  | false | `Channels(accessible)`              |
+/// | empty      | true  | `ChannelLessOnly`                   |
+/// | empty      | false | (don't call — caller short-circuits to EOSE) |
+///
+/// `ChannelLessOnly` is the variant that the old `Option<Vec<Uuid>>` +
+/// `bool` 2x2 could not express unambiguously: with empty accessible
+/// channels and `include_global=true`, both `Some(vec![]) + true` and
+/// `None + true` would broaden to all community channels rather than
+/// restrict to channel-less events. The enum closes that hole at the
+/// type level.
+///
+/// Empty-vec edge cases are intentionally not special-cased:
+/// `Channels(vec![])` emits `channel_id = ANY('{}')` which Postgres
+/// evaluates as false-for-all-rows (zero hits), and
+/// `ChannelsOrChannelLess(vec![])` emits `(channel_id = ANY('{}') OR
+/// channel_id IS NULL)` which is equivalent to `ChannelLessOnly`.
+#[derive(Debug, Clone)]
+pub enum ChannelScope {
+    /// No channel constraint. Matches every event in the community.
+    Any,
+    /// Restrict to `channel_id IS NULL` events only — what the legacy
+    /// Typesense `channel_id:=__global__` sentinel meant.
+    ChannelLessOnly,
+    /// Restrict to events whose `channel_id` is in this list.
+    Channels(Vec<Uuid>),
+    /// Restrict to events whose `channel_id` is in this list, OR are
+    /// channel-less (`channel_id IS NULL`).
+    ChannelsOrChannelLess(Vec<Uuid>),
+}
+
+/// Search matching semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Standard NIP-50-ish word/lexeme search using `websearch_to_tsquery`.
+    FullText,
+    /// Prefix-match the trailing normalized query token (`pro` matches `project`).
+    ///
+    /// Intended for bounded typeahead surfaces such as the desktop topbar. The
+    /// relay still refetches and re-authorizes every hit; this mode changes only
+    /// the candidate tsquery, not the access boundary.
+    Prefix,
+}
+
+/// A community-scoped FTS query.
+///
+/// The community is REQUIRED at the type level — there is no construction path
+/// that omits it. This is the search-side expression of conformance row zero:
+/// every search call carries the server-resolved tenant, never client input.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
-    /// The search query string (`"*"` matches all documents).
+    /// Server-resolved community. Required.
+    pub community: CommunityId,
+    /// NIP-50 search text. Empty string is rejected by `search()` early
+    /// (no hits, no SQL roundtrip).
     pub q: String,
-    /// Optional Typesense filter expression (e.g. `"kind:=1"`).
-    pub filter_by: Option<String>,
-    /// Optional sort expression (e.g. `"created_at:desc"`).
-    pub sort_by: Option<String>,
-    /// Page number (1-indexed).
+    /// How to scope hits by channel. See [`ChannelScope`] — the four variants
+    /// are 1-to-1 with the legacy `(accessible_channels, include_global)`
+    /// matrix, and `ChannelLessOnly` closes the gap where "empty accessible
+    /// channels + include global" used to silently broaden to all channels.
+    pub channel_scope: ChannelScope,
+    /// NIP-01 kinds filter. None = no kind constraint.
+    pub kinds: Option<Vec<i32>>,
+    /// NIP-01 authors filter (32-byte pubkeys). None = no author constraint.
+    pub authors: Option<Vec<Vec<u8>>>,
+    /// NIP-01 since (Unix seconds). Inclusive lower bound on created_at.
+    pub since: Option<i64>,
+    /// NIP-01 until (Unix seconds). Inclusive upper bound on created_at.
+    pub until: Option<i64>,
+    /// 1-indexed page number.
     pub page: u32,
-    /// Number of results per page.
+    /// Page size. Clamped at 500 internally.
     pub per_page: u32,
+    /// Matching semantics for the search text.
+    pub mode: SearchMode,
 }
 
-impl Default for SearchQuery {
-    fn default() -> Self {
-        Self {
-            q: "*".into(),
-            filter_by: None,
-            sort_by: Some("created_at:desc".into()),
-            page: 1,
-            per_page: 20,
-        }
-    }
-}
-
-impl SearchQuery {
-    /// Converts the query into Typesense HTTP query parameters.
-    pub fn to_query_params(&self) -> Vec<(String, String)> {
-        let mut params = vec![
-            ("q".into(), self.q.clone()),
-            ("query_by".into(), "content".into()),
-            ("page".into(), self.page.to_string()),
-            ("per_page".into(), self.per_page.to_string()),
-        ];
-
-        if let Some(ref filter) = self.filter_by {
-            params.push(("filter_by".into(), filter.clone()));
-        }
-
-        if let Some(ref sort) = self.sort_by {
-            params.push(("sort_by".into(), sort.clone()));
-        }
-
-        params
-    }
-}
-
-/// A single search result hit.
+/// A single FTS hit. The relay refetches the canonical `StoredEvent` and
+/// re-authorizes; this struct is just enough to drive that fetch and preserve
+/// relevance ordering.
 #[derive(Debug, Clone)]
 pub struct SearchHit {
-    /// Hex event ID of the matching event.
-    pub event_id: String,
-    /// Event content text **as indexed in Typesense** — not necessarily the
-    /// canonical event content.
-    ///
-    /// For kind:0 (user metadata) events, `flatten_kind0_for_indexing` in
-    /// `index.rs` appends the parsed `display_name` / `name` / `nip05` values
-    /// to the original JSON content (space-separated) so the default
-    /// tokenizer can produce clean word tokens. That doctored string is what
-    /// lands here.
-    ///
-    /// All production read paths (`bridge.rs::handle_bridge_search`,
-    /// `handlers/req.rs` WS REQ) refetch the canonical `StoredEvent` from
-    /// Postgres by `event_id` and ignore this field — which is why the
-    /// append-to-content trick is safe. If you're adding a new feature that
-    /// reads this field directly, do the same: fetch the canonical event by
-    /// id rather than trusting `content` to round-trip.
-    pub content: String,
-    /// Nostr kind number.
-    pub kind: u16,
-    /// Hex public key of the event author.
-    pub pubkey: String,
-    /// Channel UUID string, if the event is scoped to a channel.
-    pub channel_id: Option<String>,
-    /// Unix timestamp of event creation.
+    /// 32-byte event id.
+    pub event_id: [u8; 32],
+    /// Nostr kind.
+    pub kind: i32,
+    /// 32-byte pubkey of author.
+    pub pubkey: [u8; 32],
+    /// Optional channel UUID. `None` = channel-less event.
+    pub channel_id: Option<Uuid>,
+    /// Unix seconds.
     pub created_at: i64,
-    /// Typesense relevance score.
-    pub score: f64,
+    /// `ts_rank_cd` relevance score (higher = better).
+    pub rank: f32,
 }
 
-/// The result of a search query.
+/// Result of a search.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
-    /// Matching hits for this page.
+    /// Hits on this page, ordered by relevance then created_at desc.
     pub hits: Vec<SearchHit>,
-    /// Total number of matching documents across all pages.
-    pub found: u64,
-    /// Current page number.
+    /// 1-indexed page returned.
     pub page: u32,
 }
 
-#[derive(Debug, Deserialize)]
-struct TypesenseMultiSearchResponse {
-    results: Vec<TypesenseSearchResult>,
+const PER_PAGE_MAX: u32 = 500;
+const PER_PAGE_DEFAULT: u32 = 100;
+/// Hard cap on search text handed to Postgres text-search parsers. This keeps a
+/// single request from spending unbounded parser CPU/memory while still allowing
+/// far longer queries than the desktop UI normally emits.
+const SEARCH_TEXT_MAX_CHARS: usize = 4096;
+/// Search pages are currently server-generated (WS uses 1..=MAX_SEARCH_PAGES,
+/// bridge uses page 1), but clamp here too so a future caller cannot accidentally
+/// wire untrusted input into a multi-trillion-row OFFSET.
+const PAGE_MAX: u32 = 1000;
+
+fn push_tsquery(qb: &mut QueryBuilder<sqlx::Postgres>, mode: SearchMode, search_text: &str) {
+    match mode {
+        SearchMode::FullText => {
+            qb.push("websearch_to_tsquery('simple', ");
+            qb.push_bind(search_text);
+            qb.push(")");
+        }
+        SearchMode::Prefix => {
+            // Prefix mode is for typeahead: completed whitespace-delimited tokens
+            // are exact, and only the trailing token is suffixed with `:*`.
+            // Each raw token still goes through Postgres' `simple` parser before
+            // tsquery construction so query-side normalization matches the
+            // `search_tsv` generated column. `quote_literal` prevents tsquery
+            // syntax injection from punctuation/operators in the raw topbar input.
+            qb.push(
+                "(SELECT COALESCE(\
+                 string_agg(\
+                   quote_literal(lexeme) || CASE WHEN token_ord = max_token_ord THEN ':*' ELSE '' END, \
+                   ' & ' ORDER BY token_ord, lex_ord\
+                 ), \
+                 ''\
+                 )::tsquery \
+                 FROM (\
+                   SELECT raw_token.token_ord, normalized.lexeme, normalized.lex_ord, raw_token.max_token_ord \
+                   FROM (\
+                     SELECT token, token_ord, max(token_ord) OVER () AS max_token_ord \
+                     FROM regexp_split_to_table(",
+            );
+            qb.push_bind(search_text);
+            qb.push(
+                ", '\\s+') WITH ORDINALITY AS split(token, token_ord)\
+                   ) AS raw_token \
+                   CROSS JOIN LATERAL unnest(tsvector_to_array(to_tsvector('simple', raw_token.token))) \
+                     WITH ORDINALITY AS normalized(lexeme, lex_ord)\
+                 ) AS prefix_terms)",
+            );
+        }
+    }
+}
+fn normalized_search_text(q: &str) -> Option<String> {
+    let trimmed = q.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut cleaned = String::with_capacity(trimmed.len().min(SEARCH_TEXT_MAX_CHARS));
+    for ch in trimmed.chars().take(SEARCH_TEXT_MAX_CHARS) {
+        cleaned.push(if ch == '\0' { ' ' } else { ch });
+    }
+
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum TypesenseSearchResult {
-    Ok(TypesenseSearchResponse),
-    Error(TypesenseSearchError),
-}
+/// Execute a community-scoped FTS query.
+///
+/// SQL shape (always):
+/// ```sql
+/// SELECT id, kind, pubkey, channel_id, EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s,
+///        ts_rank_cd(search_tsv, query) AS rank
+/// FROM events,
+///      <mode-specific tsquery> AS query
+/// WHERE community_id = $ctx
+///   AND deleted_at IS NULL
+///   AND search_tsv @@ query
+///   [+ channel scope, kinds, authors, since, until]
+/// ORDER BY rank DESC, created_at DESC, id
+/// LIMIT $per_page OFFSET (($page - 1) * $per_page)
+/// ```
+///
+/// `community_id = $ctx` is the first predicate and is non-negotiable. There
+/// is no code path through this function that omits it.
+pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
+    let Some(search_text) = normalized_search_text(&query.q) else {
+        return Ok(SearchResult {
+            hits: Vec::new(),
+            page: query.page.clamp(1, PAGE_MAX),
+        });
+    };
 
-#[derive(Debug, Deserialize)]
-struct TypesenseSearchError {
-    code: u16,
-    error: String,
-}
+    let per_page = query.per_page.clamp(1, PER_PAGE_MAX);
+    let per_page_actual = if query.per_page == 0 {
+        PER_PAGE_DEFAULT
+    } else {
+        per_page
+    };
+    let page = query.page.clamp(1, PAGE_MAX);
+    let offset = ((page - 1) as i64) * (per_page_actual as i64);
 
-#[derive(Debug, Deserialize)]
-struct TypesenseSearchResponse {
-    found: u64,
-    page: u32,
-    hits: Vec<TypesenseHit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TypesenseHit {
-    document: TypesenseDocument,
-    #[serde(rename = "text_match")]
-    text_match: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TypesenseDocument {
-    id: String,
-    content: String,
-    kind: i32,
-    pubkey: String,
-    channel_id: Option<String>,
-    created_at: i64,
-}
-
-/// Executes a search query against Typesense and returns parsed results.
-pub async fn search(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    collection_name: &str,
-    query: &SearchQuery,
-) -> Result<SearchResult, SearchError> {
-    debug!(
-        q = %query.q,
-        page = query.page,
-        per_page = query.per_page,
-        collection = collection_name,
-        "Executing search"
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, kind, pubkey, channel_id, \
+         EXTRACT(EPOCH FROM created_at)::bigint AS created_at_s, \
+         ts_rank_cd(search_tsv, search_query.query) AS rank \
+         FROM events CROSS JOIN LATERAL (SELECT ",
     );
+    push_tsquery(&mut qb, query.mode, &search_text);
+    qb.push(" AS query) AS search_query WHERE community_id = ");
+    qb.push_bind(*query.community.as_uuid());
+    qb.push(" AND deleted_at IS NULL AND search_tsv @@ search_query.query");
 
-    // Typesense GET search has a 4000-char query string limit. When filter_by
-    // contains hundreds of channel UUIDs, the URL exceeds this. Use the
-    // /multi_search POST endpoint which accepts the same params in a JSON body.
-    let url = format!("{}/multi_search", base_url);
-    let mut search_params = serde_json::json!({
-        "collection": collection_name,
-        "q": query.q,
-        "query_by": "content",
-        "page": query.page,
-        "per_page": query.per_page,
-    });
-    if let Some(ref filter) = query.filter_by {
-        search_params["filter_by"] = serde_json::Value::String(filter.clone());
-    }
-    if let Some(ref sort) = query.sort_by {
-        search_params["sort_by"] = serde_json::Value::String(sort.clone());
-    }
-    let body = serde_json::json!({ "searches": [search_params] });
-
-    let resp = client
-        .post(&url)
-        .header("X-TYPESENSE-API-KEY", api_key)
-        .json(&body)
-        .send()
-        .await?;
-
-    let status = resp.status().as_u16();
-    if status != 200 {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(SearchError::Api { status, body });
+    // Channel scope — see `ChannelScope` doc for the four-case mapping. The
+    // emitted SQL fragments are identical to the legacy 2x2 tuple for the
+    // three carry-over cases; `ChannelLessOnly` is the new fence that the
+    // old shape could not express.
+    match &query.channel_scope {
+        ChannelScope::Any => {
+            // No channel constraint.
+        }
+        ChannelScope::ChannelLessOnly => {
+            qb.push(" AND channel_id IS NULL");
+        }
+        ChannelScope::Channels(ids) => {
+            qb.push(" AND channel_id = ANY(");
+            qb.push_bind(ids.clone());
+            qb.push(")");
+        }
+        ChannelScope::ChannelsOrChannelLess(ids) => {
+            qb.push(" AND (channel_id = ANY(");
+            qb.push_bind(ids.clone());
+            qb.push(") OR channel_id IS NULL)");
+        }
     }
 
-    // multi_search wraps results: {"results": [<search_response>]}. Individual
-    // searches can fail inside an HTTP 200 response as `{code, error}`; surface
-    // those as API errors instead of deserializing them as JSON errors so callers
-    // and logs show the actual Typesense failure.
-    let wrapper: TypesenseMultiSearchResponse = resp.json().await?;
-    let ts_resp = wrapper.results.into_iter().next().ok_or(SearchError::Api {
-        status: 200,
-        body: "empty multi_search results".into(),
-    })?;
-    match ts_resp {
-        TypesenseSearchResult::Ok(response) => parse_response(response),
-        TypesenseSearchResult::Error(error) => Err(SearchError::Api {
-            status: error.code,
-            body: error.error,
-        }),
+    if let Some(ref kinds) = query.kinds {
+        if !kinds.is_empty() {
+            qb.push(" AND kind = ANY(");
+            qb.push_bind(kinds.clone());
+            qb.push(")");
+        }
     }
-}
 
-fn parse_response(ts_resp: TypesenseSearchResponse) -> Result<SearchResult, SearchError> {
-    let hits = ts_resp
-        .hits
-        .into_iter()
-        .map(|hit| {
-            // Raw Typesense text_match relevance score (not normalized).
-            let score = hit.text_match.unwrap_or(0) as f64;
-            SearchHit {
-                event_id: hit.document.id,
-                content: hit.document.content,
-                kind: u16::try_from(hit.document.kind).unwrap_or(0),
-                pubkey: hit.document.pubkey,
-                channel_id: hit.document.channel_id.filter(|id| id != "__global__"),
-                created_at: hit.document.created_at,
-                score,
-            }
-        })
-        .collect();
+    if let Some(ref authors) = query.authors {
+        if !authors.is_empty() {
+            qb.push(" AND pubkey = ANY(");
+            qb.push_bind(authors.clone());
+            qb.push(")");
+        }
+    }
 
-    Ok(SearchResult {
-        hits,
-        found: ts_resp.found,
-        page: ts_resp.page,
-    })
+    if let Some(since) = query.since {
+        qb.push(" AND created_at >= to_timestamp(");
+        qb.push_bind(since);
+        qb.push(")");
+    }
+
+    if let Some(until) = query.until {
+        qb.push(" AND created_at <= to_timestamp(");
+        qb.push_bind(until);
+        qb.push(")");
+    }
+
+    qb.push(" ORDER BY rank DESC, created_at DESC, id LIMIT ");
+    qb.push_bind(per_page_actual as i64);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
+
+    let rows = qb.build().fetch_all(pool).await?;
+
+    let mut hits = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id_bytes: Vec<u8> = row.try_get("id")?;
+        let pk_bytes: Vec<u8> = row.try_get("pubkey")?;
+        let id: [u8; 32] = id_bytes.try_into().map_err(|v: Vec<u8>| {
+            sqlx::Error::Decode(format!("event id column is {} bytes, expected 32", v.len()).into())
+        })?;
+        let pubkey: [u8; 32] = pk_bytes.try_into().map_err(|v: Vec<u8>| {
+            sqlx::Error::Decode(format!("pubkey column is {} bytes, expected 32", v.len()).into())
+        })?;
+        hits.push(SearchHit {
+            event_id: id,
+            kind: row.try_get("kind")?,
+            pubkey,
+            channel_id: row.try_get("channel_id")?,
+            created_at: row.try_get("created_at_s")?,
+            rank: row.try_get("rank")?,
+        });
+    }
+
+    Ok(SearchResult { hits, page })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
-    fn test_search_query_building() {
-        let q = SearchQuery {
-            q: "hello world".into(),
-            filter_by: Some("kind:=1".into()),
-            sort_by: Some("created_at:desc".into()),
-            page: 2,
-            per_page: 10,
-        };
-
-        let params = q.to_query_params();
-        let get = |key: &str| -> Option<String> {
-            params
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone())
-        };
-
-        assert_eq!(get("q").unwrap(), "hello world");
-        assert_eq!(get("query_by").unwrap(), "content");
-        assert_eq!(get("page").unwrap(), "2");
-        assert_eq!(get("per_page").unwrap(), "10");
-        assert_eq!(get("filter_by").unwrap(), "kind:=1");
-        assert_eq!(get("sort_by").unwrap(), "created_at:desc");
+    fn normalized_search_text_trims_and_rejects_empty() {
+        assert_eq!(
+            normalized_search_text("  hello  ").as_deref(),
+            Some("hello")
+        );
+        assert!(normalized_search_text("   ").is_none());
     }
 
     #[test]
-    fn test_search_query_no_optional_fields() {
-        let q = SearchQuery {
-            q: "*".into(),
-            filter_by: None,
-            sort_by: None,
-            page: 1,
-            per_page: 20,
-        };
-
-        let params = q.to_query_params();
-        let has_key = |key: &str| params.iter().any(|(k, _)| k == key);
-
-        assert!(has_key("q"));
-        assert!(has_key("query_by"));
-        assert!(has_key("page"));
-        assert!(has_key("per_page"));
-        assert!(!has_key("filter_by"));
-        assert!(!has_key("sort_by"));
+    fn normalized_search_text_replaces_nul_bytes() {
+        assert_eq!(
+            normalized_search_text("foo\0bar").as_deref(),
+            Some("foo bar")
+        );
     }
 
     #[test]
-    fn test_search_result_parsing() {
-        let raw = json!({
-            "found": 42,
-            "page": 1,
-            "hits": [
-                {
-                    "document": {
-                        "id": "abc123",
-                        "content": "hello buzz",
-                        "kind": 1,
-                        "pubkey": "deadbeef",
-                        "channel_id": "chan-uuid",
-                        "created_at": 1700000000i64,
-                        "tags_flat": ["e:ref123"]
-                    },
-                    "text_match": 578730123i64
-                },
-                {
-                    "document": {
-                        "id": "def456",
-                        "content": "another message",
-                        "kind": 42,
-                        "pubkey": "cafebabe",
-                        "channel_id": null,
-                        "created_at": 1700000100i64,
-                        "tags_flat": []
-                    },
-                    "text_match": null
-                }
-            ]
-        });
-
-        let ts_resp: TypesenseSearchResponse = serde_json::from_value(raw).expect("should parse");
-        let result = parse_response(ts_resp).expect("should succeed");
-
-        assert_eq!(result.found, 42);
-        assert_eq!(result.page, 1);
-        assert_eq!(result.hits.len(), 2);
-
-        let h0 = &result.hits[0];
-        assert_eq!(h0.event_id, "abc123");
-        assert_eq!(h0.content, "hello buzz");
-        assert_eq!(h0.kind, 1);
-        assert_eq!(h0.pubkey, "deadbeef");
-        assert_eq!(h0.channel_id.as_deref(), Some("chan-uuid"));
-        assert_eq!(h0.created_at, 1700000000);
-        assert!(h0.score > 0.0);
-
-        let h1 = &result.hits[1];
-        assert_eq!(h1.event_id, "def456");
-        assert_eq!(h1.kind, 42);
-        assert!(h1.channel_id.is_none());
-        assert_eq!(h1.score, 0.0); // null text_match → 0
-    }
-
-    #[test]
-    fn test_search_result_empty() {
-        let raw = json!({
-            "found": 0,
-            "page": 1,
-            "hits": []
-        });
-
-        let ts_resp: TypesenseSearchResponse = serde_json::from_value(raw).expect("should parse");
-        let result = parse_response(ts_resp).expect("should succeed");
-
-        assert_eq!(result.found, 0);
-        assert!(result.hits.is_empty());
-    }
-
-    #[test]
-    fn test_multi_search_result_success_parses() {
-        let raw = json!({
-            "results": [{
-                "found": 1,
-                "page": 1,
-                "hits": [{
-                    "document": {
-                        "id": "abc123",
-                        "content": "hello buzz",
-                        "kind": 1,
-                        "pubkey": "deadbeef",
-                        "channel_id": "chan-uuid",
-                        "created_at": 1700000000i64,
-                        "tags_flat": []
-                    },
-                    "text_match": 578730123i64
-                }]
-            }]
-        });
-
-        let wrapper: TypesenseMultiSearchResponse =
-            serde_json::from_value(raw).expect("should parse multi_search success result");
-        let response = match wrapper.results.into_iter().next().expect("one result") {
-            TypesenseSearchResult::Ok(response) => response,
-            TypesenseSearchResult::Error(err) => panic!("expected success result, got {err:?}"),
-        };
-
-        let result = parse_response(response).expect("should parse response");
-        assert_eq!(result.found, 1);
-        assert_eq!(result.hits.len(), 1);
-        assert_eq!(result.hits[0].event_id, "abc123");
-    }
-
-    #[test]
-    fn test_multi_search_result_error_parses() {
-        let raw = json!({
-            "results": [{
-                "code": 400,
-                "error": "Could not find a filter field named `channel_id` in the schema."
-            }]
-        });
-
-        let wrapper: TypesenseMultiSearchResponse =
-            serde_json::from_value(raw).expect("should parse multi_search error result");
-        let err = match wrapper.results.into_iter().next().expect("one result") {
-            TypesenseSearchResult::Ok(_) => panic!("expected error result"),
-            TypesenseSearchResult::Error(err) => err,
-        };
-
-        assert_eq!(err.code, 400);
-        assert!(err.error.contains("channel_id"));
+    fn normalized_search_text_caps_length() {
+        let long = "x".repeat(SEARCH_TEXT_MAX_CHARS + 10);
+        let cleaned = normalized_search_text(&long).expect("non-empty");
+        assert_eq!(cleaned.chars().count(), SEARCH_TEXT_MAX_CHARS);
     }
 }

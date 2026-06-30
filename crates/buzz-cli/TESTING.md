@@ -14,7 +14,6 @@ Docker services running and healthy:
 docker compose ps
 # buzz-postgres   healthy
 # buzz-redis      healthy
-# buzz-typesense  healthy
 ```
 
 If not running: `just setup` from the repo root.

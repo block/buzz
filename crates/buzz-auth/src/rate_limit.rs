@@ -8,6 +8,7 @@
 
 use std::net::IpAddr;
 
+use buzz_core::TenantContext;
 use nostr::PublicKey;
 use serde::{Deserialize, Serialize};
 
@@ -147,14 +148,32 @@ impl Default for RateLimitConfig {
 /// The Redis-backed production implementation lives in `buzz-relay` / `buzz-pubsub`.
 /// A no-op `AlwaysAllowRateLimiter` is provided for unit tests.
 ///
+/// ## Tenant scoping
+///
+/// Pubkey-keyed limits ([`check_and_increment`]) take `&TenantContext` and the Redis
+/// key is community-prefixed (`buzz:{community}:ratelimit:{pubkey}:{suffix}`). The
+/// same pubkey active in two communities consumes two independent quotas — that is
+/// the correct behavior under multi-tenant isolation (S1 cross-community fence).
+///
+/// IP-keyed limits ([`check_ip_connection`]) are **operator-global** by design. They
+/// gate connection acceptance at the network edge, before host→community resolution
+/// has completed (or, on resolve failure, instead of it). Threading `&TenantContext`
+/// through the connection-rate fence would invert the order of operations. If
+/// per-(community, IP) caps are ever needed as a tenant-fairness signal, that
+/// belongs in an additive `LimitType` keyed on `(community, ip)`, not in this trait.
+///
 /// ⚠️ The fixed-window algorithm used by the Redis implementation allows up to 2×
 /// burst at window boundaries. Upgrade to a sliding window or token bucket if strict
 /// per-second limiting is required.
 pub trait RateLimiter: Send + Sync {
-    /// Increment the counter for `pubkey` + `limit_type` and return whether the
-    /// request is within the configured `limit` for the given `window_secs`.
+    /// Increment the per-(community, pubkey) counter for `limit_type` and return
+    /// whether the request is within `limit` for the given `window_secs`.
+    ///
+    /// `ctx` scopes the counter to the resolved community; the same pubkey in two
+    /// communities is two independent quotas.
     fn check_and_increment(
         &self,
+        ctx: &TenantContext,
         pubkey: &PublicKey,
         limit_type: LimitType,
         window_secs: u64,
@@ -162,7 +181,10 @@ pub trait RateLimiter: Send + Sync {
     ) -> impl std::future::Future<Output = Result<RateLimitResult, AuthError>> + Send;
 
     /// Increment the per-IP connection counter and return whether the connection
-    /// is within the configured `limit` for the given `window_secs`.
+    /// is within `limit` for the given `window_secs`.
+    ///
+    /// Operator-global — see trait docs. This fence runs before / outside of host
+    /// resolution and intentionally does not take a `TenantContext`.
     fn check_ip_connection(
         &self,
         ip: &IpAddr,
@@ -171,16 +193,23 @@ pub trait RateLimiter: Send + Sync {
     ) -> impl std::future::Future<Output = Result<RateLimitResult, AuthError>> + Send;
 }
 
-/// Redis key for pubkey-based rate limit: `buzz:ratelimit:<hex>:<suffix>`
-pub fn rate_limit_key(pubkey: &PublicKey, limit_type: &LimitType) -> String {
+/// Redis key for pubkey-based rate limit:
+/// `buzz:{community}:ratelimit:{pubkey_hex}:{suffix}`.
+///
+/// Community-prefixed: the same pubkey in two communities maps to two distinct
+/// keys, so quotas don't bleed across the tenancy fence.
+pub fn rate_limit_key(ctx: &TenantContext, pubkey: &PublicKey, limit_type: &LimitType) -> String {
     format!(
-        "buzz:ratelimit:{}:{}",
+        "buzz:{}:ratelimit:{}:{}",
+        ctx.community(),
         pubkey.to_hex(),
         limit_type.key_suffix()
     )
 }
 
-/// Redis key for IP-based rate limit: `buzz:ratelimit:ip:<ip>:conn`
+/// Redis key for IP-based rate limit: `buzz:ratelimit:ip:{ip}:conn`.
+///
+/// Operator-global by design — see [`RateLimiter`] docs.
 pub fn ip_rate_limit_key(ip: &IpAddr) -> String {
     format!("buzz:ratelimit:ip:{}:conn", ip)
 }
@@ -193,6 +222,7 @@ pub struct AlwaysAllowRateLimiter;
 impl RateLimiter for AlwaysAllowRateLimiter {
     async fn check_and_increment(
         &self,
+        _ctx: &TenantContext,
         _pubkey: &PublicKey,
         _limit_type: LimitType,
         window_secs: u64,
@@ -214,19 +244,70 @@ impl RateLimiter for AlwaysAllowRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::CommunityId;
     use nostr::Keys;
+    use sha2::Digest;
     use std::net::Ipv4Addr;
+    use uuid::Uuid;
+
+    fn fixture_ctx(host: &str) -> TenantContext {
+        // Deterministic community id from host so test assertions can name the prefix.
+        let bytes = sha2::Sha256::digest(host.as_bytes());
+        let mut uuid_bytes = [0u8; 16];
+        uuid_bytes.copy_from_slice(&bytes[..16]);
+        let id = CommunityId::from_uuid(Uuid::from_bytes(uuid_bytes));
+        TenantContext::resolved(id, host)
+    }
 
     #[test]
-    fn rate_limit_key_format() {
+    fn rate_limit_key_includes_community_prefix() {
+        let ctx = fixture_ctx("relay-a.example");
         let keys = Keys::generate();
-        let key = rate_limit_key(&keys.public_key(), &LimitType::Messages);
-        assert!(key.starts_with("buzz:ratelimit:"));
+        let key = rate_limit_key(&ctx, &keys.public_key(), &LimitType::Messages);
+        let expected_prefix = format!("buzz:{}:ratelimit:", ctx.community());
+        assert!(
+            key.starts_with(&expected_prefix),
+            "key {key} should start with {expected_prefix}"
+        );
         assert!(key.ends_with(":msg"));
     }
 
     #[test]
+    fn rate_limit_key_isolates_communities_for_same_pubkey() {
+        // The S1 cross-community isolation fence at the rate-limit key layer:
+        // same pubkey, two communities -> two distinct Redis keys -> independent quotas.
+        let keys = Keys::generate();
+        let ctx_a = fixture_ctx("relay-a.example");
+        let ctx_b = fixture_ctx("relay-b.example");
+        let key_a = rate_limit_key(&ctx_a, &keys.public_key(), &LimitType::Messages);
+        let key_b = rate_limit_key(&ctx_b, &keys.public_key(), &LimitType::Messages);
+        assert_ne!(
+            key_a, key_b,
+            "same pubkey in two communities must not share a rate-limit key"
+        );
+    }
+
+    #[test]
+    fn rate_limit_key_components_are_lowercase() {
+        // Stability/idempotence invariant: if pubkey hex or community Display
+        // ever started emitting uppercase, the same (community, pubkey) would
+        // produce two distinct Redis keys → effective 2× quota. Pin the
+        // lowercase property here so the regression surfaces in unit tests,
+        // not in production traffic.
+        let ctx = fixture_ctx("relay-a.example");
+        let keys = Keys::generate();
+        let key = rate_limit_key(&ctx, &keys.public_key(), &LimitType::Messages);
+        for c in key.chars() {
+            assert!(
+                !c.is_ascii_uppercase(),
+                "rate-limit key {key} must be all-lowercase ASCII"
+            );
+        }
+    }
+
+    #[test]
     fn ip_rate_limit_key_format() {
+        // IP fence stays operator-global — no community in the key.
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(ip_rate_limit_key(&ip), "buzz:ratelimit:ip:192.168.1.1:conn");
     }
@@ -234,9 +315,10 @@ mod tests {
     #[tokio::test]
     async fn always_allow_limiter() {
         let limiter = AlwaysAllowRateLimiter;
+        let ctx = fixture_ctx("relay-a.example");
         let keys = Keys::generate();
         let result = limiter
-            .check_and_increment(&keys.public_key(), LimitType::Messages, 60, 60)
+            .check_and_increment(&ctx, &keys.public_key(), LimitType::Messages, 60, 60)
             .await
             .unwrap();
         assert!(result.allowed);

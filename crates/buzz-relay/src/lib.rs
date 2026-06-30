@@ -8,6 +8,11 @@ pub mod api;
 pub mod audio;
 /// Relay configuration from environment variables.
 pub mod config;
+/// Runtime conformance harness — abstract trace emission at the
+/// ingest/read accept-reject boundary, replayed against
+/// `docs/spec/MultiTenantRelay.tla` by the independent `buzz-conformance`
+/// checker.
+pub mod conformance;
 /// WebSocket connection lifecycle and state.
 pub mod connection;
 /// Relay error types.
@@ -28,6 +33,8 @@ pub mod router;
 pub mod state;
 /// Subscription registry with (channel, kind) fan-out index.
 pub mod subscription;
+/// Row-zero host binding: resolve the request community from the connection host.
+pub mod tenant;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].

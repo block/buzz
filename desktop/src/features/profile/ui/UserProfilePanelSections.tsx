@@ -19,6 +19,7 @@ import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
+import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -406,19 +407,26 @@ export function ProfileSummaryView({
             />
           ) : null}
           {activeTab === "runtime" ? (
-            <ProfileRuntimeTabContent
-              agentInstruction={agentInstruction}
-              diagnosticsFields={diagnosticsFields}
-              diagnosticsSummary={diagnosticsTrailing}
-              managedAgent={managedAgent}
-              modelLabel={modelLabel}
-              onOpenDiagnostics={onOpenDiagnostics}
-              onOpenInstructions={onOpenInstructions}
-              runtimeConfigurationFields={runtimeConfigurationFields}
-              runtimeSettingsFields={runtimeSettingsFields}
-              showDiagnosticsIngress={showDiagnosticsIngress}
-              showInstructionBlock={showInstructionBlock}
-            />
+            <>
+              <ProfileRuntimeTabContent
+                agentInstruction={agentInstruction}
+                diagnosticsFields={diagnosticsFields}
+                diagnosticsSummary={diagnosticsTrailing}
+                managedAgent={managedAgent}
+                modelLabel={modelLabel}
+                onOpenDiagnostics={onOpenDiagnostics}
+                onOpenInstructions={onOpenInstructions}
+                runtimeConfigurationFields={runtimeConfigurationFields}
+                runtimeSettingsFields={runtimeSettingsFields}
+                showDiagnosticsIngress={showDiagnosticsIngress}
+                showInstructionBlock={showInstructionBlock}
+              />
+              {isOwner === true && managedAgent !== undefined ? (
+                <div className="overflow-hidden rounded-2xl bg-muted/20">
+                  <AgentConfigPanel pubkey={managedAgent.pubkey} />
+                </div>
+              ) : null}
+            </>
           ) : null}
           {activeTab === "channels" ? (
             <ChannelsFocusedView

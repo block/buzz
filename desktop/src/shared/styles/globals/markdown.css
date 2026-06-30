@@ -1,0 +1,268 @@
+.message-markdown {
+  --inline-chip-padding-block-start: 0.1875rem;
+  --inline-chip-padding-block-end: 0.125rem;
+  --inline-chip-padding-inline: 0.25rem;
+  --inline-chip-min-height: calc(
+    var(--text-sm) +
+    var(--inline-chip-padding-block-start) +
+    var(--inline-chip-padding-block-end)
+  );
+  --inline-code-font-size: var(--text-xs);
+  --agent-icon-size: 0.95em;
+  --agent-icon-gap: 0.125rem;
+}
+
+.message-markdown p:empty {
+  display: none;
+}
+
+.message-markdown [data-link-preview] {
+  --buzz-link-preview-icon-bg: hsl(var(--muted));
+  --buzz-link-preview-icon-color: hsl(var(--foreground));
+}
+
+.dark .message-markdown [data-link-preview] {
+  --buzz-link-preview-icon-bg: #24292f;
+}
+
+.message-markdown [data-link-preview="github-issue"],
+.message-markdown [data-link-preview="github-pull-request"],
+.message-markdown [data-link-preview="github-repository"] {
+  --buzz-link-preview-icon-color: #24292f;
+}
+
+.dark .message-markdown [data-link-preview="github-issue"],
+.dark .message-markdown [data-link-preview="github-pull-request"],
+.dark .message-markdown [data-link-preview="github-repository"] {
+  --buzz-link-preview-icon-color: #fff;
+}
+
+.message-markdown [data-link-preview="linear-issue"] {
+  --buzz-link-preview-icon-color: #5e6ad2;
+}
+
+.dark .message-markdown [data-link-preview="linear-issue"] {
+  --buzz-link-preview-icon-color: #828fff;
+}
+
+.message-markdown [data-link-preview="google-drive-file"],
+.message-markdown [data-link-preview="google-drive-folder"],
+.message-markdown [data-link-preview="google-docs-document"] {
+  --buzz-link-preview-icon-color: #4285f4;
+}
+
+.message-markdown [data-link-preview="google-sheets-spreadsheet"] {
+  --buzz-link-preview-icon-color: #34a853;
+}
+
+.message-markdown [data-link-preview="google-slides-presentation"] {
+  --buzz-link-preview-icon-color: #fbbc04;
+}
+
+.message-markdown .link-preview-media {
+  background-color: var(--buzz-link-preview-icon-bg);
+  color: var(--buzz-link-preview-icon-color);
+}
+
+.message-markdown .mention-chip,
+.message-markdown .inline-code-chip,
+.message-markdown :not(pre) > code {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--inline-chip-min-height);
+  padding: var(--inline-chip-padding-block-start)
+    var(--inline-chip-padding-inline) var(--inline-chip-padding-block-end);
+  border-radius: calc(var(--radius) - 4px);
+  font-weight: 500;
+  line-height: 1;
+  vertical-align: baseline;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.message-markdown .mention-chip {
+  font-size: inherit;
+  background: hsl(var(--primary) / 0.15);
+  color: hsl(var(--primary));
+}
+
+.message-markdown .mention-chip.inbox-channel-chip {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground) / 0.82);
+}
+
+.message-markdown .mention-chip.search-channel-chip {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground) / 0.82);
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.search-result-row[aria-selected="true"]
+  .message-markdown
+  .mention-chip.search-channel-chip {
+  background: hsl(var(--muted) / 0.82);
+  color: hsl(var(--muted-foreground) / 0.95);
+}
+
+.message-markdown.inbox-preview-markdown {
+  --inline-chip-padding-block-start: 0.125rem;
+  --inline-chip-padding-block-end: 0.0625rem;
+  overflow: hidden;
+  padding-bottom: 0.25rem;
+}
+
+.message-markdown.inbox-preview-markdown > :first-child {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.message-markdown.inbox-preview-markdown > :not(:first-child) {
+  display: none;
+}
+
+.message-markdown.inbox-preview-markdown br {
+  display: none;
+}
+
+.message-markdown.inbox-preview-markdown .mention-chip,
+.message-markdown.inbox-preview-markdown .inline-code-chip,
+.message-markdown.inbox-preview-markdown :not(pre) > code {
+  display: inline;
+  overflow: visible;
+  overflow-wrap: normal;
+  text-overflow: clip;
+  vertical-align: baseline;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+.message-markdown .mention-chip-prefix {
+  display: inline-block;
+  line-height: 1;
+  transform: translateY(-0.12em);
+}
+
+.message-markdown .inline-code-chip,
+.message-markdown :not(pre) > code {
+  font-size: var(--inline-code-font-size);
+  font-family: ui-monospace, monospace;
+  background: hsl(var(--muted));
+  color: inherit;
+}
+
+/* Code block content — higher specificity than the inline chips above; kept
+   after them so descending-specificity ordering stays clean. */
+.rich-text-composer .tiptap pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+  font-weight: 500;
+}
+
+.mention-chip-hover {
+  transition-property:
+    color, background-color, border-color, outline-color, text-decoration-color,
+    fill, stroke;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+.mention-chip-hover:hover {
+  background: hsl(var(--primary) / 0.25);
+  color: hsl(var(--primary) / 0.9);
+}
+
+.message-markdown .agent-mention-at-hidden {
+  display: inline-block;
+  width: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  vertical-align: baseline;
+  line-height: 1;
+}
+
+.message-markdown .agent-mention-highlight {
+  position: relative;
+  padding-left: calc(
+    var(--inline-chip-padding-inline) +
+    var(--agent-icon-size) +
+    var(--agent-icon-gap)
+  );
+}
+
+.message-markdown .agent-mention-highlight::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: var(--inline-chip-padding-inline);
+  width: var(--agent-icon-size);
+  height: var(--agent-icon-size);
+  background: currentColor;
+  pointer-events: none;
+  transform: translateY(-50%);
+  -webkit-mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 8V4H8'/%3E%3Crect width='16' height='12' x='4' y='8' rx='2'/%3E%3Cpath d='M2 14h2'/%3E%3Cpath d='M20 14h2'/%3E%3Cpath d='M15 13v2'/%3E%3Cpath d='M9 13v2'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 8V4H8'/%3E%3Crect width='16' height='12' x='4' y='8' rx='2'/%3E%3Cpath d='M2 14h2'/%3E%3Cpath d='M20 14h2'/%3E%3Cpath d='M15 13v2'/%3E%3Cpath d='M9 13v2'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+
+@keyframes route-target-highlight-fade {
+  0%,
+  60% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ── Code block line numbers & diff ────────────────────────────────── */
+.code-block-lines {
+  counter-reset: code-line;
+}
+
+.code-block-lines [data-line] {
+  display: block;
+  counter-increment: code-line;
+}
+
+.code-block-lines [data-line]::before {
+  content: counter(code-line);
+  display: inline-block;
+  width: 2.5ch;
+  margin-right: 1.5ch;
+  text-align: right;
+  color: hsl(var(--muted-foreground) / 0.4);
+  user-select: none;
+  pointer-events: none;
+}
+
+.code-line-diff-add {
+  background-color: hsl(120 40% 50% / 0.15);
+}
+
+.code-line-diff-remove {
+  background-color: hsl(0 60% 50% / 0.15);
+}
+
+.dark .code-line-diff-add {
+  background-color: hsl(120 40% 50% / 0.12);
+}
+
+.dark .code-line-diff-remove {
+  background-color: hsl(0 60% 50% / 0.12);
+}

@@ -2,6 +2,7 @@
 members = [
     "crates/buzz-relay",
     "crates/buzz-core",
+    "crates/buzz-conformance",
     "crates/buzz-db",
     "crates/buzz-pubsub",
     "crates/buzz-auth",
@@ -10,7 +11,6 @@ members = [
     "crates/buzz-acp",
     "crates/buzz-agent",
     "crates/sprig",
-    "crates/buzz-proxy",
     "crates/buzz-test-client",
     "crates/buzz-ws-client",
     "crates/buzz-admin",
@@ -78,7 +78,7 @@ anyhow    = "1"
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
 
-# HTTP client (webhook delivery, Typesense indexing)
+# HTTP client (webhook delivery)
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 
 # Cryptography
@@ -102,18 +102,21 @@ futures-util = "0.3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
+# Property-based testing (dev-only)
+proptest = "1"
+
 # MCP SDK (used by buzz-dev-mcp and buzz-agent)
 rmcp = { version = "1.1.0", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", default-features = false }
 
 # Internal crates
 buzz-core = { path = "crates/buzz-core" }
+buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-auth = { path = "crates/buzz-auth" }
 buzz-pubsub = { path = "crates/buzz-pubsub" }
 buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }
-buzz-proxy = { path = "crates/buzz-proxy" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }

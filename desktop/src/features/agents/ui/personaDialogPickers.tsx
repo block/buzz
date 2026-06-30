@@ -16,6 +16,7 @@ export const NO_RUNTIME_DROPDOWN_VALUE = "__no_runtime__";
 const KNOWN_LLM_PROVIDER_IDS = [
   "anthropic",
   "databricks",
+  "databricks_v2",
   "openai",
   "openai-compat",
 ] as const;
@@ -25,7 +26,6 @@ type PersonaLlmProviderId = (typeof KNOWN_LLM_PROVIDER_IDS)[number];
 export type PersonaModelOption = {
   id: string;
   label: string;
-  providers?: readonly PersonaLlmProviderId[];
 };
 
 export type PersonaDropdownOption = {
@@ -45,144 +45,20 @@ const DEFAULT_MODEL_OPTION: PersonaModelOption = {
   label: "Default model",
 };
 
-const DATABRICKS_DEFAULT_MODEL_ID = "goose-claude-4-8-opus";
-const DATABRICKS_DEFAULT_MODEL_LABEL = "Claude Opus 4.8";
-
-const DATABRICKS_DEFAULT_MODEL_OPTION: PersonaModelOption = {
-  id: "",
-  label: `${DATABRICKS_DEFAULT_MODEL_LABEL} (default)`,
-};
-
-// Databricks IDs are sourced from squareup/goose-releases goose_models.json.
-// `goose-claude-4-8-opus` is also the current Buzz internal build default in
-// squareup/buzz-releases, though it is ahead of that registry today.
-const BUZZ_AGENT_MODEL_OPTIONS: readonly PersonaModelOption[] = [
-  DATABRICKS_DEFAULT_MODEL_OPTION,
-  {
-    id: "goose-claude-4-8-opus",
-    label: "Claude Opus 4.8",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-claude-4-7-opus",
-    label: "Claude Opus 4.7",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-claude-4-6-opus",
-    label: "Claude Opus 4.6",
-    providers: ["anthropic", "databricks"],
-  },
-  {
-    id: "goose-claude-4-6-sonnet",
-    label: "Claude Sonnet 4.6",
-    providers: ["anthropic", "databricks"],
-  },
-  {
-    id: "goose-claude-4-5-opus",
-    label: "Claude Opus 4.5",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-claude-4-5-sonnet",
-    label: "Claude Sonnet 4.5",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-claude-4-5-haiku",
-    label: "Claude Haiku 4.5",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-gpt-5-2",
-    label: "GPT-5.2",
-    providers: ["databricks"],
-  },
-  {
-    id: "databricks-gpt-5-5-pro",
-    label: "GPT-5.5 Pro",
-    providers: ["databricks"],
-  },
-  {
-    id: "databricks-gpt-5-5",
-    label: "GPT-5.5",
-    providers: ["databricks"],
-  },
-  {
-    id: "gpt-5.5",
-    label: "GPT-5.5",
-    providers: ["openai", "openai-compat"],
-  },
-  {
-    id: "gpt-5.4",
-    label: "GPT-5.4",
-    providers: ["openai", "openai-compat"],
-  },
-  {
-    id: "gpt-5.4-mini",
-    label: "GPT-5.4 mini",
-    providers: ["openai", "openai-compat"],
-  },
-  {
-    id: "gpt-5.4-nano",
-    label: "GPT-5.4 nano",
-    providers: ["openai", "openai-compat"],
-  },
-  {
-    id: "gpt-5",
-    label: "GPT-5",
-    providers: ["openai", "openai-compat"],
-  },
-  {
-    id: "gpt-5-mini",
-    label: "GPT-5 mini",
-    providers: ["openai", "openai-compat"],
-  },
-  {
-    id: "goose-gemini-3-5-flash",
-    label: "Gemini 3.5 Flash",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-gemini-3-1-pro",
-    label: "Gemini 3.1 Pro",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-gemini-3-1-flash-lite",
-    label: "Gemini 3.1 Flash Lite",
-    providers: ["databricks"],
-  },
-  {
-    id: "goose-gemini-2-5-pro",
-    label: "Gemini 2.5 Pro",
-    providers: ["databricks"],
-  },
-  {
-    id: "gemini-2.5-pro",
-    label: "Gemini 2.5 Pro",
-    providers: ["openai-compat"],
-  },
-  {
-    id: "gemini-2.5-flash",
-    label: "Gemini 2.5 Flash",
-    providers: ["openai-compat"],
-  },
-];
-
 const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
   { id: "databricks", label: "Databricks" },
+  { id: "databricks_v2", label: "Databricks v2" },
 ];
 
 const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
   string,
   readonly PersonaModelOption[]
 > = {
-  goose: BUZZ_AGENT_MODEL_OPTIONS,
-  "buzz-agent": BUZZ_AGENT_MODEL_OPTIONS,
+  goose: [DEFAULT_MODEL_OPTION],
+  "buzz-agent": [DEFAULT_MODEL_OPTION],
   claude: [DEFAULT_MODEL_OPTION],
   codex: [DEFAULT_MODEL_OPTION],
 };
@@ -199,12 +75,8 @@ function isKnownLlmProvider(
   return (KNOWN_LLM_PROVIDER_IDS as readonly string[]).includes(providerId);
 }
 
-function runtimeDefaultsToDatabricks(runtimeId: string) {
-  return runtimeId === "buzz-agent" || runtimeId === "goose";
-}
-
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
-  return runtimeDefaultsToDatabricks(runtimeId);
+  return runtimeId === "buzz-agent" || runtimeId === "goose";
 }
 
 function effectiveModelProviderForOptions(
@@ -218,11 +90,7 @@ function effectiveModelProviderForOptions(
     return "";
   }
 
-  const trimmedProvider = providerId?.trim() ?? "";
-  if (trimmedProvider.length === 0 && runtimeDefaultsToDatabricks(runtimeId)) {
-    return "databricks";
-  }
-  return trimmedProvider;
+  return providerId?.trim() ?? "";
 }
 
 export function getPersonaModelOptions(
@@ -243,10 +111,7 @@ export function getPersonaModelOptions(
 
   return options.filter(
     (option) =>
-      (option.id.length === 0 &&
-        !providerRequiresExplicitModel(trimmedProvider)) ||
-      (option.id !== DATABRICKS_DEFAULT_MODEL_ID &&
-        option.providers?.includes(trimmedProvider)),
+      option.id.length === 0 && !providerRequiresExplicitModel(trimmedProvider),
   );
 }
 
@@ -299,10 +164,8 @@ export function providerRequiresExplicitModel(
   );
 }
 
-export function getDefaultLlmProviderLabel(runtimeId: string) {
-  return runtimeDefaultsToDatabricks(runtimeId)
-    ? "Databricks (default)"
-    : "Default";
+export function getDefaultLlmProviderLabel(_runtimeId: string) {
+  return "Default";
 }
 
 export function getPersonaProviderOptions(
@@ -310,16 +173,10 @@ export function getPersonaProviderOptions(
   runtimeId: string,
 ): readonly PersonaModelOption[] {
   const trimmedProvider = currentProvider.trim();
-  const providerOptions = runtimeDefaultsToDatabricks(runtimeId)
-    ? PERSONA_LLM_PROVIDER_OPTIONS.filter((option) =>
-        trimmedProvider === "databricks" ? true : option.id !== "databricks",
-      )
-    : PERSONA_LLM_PROVIDER_OPTIONS;
-  const defaultProviderOptions =
-    runtimeDefaultsToDatabricks(runtimeId) && trimmedProvider === "databricks"
-      ? []
-      : [{ id: "", label: getDefaultLlmProviderLabel(runtimeId) }];
-  const options = [...defaultProviderOptions, ...providerOptions];
+  const defaultProviderOptions = [
+    { id: "", label: getDefaultLlmProviderLabel(runtimeId) },
+  ];
+  const options = [...defaultProviderOptions, ...PERSONA_LLM_PROVIDER_OPTIONS];
   if (
     trimmedProvider.length === 0 ||
     options.some((option) => option.id === trimmedProvider)

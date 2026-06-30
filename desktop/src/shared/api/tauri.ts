@@ -42,6 +42,7 @@ import type {
   CommandAvailability,
   InstallRuntimeResult,
   OpenDmInput,
+  RuntimeConfigSurface,
 } from "@/shared/api/types";
 
 type RawIdentity = {
@@ -1122,6 +1123,21 @@ export async function discoverManagedAgentPrereqs(input: {
 
 export async function getAgentModels(pubkey: string) {
   return invokeTauri<AgentModelsResponse>("get_agent_models", { pubkey });
+}
+
+export async function getAgentConfigSurface(
+  pubkey: string,
+): Promise<RuntimeConfigSurface> {
+  return invokeTauri<RuntimeConfigSurface>("get_agent_config_surface", {
+    pubkey,
+  });
+}
+
+export async function putAgentSessionConfig(
+  pubkey: string,
+  payload: unknown,
+): Promise<void> {
+  return invokeTauri<void>("put_agent_session_config", { pubkey, payload });
 }
 
 type RawUpdateManagedAgentResponse = {

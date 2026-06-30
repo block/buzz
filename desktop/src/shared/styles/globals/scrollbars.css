@@ -1,0 +1,27 @@
+.buzz-sidebar-scrollbar {
+  scrollbar-color: transparent transparent;
+}
+
+.buzz-sidebar-scrollbar:hover {
+  scrollbar-color: hsl(var(--sidebar-border) / 0.8) transparent;
+}
+
+.buzz-sidebar-scrollbar::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+.buzz-sidebar-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.buzz-sidebar-scrollbar::-webkit-scrollbar-thumb {
+  background-clip: content-box;
+  background-color: transparent;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.buzz-sidebar-scrollbar:hover::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--sidebar-border) / 0.8);
+}

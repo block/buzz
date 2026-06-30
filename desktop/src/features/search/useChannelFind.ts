@@ -63,7 +63,7 @@ export function useChannelFind({
     return found;
   }, [messages, query]);
 
-  // Relay-backed search: full history via Typesense.
+  // Relay-backed search: full history via Postgres FTS.
   const relaySearch = useSearchMessagesQuery(debouncedQuery, {
     channelId: channelId ?? undefined,
     enabled: isOpen && debouncedQuery.length >= MIN_QUERY_LENGTH,
@@ -162,16 +162,29 @@ export function useChannelFind({
     }
   }, [channelId, reset]);
 
-  return {
-    activeIndex,
-    activeMatch,
-    close,
-    goToNext,
-    goToPrevious,
-    isOpen,
-    matchCount: matchedIds.length,
-    matchingMessageIds,
-    query,
-    setQuery,
-  };
+  return React.useMemo(
+    () => ({
+      activeIndex,
+      activeMatch,
+      close,
+      goToNext,
+      goToPrevious,
+      isOpen,
+      matchCount: matchedIds.length,
+      matchingMessageIds,
+      query,
+      setQuery,
+    }),
+    [
+      activeIndex,
+      activeMatch,
+      close,
+      goToNext,
+      goToPrevious,
+      isOpen,
+      matchedIds.length,
+      matchingMessageIds,
+      query,
+    ],
+  );
 }

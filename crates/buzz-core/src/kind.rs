@@ -110,6 +110,29 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// a compile-time bitset or sorted array with binary search for hot-path use.
 pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
 
+/// Kinds whose stored events have `#p`-bound read access — readable only by
+/// subscribers whose pubkey appears in the event's `#p` tag.
+///
+/// The relay enforces this at the filter layer (`p_gated_filters_authorized`):
+/// a REQ that can match any kind in this set is closed unless the filter's
+/// `#p` values exactly equal the authenticated reader's pubkey. For stored
+/// (non-ephemeral) kinds in this set, the storage layer additionally writes a
+/// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
+/// (`schema/schema.sql` and `migrations/0001_initial_schema.sql` — drift
+/// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
+/// `crates/buzz-search/tests/fts_integration.rs`).
+///
+/// Ephemeral kinds (20000–29999, e.g. [`KIND_AGENT_OBSERVER_FRAME`]) are
+/// included for filter-layer enforcement but are never stored, so the
+/// storage-layer search defense does not apply to them.
+pub const P_GATED_KINDS: &[u32] = &[
+    KIND_AGENT_OBSERVER_FRAME,
+    KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_GIFT_WRAP,
+    KIND_DM_VISIBILITY,
+];
+
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
 ///
 /// Persona definition event published by the workspace owner. Addressed by

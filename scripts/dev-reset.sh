@@ -29,7 +29,7 @@ cd "${REPO_ROOT}"
 # ---- Confirm ----------------------------------------------------------------
 
 if [[ "${1:-}" != "--yes" ]]; then
-  echo -e "${YELLOW}WARNING: This will DELETE all local data (postgres, typesense volumes).${NC}"
+  echo -e "${YELLOW}WARNING: This will DELETE all local data (postgres, minio volumes).${NC}"
   echo -e "   Redis data is ephemeral and always wiped on restart."
   echo ""
   read -r -p "Are you sure? [y/N] " confirm

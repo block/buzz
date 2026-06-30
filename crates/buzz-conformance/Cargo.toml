@@ -1,0 +1,35 @@
+[package]
+name = "buzz-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Runtime trace schema + independent replay checker for MultiTenantRelay.tla"
+
+# Independence rule (skill: skill-runtime-formal-compliance):
+# - Depend on NO production buzz crate. The schema carries its own opaque
+#   `CommunityLabel` UUID newtype rather than reusing `buzz_core::CommunityId`
+#   so the checker cannot inherit a bug from production type machinery, AND so
+#   buzz-core's deliberate "no Serde, no From<Uuid>" fence on `CommunityId`
+#   (the no-parse-from-client rule) is preserved.
+# - The relay's emitter module converts at the seam by calling
+#   `tenant.community().as_uuid()` and wrapping into a `CommunityLabel`.
+# - NEVER depend on buzz-db, buzz-relay, buzz-pubsub, buzz-auth, buzz-search,
+#   buzz-audit, or anything that touches the production reducer / authorization
+#   / projection helpers. The checker re-implements the spec transition
+#   relation from scratch so a bug in the production code does not mechanically
+#   become a bug in the checker.
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+
+# Independence rule still holds for dev-deps: proptest is a test-only
+# generator harness, not a production crate, and the property tests call
+# only the crate's public `check_trace` API — never the production reducer
+# and never `transitions::check_step` as a parallel oracle.
+[dev-dependencies]
+proptest = { workspace = true }

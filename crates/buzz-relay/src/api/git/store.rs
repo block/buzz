@@ -68,6 +68,16 @@ pub enum StoreError {
     /// The requested key does not exist.
     #[error("object not found: {0}")]
     NotFound(String),
+    /// The object is larger than the caller's bounded read budget.
+    #[error("object too large: {key} is {size} bytes (max {max})")]
+    ObjectTooLarge {
+        /// Object key that was read.
+        key: String,
+        /// Object size reported by the backend.
+        size: u64,
+        /// Maximum bytes the caller allows for this read.
+        max: u64,
+    },
     /// A1 detectability fired: the bytes at `key` do not hash to `expected`.
     #[error("digest mismatch on {key}: expected {expected}, got {actual}")]
     DigestMismatch {
@@ -332,6 +342,54 @@ impl GitStore {
                 key: key.into(),
                 expected: expected_digest.into(),
                 actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// GET an immutable object after rejecting objects larger than `max_bytes`.
+    ///
+    /// Pack and manifest objects are content addressed and create-only, so the
+    /// HEAD result cannot race with a different body at the same key. The
+    /// second length check protects against a backend that reports a bad
+    /// Content-Length header.
+    pub async fn get_verified_limited(
+        &self,
+        key: &str,
+        expected_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Bytes, StoreError> {
+        let (head, status) = self.bucket.head_object(key).await.map_err(|e| match e {
+            S3Error::HttpFailWithBody(404, _) => StoreError::NotFound(key.into()),
+            other => StoreError::Backend(other),
+        })?;
+        if status == 404 {
+            return Err(StoreError::NotFound(key.into()));
+        }
+        if !(200..300).contains(&status) {
+            return Err(StoreError::Backend(S3Error::HttpFailWithBody(
+                status,
+                "unexpected status".into(),
+            )));
+        }
+        if let Some(content_length) = head.content_length {
+            let size = u64::try_from(content_length).unwrap_or(u64::MAX);
+            if size > max_bytes {
+                return Err(StoreError::ObjectTooLarge {
+                    key: key.into(),
+                    size,
+                    max: max_bytes,
+                });
+            }
+        }
+
+        let bytes = self.get_verified(key, expected_digest).await?;
+        let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if size > max_bytes {
+            return Err(StoreError::ObjectTooLarge {
+                key: key.into(),
+                size,
+                max: max_bytes,
             });
         }
         Ok(bytes)

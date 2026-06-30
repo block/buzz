@@ -52,10 +52,8 @@ import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
-import {
-  THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
-  useThreadPanelWidth,
-} from "@/shared/hooks/useThreadPanelWidth";
+import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
+import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { Button } from "@/shared/ui/button";
 
@@ -184,7 +182,7 @@ export function HomeView({
   const isSinglePanelChannelManagementView =
     isChannelManagementOpen &&
     homeInboxWidthPx > 0 &&
-    homeInboxWidthPx < THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
+    homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
   const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
   const toggleReactionMutation = useToggleReactionMutation();

@@ -77,7 +77,7 @@ pub fn list_user_search_results(events: &[Event], limit: usize) -> SearchUsersRe
 /// Rank and truncate kind:0 events from a NIP-50 search response for the
 /// member-picker / DM-recipient autocomplete.
 ///
-/// The relay returns results scored by Typesense BM25 against the whole kind:0
+/// The relay returns results scored by Postgres FTS rank against the whole kind:0
 /// JSON content blob. That ranking is fine as a recall mechanism but not as
 /// final ordering — a user whose `display_name` *is* the query should always
 /// rank above someone whose `about` happens to mention it. We re-rank with a
@@ -87,7 +87,7 @@ pub fn list_user_search_results(events: &[Event], limit: usize) -> SearchUsersRe
 /// - field priority: display_name (or name) > nip05 > pubkey hex
 ///
 /// `limit` clamps the output. Pubkey de-duplication keeps only the
-/// highest-scoring result per pubkey (Typesense should already return one doc
+/// highest-scoring result per pubkey (the relay should already return one doc
 /// per event id, and kind:0 is a NIP-16 replaceable event so stale rows are
 /// soft-deleted in the DB and filtered out before reaching us — this is
 /// defense in depth in case both somehow slip through).

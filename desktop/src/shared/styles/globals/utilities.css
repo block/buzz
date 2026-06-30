@@ -1,0 +1,90 @@
+@layer utilities {
+  /*
+   * Skips rendering (layout, paint) for offscreen rows while keeping them in
+   * the DOM — unlike windowing, in-DOM state (open `<details>`, drag-and-drop,
+   * deep-link `querySelector`) survives. The intrinsic size is a height
+   * placeholder so the scrollbar stays stable before a row is first rendered.
+   */
+  .content-visibility-auto {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 200px;
+  }
+
+  /* Timeline rows re-pin by measured offset on prepend; the 200px fallback
+     over-reserves the common row and shifts that anchor, so reserve low. */
+  .timeline-row-cv {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 60px;
+  }
+
+  /* paint containment clips the action bar's upward bleed; un-pause the active row */
+  .timeline-row-cv:is(:hover, :focus-within) {
+    content-visibility: visible;
+  }
+
+  .content-visibility-auto-interactive {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 200px;
+  }
+
+  .content-visibility-auto-interactive:is(:hover, :focus-within) {
+    content-visibility: visible;
+  }
+
+  /* Compact variant for short single-line rows (sidebar channels, etc). */
+  .content-visibility-auto-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 2rem;
+  }
+
+  .buzz-huddle-tooltip {
+    --primary: var(
+      --huddle-tooltip-surface,
+      var(--huddle-control-surface, 0 0% 20%)
+    );
+    --primary-foreground: var(
+      --huddle-tooltip-foreground,
+      var(--huddle-control-foreground, 0 0% 98%)
+    );
+
+    background: hsl(var(--primary));
+    border: 1px solid
+      hsl(
+        var(
+          --huddle-control-chevron-hover-surface,
+          var(--huddle-control-chevron-surface, 0 0% 22%)
+        ) /
+        0.72
+      );
+    box-shadow: 0 10px 22px rgb(0 0 0 / 35%);
+    color: hsl(var(--primary-foreground));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-control-button,
+  .buzz-huddle-drawer .buzz-huddle-split-main {
+    background: hsl(var(--huddle-control-surface, var(--secondary)));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-control-button:hover,
+  .buzz-huddle-drawer .buzz-huddle-split-main:hover {
+    background: hsl(
+      var(
+        --huddle-control-hover-surface,
+        var(--huddle-control-surface, var(--secondary))
+      )
+    );
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-split-chevron {
+    background: hsl(var(--huddle-control-chevron-surface, var(--secondary)));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-split-chevron:hover {
+    background: hsl(
+      var(
+        --huddle-control-chevron-hover-surface,
+        var(--huddle-control-chevron-surface, var(--secondary))
+      )
+    );
+  }
+}

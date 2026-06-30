@@ -6,6 +6,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use buzz_core::tenant::CommunityId;
+
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ActionSinkError {
@@ -46,6 +48,11 @@ impl From<ActionSinkError> for crate::WorkflowError {
 pub trait ActionSink: Send + Sync {
     /// Post a message to a channel on behalf of a workflow owner.
     ///
+    /// - `community_id`: the server-resolved community that owns the workflow
+    ///   run driving this side effect. The relay-signed message is published
+    ///   under *this* community, never the deployment/default tenant — the run
+    ///   carries its owning community so a workflow in community B posts into B
+    ///   even though the side effect has no inbound connection to bind.
     /// - `channel_id`: UUID string of the target channel
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
@@ -54,6 +61,7 @@ pub trait ActionSink: Send + Sync {
     /// Returns the event ID hex string on success.
     fn send_message(
         &self,
+        community_id: CommunityId,
         channel_id: &str,
         text: &str,
         author_pubkey: &str,

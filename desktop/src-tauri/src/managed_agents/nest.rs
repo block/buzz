@@ -265,9 +265,9 @@ fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
 
 /// Ensures `~/.local/bin/buzz` is a symlink to the bundled CLI binary.
 ///
-/// Creates the symlink if it doesn't exist, updates it if it already points
-/// to a Buzz app bundle, and leaves it alone if it points elsewhere (to
-/// avoid clobbering another tool's binary).
+/// On every boot: replaces any existing symlink unconditionally (the `buzz`
+/// name is our namespace), creates a new one if absent, and leaves regular
+/// files alone to avoid clobbering a user-compiled binary.
 ///
 /// Non-fatal: callers should ignore errors — the symlink is a convenience
 /// for human Terminal use; agents find the CLI via PATH augmentation.
@@ -287,23 +287,14 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
     let link = local_bin.join("buzz");
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
-            // Symlink exists — only update if it points to a Buzz bundle.
-            if let Ok(target) = fs::read_link(&link) {
-                let target_str = target.display().to_string();
-                if target_str.contains(".app/Contents/MacOS") {
-                    // Buzz-owned symlink — update to current bundle path.
-                    let _ = fs::remove_file(&link);
-                    std::os::unix::fs::symlink(&buzz_bin, &link)
-                        .map_err(|e| format!("symlink {}: {e}", link.display()))?;
-                }
-                // Otherwise: symlink points elsewhere — don't clobber.
-            }
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(&buzz_bin, &link)
+                .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Ok(_) => {
             // Regular file or directory — don't clobber.
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // No file exists — create the symlink.
             std::os::unix::fs::symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
@@ -935,13 +926,11 @@ mod tests {
         fs::create_dir(&exe_parent).unwrap();
         fs::write(exe_parent.join("buzz"), "binary").unwrap();
 
-        // Point home_dir to a temp location by using ensure_cli_symlink
-        // directly with a custom link target. We'll test the logic manually.
+        // Simulate the symlink creation path.
         let local_bin = tmp.path().join("local_bin");
         fs::create_dir_all(&local_bin).unwrap();
         let link = local_bin.join("buzz");
 
-        // Create symlink manually to test the creation path.
         std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
@@ -956,11 +945,8 @@ mod tests {
         let link = local_bin.join("buzz");
         fs::write(&link, "user-installed binary").unwrap();
 
-        // Verify it's a regular file.
+        // Regular files are preserved — the Ok(_) branch skips them.
         assert!(link.symlink_metadata().unwrap().file_type().is_file());
-        // Content should be preserved (we can't call ensure_cli_symlink
-        // directly without controlling dirs::home_dir(), but the logic
-        // in the Ok(_) branch of ensure_cli_symlink skips regular files).
         assert_eq!(fs::read_to_string(&link).unwrap(), "user-installed binary");
     }
 

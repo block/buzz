@@ -1,15 +1,10 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
-import ReactMarkdown, {
-  type Components,
-  defaultUrlTransform,
-} from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import {
   ChevronLeft,
   ChevronRight,
-  Copy,
   Download,
-  FileText,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -18,27 +13,15 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
-import {
-  getSingletonHighlighter,
-  type HighlighterGeneric,
-  type BundledLanguage,
-  type BundledTheme,
-  type ThemedToken,
-} from "shiki";
-
-import { useTheme } from "@/shared/theme/ThemeProvider";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
-  isMessageLink,
   parseMessageLink,
   resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
-import type { Channel } from "@/shared/api/types";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
-import { copyCodeBlockToClipboard } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import {
   extractSupportedLinkPreviews,
@@ -50,13 +33,10 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
-import remarkCustomEmoji, {
-  type CustomEmoji,
-} from "@/shared/lib/remarkCustomEmoji";
+import remarkCustomEmoji from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
-import { Button } from "@/shared/ui/button";
 import { AttachmentGroup } from "@/shared/ui/attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import {
@@ -66,14 +46,11 @@ import {
   MENTION_CHIP_PREFIX_CLASS,
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import {
   POPOVER_CUSTOM_ENTER_MOTION_CLASS,
   POPOVER_SHADOW_STYLE,
   POPOVER_SURFACE_CLASS,
 } from "@/shared/ui/popoverSurface";
-import { SpoilerParticles } from "@/shared/ui/SpoilerParticles";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import {
   classifyChildren,
@@ -81,126 +58,31 @@ import {
   isImageOnlyParagraph,
   shallowArrayEqual,
 } from "./markdownUtils";
+import {
+  CODE_BLOCK_CLASS,
+  extractLanguage,
+  MarkdownCodeBlock,
+  SyntaxHighlightedCode,
+} from "./markdown/CodeBlock";
+import { FileCard } from "./markdown/FileCard";
+import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
+import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { resolveFileCard } from "./markdownFileCard";
+import type {
+  ImetaEntry,
+  MarkdownProps,
+  MarkdownRuntime,
+} from "./markdown/types";
+import { SpoilerInline } from "./markdown/SpoilerInline";
+import {
+  aspectRatioFromDim,
+  dimensionsFromDim,
+  isInsideHiddenSpoiler,
+  getReactNodeText,
+  messageLinkUrlTransform,
+  useStableArray,
+} from "./markdown/utils";
 import { VideoPlayer, type VideoReviewContext } from "./VideoPlayer";
-
-type ImetaEntry = {
-  dim?: string;
-  image?: string;
-  thumb?: string;
-  m?: string;
-  size?: number;
-  filename?: string;
-  duration?: number;
-};
-
-type ImetaLookup = Map<string, ImetaEntry>;
-
-type MessageLinkPillProps = {
-  channels: Channel[];
-  href: string;
-  interactive: boolean;
-  link: ParsedMessageLink;
-  onOpenMessageLink: (link: ParsedMessageLink) => void;
-};
-
-let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
-  null;
-let shikiInitPromise: Promise<void> | null = null;
-const loadedLangs = new Set<string>();
-const loadedThemes = new Set<string>();
-const tokenCache = new Map<string, ThemedToken[][]>();
-const MAX_CACHE_ENTRIES = 100;
-const MAX_LOADED_LANGUAGES = 30;
-const MAX_HIGHLIGHT_LINES = 150;
-const CODE_BLOCK_CLASS =
-  "code-block-lines block min-w-full whitespace-pre font-mono text-sm font-medium text-foreground";
-const DIFF_ADD_RE = /\s*\/\/\s*\[!code\s*\+\+\]\s*$/;
-const DIFF_REMOVE_RE = /\s*\/\/\s*\[!code\s*--\]\s*$/;
-
-function ensureHighlighter(): Promise<void> {
-  if (shikiHighlighter) return Promise.resolve();
-  if (!shikiInitPromise) {
-    shikiInitPromise = getSingletonHighlighter({
-      themes: [],
-      langs: [],
-    }).then((h) => {
-      shikiHighlighter = h;
-    });
-  }
-  return shikiInitPromise;
-}
-
-function extractLanguage(className?: string): string {
-  if (typeof className !== "string") return "";
-  const match = className.match(/language-(\S+)/);
-  return match ? match[1] : "";
-}
-
-function stripDiffMarker(tokens: ThemedToken[], marker: RegExp): ThemedToken[] {
-  const last = tokens[tokens.length - 1];
-  if (!last) return tokens;
-  const stripped = last.content.replace(marker, "");
-  if (stripped === last.content) return tokens;
-  if (stripped === "") return tokens.slice(0, -1);
-  return [...tokens.slice(0, -1), { ...last, content: stripped }];
-}
-
-function useStableArray<T>(arr: T[]): T[] {
-  const ref = React.useRef(arr);
-  if (
-    arr.length !== ref.current.length ||
-    arr.some((item, i) => item !== ref.current[i])
-  ) {
-    ref.current = arr;
-  }
-  return ref.current;
-}
-
-function aspectRatioFromDim(dim?: string): number | undefined {
-  if (!dim) return undefined;
-  const match = dim.match(/^(\d+)x(\d+)$/i);
-  if (!match) return undefined;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
-    return undefined;
-  }
-  return width / height;
-}
-
-/**
- * Parse a NIP-92 `dim` value ("WxH") into intrinsic pixel dimensions. Used to
- * stamp explicit `width`/`height` attributes on inline images so the browser
- * reserves aspect-ratio-correct layout space *before* the image decodes. This
- * is what keeps the timeline from jumping when a tall image loads late — the
- * row's height is known at first paint instead of growing from ~0 on load.
- */
-function dimensionsFromDim(
-  dim?: string,
-): { width: number; height: number } | undefined {
-  if (!dim) return undefined;
-  const match = dim.match(/^(\d+)x(\d+)$/i);
-  if (!match) return undefined;
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (
-    !Number.isFinite(width) ||
-    !Number.isFinite(height) ||
-    width <= 0 ||
-    height <= 0
-  ) {
-    return undefined;
-  }
-  return { width, height };
-}
-
-function isInsideHiddenSpoiler(element: Element): boolean {
-  return (
-    element.closest('.buzz-spoiler[data-spoiler][data-revealed="false"]') !==
-    null
-  );
-}
 
 /**
  * Video review context flows through React context instead of
@@ -213,16 +95,6 @@ function isInsideHiddenSpoiler(element: Element): boolean {
 const VideoReviewMarkdownContext = React.createContext<
   VideoReviewContext | undefined
 >(undefined);
-
-type MarkdownRuntime = {
-  agentMentionPubkeysByName?: Record<string, string>;
-  channels: Channel[];
-  imetaByUrl?: ImetaLookup;
-  linkPreviewHrefs: ReadonlySet<string>;
-  mentionPubkeysByName?: Record<string, string>;
-  onOpenChannel: (channelId: string) => void;
-  onOpenMessageLink: (link: ParsedMessageLink) => void;
-};
 
 function useLatestRef<T>(value: T) {
   const ref = React.useRef(value);
@@ -269,33 +141,6 @@ function MarkdownVideoPlayer({
     />
   );
 }
-
-/**
- * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
- * links. The default transform strips unknown schemes (returns `""`) before
- * the `a` component override can see them, which would break copy → paste →
- * click end-to-end. Everything else delegates to `defaultUrlTransform`.
- */
-function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
-    return value;
-  }
-  return defaultUrlTransform(value);
-}
-
-type MarkdownProps = {
-  channelNames?: string[];
-  className?: string;
-  content: string;
-  customEmoji?: CustomEmoji[];
-  imetaByUrl?: ImetaLookup;
-  interactive?: boolean;
-  agentMentionPubkeysByName?: Record<string, string>;
-  mentionNames?: string[];
-  mentionPubkeysByName?: Record<string, string>;
-  searchQuery?: string;
-  videoReviewContext?: VideoReviewContext;
-};
 
 type ImageLightboxBox = {
   height: number;
@@ -1653,546 +1498,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
         />
       ) : null}
     </>
-  );
-}
-
-function getReactNodeText(node: React.ReactNode): string {
-  if (typeof node === "string" || typeof node === "number") {
-    return String(node);
-  }
-
-  if (Array.isArray(node)) {
-    return node.map(getReactNodeText).join("");
-  }
-
-  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
-    return getReactNodeText(node.props.children);
-  }
-
-  return "";
-}
-
-function getCodeBlockText(children: React.ReactNode) {
-  return getReactNodeText(children).replace(/\n$/, "");
-}
-
-function MessageLinkPill({
-  channels,
-  href,
-  interactive,
-  link,
-  onOpenMessageLink,
-}: MessageLinkPillProps) {
-  const channel = channels.find((c) => c.id === link.channelId);
-  const channelLabel = channel?.name ?? "channel";
-  const shortId = link.messageId.slice(0, 6);
-  const label = (
-    <>
-      #{channelLabel} · {shortId}
-    </>
-  );
-
-  if (!interactive) {
-    return <span data-message-link="">{label}</span>;
-  }
-
-  return (
-    <button
-      type="button"
-      data-message-link=""
-      aria-label={`Open message in ${channelLabel}`}
-      title={href}
-      className={cn(
-        "cursor-pointer",
-        MENTION_CHIP_BASE_CLASSES,
-        MENTION_CHIP_HOVER_CLASSES,
-      )}
-      onClick={() => {
-        onOpenMessageLink(link);
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function InlineEmojiPopover({
-  alt,
-  resolvedSrc,
-}: {
-  alt: string | undefined;
-  resolvedSrc: string;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const openTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const closeTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const label = alt?.trim() || "Custom emoji";
-
-  const clearTimers = React.useCallback(() => {
-    if (openTimeout.current) {
-      clearTimeout(openTimeout.current);
-      openTimeout.current = null;
-    }
-    if (closeTimeout.current) {
-      clearTimeout(closeTimeout.current);
-      closeTimeout.current = null;
-    }
-  }, []);
-
-  const handleMouseEnter = React.useCallback(() => {
-    clearTimers();
-    openTimeout.current = setTimeout(() => setOpen(true), 200);
-  }, [clearTimers]);
-
-  const scheduleClose = React.useCallback(() => {
-    clearTimers();
-    closeTimeout.current = setTimeout(() => setOpen(false), 150);
-  }, [clearTimers]);
-
-  const handleFocus = React.useCallback(() => {
-    clearTimers();
-    setOpen(true);
-  }, [clearTimers]);
-
-  React.useEffect(() => clearTimers, [clearTimers]);
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex border-0 bg-transparent p-0 align-middle text-inherit"
-          aria-label={label}
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={scheduleClose}
-          onFocus={handleFocus}
-          onBlur={scheduleClose}
-        >
-          <img
-            alt={alt}
-            title={label}
-            src={resolvedSrc}
-            data-custom-emoji=""
-            className="mx-px inline-block h-[1.25em] w-auto max-w-none align-middle"
-            draggable={false}
-            onContextMenu={(e) => e.preventDefault()}
-          />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="center"
-        side="top"
-        sideOffset={6}
-        className="w-auto min-w-32 max-w-56 rounded-xl p-3"
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={scheduleClose}
-        onOpenAutoFocus={(e) => e.preventDefault()}
-        onCloseAutoFocus={(e) => e.preventDefault()}
-      >
-        <div className="flex flex-col items-center text-center">
-          <div className="mb-2 flex h-14 w-14 items-center justify-center">
-            <img
-              alt={alt}
-              src={resolvedSrc}
-              className="inline-block h-12 w-12 object-contain"
-              draggable={false}
-            />
-          </div>
-          <div className="max-w-[12rem] text-balance text-sm font-semibold leading-snug text-popover-foreground">
-            {label}
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function MarkdownCodeBlock({
-  children,
-  language,
-}: {
-  children?: React.ReactNode;
-  language?: string;
-}) {
-  const [isCopying, setIsCopying] = React.useState(false);
-  const code = React.useMemo(() => getCodeBlockText(children), [children]);
-
-  const handleCopy = React.useCallback(
-    async (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setIsCopying(true);
-
-      try {
-        await copyCodeBlockToClipboard(code);
-        toast.success("Copied code to clipboard");
-      } catch (error) {
-        console.error("Failed to copy code block", error);
-        toast.error("Failed to copy code");
-      } finally {
-        setIsCopying(false);
-      }
-    },
-    [code],
-  );
-
-  return (
-    <div className="group relative" data-code-block="">
-      <pre className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs">
-        {language && (
-          <div className="mb-1 text-xs text-muted-foreground/70">
-            {language}
-          </div>
-        )}
-        {children}
-      </pre>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            aria-label="Copy code block"
-            className="absolute right-2 top-2 h-7 w-7 bg-background/80 text-muted-foreground opacity-0 shadow-xs ring-1 ring-border/60 backdrop-blur-sm transition-opacity hover:bg-background hover:text-foreground hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:opacity-60"
-            disabled={isCopying}
-            onClick={handleCopy}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <Copy className="h-4 w-4" />
-            <span className="sr-only">Copy code block</span>
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>Copy code</TooltipContent>
-      </Tooltip>
-    </div>
-  );
-}
-
-/** Human-readable byte size: "820 B", "12.4 KB", "3.1 MB". */
-function formatFileSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let size = bytes / 1024;
-  let i = 0;
-  while (size >= 1024 && i < units.length - 1) {
-    size /= 1024;
-    i += 1;
-  }
-  return `${size < 10 ? size.toFixed(1) : Math.round(size)} ${units[i]}`;
-}
-
-/**
- * File card for a generic (non-image, non-video) attachment: icon, filename,
- * size, and a download action.
- *
- * Downloads go through the native `download_file` Tauri command (HTTP inside
- * the app's tunnel + a save dialog), not a plain `<a download>` link. A bare
- * link navigates the webview to the blob URL, which escapes to the OS browser
- * and gets bounced to a corporate CDN interstitial ("browser not supported").
- * The native command mirrors the image-download path.
- */
-function FileCard({
-  href,
-  filename,
-  size,
-}: {
-  href: string;
-  filename: string;
-  size?: number;
-}) {
-  const sizeLabel = size != null ? formatFileSize(size) : "";
-  return (
-    <button
-      type="button"
-      onClick={() => {
-        invokeTauri("download_file", { url: href, filename }).catch(
-          (err: unknown) => {
-            const msg = err instanceof Error ? err.message : "Download failed";
-            toast.error(msg);
-          },
-        );
-      }}
-      data-testid="file-card"
-      className="my-1 inline-flex max-w-sm items-center gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
-    >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-        <FileText className="h-4 w-4" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium text-foreground">
-          {filename}
-        </span>
-        {sizeLabel ? (
-          <span className="block text-xs text-muted-foreground">
-            {sizeLabel}
-          </span>
-        ) : null}
-      </span>
-      <Download className="h-4 w-4 shrink-0 text-muted-foreground" />
-    </button>
-  );
-}
-
-export function SyntaxHighlightedCode({
-  code,
-  language,
-  className,
-  ...props
-}: {
-  code: string;
-  language: string;
-} & React.ComponentProps<"code">) {
-  const { themeName } = useTheme();
-  const [loadedKey, setLoadedKey] = React.useState(0);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    async function loadAssets() {
-      try {
-        await ensureHighlighter();
-        if (!shikiHighlighter || cancelled) return;
-        let loaded = false;
-        if (!loadedLangs.has(language)) {
-          if (loadedLangs.size >= MAX_LOADED_LANGUAGES) return;
-          try {
-            await shikiHighlighter.loadLanguage(language as BundledLanguage);
-            loadedLangs.add(language);
-            loaded = true;
-          } catch {
-            return;
-          }
-        }
-        if (!loadedThemes.has(themeName as string)) {
-          try {
-            await shikiHighlighter.loadTheme(themeName as BundledTheme);
-            loadedThemes.add(themeName as string);
-            loaded = true;
-          } catch {
-            return;
-          }
-        }
-        if (loaded && !cancelled) setLoadedKey((k) => k + 1);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (!loadedLangs.has(language) || !loadedThemes.has(themeName as string)) {
-      loadAssets();
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [language, themeName]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: loadedKey intentionally triggers re-memoization after async asset loading
-  const tokens = React.useMemo(() => {
-    if (
-      !shikiHighlighter ||
-      !loadedLangs.has(language) ||
-      !loadedThemes.has(themeName as string)
-    )
-      return null;
-    if ((code.match(/\n/g) || []).length > MAX_HIGHLIGHT_LINES) return null;
-    const cacheKey = `${language}:${themeName}:${code}`;
-    const cached = tokenCache.get(cacheKey);
-    if (cached) return cached;
-    try {
-      const result = shikiHighlighter.codeToTokens(code, {
-        lang: language as BundledLanguage,
-        theme: themeName as BundledTheme,
-      });
-      if (tokenCache.size >= MAX_CACHE_ENTRIES) {
-        const firstKey = tokenCache.keys().next().value;
-        if (firstKey !== undefined) tokenCache.delete(firstKey);
-      }
-      tokenCache.set(cacheKey, result.tokens);
-      return result.tokens;
-    } catch {
-      return null;
-    }
-  }, [code, language, themeName, loadedKey]);
-
-  const codeClassName = cn(CODE_BLOCK_CLASS, className);
-
-  if (!tokens) {
-    const lines = code.split("\n");
-    return (
-      <code {...props} className={codeClassName}>
-        {lines.map((line, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: lines are positional
-          <span key={i} data-line="">
-            {line}
-          </span>
-        ))}
-      </code>
-    );
-  }
-
-  return (
-    <code {...props} className={codeClassName}>
-      {tokens.map((line, lineIdx) => {
-        const lineText = line.map((t) => t.content).join("");
-        const isAdd = DIFF_ADD_RE.test(lineText);
-        const isRemove = DIFF_REMOVE_RE.test(lineText);
-        const diffClass = isAdd
-          ? "code-line-diff-add"
-          : isRemove
-            ? "code-line-diff-remove"
-            : undefined;
-
-        const renderedTokens =
-          isAdd || isRemove
-            ? stripDiffMarker(line, isAdd ? DIFF_ADD_RE : DIFF_REMOVE_RE)
-            : line;
-
-        return (
-          <span
-            // biome-ignore lint/suspicious/noArrayIndexKey: tokens are positional and never reordered
-            key={lineIdx}
-            data-line=""
-            className={diffClass}
-          >
-            {renderedTokens.map((token, tokenIdx) => (
-              <span
-                // biome-ignore lint/suspicious/noArrayIndexKey: tokens are positional and never reordered
-                key={tokenIdx}
-                style={token.color ? { color: token.color } : undefined}
-              >
-                {token.content}
-              </span>
-            ))}
-          </span>
-        );
-      })}
-    </code>
-  );
-}
-
-function SpoilerInline({
-  block = false,
-  children,
-  interactive = true,
-}: {
-  block?: boolean;
-  children?: React.ReactNode;
-  interactive?: boolean;
-}) {
-  const [revealed, setRevealed] = React.useState(false);
-  const contentRef = React.useRef<HTMLElement | null>(null);
-  const isBlock = block || hasBlockMedia(React.Children.toArray(children));
-
-  const setContentElement = React.useCallback((node: HTMLElement | null) => {
-    contentRef.current = node;
-  }, []);
-
-  const toggleRevealed = React.useCallback(() => {
-    setRevealed((value) => !value);
-  }, []);
-
-  const handlePointerDownCapture = React.useCallback(
-    (event: React.PointerEvent<HTMLElement>) => {
-      if (revealed) return;
-      event.stopPropagation();
-    },
-    [revealed],
-  );
-
-  const handleClickCapture = React.useCallback(
-    (event: React.MouseEvent<HTMLElement>) => {
-      if (revealed) return;
-      event.preventDefault();
-      event.stopPropagation();
-      toggleRevealed();
-    },
-    [revealed, toggleRevealed],
-  );
-
-  const handleClick = React.useCallback(
-    (event: React.MouseEvent<HTMLElement>) => {
-      if (revealed && isBlock && event.target !== event.currentTarget) return;
-      toggleRevealed();
-    },
-    [isBlock, revealed, toggleRevealed],
-  );
-
-  const handleKeyDown = React.useCallback(
-    (event: React.KeyboardEvent<HTMLElement>) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      toggleRevealed();
-    },
-    [toggleRevealed],
-  );
-
-  const revealProps = {
-    "aria-label": revealed ? "Hide spoiler" : "Reveal spoiler",
-    "aria-pressed": revealed,
-    onClick: handleClick,
-    onClickCapture: handleClickCapture,
-    onKeyDown: handleKeyDown,
-    onPointerDownCapture: handlePointerDownCapture,
-    role: "button",
-    tabIndex: 0,
-  } as const;
-
-  if (!interactive) {
-    if (isBlock) {
-      return (
-        <div
-          className="buzz-spoiler buzz-spoiler--block buzz-spoiler--inert"
-          data-revealed="false"
-          data-spoiler=""
-        >
-          <SpoilerParticles active contentRef={contentRef} />
-          <div className="buzz-spoiler__content" ref={setContentElement}>
-            {children}
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <span
-        className="buzz-spoiler buzz-spoiler--inert"
-        data-revealed="false"
-        data-spoiler=""
-      >
-        <SpoilerParticles active contentRef={contentRef} />
-        <span className="buzz-spoiler__content" ref={setContentElement}>
-          {children}
-        </span>
-      </span>
-    );
-  }
-
-  if (isBlock) {
-    return (
-      <div
-        {...revealProps}
-        className="buzz-spoiler buzz-spoiler--block"
-        data-revealed={revealed ? "true" : "false"}
-        data-spoiler=""
-      >
-        <SpoilerParticles active={!revealed} contentRef={contentRef} />
-        <div className="buzz-spoiler__content" ref={setContentElement}>
-          {children}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <span
-      {...revealProps}
-      className="buzz-spoiler"
-      data-revealed={revealed ? "true" : "false"}
-      data-spoiler=""
-    >
-      <SpoilerParticles active={!revealed} contentRef={contentRef} />
-      <span className="buzz-spoiler__content" ref={setContentElement}>
-        {children}
-      </span>
-    </span>
   );
 }
 

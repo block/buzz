@@ -9,10 +9,28 @@ import type { TimelineMessage } from "@/features/messages/types";
  * rounding from the layout engine.
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
+// Tests and user-visible "pinned" affordances need the view at the physical
+// floor, not merely within the looser UI at-bottom threshold. The loose
+// threshold decides whether the user is close enough to count as reading the
+// latest message; this strict threshold decides when a programmatic bottom pin
+// has actually finished settling.
+const TRUE_BOTTOM_THRESHOLD_PX = 1;
 
 type AnchorState =
   | { kind: "at-bottom" }
   | { kind: "message"; messageId: string; topOffset: number };
+
+type BottomSettleContainer = Pick<
+  HTMLDivElement,
+  "scrollHeight" | "clientHeight" | "scrollTop" | "scrollTo"
+>;
+
+export function settleProgrammaticBottomPin(
+  container: BottomSettleContainer,
+): boolean {
+  container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+  return isAtTrueBottom(container);
+}
 
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
@@ -56,10 +74,27 @@ type UseAnchoredScrollResult = {
   ) => boolean;
 };
 
-function isAtBottomNow(container: HTMLDivElement) {
+function isAtBottomNow(
+  container: Pick<
+    HTMLDivElement,
+    "scrollHeight" | "clientHeight" | "scrollTop"
+  >,
+) {
   return (
     container.scrollHeight - container.clientHeight - container.scrollTop <=
     AT_BOTTOM_THRESHOLD_PX
+  );
+}
+
+function isAtTrueBottom(
+  container: Pick<
+    HTMLDivElement,
+    "scrollHeight" | "clientHeight" | "scrollTop"
+  >,
+) {
+  return (
+    container.scrollHeight - container.clientHeight - container.scrollTop <=
+    TRUE_BOTTOM_THRESHOLD_PX
   );
 }
 
@@ -140,6 +175,11 @@ export function useAnchoredScroll({
   // appends, we snap to bottom even if they had scrolled up to read history.
   // Consumed (and cleared) by the next append in the restoration effect.
   const forceBottomOnNextAppendRef = React.useRef(false);
+  // True from a programmatic bottom pin until the list's row measurement settles
+  // and the view reaches a true physical bottom. During this window `onScroll`
+  // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
+  // guard runs on a native scroll event, outside React's render cycle.
+  const settlingRef = React.useRef(false);
 
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
@@ -156,6 +196,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = 0;
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
+    settlingRef.current = false;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
       highlightTimeoutRef.current = null;
@@ -171,6 +212,14 @@ export function useAnchoredScroll({
       const container = scrollContainerRef.current;
       if (!container) return;
       anchorRef.current = { kind: "at-bottom" };
+      // A programmatic jump-to-bottom is not atomic, even for `behavior: "auto"`:
+      // the browser can emit `scroll` while the list is still settling row
+      // measurements. During that window `computeAnchor` may read the transient
+      // gap as a deliberate scroll-up and latch a mid-history message anchor,
+      // which strands future appends above the floor. Arm the settle guard for
+      // every imperative bottom jump so `onScroll` holds the at-bottom anchor
+      // until it can snap to the true floor.
+      settlingRef.current = true;
       container.scrollTo({ top: container.scrollHeight, behavior });
       setIsAtBottom(true);
       setNewMessageCount(0);
@@ -251,6 +300,18 @@ export function useAnchoredScroll({
   const onScroll = React.useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
+    // Row measurement can grow `scrollHeight` after a bottom pin and emit scroll
+    // events while `scrollTop` holds at the old floor — opening a transient gap
+    // above the true bottom. `computeAnchor` would read that as a deliberate
+    // scroll-up and latch a message anchor, freezing the view short of bottom.
+    // While settling, keep the anchor at-bottom and chase the physical floor.
+    if (settlingRef.current) {
+      if (settleProgrammaticBottomPin(container)) {
+        settlingRef.current = false;
+      } else {
+        return;
+      }
+    }
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
@@ -330,8 +391,9 @@ export function useAnchoredScroll({
     // message pulls the view down.
     if (newLatestArrived && forceBottomOnNextAppendRef.current) {
       forceBottomOnNextAppendRef.current = false;
-      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       anchorRef.current = { kind: "at-bottom" };
+      settlingRef.current = true;
+      container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
       setIsAtBottom(true);
       setNewMessageCount(0);
       prevLastMessageIdRef.current = lastMessage?.id;

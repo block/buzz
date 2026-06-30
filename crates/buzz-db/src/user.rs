@@ -1,6 +1,7 @@
 //! User CRUD operations.
 
 use crate::error::Result;
+use buzz_core::CommunityId;
 use sqlx::PgPool;
 use sqlx::Row;
 
@@ -34,14 +35,15 @@ pub struct UserSearchProfile {
 
 /// Ensure a user record exists for the given pubkey (upsert).
 /// Creates with minimal fields if not present; no-op if already exists.
-pub async fn ensure_user(pool: &PgPool, pubkey: &[u8]) -> Result<()> {
+pub async fn ensure_user(pool: &PgPool, community_id: CommunityId, pubkey: &[u8]) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT INTO users (pubkey)
-        VALUES ($1)
+        INSERT INTO users (community_id, pubkey)
+        VALUES ($1, $2)
         ON CONFLICT DO NOTHING
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(pubkey)
     .execute(pool)
     .await?;
@@ -49,7 +51,11 @@ pub async fn ensure_user(pool: &PgPool, pubkey: &[u8]) -> Result<()> {
 }
 
 /// Get a single user record by pubkey.
-pub async fn get_user(pool: &PgPool, pubkey: &[u8]) -> Result<Option<UserProfile>> {
+pub async fn get_user(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+) -> Result<Option<UserProfile>> {
     let row = sqlx::query_as::<
         _,
         (
@@ -63,9 +69,10 @@ pub async fn get_user(pool: &PgPool, pubkey: &[u8]) -> Result<Option<UserProfile
         r#"
         SELECT pubkey, display_name, avatar_url, about, nip05_handle
         FROM users
-        WHERE pubkey = $1
+        WHERE community_id = $1 AND pubkey = $2
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(pubkey)
     .fetch_optional(pool)
     .await?;
@@ -91,6 +98,7 @@ pub async fn get_user(pool: &PgPool, pubkey: &[u8]) -> Result<Option<UserProfile
 /// but multiple empty strings would violate uniqueness).
 pub async fn update_user_profile(
     pool: &PgPool,
+    community_id: CommunityId,
     pubkey: &[u8],
     display_name: Option<&str>,
     avatar_url: Option<&str>,
@@ -129,8 +137,9 @@ pub async fn update_user_profile(
     }
 
     let sql = format!(
-        "UPDATE users SET {} WHERE pubkey = ${param_idx}",
-        set_parts.join(", ")
+        "UPDATE users SET {} WHERE community_id = ${param_idx} AND pubkey = ${}",
+        set_parts.join(", "),
+        param_idx + 1
     );
     let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
     if display_name.is_some() {
@@ -145,6 +154,7 @@ pub async fn update_user_profile(
     if nip05_handle.is_some() {
         query = query.bind(empty_to_none(nip05_handle));
     }
+    query = query.bind(community_id.as_uuid());
     query = query.bind(pubkey);
     query.execute(pool).await?;
     Ok(())
@@ -154,6 +164,7 @@ pub async fn update_user_profile(
 /// Both `local_part` and `domain` must already be lowercased by the caller.
 pub async fn get_user_by_nip05(
     pool: &PgPool,
+    community_id: CommunityId,
     local_part: &str,
     domain: &str,
 ) -> Result<Option<UserProfile>> {
@@ -171,10 +182,11 @@ pub async fn get_user_by_nip05(
         r#"
         SELECT pubkey, display_name, avatar_url, about, nip05_handle
         FROM users
-        WHERE LOWER(nip05_handle) = LOWER($1)
+        WHERE community_id = $1 AND LOWER(nip05_handle) = LOWER($2)
         LIMIT 1
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(&handle)
     .fetch_optional(pool)
     .await?;
@@ -207,6 +219,7 @@ fn escape_like(input: &str) -> String {
 /// Empty queries return an empty vec and do not hit the database.
 pub async fn search_users(
     pool: &PgPool,
+    community_id: CommunityId,
     query: &str,
     limit: u32,
 ) -> Result<Vec<UserSearchProfile>> {
@@ -224,23 +237,25 @@ pub async fn search_users(
         r#"
         SELECT pubkey, display_name, avatar_url, nip05_handle
         FROM users
-        WHERE LOWER(COALESCE(display_name, '')) LIKE $1 ESCAPE '\'
-           OR LOWER(COALESCE(nip05_handle, '')) LIKE $1 ESCAPE '\'
-           OR LOWER(encode(pubkey, 'hex')) LIKE $1 ESCAPE '\'
+        WHERE community_id = $1
+          AND (LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
+           OR LOWER(COALESCE(nip05_handle, '')) LIKE $2 ESCAPE '\'
+           OR LOWER(encode(pubkey, 'hex')) LIKE $2 ESCAPE '\')
         ORDER BY
             CASE
-                WHEN LOWER(COALESCE(display_name, '')) = $2 THEN 0
-                WHEN LOWER(COALESCE(nip05_handle, '')) = $2 THEN 1
-                WHEN LOWER(encode(pubkey, 'hex')) = $2 THEN 2
-                WHEN LOWER(COALESCE(display_name, '')) LIKE $3 ESCAPE '\' THEN 3
-                WHEN LOWER(COALESCE(nip05_handle, '')) LIKE $3 ESCAPE '\' THEN 4
-                WHEN LOWER(encode(pubkey, 'hex')) LIKE $3 ESCAPE '\' THEN 5
+                WHEN LOWER(COALESCE(display_name, '')) = $3 THEN 0
+                WHEN LOWER(COALESCE(nip05_handle, '')) = $3 THEN 1
+                WHEN LOWER(encode(pubkey, 'hex')) = $3 THEN 2
+                WHEN LOWER(COALESCE(display_name, '')) LIKE $4 ESCAPE '\' THEN 3
+                WHEN LOWER(COALESCE(nip05_handle, '')) LIKE $4 ESCAPE '\' THEN 4
+                WHEN LOWER(encode(pubkey, 'hex')) LIKE $4 ESCAPE '\' THEN 5
                 ELSE 6
             END,
             COALESCE(NULLIF(display_name, ''), NULLIF(nip05_handle, ''), LOWER(encode(pubkey, 'hex')))
-        LIMIT $4
+        LIMIT $5
         "#,
     )
+    .bind(community_id.as_uuid())
     .bind(&contains_pattern)
     .bind(&normalized)
     .bind(&prefix_pattern)
@@ -271,15 +286,17 @@ pub async fn search_users(
 /// agent pubkey doesn't exist in the users table.
 pub async fn set_agent_owner(
     pool: &PgPool,
+    community_id: CommunityId,
     agent_pubkey: &[u8],
     owner_pubkey: &[u8],
 ) -> Result<bool> {
     // Conditional UPDATE: only set owner if currently NULL. This makes
     // "first mint wins" atomic — no TOCTOU race between concurrent mints.
     let result = sqlx::query(
-        r#"UPDATE users SET agent_owner_pubkey = $1 WHERE pubkey = $2 AND agent_owner_pubkey IS NULL"#,
+        r#"UPDATE users SET agent_owner_pubkey = $1 WHERE community_id = $2 AND pubkey = $3 AND agent_owner_pubkey IS NULL"#,
     )
     .bind(owner_pubkey)
+    .bind(community_id.as_uuid())
     .bind(agent_pubkey)
     .execute(pool)
     .await?;
@@ -287,7 +304,8 @@ pub async fn set_agent_owner(
     if result.rows_affected() == 0 {
         // Could be: (a) pubkey not found, or (b) owner already set.
         // Check which case by querying the row.
-        let exists = sqlx::query(r#"SELECT 1 FROM users WHERE pubkey = $1"#)
+        let exists = sqlx::query(r#"SELECT 1 FROM users WHERE community_id = $1 AND pubkey = $2"#)
+            .bind(community_id.as_uuid())
             .bind(agent_pubkey)
             .fetch_optional(pool)
             .await?;
@@ -307,11 +325,13 @@ pub async fn set_agent_owner(
 /// Returns Some((policy_str, owner_bytes_or_none)) if found.
 pub async fn get_agent_channel_policy(
     pool: &PgPool,
+    community_id: CommunityId,
     pubkey: &[u8],
 ) -> Result<Option<(String, Option<Vec<u8>>)>> {
     let row = sqlx::query(
-        r#"SELECT channel_add_policy::text AS channel_add_policy, agent_owner_pubkey FROM users WHERE pubkey = $1"#,
+        r#"SELECT channel_add_policy::text AS channel_add_policy, agent_owner_pubkey FROM users WHERE community_id = $1 AND pubkey = $2"#,
     )
+    .bind(community_id.as_uuid())
     .bind(pubkey)
     .fetch_optional(pool)
     .await?;
@@ -329,12 +349,14 @@ pub async fn get_agent_channel_policy(
 /// `get_agent_channel_policy`, which would fetch unrelated fields.
 pub async fn is_agent_owner(
     pool: &PgPool,
+    community_id: CommunityId,
     target_pubkey: &[u8],
     actor_pubkey: &[u8],
 ) -> Result<bool> {
     let row = sqlx::query_scalar::<_, bool>(
-        "SELECT agent_owner_pubkey = $2 FROM users WHERE pubkey = $1 AND agent_owner_pubkey IS NOT NULL",
+        "SELECT agent_owner_pubkey = $3 FROM users WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL",
     )
+    .bind(community_id.as_uuid())
     .bind(target_pubkey)
     .bind(actor_pubkey)
     .fetch_optional(pool)
@@ -345,16 +367,22 @@ pub async fn is_agent_owner(
 /// Set the channel_add_policy for a user.
 /// Returns an error if the pubkey is not found (rows_affected == 0).
 /// Returns an error if `policy` is not one of the valid ENUM values.
-pub async fn set_channel_add_policy(pool: &PgPool, pubkey: &[u8], policy: &str) -> Result<()> {
+pub async fn set_channel_add_policy(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkey: &[u8],
+    policy: &str,
+) -> Result<()> {
     if !matches!(policy, "anyone" | "owner_only" | "nobody") {
         return Err(crate::error::DbError::InvalidData(format!(
             "invalid channel_add_policy: {policy}"
         )));
     }
     let result = sqlx::query(
-        r#"UPDATE users SET channel_add_policy = $1::channel_add_policy WHERE pubkey = $2"#,
+        r#"UPDATE users SET channel_add_policy = $1::channel_add_policy WHERE community_id = $2 AND pubkey = $3"#,
     )
     .bind(policy)
+    .bind(community_id.as_uuid())
     .bind(pubkey)
     .execute(pool)
     .await?;
@@ -385,28 +413,41 @@ mod tests {
         Keys::generate().public_key().to_bytes().to_vec()
     }
 
+    async fn make_community(pool: &PgPool) -> CommunityId {
+        let id = uuid::Uuid::new_v4();
+        let host = format!("user-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        CommunityId::from_uuid(id)
+    }
+
     /// Setting an agent owner then reading back the policy should return
     /// the default "anyone" policy and the owner pubkey.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_and_get_policy() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let agent_pk = random_pubkey();
         let owner_pk = random_pubkey();
 
-        ensure_user(&db.pool, &agent_pk)
+        ensure_user(&db.pool, community, &agent_pk)
             .await
             .expect("ensure agent");
-        ensure_user(&db.pool, &owner_pk)
+        ensure_user(&db.pool, community, &owner_pk)
             .await
             .expect("ensure owner");
 
-        let was_set = set_agent_owner(&db.pool, &agent_pk, &owner_pk)
+        let was_set = set_agent_owner(&db.pool, community, &agent_pk, &owner_pk)
             .await
             .expect("set_agent_owner");
         assert!(was_set, "first set_agent_owner should return true");
 
-        let result = get_agent_channel_policy(&db.pool, &agent_pk)
+        let result = get_agent_channel_policy(&db.pool, community, &agent_pk)
             .await
             .expect("get_agent_channel_policy");
 
@@ -424,14 +465,17 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_set_channel_add_policy() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let pk = random_pubkey();
-        ensure_user(&db.pool, &pk).await.expect("ensure user");
+        ensure_user(&db.pool, community, &pk)
+            .await
+            .expect("ensure user");
 
         // owner_only
-        set_channel_add_policy(&db.pool, &pk, "owner_only")
+        set_channel_add_policy(&db.pool, community, &pk, "owner_only")
             .await
             .expect("set owner_only");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, &pk)
+        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -439,10 +483,10 @@ mod tests {
         assert!(owner.is_none(), "no owner was set");
 
         // nobody
-        set_channel_add_policy(&db.pool, &pk, "nobody")
+        set_channel_add_policy(&db.pool, community, &pk, "nobody")
             .await
             .expect("set nobody");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, &pk)
+        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -450,10 +494,10 @@ mod tests {
         assert!(owner.is_none());
 
         // anyone (reset to default)
-        set_channel_add_policy(&db.pool, &pk, "anyone")
+        set_channel_add_policy(&db.pool, community, &pk, "anyone")
             .await
             .expect("set anyone");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, &pk)
+        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -467,9 +511,10 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_get_policy_unknown_pubkey() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let pk = random_pubkey();
 
-        let result = get_agent_channel_policy(&db.pool, &pk)
+        let result = get_agent_channel_policy(&db.pool, community, &pk)
             .await
             .expect("query should not error");
 
@@ -482,15 +527,16 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_nonexistent_agent() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let agent_pk = random_pubkey();
         let owner_pk = random_pubkey();
 
         // Only ensure the owner exists -- agent is intentionally absent.
-        ensure_user(&db.pool, &owner_pk)
+        ensure_user(&db.pool, community, &owner_pk)
             .await
             .expect("ensure owner");
 
-        let result = set_agent_owner(&db.pool, &agent_pk, &owner_pk).await;
+        let result = set_agent_owner(&db.pool, community, &agent_pk, &owner_pk).await;
         assert!(
             result.is_err(),
             "should error when agent pubkey is not in users table"
@@ -502,28 +548,33 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_set_agent_owner_already_owned() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let agent_pk = random_pubkey();
         let owner1 = random_pubkey();
         let owner2 = random_pubkey();
 
-        ensure_user(&db.pool, &agent_pk)
+        ensure_user(&db.pool, community, &agent_pk)
             .await
             .expect("ensure agent");
-        ensure_user(&db.pool, &owner1).await.expect("ensure owner1");
-        ensure_user(&db.pool, &owner2).await.expect("ensure owner2");
+        ensure_user(&db.pool, community, &owner1)
+            .await
+            .expect("ensure owner1");
+        ensure_user(&db.pool, community, &owner2)
+            .await
+            .expect("ensure owner2");
 
-        let first = set_agent_owner(&db.pool, &agent_pk, &owner1)
+        let first = set_agent_owner(&db.pool, community, &agent_pk, &owner1)
             .await
             .expect("first set");
         assert!(first, "first set should succeed");
 
-        let second = set_agent_owner(&db.pool, &agent_pk, &owner2)
+        let second = set_agent_owner(&db.pool, community, &agent_pk, &owner2)
             .await
             .expect("second set should not error");
         assert!(!second, "second set should return false (already owned)");
 
         // Verify original owner is preserved.
-        let (_, owner) = get_agent_channel_policy(&db.pool, &agent_pk)
+        let (_, owner) = get_agent_channel_policy(&db.pool, community, &agent_pk)
             .await
             .expect("get policy")
             .expect("should be Some");
@@ -536,9 +587,10 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_set_channel_add_policy_nonexistent_user() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let pk = random_pubkey();
 
-        let result = set_channel_add_policy(&db.pool, &pk, "nobody").await;
+        let result = set_channel_add_policy(&db.pool, community, &pk, "nobody").await;
         assert!(
             result.is_err(),
             "should error when pubkey is not in users table"
@@ -549,9 +601,10 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_set_channel_add_policy_rejects_invalid() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let pubkey = nostr::Keys::generate().public_key().to_bytes().to_vec();
-        ensure_user(&db.pool, &pubkey).await.unwrap();
-        let result = set_channel_add_policy(&db.pool, &pubkey, "invalid_policy").await;
+        ensure_user(&db.pool, community, &pubkey).await.unwrap();
+        let result = set_channel_add_policy(&db.pool, community, &pubkey, "invalid_policy").await;
         assert!(result.is_err(), "should reject invalid policy value");
     }
 
@@ -595,14 +648,17 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn test_owner_only_with_no_owner() {
         let db = setup_db().await;
+        let community = make_community(&db.pool).await;
         let pk = random_pubkey();
-        ensure_user(&db.pool, &pk).await.expect("ensure user");
+        ensure_user(&db.pool, community, &pk)
+            .await
+            .expect("ensure user");
 
-        set_channel_add_policy(&db.pool, &pk, "owner_only")
+        set_channel_add_policy(&db.pool, community, &pk, "owner_only")
             .await
             .expect("set owner_only");
 
-        let result = get_agent_channel_policy(&db.pool, &pk)
+        let result = get_agent_channel_policy(&db.pool, community, &pk)
             .await
             .expect("get policy")
             .expect("should be Some");

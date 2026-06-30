@@ -43,7 +43,7 @@ unacceptable behavior to **conduct@buzz-relay.org**.
 | Node.js | 24+ | Required for desktop app commands and `just ci` |
 | pnpm | 10+ | Required for desktop app commands and `just ci` |
 | Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
-| Docker | 24+ | For Postgres, Redis, Typesense |
+| Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | latest | Optional; run `lefthook install` for local Git hooks |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
@@ -85,9 +85,9 @@ cached thereafter). You can also run `just bootstrap` independently at any time;
 it is safe to re-run.
 
 `just setup` then starts Docker services (Postgres on `:5432`, Redis on `:6379`,
-Typesense on `:8108`, Adminer on `:8082`, Keycloak on `:8180` for local
-OAuth/OIDC testing, MinIO on `:9000` for media storage, and Prometheus on
-`:9090` for metrics) and runs all pending database migrations.
+Adminer on `:8082`, Keycloak on `:8180` for local OAuth/OIDC testing, MinIO on
+`:9000` for media storage, and Prometheus on `:9090` for metrics) and runs all
+pending database migrations.
 
 ### Running the Relay and Desktop App
 
@@ -141,14 +141,11 @@ already running.
 
 End-to-end tests live in `crates/buzz-test-client/tests/`:
 
-- `e2e_rest_api.rs` — REST API tests
 - `e2e_relay.rs` — WebSocket relay tests
 - `e2e_mcp.rs` — MCP tool tests
 - `e2e_nostr_interop.rs` — Nostr protocol interoperability tests
-- `e2e_tokens.rs` — token management tests
 - `e2e_media.rs` — media upload/download tests
 - `e2e_media_extended.rs` — extended media tests (GIF, image processing)
-- `e2e_workflows.rs` — workflow tests
 
 Run them with (requires running infrastructure):
 
@@ -372,16 +369,20 @@ for team access setup, onboarding, and the full repo inventory. See
 
    `handle_side_effects()` runs after the event is stored — use it for
    notifications, cache invalidation, or derived data. If the new kind
-   also needs a REST surface (e.g., a query endpoint for clients), add a
-   handler in `crates/buzz-relay/src/api/` and register it in
+   also needs an HTTP bridge surface (for example, a protocol helper that
+   cannot practically use WebSocket), add a handler in
+   `crates/buzz-relay/src/api/` and register it in
    `crates/buzz-relay/src/router.rs`.
 
 5. **Persist to the database** — if the event needs to be queryable, add a
    handler in `buzz-db/src/` (e.g., `buzz-db/src/my_feature.rs`) with
    the appropriate `INSERT` and `SELECT` queries.
 
-6. **Index for search** (if applicable) — add the kind to the Typesense
-   indexing logic in `buzz-search/src/index.rs`.
+6. **Index for search** (if applicable) — Postgres FTS indexes persisted
+   events automatically via the `events.search_tsv` generated column. To
+   exclude a privacy-sensitive kind from search, add it to the `CASE WHEN
+   kind IN (...)` exclusion in the `search_tsv` definition (see the initial
+   schema migration) rather than wiring a separate indexer.
 
 7. **Audit** — the audit log captures all events automatically; no changes
    needed unless you need custom audit metadata.
@@ -397,50 +398,35 @@ for team access setup, onboarding, and the full repo inventory. See
 
 ## How to Add a New API Endpoint
 
-REST endpoints live in `crates/buzz-relay/src/api/` — each resource has
-its own submodule (e.g., `channels.rs`, `messages.rs`, `tokens.rs`). Routes
-are registered in `crates/buzz-relay/src/router.rs`.
+Prefer a signed Nostr event and the existing WebSocket/`POST /events` ingest
+path over adding endpoint-specific JSON APIs. The relay intentionally exposes
+only a narrow HTTP surface: NIP-11/NIP-05 metadata, `/events`, `/query`,
+`/count`, `/hooks/{id}`, Blossom media, git smart HTTP, git policy hooks, and
+health probes.
 
-1. **Define the handler function:**
+If an HTTP endpoint is still necessary:
 
-   ```rust
-   pub async fn get_my_resource(
-       State(state): State<Arc<AppState>>,
-       headers: HeaderMap,
-       Path(channel_id_str): Path<String>,
-   ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-       let channel_id = uuid::Uuid::parse_str(&channel_id_str)
-           .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid channel_id"))?;
-       let ctx = extract_auth_context(&headers, &state).await?;
-       buzz_auth::require_scope(&ctx.scopes, buzz_auth::Scope::ChannelsRead)
-           .map_err(scope_error)?;
-       let pubkey_bytes = ctx.pubkey_bytes.clone();
-       check_token_channel_access(&ctx, &channel_id)?;
-       check_channel_access(&state, channel_id, &pubkey_bytes).await?;
-       // Fetch data
-       let data = state.db.get_my_resource(channel_id).await
-           .map_err(|e| internal_error(&e.to_string()))?;
-       Ok(Json(serde_json::json!(data)))
-   }
-   ```
+1. **Define the handler** in the appropriate module under
+   `crates/buzz-relay/src/api/`. Resolve the request tenant before any auth or
+   data lookup, use NIP-98 when the endpoint accepts user credentials, and keep
+   community scoping explicit.
 
-2. **Register the route** in `crates/buzz-relay/src/router.rs`:
+2. **Register the route** in `crates/buzz-relay/src/router.rs` using the
+   narrowest path possible. Do not add new `/api/*` compatibility routes unless
+   the product decision explicitly calls for one.
 
-   ```rust
-   .route("/api/channels/{channel_id}/my-resource", get(get_my_resource))
-   ```
+3. **Add database queries** in `buzz-db/src/` only when the endpoint cannot be
+   expressed through the existing event query paths.
 
-3. **Add the database query** in `buzz-db/src/` — follow the existing
-   patterns in `channel.rs`, `event.rs`, etc.
+4. **Handle errors** using the `api_error()`, `internal_error()`, and
+   `not_found()` helpers in `buzz-relay/src/api/mod.rs`. Return
+   `(StatusCode, Json<Value>)` tuples.
 
-4. **Handle errors** — use the `api_error()` and `internal_error()` helpers in
-   `buzz-relay/src/api/mod.rs`. Return `(StatusCode, Json<Value>)` tuples.
+5. **Write tests** with the `buzz-test-client` harness in
+   `crates/buzz-test-client/tests/`, covering auth, community scoping, and the
+   relevant success path.
 
-5. **Write tests** — add an integration test using the `buzz-test-client`
-   harness in `crates/buzz-test-client/tests/e2e_rest_api.rs`.
-
-6. **Document** — if the endpoint is part of the public API surface, add it
-   to the API reference section of `README.md` or a dedicated `API.md`.
+6. **Document** any public endpoint in `ARCHITECTURE.md` and user-facing docs.
 
 ---
 

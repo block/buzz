@@ -44,6 +44,15 @@ const BROWSER_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 pub trait TokenSource: Send + Sync {
     async fn bearer(&self) -> Result<String, AgentError>;
 
+    /// Return a bearer token from cache or refresh, **never** opening a browser.
+    ///
+    /// The default delegates to [`bearer`](Self::bearer) — correct for token
+    /// sources (e.g. static API keys) that can never trigger a browser flow.
+    /// [`PkceOAuthTokenSource`] overrides this to stop before the browser step.
+    async fn bearer_no_browser(&self) -> Result<String, AgentError> {
+        self.bearer().await
+    }
+
     /// Force a fresh bearer after the server rejected the current one (401).
     ///
     /// `rejected` is the exact access token that just got the 401. Unlike
@@ -287,6 +296,10 @@ impl TokenSource for PkceOAuthTokenSource {
         Ok(bearer)
     }
 
+    async fn bearer_no_browser(&self) -> Result<String, AgentError> {
+        self.try_bearer_no_browser().await
+    }
+
     /// Force-refresh after a 401, never touching the browser flow.
     ///
     /// `rejected` is the access token the server just 401'd. Coalescing keys
@@ -341,6 +354,68 @@ impl TokenSource for PkceOAuthTokenSource {
             //    which would hang a headless harness.
             Err(e) => Err(AgentError::LlmAuth(format!("token refresh failed: {e}"))),
         }
+    }
+}
+
+impl PkceOAuthTokenSource {
+    /// Return a bearer token from cache or refresh, **never** opening a browser.
+    ///
+    /// Follows the same steps as [`bearer`](TokenSource::bearer) but stops at
+    /// step 4 — if no usable token is available after cache + refresh attempts,
+    /// returns `Err(LlmAuth(...))` instead of launching the browser PKCE flow.
+    /// Used by model-discovery paths that must not block on user interaction.
+    pub(crate) async fn try_bearer_no_browser(&self) -> Result<String, AgentError> {
+        let mut state = self.state.lock().await;
+
+        // 1. In-memory cache hit, still fresh.
+        if let Some(tok) = state.as_ref() {
+            if !is_expired(tok) {
+                return Ok(tok.access_token.clone());
+            }
+        }
+
+        // 2. Re-read disk — another process may have refreshed already.
+        if let Some(disk_tok) = read_cache(&self.cache_path) {
+            if !is_expired(&disk_tok) {
+                let bearer = disk_tok.access_token.clone();
+                *state = Some(disk_tok);
+                return Ok(bearer);
+            }
+        }
+
+        // 3. Try refresh if we have a refresh token.  Endpoints are discovered
+        //    lazily here — only when a refresh token is actually present — so
+        //    that an unreachable OIDC discovery URL cannot prevent the
+        //    no-token/no-cache path from returning `LlmAuth` (graceful
+        //    fallback) instead of `Llm` (hard error).
+        let refresh = state.as_ref().and_then(|t| t.refresh_token.clone());
+        if let Some(rt) = refresh {
+            let endpoints = self.endpoints().await?;
+            match self.refresh(&endpoints, &rt).await {
+                Ok(fresh) => {
+                    let bearer = fresh.access_token.clone();
+                    self.save(&mut state, fresh)?;
+                    return Ok(bearer);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "oauth refresh failed during model discovery");
+                }
+            }
+
+            // 4. Re-read disk after refresh failure.
+            if let Some(disk_tok) = read_cache(&self.cache_path) {
+                if !is_expired(&disk_tok) {
+                    let bearer = disk_tok.access_token.clone();
+                    *state = Some(disk_tok);
+                    return Ok(bearer);
+                }
+            }
+        }
+
+        // No usable token — return error instead of opening a browser.
+        Err(AgentError::LlmAuth(
+            "no cached Databricks token; run `buzz-agent auth databricks` first".into(),
+        ))
     }
 }
 
@@ -725,5 +800,46 @@ mod tests {
             err_msg.contains("oauth discovery"),
             "expected discovery error, got: {err_msg}"
         );
+    }
+
+    /// `try_bearer_no_browser` with an empty cache and no refresh token must
+    /// return `LlmAuth` immediately — it must NOT attempt OIDC discovery even
+    /// when the `discovery_url` is unreachable/invalid.  This guards the
+    /// regression where `endpoints()` was called unconditionally before the
+    /// refresh-token check, causing an `Llm` error (hard failure) instead of
+    /// the intended graceful `LlmAuth` fallback.
+    #[tokio::test]
+    async fn test_try_bearer_no_browser_empty_cache_no_refresh_returns_llm_auth_without_discovery()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        // Intentionally invalid/unreachable discovery URL — if endpoints() is
+        // called, the test will get an `Llm` error and the assertion below fails.
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://invalid.example.test/.well-known/oauth-authorization-server"
+                .into(),
+            client_id: "test-client".into(),
+            scopes: vec!["offline_access".into()],
+            cache_namespace: "test".into(),
+            cache_dir_override: Some(dir.path().to_path_buf()),
+        };
+        let source = PkceOAuthTokenSource::new(cfg).unwrap();
+
+        // Empty in-memory state (no token, no refresh token).
+        {
+            let mut state = source.state.lock().await;
+            *state = None;
+        }
+
+        // No disk cache file either — dir is empty.
+
+        let result = source.try_bearer_no_browser().await;
+        assert!(result.is_err(), "expected Err, got Ok");
+        match result.unwrap_err() {
+            AgentError::LlmAuth(_) => {} // correct: graceful fallback
+            other => panic!(
+                "expected LlmAuth (no discovery attempted), got: {other:?}\n\
+                 This means endpoints() was called before the refresh-token check."
+            ),
+        }
     }
 }

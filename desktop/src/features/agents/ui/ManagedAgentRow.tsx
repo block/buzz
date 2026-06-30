@@ -16,6 +16,7 @@ import type {
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { truncatePubkey } from "./agentUi";
@@ -171,6 +172,12 @@ export function ManagedAgentRow({
             selectedAgent={agent}
             variant="inline"
           />
+          <div className="mt-4 border-t border-border/50 pt-3">
+            <p className="mb-2 text-xs font-medium text-muted-foreground">
+              Configuration
+            </p>
+            <AgentConfigPanel pubkey={agent.pubkey} />
+          </div>
         </div>
       ) : null}
     </div>

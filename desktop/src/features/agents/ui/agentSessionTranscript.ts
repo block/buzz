@@ -357,6 +357,36 @@ export function processTranscriptEvent(
           );
         }
       }
+    } else if (
+      event.kind === "acp_write" &&
+      method === "_goose/unstable/session/steer"
+    ) {
+      const promptText = extractPromptText(payload);
+      if (promptText) {
+        const parsedPrompt = parsePromptText(promptText);
+        if (parsedPrompt.userText) {
+          upsertMessage(
+            d,
+            `steer:${ch}:${event.turnId ?? event.seq}`,
+            "user",
+            parsedPrompt.userTitle,
+            parsedPrompt.userText,
+            event.timestamp,
+            channelId,
+            parsedPrompt.userPubkey,
+          );
+        }
+        if (parsedPrompt.sections.length > 0) {
+          upsertMetadata(
+            d,
+            `steer-context:${ch}:${event.turnId ?? event.seq}`,
+            "Prompt context",
+            parsedPrompt.sections,
+            event.timestamp,
+            channelId,
+          );
+        }
+      }
     } else if (event.kind === "acp_read" && method === "session/update") {
       const params = asRecord(payload.params);
       const update = asRecord(params.update);
@@ -375,15 +405,20 @@ export function processTranscriptEvent(
           channelId,
         );
       } else if (updateType === "user_message_chunk") {
-        upsertMessage(
-          d,
-          `user:${ch}:${messageId ?? turnKey}`,
-          "user",
-          "User",
-          extractContentText(update.content),
-          event.timestamp,
-          channelId,
-        );
+        // Suppress user_message_chunk echo when a steer already rendered
+        // the user message for this turn (Goose echoes steered content back).
+        const steerKey = `steer:${ch}:${event.turnId ?? event.seq}`;
+        if (!d.itemsById.has(steerKey)) {
+          upsertMessage(
+            d,
+            `user:${ch}:${messageId ?? turnKey}`,
+            "user",
+            "User",
+            extractContentText(update.content),
+            event.timestamp,
+            channelId,
+          );
+        }
       } else if (updateType === "agent_thought_chunk") {
         upsertTextItem(
           d,

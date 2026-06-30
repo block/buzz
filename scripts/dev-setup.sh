@@ -59,7 +59,6 @@ load_env() {
   if [[ "${PGUSER:-}" == "sprout" ]]; then PGUSER="buzz"; fi
   if [[ "${PGPASSWORD:-}" == "sprout_dev" ]]; then PGPASSWORD="buzz_dev"; fi
   if [[ "${PGDATABASE:-}" == "sprout" ]]; then PGDATABASE="buzz"; fi
-  if [[ "${TYPESENSE_API_KEY:-}" == "sprout_dev_key" ]]; then TYPESENSE_API_KEY="buzz_dev_key"; fi
 
   export DATABASE_URL="${DATABASE_URL:-postgres://buzz:buzz_dev@localhost:5432/buzz}"
   export PGHOST="${PGHOST:-localhost}"
@@ -68,13 +67,11 @@ load_env() {
   export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
   export PGDATABASE="${PGDATABASE:-buzz}"
   export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
-  export TYPESENSE_API_KEY="${TYPESENSE_API_KEY:-buzz_dev_key}"
-  export TYPESENSE_URL="${TYPESENSE_URL:-http://localhost:8108}"
 }
 
 cleanup_legacy_sprout_containers() {
   local legacy_containers
-  legacy_containers=$(docker ps -a --format '{{.Names}}' | grep -E '^sprout-(postgres|redis|typesense|adminer|keycloak|minio|minio-init|prometheus)$' || true)
+  legacy_containers=$(docker ps -a --format '{{.Names}}' | grep -E '^sprout-(postgres|redis|adminer|keycloak|minio|minio-init|prometheus)$' || true)
   if [[ -z "${legacy_containers}" ]]; then
     return
   fi
@@ -132,6 +129,7 @@ until postgres_accepting_connections; do
 done
 
 "${REPO_ROOT}/bin/cargo" run -p buzz-admin -- migrate
+"${REPO_ROOT}/scripts/seed-local-community.sh"
 success "Database migrations complete"
 
 # ---- Install desktop dependencies -------------------------------------------
@@ -184,7 +182,6 @@ echo -e "${GREEN}=======================================================${NC}"
 echo ""
 echo -e "  ${BLUE}Postgres${NC}    ${DATABASE_URL}"
 echo -e "  ${BLUE}Redis${NC}       ${REDIS_URL}"
-echo -e "  ${BLUE}Typesense${NC}   ${TYPESENSE_URL}  (key: ${TYPESENSE_API_KEY})"
 echo -e "  ${BLUE}Adminer${NC}     http://localhost:8082  (DB browser)"
 echo -e "  ${BLUE}Keycloak${NC}    http://localhost:8180  (admin / admin — local OAuth testing)"
 echo ""

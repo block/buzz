@@ -50,12 +50,13 @@ export function useChannelProfilePanel({
     setProfilePanelPubkey(null);
   }, [setProfilePanelPubkey]);
 
+  const openDmMutateAsync = openDmMutation.mutateAsync;
   const handleOpenDm = React.useCallback(
     async (pubkeys: string[]) => {
-      const dm = await openDmMutation.mutateAsync({ pubkeys });
+      const dm = await openDmMutateAsync({ pubkeys });
       await goChannel(dm.id);
     },
-    [goChannel, openDmMutation],
+    [goChannel, openDmMutateAsync],
   );
 
   return {

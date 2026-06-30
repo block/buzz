@@ -180,6 +180,25 @@ pub(crate) fn nip11_facts(state: &crate::state::AppState) -> (Option<String>, bo
     (relay_self, advertise_nip43)
 }
 
+/// Multi-tenant conformance static-input fence (surface row "NIP-11 relay info
+/// and relay `self`").
+///
+/// The conformance obligation: `RelayInfo::build` "must not grow unscoped
+/// DB/search/audit inputs", so an unauthenticated NIP-11 read can never become
+/// an enumeration oracle for other communities. Today `build` takes only static
+/// and scalar inputs — the per-deployment facts arrive pre-derived through
+/// [`nip11_facts`], which reads config and the relay keypair only.
+///
+/// This const binds `RelayInfo::build` to its **exact** allowed signature. The
+/// moment someone adds a `&Db`, `&AppState`, a search handle, an audit handle,
+/// or any other unscoped input, the function pointer's type stops matching and
+/// **this file fails to compile** — turning a silent cross-tenant leak into a
+/// hard build break, the same way a deny-lint would. If you must change this
+/// signature, you are changing the conformance contract: update the conformance
+/// doc and prove the new input is host-scoped, not unscoped, first.
+const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(Option<&str>, bool, usize) -> RelayInfo =
+    RelayInfo::build;
+
 #[cfg(test)]
 mod tests {
     use super::*;

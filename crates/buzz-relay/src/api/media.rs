@@ -6,6 +6,7 @@
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::http::header;
 use axum::{
@@ -17,6 +18,7 @@ use axum::{
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_auth::Scope;
+use buzz_core::tenant::TenantContext;
 use buzz_media::{BlobDescriptor, MediaError};
 use sha2::{Digest, Sha256};
 
@@ -32,6 +34,79 @@ pub(crate) struct AuthenticatedUpload {
     auth_event: nostr::Event,
     #[allow(dead_code)] // scopes validated in extractor; stored for future per-scope handler logic
     scopes: Vec<Scope>,
+    /// Community resolved from the request host at extraction time (row zero for
+    /// this HTTP door), identical to the WS door in `router.rs` and the bridge
+    /// door in `bridge.rs`. Server-resolved, never client-supplied.
+    tenant: TenantContext,
+    _upload_permit: UploadPermit,
+}
+
+const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
+
+struct UploadPermit {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    in_flight: Arc<dashmap::DashMap<[u8; 32], u32>>,
+    pubkey: [u8; 32],
+}
+
+impl Drop for UploadPermit {
+    fn drop(&mut self) {
+        use dashmap::mapref::entry::Entry;
+
+        if let Entry::Occupied(mut entry) = self.in_flight.entry(self.pubkey) {
+            if *entry.get() <= 1 {
+                entry.remove();
+            } else {
+                *entry.get_mut() -= 1;
+            }
+        }
+    }
+}
+
+fn upload_rate_limited(state: &AppState, pubkey: &nostr::PublicKey) -> bool {
+    let key: [u8; 32] = pubkey.to_bytes();
+    let now = Instant::now();
+    let limit = state.config.media_uploads_per_minute;
+    let mut entry = state
+        .media_upload_rate_limiter
+        .entry(key)
+        .or_insert((0, now));
+    let (count, window_start) = entry.value_mut();
+    if now.duration_since(*window_start) >= MEDIA_UPLOAD_RATE_WINDOW {
+        *count = 1;
+        *window_start = now;
+        return false;
+    }
+    if *count >= limit {
+        return true;
+    }
+    *count += 1;
+    false
+}
+
+fn acquire_upload_permit(
+    state: &AppState,
+    pubkey: &nostr::PublicKey,
+) -> Result<UploadPermit, MediaError> {
+    let global = state
+        .media_upload_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| MediaError::UploadConcurrencyLimitReached)?;
+
+    let key: [u8; 32] = pubkey.to_bytes();
+    let mut in_flight = state.media_uploads_in_flight.entry(key).or_insert(0);
+    if *in_flight >= state.config.media_max_concurrent_uploads_per_pubkey {
+        return Err(MediaError::UploadConcurrencyLimitReached);
+    }
+    *in_flight += 1;
+    drop(in_flight);
+
+    Ok(UploadPermit {
+        _global: global,
+        in_flight: Arc::clone(&state.media_uploads_in_flight),
+        pubkey: key,
+    })
 }
 
 impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
@@ -43,19 +118,41 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
     ) -> Result<Self, Self::Rejection> {
         let headers = &parts.headers;
 
-        // 1. Extract and validate Blossom auth event
+        // 1. Row zero: bind this upload to its community from the request host,
+        // identical to the WS door in `router.rs` and the bridge door in
+        // `bridge.rs`. Fail-closed: an unmapped host or lookup failure is a
+        // generic `NotFound` (404) — never a default tenant, never echoing the
+        // host, so an unauthenticated caller cannot probe which communities
+        // exist on this deployment.
+        //
+        // This MUST run before scope resolution so the API-token lookup is
+        // keyed on (community_id, token_hash) — see Gap 2 / row-44 conformance
+        // obligation. Resolving scopes without a tenant in hand would query
+        // api_tokens by hash alone, defeating the cross-community fence.
+        //
+        // It also runs before Blossom auth verification (step 2) so the
+        // `server`-tag check validates against the *bound tenant host*, not a
+        // process-global domain — a relay process serves many tenant hosts, and
+        // the stock CLI tags its own configured relay host (conformance row 52).
+        // Binding only reads the Host header — no request body is buffered — so
+        // doing it first preserves the pre-body auth-rejection guarantee.
+        let raw_host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let tenant = crate::tenant::bind_community(&state.db, raw_host)
+            .await
+            .map_err(|_| MediaError::NotFound)?;
+
+        // 2. Extract and validate Blossom auth event against the bound host.
         let auth_event = extract_blossom_auth(headers)?;
         // Use the permissive window (3600s) here because we don't know the
         // content type yet.  The upload functions re-verify with the correct
         // per-type window (600s for images, 3600s for video) after the body
         // has been consumed and the SHA-256 computed.
-        buzz_media::auth::verify_blossom_auth_event(
-            &auth_event,
-            state.config.media.server_domain.as_deref(),
-            3600,
-        )?;
+        buzz_media::auth::verify_blossom_auth_event(&auth_event, Some(tenant.host()), 3600)?;
 
-        // 2. Require X-SHA-256 header (BUD-11: mandatory for PUT /upload)
+        // 3. Require X-SHA-256 header (BUD-11: mandatory for PUT /upload)
         let claimed_hash = headers
             .get("x-sha-256")
             .and_then(|v| v.to_str().ok())
@@ -70,7 +167,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             return Err(MediaError::HashMismatch);
         }
 
-        // 3. Validate X-SHA-256 matches at least one x tag in the auth event
+        // 4. Validate X-SHA-256 matches at least one x tag in the auth event
         let has_matching_x = auth_event
             .tags
             .iter()
@@ -79,22 +176,38 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             return Err(MediaError::HashMismatch);
         }
 
-        // 4. Resolve scopes (API token or dev mode)
-        let scopes = resolve_upload_scopes(headers, state, &auth_event.pubkey).await?;
+        // 5. Resolve scopes (API token or dev mode), scoped to the bound tenant.
+        let scopes = resolve_upload_scopes(headers, state, &tenant, &auth_event.pubkey).await?;
         buzz_auth::require_scope(&scopes, Scope::FilesWrite)
             .map_err(|_| MediaError::InsufficientScope)?;
 
-        // 5. Relay membership gate (NIP-43).
+        // 6. Relay membership gate (NIP-43).
         let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
         crate::api::relay_members::enforce_relay_membership(
             state,
+            tenant.community(),
             auth_event.pubkey.as_bytes(),
             auth_tag,
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
 
-        Ok(AuthenticatedUpload { auth_event, scopes })
+        if upload_rate_limited(state, &auth_event.pubkey) {
+            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
+                .increment(1);
+            return Err(MediaError::UploadRateLimitExceeded);
+        }
+        let upload_permit = acquire_upload_permit(state, &auth_event.pubkey).inspect_err(|_| {
+            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
+                .increment(1);
+        })?;
+
+        Ok(AuthenticatedUpload {
+            auth_event,
+            scopes,
+            tenant,
+            _upload_permit: upload_permit,
+        })
     }
 }
 
@@ -115,9 +228,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
 ///   - Raw binary body (the file bytes)
 ///
 /// Returns a [`BlobDescriptor`] JSON on success.
-// TODO(v2): Add per-pubkey upload rate limiting and storage quotas to prevent
-// bandwidth/storage exhaustion from authenticated callers. Currently mitigated by
-// auth requirement (API token + Blossom signature) and body size limit.
+// TODO(v2): Add persistent per-pubkey storage quotas. Admission limits below
+// bound active parser/storage work, but they do not cap durable bytes stored.
 pub async fn upload_blob(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedUpload,
@@ -129,7 +241,7 @@ pub async fn upload_blob(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let descriptor = if content_type.starts_with("video/") {
+    let mut descriptor = if content_type.starts_with("video/") {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
@@ -138,6 +250,7 @@ pub async fn upload_blob(
         buzz_media::process_video_upload(
             &state.media_storage,
             &state.config.media,
+            &auth.tenant,
             &auth.auth_event,
             body.into_data_stream(),
             content_length,
@@ -167,6 +280,7 @@ pub async fn upload_blob(
             buzz_media::process_upload(
                 &state.media_storage,
                 &state.config.media,
+                &auth.tenant,
                 &auth.auth_event,
                 bytes,
             )
@@ -175,12 +289,19 @@ pub async fn upload_blob(
             buzz_media::process_file_upload(
                 &state.media_storage,
                 &state.config.media,
+                &auth.tenant,
                 &auth.auth_event,
                 bytes,
             )
             .await?
         }
     };
+
+    rewrite_descriptor_urls_for_tenant(
+        &mut descriptor,
+        &state.config.relay_url,
+        auth.tenant.host(),
+    );
 
     // Normalize MIME to a known set to bound label cardinality.
     let mime_label = match descriptor.mime_type.as_str() {
@@ -193,16 +314,14 @@ pub async fn upload_blob(
 
     // Audit via bounded channel — same pattern as event audit.
     let desc = descriptor.clone();
-    let uploader = auth.auth_event.pubkey.to_hex();
     if let Err(e) = state
         .audit_tx
         .send(NewAuditEntry {
-            event_id: desc.sha256.clone(),
-            event_kind: buzz_core::kind::KIND_MEDIA_UPLOAD,
-            actor_pubkey: uploader,
+            community_id: auth.tenant.community(),
             action: AuditAction::MediaUploaded,
-            channel_id: None,
-            metadata: serde_json::json!({
+            actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
+            object_id: Some(desc.sha256.clone()),
+            detail: serde_json::json!({
                 "sha256": desc.sha256,
                 "size": desc.size,
                 "mime": desc.mime_type,
@@ -215,6 +334,48 @@ pub async fn upload_blob(
     }
 
     Ok(Json(descriptor))
+}
+
+pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &str) -> String {
+    let scheme = if config_relay_url.trim_start().starts_with("wss://")
+        || config_relay_url.trim_start().starts_with("https://")
+    {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{tenant_host}/media")
+}
+
+fn rewrite_descriptor_urls_for_tenant(
+    descriptor: &mut BlobDescriptor,
+    config_relay_url: &str,
+    tenant_host: &str,
+) {
+    let base = media_base_url_for_tenant(config_relay_url, tenant_host);
+    let ext = descriptor
+        .url
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|ext| is_safe_ext(ext))
+        .unwrap_or("bin");
+    descriptor.url = format!("{base}/{}.{ext}", descriptor.sha256);
+    if descriptor.thumb.is_some() {
+        descriptor.thumb = Some(format!("{base}/{}.thumb.jpg", descriptor.sha256));
+    }
+}
+
+async fn bind_media_read_tenant(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<TenantContext, MediaError> {
+    let raw_host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| MediaError::NotFound)
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -302,13 +463,14 @@ pub async fn get_blob(
     req_headers: HeaderMap,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
+    let tenant = bind_media_read_tenant(&state, &req_headers).await?;
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
         let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
         let _ = state
             .media_storage
-            .read_sidecar_mime(parent_hash)
+            .read_sidecar_mime(&tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
         "image/jpeg".to_string()
@@ -317,14 +479,14 @@ pub async fn get_blob(
         // the sidecar's canonical extension — sidecar is authoritative.
         let sidecar_mime = state
             .media_storage
-            .read_sidecar_mime(&sha256_ext)
+            .read_sidecar_mime(&tenant, &sha256_ext)
             .await
             .ok_or(MediaError::NotFound)?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
             let sidecar = state
                 .media_storage
-                .get_sidecar(sha256_ext.split('.').next().unwrap_or(&sha256_ext))
+                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
@@ -344,7 +506,7 @@ pub async fn get_blob(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, &sha256_ext).await?;
+    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -480,30 +642,32 @@ fn parse_byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
 /// is missing, we return 404 rather than fall back to untrusted metadata.
 pub async fn head_blob(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
+    let tenant = bind_media_read_tenant(&state, &headers).await?;
 
     // Sidecar gate FIRST — reject before any blob I/O.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
         let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
         let _ = state
             .media_storage
-            .read_sidecar_mime(parent_hash)
+            .read_sidecar_mime(&tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
         "image/jpeg".to_string()
     } else {
         let sidecar_mime = state
             .media_storage
-            .read_sidecar_mime(&sha256_ext)
+            .read_sidecar_mime(&tenant, &sha256_ext)
             .await
             .ok_or(MediaError::NotFound)?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
             let sidecar = state
                 .media_storage
-                .get_sidecar(sha256_ext.split('.').next().unwrap_or(&sha256_ext))
+                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
@@ -513,7 +677,7 @@ pub async fn head_blob(
         sidecar_mime
     };
 
-    let key = resolve_s3_key(&state.media_storage, &sha256_ext).await?;
+    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
     match state.media_storage.head_with_metadata(&key).await? {
         Some(meta) => {
             let size_str = meta.size.to_string();
@@ -541,13 +705,14 @@ pub async fn head_blob(
 /// object-key confusion if sidecar data is ever tampered with.
 async fn resolve_s3_key(
     storage: &buzz_media::MediaStorage,
+    tenant: &TenantContext,
     sha256_ext: &str,
 ) -> Result<String, MediaError> {
     if sha256_ext.contains('.') {
         Ok(sha256_ext.to_string())
     } else {
         let sidecar = storage
-            .get_sidecar(sha256_ext)
+            .get_sidecar(tenant, sha256_ext)
             .await
             .map_err(|_| MediaError::NotFound)?;
         // Validate sidecar ext — never trust storage as authoritative for path construction
@@ -584,14 +749,20 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
     Ok(event)
 }
 
-/// Resolve permission scopes for an upload caller.
+/// Resolve permission scopes for an upload caller, scoped to the request's tenant.
 ///
 /// Resolution order:
 /// 1. `X-Auth-Token: buzz_*` header — API token path (validates owner matches Blossom signer)
 /// 2. If `require_auth_token` is false (dev mode) — check pubkey allowlist, then grant file scopes
+///
+/// The token lookup is keyed on `(tenant.community(), token_hash)` — see
+/// [`buzz_db::api_token::get_api_token_by_hash_including_revoked`] for the
+/// row-44 conformance rationale. A token minted in community A presented to a
+/// host that resolves to community B must not authorize.
 async fn resolve_upload_scopes(
     headers: &HeaderMap,
     state: &AppState,
+    tenant: &TenantContext,
     blossom_pubkey: &nostr::PublicKey,
 ) -> Result<Vec<Scope>, MediaError> {
     // 1. API token path — desktop sends Blossom auth in Authorization + token in X-Auth-Token.
@@ -603,7 +774,7 @@ async fn resolve_upload_scopes(
         let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         let record = state
             .db
-            .get_api_token_by_hash_including_revoked(&hash)
+            .get_api_token_by_hash_including_revoked(tenant.community(), &hash)
             .await
             .map_err(|_| MediaError::Unauthorized)?
             .ok_or(MediaError::Unauthorized)?;
@@ -646,7 +817,7 @@ async fn resolve_upload_scopes(
         let pubkey_bytes = blossom_pubkey.to_bytes().to_vec();
         if !state
             .db
-            .is_pubkey_allowed(&pubkey_bytes)
+            .is_pubkey_allowed(tenant.community(), &pubkey_bytes)
             .await
             .unwrap_or(false)
         {
@@ -745,6 +916,49 @@ mod tests {
     #[test]
     fn test_validate_media_path_rejects_empty() {
         assert!(validate_media_path("").is_err());
+    }
+
+    #[test]
+    fn media_base_url_for_tenant_uses_tenant_host_and_http_scheme() {
+        assert_eq!(
+            media_base_url_for_tenant("wss://config.example", "tenant-b.example"),
+            "https://tenant-b.example/media"
+        );
+        assert_eq!(
+            media_base_url_for_tenant("ws://config.example", "localhost:3100"),
+            "http://localhost:3100/media"
+        );
+    }
+
+    #[test]
+    fn rewrite_descriptor_urls_for_tenant_replaces_global_media_host() {
+        let hash = "a".repeat(64);
+        let mut descriptor = BlobDescriptor {
+            url: format!("https://primary.example/media/{hash}.jpg"),
+            sha256: hash.clone(),
+            size: 42,
+            mime_type: "image/jpeg".to_string(),
+            uploaded: 1700000000,
+            dim: Some("1x1".to_string()),
+            blurhash: None,
+            thumb: Some(format!("https://primary.example/media/{hash}.thumb.jpg")),
+            duration: None,
+        };
+
+        rewrite_descriptor_urls_for_tenant(
+            &mut descriptor,
+            "wss://primary.example",
+            "tenant-b.example",
+        );
+
+        assert_eq!(
+            descriptor.url,
+            format!("https://tenant-b.example/media/{hash}.jpg")
+        );
+        assert_eq!(
+            descriptor.thumb,
+            Some(format!("https://tenant-b.example/media/{hash}.thumb.jpg"))
+        );
     }
 
     #[test]

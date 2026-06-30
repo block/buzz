@@ -10,7 +10,7 @@
 //!   ├── deadpool-redis pool → PUBLISH, SET, ZADD, etc.
 //!   │
 //!   └── dedicated redis::aio::PubSub connection (NOT from pool)
-//!         └── PSUBSCRIBE buzz:channel:*
+//!         └── dynamic SUBSCRIBE buzz:{community}:channel:{id} / buzz:{community}:global
 //!               └── run_subscriber() → broadcast::channel(4096) → N WS receivers
 //! ```
 //!
@@ -25,6 +25,9 @@
 pub mod cache_invalidation;
 /// Error types for pub/sub operations.
 pub mod error;
+/// Redis-backed NIP-98 replay seen-set.
+pub mod nip98_replay;
+pub use nip98_replay::RedisNip98ReplayGuard;
 /// Online/offline presence tracking in Redis.
 pub mod presence;
 /// Redis PUBLISH for channel event fan-out.
@@ -33,23 +36,31 @@ pub mod publisher;
 pub mod rate_limiter;
 /// Redis SUBSCRIBE for channel event delivery.
 pub mod subscriber;
+/// Community-scoped Redis event topics.
+pub mod topic;
 /// Typing indicator tracking in Redis.
 pub use error::PubSubError;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
+use buzz_core::TenantContext;
 use nostr::PublicKey;
-use tokio::sync::broadcast;
-use uuid::Uuid;
+use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::cache_invalidation::{CacheInvalidation, CACHE_INVALIDATION_CHANNEL};
+use crate::cache_invalidation::{
+    cache_invalidation_channel, CacheInvalidation, ScopedCacheInvalidation,
+};
+pub use crate::topic::{channel_key, global_key, EventTopic, EventTopicKey};
 
-/// A Nostr event received on a specific channel, broadcast to local subscribers.
+/// A Nostr event received on a scoped Redis event topic, broadcast to local subscribers.
 #[derive(Debug, Clone)]
 pub struct ChannelEvent {
-    /// Channel the event belongs to.
-    pub channel_id: Uuid,
+    /// Server-resolved community that scoped the Redis topic.
+    pub community_id: buzz_core::CommunityId,
+    /// Tenant-local routing scope for this event.
+    pub topic: EventTopic,
     /// The Nostr event payload.
     pub event: nostr::Event,
 }
@@ -59,14 +70,26 @@ pub struct ChannelEvent {
 pub struct PubSubConfig {
     /// Redis connection URL (e.g. `redis://127.0.0.1:6379`).
     pub redis_url: String,
+    /// Delay before unsubscribing after the last local interest is released.
+    pub unsubscribe_debounce: Duration,
 }
 
 impl PubSubConfig {
+    /// Default delay before unsubscribing after the last local interest is released.
+    pub const DEFAULT_UNSUBSCRIBE_DEBOUNCE: Duration = Duration::from_millis(500);
+
     /// Creates a new `PubSubConfig` with the given Redis URL.
     pub fn new(redis_url: impl Into<String>) -> Self {
         Self {
             redis_url: redis_url.into(),
+            unsubscribe_debounce: Self::DEFAULT_UNSUBSCRIBE_DEBOUNCE,
         }
+    }
+
+    /// Override the unsubscribe debounce delay.
+    pub fn with_unsubscribe_debounce(mut self, debounce: Duration) -> Self {
+        self.unsubscribe_debounce = debounce;
+        self
     }
 }
 
@@ -75,19 +98,38 @@ pub struct PubSubManager {
     pool: deadpool_redis::Pool,
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.
     redis_url: String,
+    /// Delay before unsubscribing after the last local interest is released.
+    unsubscribe_debounce: Duration,
+    /// Local desired topic refcounts; source of truth across Redis reconnects.
+    desired_topics: subscriber::DesiredTopics,
+    subscription_tx: mpsc::Sender<subscriber::SubscriptionCommand>,
+    subscription_rx: Mutex<Option<mpsc::Receiver<subscriber::SubscriptionCommand>>>,
     broadcast_tx: broadcast::Sender<ChannelEvent>,
-    cache_invalidation_tx: broadcast::Sender<CacheInvalidation>,
+    cache_invalidation_tx: broadcast::Sender<ScopedCacheInvalidation>,
 }
 
 impl PubSubManager {
     /// Creates a new `PubSubManager` connected to the given Redis URL.
     pub async fn new(redis_url: &str, pool: deadpool_redis::Pool) -> Result<Self, PubSubError> {
+        Self::with_config(PubSubConfig::new(redis_url), pool).await
+    }
+
+    /// Creates a new `PubSubManager` using explicit pub/sub configuration.
+    pub async fn with_config(
+        config: PubSubConfig,
+        pool: deadpool_redis::Pool,
+    ) -> Result<Self, PubSubError> {
         let (broadcast_tx, _) = broadcast::channel(4096);
         let (cache_invalidation_tx, _) = broadcast::channel(4096);
+        let (subscription_tx, subscription_rx) = mpsc::channel(4096);
 
         Ok(Self {
             pool,
-            redis_url: redis_url.to_string(),
+            redis_url: config.redis_url,
+            unsubscribe_debounce: config.unsubscribe_debounce,
+            desired_topics: Arc::new(Mutex::new(HashMap::new())),
+            subscription_tx,
+            subscription_rx: Mutex::new(Some(subscription_rx)),
             broadcast_tx,
             cache_invalidation_tx,
         })
@@ -98,7 +140,18 @@ impl PubSubManager {
     /// Runs forever — spawn this in a background task. The loop reconnects
     /// with exponential backoff on Redis disconnect (1s → 2s → 4s → … → 30s).
     pub async fn run_subscriber(self: Arc<Self>) {
-        subscriber::run_subscriber(self.redis_url.clone(), self.broadcast_tx.clone()).await;
+        let Some(subscription_rx) = self.subscription_rx.lock().await.take() else {
+            tracing::error!("Redis pub/sub subscriber already started");
+            return;
+        };
+
+        subscriber::run_subscriber(
+            self.redis_url.clone(),
+            self.broadcast_tx.clone(),
+            self.desired_topics.clone(),
+            subscription_rx,
+        )
+        .await;
     }
 
     /// Starts the cache-invalidation subscriber loop with automatic
@@ -116,8 +169,78 @@ impl PubSubManager {
         self.broadcast_tx.subscribe()
     }
 
+    /// Retain local interest in a scoped Redis event topic.
+    ///
+    /// The first retain for a topic asks the subscriber task to `SUBSCRIBE`.
+    /// Additional retains only increment the local desired refcount.
+    pub async fn retain_topic(&self, ctx: &TenantContext, topic: EventTopic) {
+        let topic_key = EventTopicKey::from_context(ctx, topic);
+        let should_subscribe = {
+            let mut desired = self.desired_topics.lock().await;
+            let count = desired.entry(topic_key).or_insert(0);
+            let was_zero = *count == 0;
+            *count += 1;
+            was_zero
+        };
+
+        if should_subscribe {
+            let _ = self
+                .subscription_tx
+                .send(subscriber::SubscriptionCommand::Subscribe(topic_key))
+                .await;
+        }
+    }
+
+    /// Release local interest in a scoped Redis event topic.
+    ///
+    /// When the last retain is released, unsubscribe is delayed by the configured
+    /// debounce. If another retain arrives during that delay, the pending
+    /// unsubscribe becomes a no-op.
+    pub async fn release_topic(&self, ctx: &TenantContext, topic: EventTopic) {
+        let topic_key = EventTopicKey::from_context(ctx, topic);
+        let became_zero = {
+            let mut desired = self.desired_topics.lock().await;
+            let Some(count) = desired.get_mut(&topic_key) else {
+                tracing::warn!(?topic_key, "release_topic called for unretained topic");
+                return;
+            };
+
+            *count -= 1;
+            if *count == 0 {
+                desired.remove(&topic_key);
+                true
+            } else {
+                false
+            }
+        };
+
+        if became_zero {
+            let tx = self.subscription_tx.clone();
+            let debounce = self.unsubscribe_debounce;
+            tokio::spawn(async move {
+                tokio::time::sleep(debounce).await;
+                let _ = tx
+                    .send(subscriber::SubscriptionCommand::UnsubscribeIfIdle(
+                        topic_key,
+                    ))
+                    .await;
+            });
+        }
+    }
+
+    /// Current local desired refcount for tests and metrics.
+    pub async fn topic_refcount(&self, ctx: &TenantContext, topic: EventTopic) -> usize {
+        let topic_key = EventTopicKey::from_context(ctx, topic);
+        self.desired_topics
+            .lock()
+            .await
+            .get(&topic_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Returns a new broadcast receiver for cross-pod cache-invalidation drops.
-    pub fn subscribe_cache_invalidations(&self) -> broadcast::Receiver<CacheInvalidation> {
+    pub fn subscribe_cache_invalidations(&self) -> broadcast::Receiver<ScopedCacheInvalidation> {
         self.cache_invalidation_tx.subscribe()
     }
 
@@ -127,12 +250,13 @@ impl PubSubManager {
     /// DB confirmation, so callers may spawn this without awaiting delivery.
     pub async fn publish_cache_invalidation(
         &self,
+        ctx: &TenantContext,
         invalidation: &CacheInvalidation,
     ) -> Result<i64, PubSubError> {
         let mut conn = self.pool.get().await?;
         let payload = serde_json::to_string(invalidation)?;
         let subscriber_count: i64 = redis::cmd("PUBLISH")
-            .arg(CACHE_INVALIDATION_CHANNEL)
+            .arg(cache_invalidation_channel(ctx))
             .arg(&payload)
             .query_async(&mut conn)
             .await?;
@@ -142,9 +266,9 @@ impl PubSubManager {
     /// Publish an event to the Redis channel. Returns subscriber count.
     ///
     /// Routing note (NIP-ER author-private reminders): events are keyed by
-    /// `channel_id` (`buzz:channel:{id}`), and every relay node's subscriber
-    /// `PSUBSCRIBE buzz:channel:*` — so the channel key is a routing label, not
-    /// an isolation boundary; every node already receives every published event.
+    /// `buzz:{community}:channel:{id}` / `buzz:{community}:global`, and
+    /// relay nodes dynamically subscribe only to topics with local interest —
+    /// so the topic key is a routing label, not an isolation boundary.
     /// Author-private reminders (kind:30300, stored under the nil channel
     /// sentinel) are therefore NOT protected by per-author Redis routing, and
     /// adding it would be pointless: the reminder's author may be connected to
@@ -156,33 +280,48 @@ impl PubSubManager {
     /// domain; the ciphertext is NIP-44-encrypted to the author regardless.
     pub async fn publish_event(
         &self,
-        channel_id: Uuid,
+        ctx: &TenantContext,
+        topic: EventTopic,
         event: &nostr::Event,
     ) -> Result<i64, PubSubError> {
-        publisher::publish_event(&self.pool, channel_id, event).await
+        publisher::publish_event(&self.pool, ctx, topic, event).await
     }
 
     /// Set presence with 60s TTL. Call on connect and every 30s heartbeat.
-    pub async fn set_presence(&self, pubkey: &PublicKey, status: &str) -> Result<(), PubSubError> {
-        presence::set_presence(&self.pool, pubkey, status).await
+    pub async fn set_presence(
+        &self,
+        ctx: &TenantContext,
+        pubkey: &PublicKey,
+        status: &str,
+    ) -> Result<(), PubSubError> {
+        presence::set_presence(&self.pool, ctx, pubkey, status).await
     }
 
     /// Remove presence for `pubkey`. Call on clean disconnect.
-    pub async fn clear_presence(&self, pubkey: &PublicKey) -> Result<(), PubSubError> {
-        presence::clear_presence(&self.pool, pubkey).await
+    pub async fn clear_presence(
+        &self,
+        ctx: &TenantContext,
+        pubkey: &PublicKey,
+    ) -> Result<(), PubSubError> {
+        presence::clear_presence(&self.pool, ctx, pubkey).await
     }
 
     /// Returns the current presence status for `pubkey`, or `None` if not set.
-    pub async fn get_presence(&self, pubkey: &PublicKey) -> Result<Option<String>, PubSubError> {
-        presence::get_presence(&self.pool, pubkey).await
+    pub async fn get_presence(
+        &self,
+        ctx: &TenantContext,
+        pubkey: &PublicKey,
+    ) -> Result<Option<String>, PubSubError> {
+        presence::get_presence(&self.pool, ctx, pubkey).await
     }
 
     /// Returns presence statuses for multiple pubkeys as a `pubkey_hex → status` map.
     pub async fn get_presence_bulk(
         &self,
+        ctx: &TenantContext,
         pubkeys: &[PublicKey],
     ) -> Result<HashMap<String, String>, PubSubError> {
-        presence::get_presence_bulk(&self.pool, pubkeys).await
+        presence::get_presence_bulk(&self.pool, ctx, pubkeys).await
     }
 }
 
@@ -199,7 +338,9 @@ pub(crate) mod test_util {
 mod tests {
     use super::*;
     use crate::test_util::make_test_pool;
+    use buzz_core::{CommunityId, TenantContext};
     use nostr::{EventBuilder, Keys, Kind};
+    use uuid::Uuid;
 
     async fn make_manager() -> Arc<PubSubManager> {
         let pool = make_test_pool();
@@ -208,6 +349,10 @@ mod tests {
                 .await
                 .expect("Failed to create PubSubManager"),
         )
+    }
+
+    fn ctx(id: u128, host: &str) -> TenantContext {
+        TenantContext::resolved(CommunityId::from_uuid(Uuid::from_u128(id)), host)
     }
 
     #[tokio::test]
@@ -220,6 +365,7 @@ mod tests {
         tokio::spawn(async move { manager_clone.run_subscriber().await });
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
+        let ctx = ctx(0xaaaa, "a.example");
         let channel_id = Uuid::new_v4();
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::TextNote, "hello pubsub")
@@ -229,7 +375,11 @@ mod tests {
         let event_id = event.id;
 
         manager
-            .publish_event(channel_id, &event)
+            .retain_topic(&ctx, EventTopic::Channel(channel_id))
+            .await;
+
+        manager
+            .publish_event(&ctx, EventTopic::Channel(channel_id), &event)
             .await
             .expect("publish failed");
 
@@ -238,7 +388,8 @@ mod tests {
             .expect("timeout")
             .expect("channel closed");
 
-        assert_eq!(received.channel_id, channel_id);
+        assert_eq!(received.community_id, ctx.community());
+        assert_eq!(received.topic, EventTopic::Channel(channel_id));
         assert_eq!(received.event.id, event_id);
     }
 
@@ -259,8 +410,10 @@ mod tests {
             pubkey: pubkey.clone(),
         };
 
+        let ctx = ctx(0xaaaa, "a.example");
+
         manager
-            .publish_cache_invalidation(&sent)
+            .publish_cache_invalidation(&ctx, &sent)
             .await
             .expect("publish failed");
 
@@ -269,7 +422,13 @@ mod tests {
             .expect("timeout")
             .expect("channel closed");
 
-        assert_eq!(received, sent);
+        assert_eq!(
+            received,
+            ScopedCacheInvalidation {
+                community_id: ctx.community(),
+                invalidation: sent,
+            }
+        );
     }
 
     #[tokio::test]
@@ -277,19 +436,20 @@ mod tests {
     async fn test_presence_set_and_get() {
         let pool = make_test_pool();
         let pubkey = Keys::generate().public_key();
+        let ctx = ctx(0xaaaa, "a.example");
 
-        let status = presence::get_presence(&pool, &pubkey).await.unwrap();
+        let status = presence::get_presence(&pool, &ctx, &pubkey).await.unwrap();
         assert!(status.is_none());
 
-        presence::set_presence(&pool, &pubkey, "online")
+        presence::set_presence(&pool, &ctx, &pubkey, "online")
             .await
             .unwrap();
-        let status = presence::get_presence(&pool, &pubkey).await.unwrap();
+        let status = presence::get_presence(&pool, &ctx, &pubkey).await.unwrap();
         assert_eq!(status.as_deref(), Some("online"));
 
         let mut conn = pool.get().await.unwrap();
         let ttl: i64 = redis::cmd("TTL")
-            .arg(presence::presence_key(&pubkey))
+            .arg(presence::presence_key(&ctx, &pubkey))
             .query_async(&mut conn)
             .await
             .unwrap();
@@ -299,8 +459,130 @@ mod tests {
             presence::PRESENCE_TTL_SECS
         );
 
-        presence::clear_presence(&pool, &pubkey).await.unwrap();
-        let status = presence::get_presence(&pool, &pubkey).await.unwrap();
+        presence::clear_presence(&pool, &ctx, &pubkey)
+            .await
+            .unwrap();
+        let status = presence::get_presence(&pool, &ctx, &pubkey).await.unwrap();
         assert!(status.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Redis"]
+    async fn same_channel_id_in_two_communities_release_one_keeps_other_live() {
+        let pool = make_test_pool();
+        let manager = Arc::new(
+            PubSubManager::with_config(
+                PubSubConfig::new("redis://127.0.0.1:6379")
+                    .with_unsubscribe_debounce(Duration::from_millis(25)),
+                pool,
+            )
+            .await
+            .expect("Failed to create PubSubManager"),
+        );
+        let mut rx = manager.subscribe_local();
+
+        let manager_clone = manager.clone();
+        tokio::spawn(async move { manager_clone.run_subscriber().await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let ctx_a = ctx(0xaaaa, "a.example");
+        let ctx_b = ctx(0xbbbb, "b.example");
+        let channel_id = Uuid::from_u128(0xcccc);
+        let topic = EventTopic::Channel(channel_id);
+
+        manager.retain_topic(&ctx_a, topic).await;
+        manager.retain_topic(&ctx_b, topic).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        assert_eq!(manager.topic_refcount(&ctx_a, topic).await, 1);
+        assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 1);
+
+        let keys = Keys::generate();
+        let event_before_release = EventBuilder::new(Kind::TextNote, "before A release")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("signing failed");
+
+        manager
+            .publish_event(&ctx_b, topic, &event_before_release)
+            .await
+            .expect("publish before release failed");
+
+        let received_before_release =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout before release")
+                .expect("channel closed before release");
+        assert_eq!(received_before_release.community_id, ctx_b.community());
+        assert_eq!(received_before_release.topic, topic);
+        assert_eq!(received_before_release.event.id, event_before_release.id);
+
+        manager.release_topic(&ctx_a, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx_a, topic).await, 0);
+        assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 1);
+
+        // Wait past A's debounce. A buggy implementation that keyed active
+        // Redis subscriptions by channel id alone would unsubscribe B here too.
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let event_after_release = EventBuilder::new(Kind::TextNote, "after A release")
+            .tags([])
+            .sign_with_keys(&keys)
+            .expect("signing failed");
+
+        manager
+            .publish_event(&ctx_b, topic, &event_after_release)
+            .await
+            .expect("publish after release failed");
+
+        let received_after_release =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+                .await
+                .expect("timeout after release")
+                .expect("channel closed after release");
+        assert_eq!(received_after_release.community_id, ctx_b.community());
+        assert_eq!(received_after_release.topic, topic);
+        assert_eq!(received_after_release.event.id, event_after_release.id);
+
+        manager.release_topic(&ctx_b, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx_b, topic).await, 0);
+    }
+
+    #[tokio::test]
+    async fn retain_release_refcounts_and_debounces_last_release() {
+        let pool = make_test_pool();
+        let manager = PubSubManager::with_config(
+            PubSubConfig::new("redis://127.0.0.1:6379")
+                .with_unsubscribe_debounce(Duration::from_millis(1)),
+            pool,
+        )
+        .await
+        .unwrap();
+        let ctx = ctx(0xaaaa, "a.example");
+        let topic = EventTopic::Channel(Uuid::from_u128(0xbbbb));
+
+        assert_eq!(manager.topic_refcount(&ctx, topic).await, 0);
+
+        manager.retain_topic(&ctx, topic).await;
+        manager.retain_topic(&ctx, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx, topic).await, 2);
+
+        manager.release_topic(&ctx, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx, topic).await, 1);
+
+        manager.release_topic(&ctx, topic).await;
+        assert_eq!(manager.topic_refcount(&ctx, topic).await, 0);
+    }
+
+    #[test]
+    fn config_defaults_debounce_but_allows_override() {
+        let config = PubSubConfig::new("redis://example");
+        assert_eq!(
+            config.unsubscribe_debounce,
+            PubSubConfig::DEFAULT_UNSUBSCRIBE_DEBOUNCE
+        );
+
+        let config = config.with_unsubscribe_debounce(Duration::from_millis(42));
+        assert_eq!(config.unsubscribe_debounce, Duration::from_millis(42));
     }
 }
