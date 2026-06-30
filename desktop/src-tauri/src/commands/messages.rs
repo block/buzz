@@ -283,6 +283,7 @@ pub async fn send_channel_message(
     media_tags: Option<Vec<Vec<String>>>,
     emoji_tags: Option<Vec<Vec<String>>>,
     mention_tags: Option<Vec<Vec<String>>>,
+    client_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -294,7 +295,11 @@ pub async fn send_channel_message(
     let media = media_tags.unwrap_or_default();
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
+    let client = client_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
+    if kind_num != buzz_core_pkg::kind::KIND_STREAM_MESSAGE && !client.is_empty() {
+        return Err("client tags are only supported on stream messages".into());
+    }
 
     let mut resolved_root: Option<String> = None;
 
@@ -330,7 +335,7 @@ pub async fn send_channel_message(
                 }
                 None => None,
             };
-            events::build_message(
+            events::build_message_with_client_tags(
                 channel_uuid,
                 content.trim(),
                 thread_ref.as_ref(),
@@ -338,6 +343,7 @@ pub async fn send_channel_message(
                 &media,
                 &emoji,
                 &mention_refs_only,
+                &client,
             )?
         }
     };

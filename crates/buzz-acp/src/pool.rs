@@ -1046,15 +1046,7 @@ pub async fn run_prompt_task(
         }),
     );
 
-    // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
-    // See `ReactionGuard` docs for ordering guarantees and known edge cases.
-    let reaction_ids: Vec<String> = batch
-        .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
-        .unwrap_or_default();
-    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
-
+    // ── Turn completion guard ─────────────────────────────────────────────
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult.
     let _turn_guard = TurnCompletionGuard::new(
@@ -1405,16 +1397,7 @@ pub async fn run_prompt_task(
         return;
     };
 
-    // 💬 — fire-and-forget so the prompt fires immediately.
-    // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
-    // A brief race where 💬 appears slightly after the agent starts is acceptable.
-    if !reaction_ids.is_empty() {
-        let rest = ctx.rest_client.clone();
-        let ids = reaction_ids.clone();
-        tokio::spawn(async move {
-            react_working(&rest, &ids).await;
-        });
-    }
+    // ── Send the actual prompt ────────────────────────────────────────────
 
     // Slash-command pass-through sends the bare command as the first text
     // block (so connector detection fires), then each prompt section as its
@@ -1730,7 +1713,6 @@ pub async fn run_prompt_task(
             });
         }
     }
-    // _reaction_guard drops here → spawns clear_reactions for all exit paths.
 }
 
 /// Retry wrapper for context fetches: one retry with `CONTEXT_FETCH_RETRY_DELAY`
@@ -1847,7 +1829,14 @@ async fn fetch_conversation_context(
     let last_event = batch.events.last()?;
     let tags = crate::queue::parse_thread_tags(&last_event.event);
     if let Some(root_id) = tags.root_event_id {
-        return fetch_thread_context(batch.channel_id, &root_id, limit, &ctx.rest_client).await;
+        return fetch_thread_context(
+            batch.channel_id,
+            &root_id,
+            tags.agent_reply_event_id.as_deref(),
+            limit,
+            &ctx.rest_client,
+        )
+        .await;
     }
 
     // DM non-reply: fetch recent conversation history.
@@ -2012,16 +2001,14 @@ async fn fetch_prompt_profile_lookup(
 async fn fetch_thread_context(
     channel_id: Uuid,
     root_event_id: &str,
+    agent_reply_event_id: Option<&str>,
     limit: u32,
     rest: &RestClient,
 ) -> Option<ConversationContext> {
     use nostr::{Alphabet, SingleLetterTag};
 
     // Defense-in-depth: validate hex event ID.
-    if root_event_id.is_empty()
-        || root_event_id.len() != 64
-        || !root_event_id.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if !is_valid_event_id_hex(root_event_id) {
         tracing::warn!(
             channel_id = %channel_id,
             "invalid root_event_id (expected 64 hex chars) — skipping thread context fetch"
@@ -2033,7 +2020,7 @@ async fn fetch_thread_context(
     let h_tag = SingleLetterTag::lowercase(Alphabet::H);
     let ch_str = channel_id.to_string();
 
-    // Two filters: (1) root event by ID, (2) replies with #e=root + #h=channel.
+    // Base filters: (1) root event by ID, (2) replies with #e=root + #h=channel.
     let root_filter = nostr::Filter::new().id(nostr::EventId::from_hex(root_event_id).ok()?);
     let replies_filter = nostr::Filter::new()
         .kinds([
@@ -2043,14 +2030,27 @@ async fn fetch_thread_context(
         .custom_tags(e_tag, [root_event_id])
         .custom_tags(h_tag, [ch_str.as_str()])
         .limit(limit as usize);
+    let mut filters = vec![root_filter, replies_filter];
+
+    if let Some(agent_reply_event_id) = agent_reply_event_id {
+        if is_valid_event_id_hex(agent_reply_event_id) && agent_reply_event_id != root_event_id {
+            if let Ok(event_id) = nostr::EventId::from_hex(agent_reply_event_id) {
+                // A selected task anchor may be outside the bounded prompt
+                // window. Fetch it independently, but require the same
+                // channel and thread root so forged client tags cannot route
+                // replies into a different conversation.
+                filters.push(
+                    nostr::Filter::new()
+                        .id(event_id)
+                        .custom_tags(e_tag, [root_event_id])
+                        .custom_tags(h_tag, [ch_str.as_str()]),
+                );
+            }
+        }
+    }
 
     fetch_with_retry(|| async {
-        match timeout(
-            CONTEXT_FETCH_TIMEOUT,
-            rest.query(&[root_filter.clone(), replies_filter.clone()]),
-        )
-        .await
-        {
+        match timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&filters)).await {
             Ok(Ok(json)) => parse_nostr_thread_response(json, root_event_id),
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -2071,6 +2071,10 @@ async fn fetch_thread_context(
         }
     })
     .await
+}
+
+fn is_valid_event_id_hex(event_id: &str) -> bool {
+    event_id.len() == 64 && event_id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Fetch DM context via Nostr query: recent messages in channel by `#h` tag.
@@ -2195,6 +2199,11 @@ fn parse_dm_response(json: serde_json::Value, limit: u32) -> Option<Conversation
 ///
 /// Works with both thread reply objects and channel message objects.
 fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
+    let event_id = obj
+        .get("id")
+        .or_else(|| obj.get("event_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let content = obj.get("content").and_then(|v| v.as_str())?;
     let pubkey = obj
         .get("pubkey")
@@ -2215,6 +2224,7 @@ fn json_to_context_message(obj: &serde_json::Value) -> Option<ContextMessage> {
         .unwrap_or_else(|| "unknown".to_string());
 
     Some(ContextMessage {
+        event_id,
         pubkey: pubkey.to_string(),
         timestamp,
         content: content.to_string(),
@@ -2232,13 +2242,16 @@ fn parse_nostr_thread_response(
     let events = json.as_array()?;
     let mut root_msg = None;
     let mut reply_msgs = Vec::new();
+    let mut seen_reply_ids = HashSet::new();
 
     for ev in events {
         let ev_id = ev.get("id").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(msg) = json_to_context_message(ev) {
             if ev_id == root_event_id {
                 root_msg = Some(msg);
-            } else {
+            } else if event_references_thread_root(ev, root_event_id)
+                && seen_reply_ids.insert(ev_id.to_string())
+            {
                 reply_msgs.push((
                     ev.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                     msg,
@@ -2266,6 +2279,19 @@ fn parse_nostr_thread_response(
         total,
         truncated: false, // query returns all within limit
     })
+}
+
+fn event_references_thread_root(ev: &serde_json::Value, root_event_id: &str) -> bool {
+    ev.get("tags")
+        .and_then(|tags| tags.as_array())
+        .is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                tag.as_array().is_some_and(|parts| {
+                    parts.first().and_then(|part| part.as_str()) == Some("e")
+                        && parts.get(1).and_then(|part| part.as_str()) == Some(root_event_id)
+                })
+            })
+        })
 }
 
 /// Parse a Nostr query response (array of events) into DM context.
@@ -2361,67 +2387,7 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     }
 }
 
-//
-// Two-phase lifecycle visible to users:
-//   👀  "seen"    — event was queued and an agent will handle it
-//   💬  "working" — agent is actively prompting
-//
-// 💬 is awaited inline in `run_prompt_task` before the prompt fires, so
-// add-before-remove ordering is structural. 👀 is fire-and-forget from
-// `main.rs` at queue-push time for immediate responsiveness; on rare
-// fast-failure paths the guard's cleanup may race with the 👀 add,
-// leaving a cosmetic stale 👀 (see `ReactionGuard` docs).
-//
-// Cleanup is fire-and-forget via `ReactionGuard` (spawned on drop).
-// Failures are debug-logged and ignored — reactions are cosmetic.
-
-/// Drop guard that spawns reaction cleanup on any exit path.
-///
-/// Created at the top of `run_prompt_task`. On drop — normal return, early
-/// return, or panic — spawns fire-and-forget removal of both 👀 and 💬.
-///
-/// ## Ordering
-///
-/// 💬 (`react_working`) is fire-and-forget (spawned before the prompt fires).
-/// A brief race where 💬 appears slightly after the agent starts is acceptable.
-///
-/// 👀 (`react_seen`) is fire-and-forget from `main.rs` at queue-push time.
-/// On rare fast-failure paths (e.g., `session_new` error on an idle agent),
-/// the cleanup spawn may race with the 👀 add, leaving a stale 👀. This is
-/// accepted as a cosmetic edge case — the message will be retried and the
-/// stale 👀 is harmless.
-struct ReactionGuard {
-    rest: Option<crate::relay::RestClient>,
-    ids: Vec<String>,
-}
-
-impl ReactionGuard {
-    fn new(rest: crate::relay::RestClient, ids: Vec<String>) -> Self {
-        Self {
-            rest: if ids.is_empty() { None } else { Some(rest) },
-            ids,
-        }
-    }
-}
-
-impl Drop for ReactionGuard {
-    fn drop(&mut self) {
-        // Guard against drop outside a tokio runtime (e.g., in unit tests or
-        // during process teardown before the runtime is fully initialized).
-        // `run_prompt_task` is always spawned via `JoinSet::spawn`, so a
-        // runtime handle is normally available; `try_current` is the safe
-        // fallback for the rare cases it isn't.
-        if let Some(rest) = self.rest.take() {
-            let ids = std::mem::take(&mut self.ids);
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(clear_reactions(rest, ids));
-            }
-            // If no runtime is available, reactions are left as-is — they are
-            // cosmetic indicators and the stale state is harmless.
-        }
-    }
-}
-
+// ── Turn liveness emission ───────────────────────────────────────────────────
 // Periodically emits a `turn_liveness` observer event while a turn is in-flight,
 // so the desktop can prune turns whose host died without unwinding (kill -9 /
 // crash) far sooner than the no-activity backstop. Runs as a non-resolving
@@ -2506,178 +2472,7 @@ impl Drop for TurnCompletionGuard {
     }
 }
 
-const REACTION_SEEN: &str = "👀";
-const REACTION_WORKING: &str = "💬";
-
-/// Best-effort timeout for a single reaction REST call.
-const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// Percent-encode a string for use in a URL path segment (used in tests only).
-#[cfg(test)]
-fn pct_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                use std::fmt::Write;
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
-
-/// Best-effort: add a reaction via a signed Nostr kind-7 event (NIP-25).
-///
-/// Builds a reaction event with `buzz_sdk::build_reaction`, signs it with
-/// the keys already stored in `RestClient`, and submits via `POST /events`.
-/// Returns immediately on timeout or any error — reactions are cosmetic.
-pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str, emoji: &str) {
-    let target_id = match nostr::EventId::from_hex(event_id) {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::debug!(event_id, emoji, "reaction add: invalid event ID: {e}");
-            return;
-        }
-    };
-    let builder = match buzz_sdk::build_reaction(target_id, emoji) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(event_id, emoji, "reaction add: build failed: {e}");
-            return;
-        }
-    };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(event_id, emoji, "reaction add: sign failed: {e}");
-            return;
-        }
-    };
-    match tokio::time::timeout(REACTION_TIMEOUT, rest.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
-        Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
-    }
-}
-
-/// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
-///
-/// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
-/// emoji, then submits a signed kind:5 deletion via `POST /events`.
-/// Returns immediately on timeout or any error — reactions are cosmetic.
-pub(crate) async fn reaction_remove(rest: &crate::relay::RestClient, event_id: &str, emoji: &str) {
-    use nostr::{Alphabet, SingleLetterTag};
-
-    // Step 1: query our kind:7 reactions targeting this event.
-    let my_pubkey = rest.keys.public_key();
-    let e_tag = SingleLetterTag::lowercase(Alphabet::E);
-    let filter = nostr::Filter::new()
-        .kind(nostr::Kind::Reaction)
-        .author(my_pubkey)
-        .custom_tags(e_tag, [event_id]);
-
-    let resp = match tokio::time::timeout(Duration::from_millis(1_000), rest.query(&[filter])).await
-    {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
-            tracing::debug!(event_id, emoji, "reaction remove: query failed: {e}");
-            return;
-        }
-        Err(_) => {
-            tracing::debug!(event_id, emoji, "reaction remove: query timed out");
-            return;
-        }
-    };
-
-    // Find our reaction event with matching emoji content.
-    let reid = resp.as_array().and_then(|events| {
-        events.iter().find_map(|ev| {
-            let content = ev.get("content")?.as_str()?;
-            if content != emoji {
-                return None;
-            }
-            ev.get("id")?.as_str().map(|s| s.to_string())
-        })
-    });
-
-    let reid = match reid {
-        Some(id) => id,
-        None => {
-            tracing::debug!(event_id, emoji, "reaction remove: no reaction event found");
-            return;
-        }
-    };
-
-    // Step 2: build and submit a signed kind:5 deletion for the reaction event.
-    let target_id = match nostr::EventId::from_hex(&reid) {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::debug!(
-                event_id,
-                emoji,
-                "reaction remove: invalid reaction event ID: {e}"
-            );
-            return;
-        }
-    };
-    let builder = match buzz_sdk::build_remove_reaction(target_id) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(event_id, emoji, "reaction remove: build failed: {e}");
-            return;
-        }
-    };
-    let event = match builder.sign_with_keys(&rest.keys) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(event_id, emoji, "reaction remove: sign failed: {e}");
-            return;
-        }
-    };
-    match tokio::time::timeout(Duration::from_millis(1_000), rest.submit_event(&event)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction remove failed: {e}"),
-        Err(_) => tracing::debug!(event_id, emoji, "reaction remove timed out"),
-    }
-}
-
-/// Maximum concurrent reaction HTTP requests per fan-out call.
-/// Prevents unbounded parallelism when a large batch of events arrives.
-const REACTION_CONCURRENCY: usize = 10;
-
-/// Add 💬 to all events, capped at `REACTION_CONCURRENCY` concurrent requests.
-/// Awaited inline before the prompt fires.
-async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
-    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
-        futures_util::future::join_all(
-            chunk
-                .iter()
-                .map(|eid| reaction_add(rest, eid, REACTION_WORKING)),
-        )
-        .await;
-    }
-}
-
-/// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
-/// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
-/// unbounded HTTP fan-out on large batches.
-async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
-    // Each event needs two removals (👀 and 💬); pair them and chunk by
-    // REACTION_CONCURRENCY pairs so the total concurrent requests stay bounded.
-    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
-        futures_util::future::join_all(chunk.iter().flat_map(|eid| {
-            [
-                reaction_remove(&rest, eid, REACTION_SEEN),
-                reaction_remove(&rest, eid, REACTION_WORKING),
-            ]
-        }))
-        .await;
-    }
-}
+// ─── Unit Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -2902,6 +2697,81 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_nostr_thread_response_keeps_independently_fetched_anchor() {
+        let root_id = "a".repeat(64);
+        let reply_id = "b".repeat(64);
+        let anchor_id = "c".repeat(64);
+        let json = json!([
+            {
+                "id": anchor_id.clone(),
+                "pubkey": "agent",
+                "content": "selected task anchor",
+                "created_at": 1710518520_u64,
+                "tags": [["e", root_id.clone(), "", "reply"]]
+            },
+            {
+                "id": root_id.clone(),
+                "pubkey": "human",
+                "content": "root message",
+                "created_at": 1710518400_u64,
+                "tags": []
+            },
+            {
+                "id": reply_id.clone(),
+                "pubkey": "agent",
+                "content": "visible reply",
+                "created_at": 1710518460_u64,
+                "tags": [["e", root_id.clone(), "", "reply"]]
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, &root_id).expect("should parse");
+
+        match ctx {
+            ConversationContext::Thread { messages, .. } => {
+                assert_eq!(messages.len(), 3);
+                assert_eq!(messages[0].content, "root message");
+                assert_eq!(messages[1].content, "visible reply");
+                assert_eq!(messages[2].content, "selected task anchor");
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_rejects_wrong_root_anchor() {
+        let root_id = "a".repeat(64);
+        let forged_anchor_id = "c".repeat(64);
+        let other_root_id = "d".repeat(64);
+        let json = json!([
+            {
+                "id": root_id.clone(),
+                "pubkey": "human",
+                "content": "root message",
+                "created_at": 1710518400_u64,
+                "tags": []
+            },
+            {
+                "id": forged_anchor_id.clone(),
+                "pubkey": "agent",
+                "content": "wrong thread",
+                "created_at": 1710518520_u64,
+                "tags": [["e", other_root_id.clone(), "", "reply"]]
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, &root_id).expect("should parse");
+
+        match ctx {
+            ConversationContext::Thread { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "root message");
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
     fn test_parse_dm_response_basic() {
         let json = json!({
             "messages": [
@@ -3066,6 +2936,7 @@ mod tests {
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: None,
                 pubkey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
@@ -3146,40 +3017,7 @@ mod tests {
         assert_eq!(msg.pubkey, "unknown");
     }
 
-    #[test]
-    fn test_pct_encode_hex_passthrough() {
-        let hex = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
-        assert_eq!(pct_encode(hex), hex);
-    }
-
-    #[test]
-    fn test_pct_encode_emoji() {
-        // 👀 = U+1F440 = F0 9F 91 80 in UTF-8
-        assert_eq!(pct_encode("👀"), "%F0%9F%91%80");
-    }
-
-    #[test]
-    fn test_pct_encode_emoji_speech_balloon() {
-        // 💬 = U+1F4AC = F0 9F 92 AC in UTF-8
-        assert_eq!(pct_encode("💬"), "%F0%9F%92%AC");
-    }
-
-    #[test]
-    fn test_pct_encode_empty() {
-        assert_eq!(pct_encode(""), "");
-    }
-
-    #[test]
-    fn test_pct_encode_unreserved_passthrough() {
-        assert_eq!(pct_encode("AZaz09-_.~"), "AZaz09-_.~");
-    }
-
-    #[test]
-    fn test_pct_encode_reserved_chars() {
-        assert_eq!(pct_encode("/"), "%2F");
-        assert_eq!(pct_encode("+"), "%2B");
-        assert_eq!(pct_encode(" "), "%20");
-    }
+    // ── SessionState tests ───────────────────────────────────────────────
 
     fn make_state() -> (SessionState, Uuid, Uuid) {
         let ch_a = Uuid::new_v4();

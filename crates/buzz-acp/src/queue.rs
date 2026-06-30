@@ -559,7 +559,7 @@ impl EventQueue {
     /// Also clears any `retry_after` throttle for the channel.
     ///
     /// Returns the event IDs of dropped events so the caller can clean up
-    /// any reactions (👀) that were added at queue-push time.
+    /// channel-scoped side effects if needed.
     pub fn drain_channel(&mut self, channel_id: Uuid) -> Vec<String> {
         let ids = self
             .queues
@@ -769,6 +769,9 @@ pub struct ThreadTags {
     pub root_event_id: Option<String>,
     /// Parent event ID (hex). For direct replies to root, equals root.
     pub parent_event_id: Option<String>,
+    /// Dedicated agent-conversation anchor, when a client asks follow-ups to
+    /// stay attached to a selected task instead of the flat thread root.
+    pub agent_reply_event_id: Option<String>,
     /// Mentioned pubkeys from `p` tags (hex).
     pub mentioned_pubkeys: Vec<String>,
 }
@@ -779,6 +782,8 @@ pub struct ThreadTags {
 /// - Find an `e` tag with `root` marker → its value is `root_event_id`
 /// - Find an `e` tag with `reply` marker → its value is `parent_event_id`
 /// - If only `reply` marker found (direct reply to root), root == parent
+/// - Find a client task marker (`["client", "agent-conversation", id]`) →
+///   its value is `agent_reply_event_id`
 /// - `p` tags → mentioned pubkeys
 ///
 /// NOTE: Only handles NIP-10 marker-based format (preferred). The deprecated
@@ -787,6 +792,7 @@ pub struct ThreadTags {
 pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     let mut root = None;
     let mut reply = None;
+    let mut agent_reply = None;
     let mut mentions = Vec::new();
 
     for tag in event.tags.iter() {
@@ -804,6 +810,12 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
             Some("p") if parts.len() >= 2 => {
                 mentions.push(parts[1].clone());
             }
+            Some("client")
+                if parts.len() >= 3
+                    && parts.get(1).map(|value| value.as_str()) == Some("agent-conversation") =>
+            {
+                agent_reply = parts.get(2).cloned();
+            }
             _ => {}
         }
     }
@@ -820,6 +832,7 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     ThreadTags {
         root_event_id,
         parent_event_id,
+        agent_reply_event_id: agent_reply,
         mentioned_pubkeys: mentions,
     }
 }
@@ -923,6 +936,7 @@ pub enum ConversationContext {
 /// A single message in a conversation context section.
 #[derive(Debug, Clone)]
 pub struct ContextMessage {
+    pub event_id: Option<String>,
     pub pubkey: String,
     pub timestamp: String,
     pub content: String,
@@ -1061,6 +1075,9 @@ pub(crate) fn format_event_block(
     if let Some(ref r) = thread.root_event_id {
         parsed_parts.push(format!("root={r}"));
     }
+    if let Some(ref agent_reply) = thread.agent_reply_event_id {
+        parsed_parts.push(format!("agent_reply={agent_reply}"));
+    }
     if !thread.mentioned_pubkeys.is_empty() {
         parsed_parts.push(format!(
             "mentions=[{}]",
@@ -1081,15 +1098,15 @@ pub(crate) fn format_event_block(
 
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
-/// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
-/// while still allowing an explicit human request to post at the channel root or
-/// top level.
-fn append_reply_instruction(s: &mut String, event_id: &str) {
+/// Tells the agent to pass `--reply-to <thread_root_id>` on every `buzz
+/// messages send` call for ordinary replies, while still allowing an explicit
+/// human request to post at the channel root or top level.
+fn append_reply_instruction(s: &mut String, thread_root_id: &str) {
     s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
+        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {thread_root_id}` \
+         on `buzz messages send` so the conversation stays in the thread without adding \
+         another visible nesting level. If the human explicitly asks for a channel-root, \
+         top-level, or broadcast post, send that message without `--reply-to`. \
          If the requested destination is ambiguous, ask before sending."
     ));
 }
@@ -1136,11 +1153,37 @@ fn turn_is_human_facing(
     thread_tags.mentioned_pubkeys.iter().any(|pk| !is_agent(pk))
 }
 
+fn context_contains_event_id(context: Option<&ConversationContext>, event_id: &str) -> bool {
+    let messages = match context {
+        Some(ConversationContext::Thread { messages, .. })
+        | Some(ConversationContext::Dm { messages, .. }) => messages,
+        None => return false,
+    };
+
+    messages
+        .iter()
+        .any(|message| message.event_id.as_deref() == Some(event_id))
+}
+
+fn resolve_valid_agent_conversation_anchor(
+    thread_tags: &ThreadTags,
+    conversation_context: Option<&ConversationContext>,
+) -> Option<String> {
+    let agent_reply_event_id = thread_tags.agent_reply_event_id.as_deref()?;
+    if context_contains_event_id(conversation_context, agent_reply_event_id) {
+        return Some(agent_reply_event_id.to_string());
+    }
+
+    None
+}
+
 /// Resolve the `--reply-to` anchor for a non-DM turn.
 ///
 /// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
-///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
-///   - top-level   → the triggering event id, which becomes the new thread root
+///   - dedicated task → the selected agent reply anchor, after validating it
+///     exists in the fetched context for this thread/task
+///   - in a thread    → the thread ROOT, keeping the reply flat at layer 1
+///   - top-level      → the triggering event id, which becomes the new thread root
 ///
 /// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
 /// (intentional for agent coordination).
@@ -1148,15 +1191,15 @@ fn resolve_reply_anchor(
     sender_pubkey: &str,
     thread_tags: &ThreadTags,
     triggering_event_id: &str,
+    conversation_context: Option<&ConversationContext>,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> Option<String> {
     if !turn_is_human_facing(sender_pubkey, thread_tags, profile_lookup) {
         return None;
     }
     Some(
-        thread_tags
-            .root_event_id
-            .clone()
+        resolve_valid_agent_conversation_anchor(thread_tags, conversation_context)
+            .or_else(|| thread_tags.root_event_id.clone())
             .unwrap_or_else(|| triggering_event_id.to_string()),
     )
 }
@@ -1376,6 +1419,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     }
 
     // 2. Context hints (with a human-aware reply anchor).
+    // 2. Context hints (with a human-aware reply anchor).
     //
     // Human-facing turns are anchored so replies stay readable at layer 1:
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
@@ -1384,15 +1428,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        thread_tags.root_event_id.clone()
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
             &thread_tags,
             &last_event.event.id.to_hex(),
+            args.conversation_context,
             args.profile_lookup,
         )
     };
@@ -2329,6 +2371,7 @@ mod tests {
 
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: None,
                 pubkey: "npub1test".into(),
                 content: "prior message".into(),
                 timestamp: "2024-01-01T00:00:00Z".into(),
@@ -2774,6 +2817,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_thread_tags_agent_conversation_client_anchor() {
+        let event = make_event_with_tags(
+            "dedicated task follow-up",
+            vec![
+                vec!["e".into(), "root123".into(), "".into(), "root".into()],
+                vec!["e".into(), "parent456".into(), "".into(), "reply".into()],
+                vec![
+                    "client".into(),
+                    "agent-conversation".into(),
+                    "agent789".into(),
+                ],
+            ],
+        );
+        let tags = parse_thread_tags(&event);
+        assert_eq!(tags.root_event_id.as_deref(), Some("root123"));
+        assert_eq!(tags.parent_event_id.as_deref(), Some("parent456"));
+        assert_eq!(tags.agent_reply_event_id.as_deref(), Some("agent789"));
+    }
+
+    #[test]
     fn test_parse_thread_tags_with_mentions() {
         let event = make_event_with_tags(
             "hey @alice",
@@ -2913,11 +2976,13 @@ mod tests {
         let ctx = ConversationContext::Thread {
             messages: vec![
                 ContextMessage {
+                    event_id: None,
                     pubkey: "npub1xyz".into(),
                     timestamp: "2026-03-15T16:30:00Z".into(),
                     content: "Let's refactor auth".into(),
                 },
                 ContextMessage {
+                    event_id: None,
                     pubkey: "npub1def".into(),
                     timestamp: "2026-03-15T16:35:00Z".into(),
                     content: "yes go ahead".into(),
@@ -2960,6 +3025,7 @@ mod tests {
         };
         let ctx = ConversationContext::Dm {
             messages: vec![ContextMessage {
+                event_id: None,
                 pubkey: "npub1abc".into(),
                 timestamp: "2026-03-15T16:00:00Z".into(),
                 content: "Can you deploy?".into(),
@@ -3005,6 +3071,7 @@ mod tests {
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: None,
                 pubkey: author_hex.clone(),
                 timestamp: "2026-03-25T05:51:25Z".into(),
                 content: "follow up".into(),
@@ -3108,6 +3175,7 @@ mod tests {
 
     fn thread_tags(root: Option<&str>, mentions: &[&str]) -> ThreadTags {
         ThreadTags {
+            agent_reply_event_id: None,
             root_event_id: root.map(str::to_string),
             parent_event_id: root.map(str::to_string),
             mentioned_pubkeys: mentions.iter().map(|s| s.to_string()).collect(),
@@ -3118,7 +3186,7 @@ mod tests {
     fn test_anchor_human_in_thread_uses_root() {
         // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, None, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3126,7 +3194,7 @@ mod tests {
     fn test_anchor_human_top_level_uses_triggering_event() {
         // Human top-level mention (no thread tags) → triggering event is root.
         let tags = thread_tags(None, &[AGENT_A_PK]);
-        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, None, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(TRIGGER_ID));
     }
 
@@ -3134,14 +3202,14 @@ mod tests {
     fn test_anchor_agent_to_agent_in_thread_is_none() {
         // Agent pings agent inside a thread → no forced anchor (deep nesting ok).
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, Some(&id_lookup()));
         assert_eq!(anchor, None);
     }
 
     #[test]
     fn test_anchor_agent_to_agent_top_level_is_none() {
         let tags = thread_tags(None, &[AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, Some(&id_lookup()));
         assert_eq!(anchor, None);
     }
 
@@ -3149,7 +3217,7 @@ mod tests {
     fn test_anchor_agent_sender_but_human_tagged_flattens() {
         // Agent-authored, but a human is tagged → human-facing → anchor to root.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_B_PK, HUMAN_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, Some(&id_lookup()));
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3157,7 +3225,7 @@ mod tests {
     fn test_anchor_unknown_identity_treated_as_human() {
         // No profile lookup → fail open (treat as human so visibility is kept).
         let tags = thread_tags(Some(ROOT_ID), &[]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None);
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, None);
         assert_eq!(anchor.as_deref(), Some(ROOT_ID));
     }
 
@@ -3166,7 +3234,7 @@ mod tests {
         // Raw p-tag presence must NOT flatten when every tagged pubkey is an
         // agent — this is the regression Pinky flagged.
         let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK, AGENT_B_PK]);
-        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
+        let anchor = resolve_reply_anchor(AGENT_A_PK, &tags, TRIGGER_ID, None, Some(&id_lookup()));
         assert_eq!(anchor, None);
     }
 
@@ -3217,6 +3285,7 @@ mod tests {
         // Thread context fetched (as the fetch path does for DM replies).
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
+                event_id: None,
                 pubkey: "npub1xyz".into(),
                 timestamp: "2026-03-15T16:30:00Z".into(),
                 content: "Should I deploy?".into(),
@@ -3744,14 +3813,127 @@ mod tests {
     }
 
     #[test]
+    fn test_reply_instruction_prefers_agent_conversation_anchor() {
+        let ch = Uuid::new_v4();
+        let root_id = "a".repeat(64);
+        let parent_id = "b".repeat(64);
+        let agent_reply_id = "c".repeat(64);
+        let event = make_event_with_tags(
+            "@bot keep going",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+                vec![
+                    "client".into(),
+                    "agent-conversation".into(),
+                    agent_reply_id.clone(),
+                ],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ctx = ConversationContext::Thread {
+            messages: vec![ContextMessage {
+                event_id: Some(agent_reply_id.clone()),
+                pubkey: "agent".into(),
+                timestamp: "2026-03-15T16:30:00Z".into(),
+                content: "I'll take this into a task.".into(),
+            }],
+            total: 1,
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {agent_reply_id}")),
+            "dedicated task follow-up should anchor agent reply to the selected task"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {root_id}")),
+            "dedicated task follow-up should not fall back to the flat thread root"
+        );
+    }
+
+    #[test]
+    fn test_reply_instruction_rejects_unvalidated_agent_conversation_anchor() {
+        let ch = Uuid::new_v4();
+        let root_id = "a".repeat(64);
+        let parent_id = "b".repeat(64);
+        let forged_agent_reply_id = "c".repeat(64);
+        let event = make_event_with_tags(
+            "@bot keep going",
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+                vec![
+                    "client".into(),
+                    "agent-conversation".into(),
+                    forged_agent_reply_id.clone(),
+                ],
+            ],
+        );
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ctx = ConversationContext::Thread {
+            messages: vec![ContextMessage {
+                event_id: Some(parent_id),
+                pubkey: "human".into(),
+                timestamp: "2026-03-15T16:30:00Z".into(),
+                content: "Keep going.".into(),
+            }],
+            total: 1,
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                conversation_context: Some(&ctx),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "unvalidated task anchors should fall back to the flat thread root"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {forged_agent_reply_id}")),
+            "forged task anchors must not route the agent into another thread"
+        );
+    }
+
+    #[test]
     fn test_reply_instruction_present_for_dm_thread_reply() {
         let ch = Uuid::new_v4();
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -3776,7 +3958,7 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
+            prompt.contains(&format!("--reply-to {root_id}")),
             "DM thread reply should include reply instruction"
         );
     }

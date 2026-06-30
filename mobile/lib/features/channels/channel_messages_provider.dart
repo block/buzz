@@ -152,8 +152,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         content.contains('member_removed');
   }
 
-  /// Kinds that are metadata rather than displayable content (deletions,
-  /// reactions, edits, legacy pre-migration messages).
+  /// reactions, edits, legacy pre-migration messages, task markers).
   static const _metadataKinds = {
     EventKind.deletion,
     EventKind.reaction,
@@ -161,6 +160,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     EventKind.streamMessageEdit,
     EventKind.huddleParticipantJoined,
     EventKind.huddleParticipantLeft,
+    EventKind.agentConversationCompat,
+    EventKind.agentConversation,
   };
 
   /// Minimum displayable messages we want after the initial history load.

@@ -161,8 +161,7 @@ fn merge_discovered_channels(
 /// Extracted from `HarnessRelay` fields so it can be shared (via `Arc`) with
 /// spawned prompt tasks without giving them access to the WebSocket.
 ///
-/// All reads go through `POST /query` with NIP-98 auth. Event submission goes
-/// through `POST /events` with NIP-98 auth.
+/// All reads go through `POST /query` with NIP-98 auth.
 #[derive(Debug, Clone)]
 pub struct RestClient {
     pub http: reqwest::Client,
@@ -337,23 +336,6 @@ impl RestClient {
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))
-    }
-
-    /// Submit a signed event via the HTTP bridge: `POST /events` with NIP-98 auth.
-    ///
-    /// The event must already be signed. Returns the relay response JSON.
-    pub async fn submit_event(&self, event: &Event) -> Result<Value, RelayError> {
-        let body_bytes = serde_json::to_vec(event)
-            .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
-        let resp = self.bridge_post("/events", &body_bytes).await?;
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| RelayError::Http(e.to_string()))?;
-        if text.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
     }
 }
 

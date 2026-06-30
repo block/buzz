@@ -66,6 +66,7 @@ pub async fn get_agent_models(
             record.persona_id.as_deref(),
             &personas,
             record.agent_command_override.as_deref(),
+            Some(&record.agent_command),
         );
 
         let args = normalize_agent_args(&effective_command, record.agent_args.clone());
@@ -929,6 +930,7 @@ pub async fn update_managed_agent(
                 record.persona_id.as_deref(),
                 &personas,
                 record.agent_command_override.as_deref(),
+                Some(&record.agent_command),
             );
             let avatar_url = record
                 .avatar_url

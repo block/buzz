@@ -176,6 +176,7 @@ pub async fn get_agent_config_surface(
         record.persona_id.as_deref(),
         &personas,
         record.agent_command_override.as_deref(),
+        Some(&record.agent_command),
     );
     let runtime_meta = known_acp_runtime(&effective_cmd);
     let session_cache = state.get_session_cache(&pubkey);

@@ -159,8 +159,16 @@ fn fixture(
 
 #[test]
 fn build_env_owner_only_sets_mode_and_removes_others() {
-    let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
-    let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+    let owner = nostr::Keys::generate();
+    let agent = nostr::Keys::generate();
+    let agent_pubkey = agent.public_key().to_hex();
+    let auth_tag = super::managed_agent_auth_tag_for_owner(&owner, &agent_pubkey)
+        .unwrap()
+        .unwrap();
+    let mut rec = fixture(RespondTo::OwnerOnly, vec![], Some(auth_tag));
+    rec.pubkey = agent_pubkey;
+    let owner_hex = owner.public_key().to_hex();
+    let (set, remove) = build_respond_to_env(&rec, Some(&owner_hex)).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
@@ -170,6 +178,27 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
     // auth_tag is present → no AGENT_OWNER fallback fires.
     assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
+}
+
+#[test]
+fn build_env_stale_auth_tag_emits_current_owner() {
+    let previous_owner = nostr::Keys::generate();
+    let current_owner = nostr::Keys::generate();
+    let agent = nostr::Keys::generate();
+    let agent_pubkey = agent.public_key().to_hex();
+    let stale_auth_tag = super::managed_agent_auth_tag_for_owner(&previous_owner, &agent_pubkey)
+        .unwrap()
+        .unwrap();
+    let mut rec = fixture(RespondTo::OwnerOnly, vec![], Some(stale_auth_tag));
+    rec.pubkey = agent_pubkey;
+    let current_owner_hex = current_owner.public_key().to_hex();
+    let (set, remove) = build_respond_to_env(&rec, Some(&current_owner_hex)).unwrap();
+    let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+    assert_eq!(
+        set_map.get("BUZZ_ACP_AGENT_OWNER").map(String::as_str),
+        Some(current_owner_hex.as_str())
+    );
+    assert!(!remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
 #[test]

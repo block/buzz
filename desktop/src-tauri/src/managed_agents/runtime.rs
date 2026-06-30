@@ -1517,6 +1517,7 @@ pub fn build_managed_agent_summary(
         record.persona_id.as_deref(),
         personas,
         record.agent_command_override.as_deref(),
+        Some(&record.agent_command),
     );
     let effective_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let effective_mcp_command = known_acp_runtime(&effective_command)
@@ -1611,12 +1612,10 @@ pub(crate) fn build_respond_to_env(
         remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");
     }
 
-    // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
-    // it the harness can't resolve the owner, and owner-dependent gate modes
-    // would drop every event. Forwarding the workspace owner pubkey via
-    // BUZZ_ACP_AGENT_OWNER keeps those records functional. Modern records
-    // (`auth_tag = Some(...)`) use `BUZZ_AUTH_TAG` as before.
-    if record.auth_tag.is_none() {
+    // Fallback: if the record has no usable NIP-OA `auth_tag` for the current
+    // workspace owner, forward the owner pubkey explicitly. This covers both
+    // pre-NIP-OA records and records restored after the local identity changed.
+    if !auth_tag_matches_owner(record.auth_tag.as_deref(), &record.pubkey, owner_hex) {
         if let Some(owner) = owner_hex {
             set.push(("BUZZ_ACP_AGENT_OWNER", owner.to_string()));
         } else {
@@ -1627,6 +1626,53 @@ pub(crate) fn build_respond_to_env(
     }
 
     Ok((set, remove))
+}
+
+pub(crate) fn auth_tag_owner_hex(auth_tag: &str, agent_pubkey_hex: &str) -> Option<String> {
+    let trimmed = auth_tag.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let agent_pubkey = nostr::PublicKey::from_hex(agent_pubkey_hex).ok()?;
+    buzz_sdk_pkg::nip_oa::verify_auth_tag(trimmed, &agent_pubkey)
+        .ok()
+        .map(|owner| owner.to_hex().to_ascii_lowercase())
+}
+
+pub(crate) fn auth_tag_matches_owner(
+    auth_tag: Option<&str>,
+    agent_pubkey_hex: &str,
+    owner_hex: Option<&str>,
+) -> bool {
+    let Some(tag) = auth_tag.map(str::trim).filter(|tag| !tag.is_empty()) else {
+        return false;
+    };
+    match owner_hex {
+        Some(owner) => auth_tag_owner_hex(tag, agent_pubkey_hex)
+            .is_some_and(|tag_owner| tag_owner.eq_ignore_ascii_case(owner)),
+        None => true,
+    }
+}
+
+pub(crate) fn managed_agent_auth_tag_for_owner(
+    owner_keys: &nostr::Keys,
+    agent_pubkey_hex: &str,
+) -> Result<Option<String>, String> {
+    if owner_keys
+        .public_key()
+        .to_hex()
+        .eq_ignore_ascii_case(agent_pubkey_hex)
+    {
+        return Ok(None);
+    }
+
+    let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
+        .map_err(|error| format!("failed to bridge owner keys: {error}"))?;
+    let compat_agent = nostr::PublicKey::from_hex(agent_pubkey_hex)
+        .map_err(|error| format!("failed to bridge agent pubkey: {error}"))?;
+    buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
+        .map(Some)
+        .map_err(|error| format!("failed to compute NIP-OA auth tag: {error}"))
 }
 
 /// Spawn an agent process without holding any locks on records or runtimes.
@@ -1668,6 +1714,7 @@ pub fn spawn_agent_child(
         record.persona_id.as_deref(),
         &personas,
         record.agent_command_override.as_deref(),
+        Some(&record.agent_command),
     );
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
@@ -1822,7 +1869,13 @@ pub fn spawn_agent_child(
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");
 
-    if let Some(ref auth_tag) = record.auth_tag {
+    let auth_tag_for_child = record
+        .auth_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .filter(|tag| auth_tag_matches_owner(Some(tag), &record.pubkey, owner_hex));
+    if let Some(auth_tag) = auth_tag_for_child {
         command.env("BUZZ_AUTH_TAG", auth_tag);
     } else {
         command.env_remove("BUZZ_AUTH_TAG");

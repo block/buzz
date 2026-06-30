@@ -22,7 +22,10 @@ abstract final class EventKind {
   static const dmVisibility = 30622;
   static const streamMessageV2 = 40002;
   static const streamMessageEdit = 40003;
+  static const streamMessagePinned = 40004;
   static const streamMessageDiff = 40008;
+  static const agentConversation = 40010;
+  static const agentConversationCompat = streamMessagePinned;
   static const systemMessage = 40099;
   static const forumPost = 45001;
   static const forumComment = 45003;
@@ -48,7 +51,9 @@ abstract final class EventKind {
     ...channelMessageEventKinds,
     40001, // legacy pre-migration stream messages
     streamMessageEdit, // 40003
+    agentConversationCompat, // 40004 — staging-compatible task marker
     streamMessageDiff, // 40008
+    agentConversation, // 40010 — task marker
     systemMessage, // 40099
     huddleStarted, // 48100 — visible huddle session row
     huddleParticipantJoined, // 48101 — huddle lifecycle metadata

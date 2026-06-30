@@ -1,6 +1,7 @@
 mod agent_config;
 mod agent_discovery;
 mod agent_models;
+mod agent_profile_reconcile;
 mod agent_settings;
 mod agents;
 mod canvas;

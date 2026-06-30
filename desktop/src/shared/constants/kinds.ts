@@ -6,7 +6,10 @@ export const KIND_STREAM_MESSAGE = 9;
 export const KIND_NIP29_DELETE_EVENT = 9005;
 export const KIND_STREAM_MESSAGE_V2 = 40002;
 export const KIND_STREAM_MESSAGE_EDIT = 40003;
+export const KIND_STREAM_MESSAGE_PINNED = 40004;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
+export const KIND_AGENT_CONVERSATION = 40010;
+export const KIND_AGENT_CONVERSATION_COMPAT = KIND_STREAM_MESSAGE_PINNED;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
 export const KIND_JOB_REQUEST = 43001;
@@ -71,12 +74,21 @@ export const CHANNEL_EVENT_KINDS = [
   ...CHANNEL_MESSAGE_EVENT_KINDS,
   40001, // legacy: pre-migration stream messages
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
+  KIND_AGENT_CONVERSATION_COMPAT, // 40004 — staging-compatible focused agent conversation marker
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
+  KIND_AGENT_CONVERSATION, // 40010 — focused agent conversation marker
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
   KIND_HUDDLE_STARTED, // 48100 — visible huddle session card
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
   KIND_HUDDLE_ENDED, // 48103 — huddle lifecycle overlay
+] as const;
+
+// Stored channel-scoped state that should be fetched with timeline history but
+// should not render as a message row or count against unread message tallies.
+export const CHANNEL_TIMELINE_STATE_KINDS = [
+  KIND_AGENT_CONVERSATION_COMPAT, // 40004 — staging-compatible focused agent conversation marker
+  KIND_AGENT_CONVERSATION, // 40010 — focused agent conversation marker
 ] as const;
 
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
