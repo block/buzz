@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
+import { Info } from "lucide-react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -59,6 +60,7 @@ type MessageComposerProps = {
   containerClassName?: string;
   disabled?: boolean;
   draftKey?: string;
+  composerNotice?: React.ReactNode;
   editTarget?: {
     author: string;
     body: string;
@@ -111,6 +113,7 @@ function MessageComposerImpl({
   containerClassName,
   disabled = false,
   draftKey,
+  composerNotice,
   editTarget = null,
   isSending = false,
   onCancelEdit,
@@ -831,6 +834,15 @@ function MessageComposerImpl({
             onCancelEdit={onCancelEdit}
             onCancelReply={onCancelReply}
           />
+          {!editTarget && !replyTarget && composerNotice ? (
+            <div
+              className="relative z-0 -mb-4 flex transform-gpu items-start gap-2 rounded-t-2xl border border-b-0 border-border/60 bg-muted/55 px-4 pb-6 pt-2.5 text-sm leading-5 text-muted-foreground backdrop-blur-sm transition-colors"
+              data-testid="composer-notice"
+            >
+              <Info aria-hidden className="mt-0.5 h-4 w-4 shrink-0" />
+              <div className="min-w-0 flex-1">{composerNotice}</div>
+            </div>
+          ) : null}
           <form
             className="relative z-10 isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55 sm:px-4"
             data-testid="message-composer"
