@@ -397,9 +397,24 @@ test("editAgent_inheritedAgentRuntimeSwitch_producesConsistentCommandProviderPai
 // The UI dropdown state (selectedRuntimeId / llmProviderFieldVisible) is for
 // visibility only. Provider PERSISTENCE at submit must key on the EFFECTIVE
 // runtime — i.e. the one that will actually run after save. When inheritHarness
-// is true, the persona's runtime runs; persisting a provider chosen for a
-// different dropdown selection would create the exact runtime/provider mismatch
-// these passes have been eliminating.
+// is true, the effective runtime is derived from agent.agentCommand matched
+// against the catalog. If that runtime is provider-locked (e.g. inherited
+// Claude), the stale dropdown provider is NOT persisted.
+//
+// Helper mirrors the component's effectiveRuntimeIdForSubmit + gate logic.
+function computeCanPersistAtSubmit({
+  inheritHarness,
+  agentCommand,
+  runtimes,
+  selectedRuntimeId,
+  selectedRuntime,
+}) {
+  const effectiveRuntimeIdForSubmit = inheritHarness
+    ? (runtimes.find((r) => r.command?.trim() === agentCommand.trim())?.id ??
+      "")
+    : (selectedRuntime?.id ?? selectedRuntimeId);
+  return runtimeSupportsLlmProviderSelection(effectiveRuntimeIdForSubmit);
+}
 
 test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntime", () => {
   // Simulate: inherited Claude agent (agentCommandOverride == null)
@@ -409,7 +424,13 @@ test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntim
   // → save: effective runtime is inherited (Claude), provider must NOT be persisted.
 
   const inheritHarness = true; // re-checked before save
+  const agentCommand = "/usr/local/bin/claude"; // original Claude command
+  const runtimes = [
+    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
+  ];
   const selectedRuntimeId = "buzz-agent"; // dropdown state (stale after re-check)
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
   const savedProvider = null; // was null on open (inherited Claude had no provider)
   const chosenProvider = "databricks_v2"; // chosen while dropdown was buzz-agent
 
@@ -423,14 +444,19 @@ test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntim
     "provider field is visible (dropdown shows buzz-agent) — this is the UX state",
   );
 
-  // llmProviderCanPersistAtSubmit is the fix: gated on the EFFECTIVE runtime.
-  // When inheritHarness=true, the inherited runtime runs → treat as not-provider-capable.
-  const llmProviderCanPersistAtSubmit =
-    !inheritHarness && llmProviderFieldVisible;
+  // llmProviderCanPersistAtSubmit keys on the EFFECTIVE runtime.
+  // Inherited Claude command → effective runtime = "claude" → not-provider-capable.
+  const llmProviderCanPersistAtSubmit = computeCanPersistAtSubmit({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
   assert.equal(
     llmProviderCanPersistAtSubmit,
     false,
-    "provider must NOT be persistable when the agent will inherit (effective runtime is inherited Claude)",
+    "provider must NOT be persistable when the inherited effective runtime is Claude",
   );
 
   // Submit logic for provider tri-state (mirrors the component).
@@ -449,25 +475,33 @@ test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntim
   assert.equal(
     providerUpdate,
     undefined,
-    "provider update must be omitted (not sent as databricks_v2) when reverting to inherit",
+    "provider update must be omitted (not sent as databricks_v2) when reverting to inherited Claude",
   );
 });
 
 test("editAgent_inheritCheckboxRoundTrip_clearsStaleSavedProviderWhenRevertingToInherit", () => {
   // Variant: agent previously had a provider saved (e.g. was pinned to buzz-agent
-  // with databricks_v2). User opens edit, re-checks inherit → provider must be
-  // cleared (sent as null) so the record doesn't retain a stale provider on the
-  // inherited runtime.
+  // with databricks_v2). User opens edit, re-checks inherit (inherited runtime is
+  // Claude) → provider must be cleared (sent as null).
 
   const inheritHarness = true; // re-checked before save
+  const agentCommand = "/usr/local/bin/claude"; // inherited Claude command
+  const runtimes = [
+    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
+  ];
   const selectedRuntimeId = "buzz-agent"; // dropdown state
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
   const savedProvider = "databricks_v2"; // was saved on open (pre-existing provider)
   const chosenProvider = "databricks_v2"; // unchanged from saved
 
-  const llmProviderFieldVisible =
-    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
-  const llmProviderCanPersistAtSubmit =
-    !inheritHarness && llmProviderFieldVisible;
+  const llmProviderCanPersistAtSubmit = computeCanPersistAtSubmit({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
 
   const normalizedProvider = chosenProvider;
   let providerUpdate;
@@ -483,6 +517,117 @@ test("editAgent_inheritCheckboxRoundTrip_clearsStaleSavedProviderWhenRevertingTo
   assert.equal(
     providerUpdate,
     null,
-    "reverting to inherit when a provider was previously saved must clear it (send null)",
+    "reverting to inherited Claude when a provider was previously saved must clear it (send null)",
+  );
+});
+
+// ── Finding D fix: inherited provider-capable agent does not lose its provider
+//                  on a name-only / no-op save ────────────────────────────────
+//
+// An agent with agentCommandOverride==null (inheritHarness=true) but whose
+// persona's runtime is buzz-agent/Goose legitimately carries a provider
+// snapshot (ManagedAgentRecord.provider). A no-op or name-only save must
+// preserve that snapshot — not clear it. The fix derives the effective runtime
+// from agent.agentCommand in the catalog rather than using !inheritHarness as
+// a blanket not-provider-capable proxy.
+
+test("editAgent_inheritedBuzzAgentProvider_preservedOnNameOnlySave", () => {
+  // Inherited buzz-agent persona with databricks_v2 snapshot.
+  // User makes a name-only edit (never touches runtime or provider).
+  // The catalog-arrival effect correctly derived selectedRuntimeId="buzz-agent".
+
+  const inheritHarness = true; // agentCommandOverride == null → inheriting
+  const agentCommand = "/usr/local/bin/buzz-agent"; // inherited buzz-agent command
+  const runtimes = [
+    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
+    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+  ];
+  const selectedRuntimeId = "buzz-agent"; // correctly derived by catalog-arrival effect
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
+  const savedProvider = "databricks_v2"; // valid provider snapshot
+  const currentProvider = "databricks_v2"; // unchanged by user
+
+  // llmProviderFieldVisible (UX) is true since dropdown shows buzz-agent.
+  const llmProviderFieldVisible =
+    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  assert.equal(
+    llmProviderFieldVisible,
+    true,
+    "provider field must be visible for inherited buzz-agent",
+  );
+
+  // The effective runtime for submit: inherited → match agentCommand in catalog → buzz-agent.
+  const llmProviderCanPersistAtSubmit = computeCanPersistAtSubmit({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
+  assert.equal(
+    llmProviderCanPersistAtSubmit,
+    true,
+    "inherited buzz-agent runtime IS provider-capable — provider must be persistable",
+  );
+
+  // Submit logic: provider unchanged → omit (no-op).
+  const normalizedProvider = currentProvider;
+  let providerUpdate;
+  if (llmProviderCanPersistAtSubmit) {
+    providerUpdate =
+      normalizedProvider !== (savedProvider ?? null)
+        ? normalizedProvider
+        : undefined;
+  } else {
+    providerUpdate = (savedProvider ?? null) !== null ? null : undefined;
+  }
+
+  assert.equal(
+    providerUpdate,
+    undefined,
+    "name-only save on inherited buzz-agent must omit provider (not send null to clear it)",
+  );
+});
+
+test("editAgent_inheritedBuzzAgentProvider_clearsWhenUserSwitchesToInheritedClaude", () => {
+  // An agent inheriting buzz-agent with databricks_v2, but the persona was
+  // changed to Claude (agentCommand now resolves to Claude). On save, the
+  // provider must be cleared (not preserved for a non-capable runtime).
+
+  const inheritHarness = true; // still inheriting
+  const agentCommand = "/usr/local/bin/claude"; // persona now runs Claude
+  const runtimes = [
+    { id: "buzz-agent", command: "/usr/local/bin/buzz-agent", defaultArgs: [] },
+    { id: "claude", command: "/usr/local/bin/claude", defaultArgs: [] },
+  ];
+  const selectedRuntimeId = "claude"; // catalog-arrival effect derives Claude
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
+  const savedProvider = "databricks_v2"; // stale provider from before persona change
+
+  const llmProviderCanPersistAtSubmit = computeCanPersistAtSubmit({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
+  assert.equal(
+    llmProviderCanPersistAtSubmit,
+    false,
+    "inherited Claude runtime is not provider-capable — stale provider must not be persisted",
+  );
+
+  let providerUpdate;
+  if (llmProviderCanPersistAtSubmit) {
+    providerUpdate =
+      savedProvider !== (savedProvider ?? null) ? savedProvider : undefined;
+  } else {
+    providerUpdate = (savedProvider ?? null) !== null ? null : undefined;
+  }
+
+  assert.equal(
+    providerUpdate,
+    null,
+    "stale databricks_v2 on an inherited-Claude agent must be cleared on save",
   );
 });

@@ -424,14 +424,23 @@ export function EditAgentDialog({
           ? agentCommand.trim()
           : undefined;
 
-      // The effective runtime for provider persistence is the one that will
-      // actually run AFTER submit. When the agent is (or has been re-checked
-      // back to) inheriting, the persona's runtime runs — which may be
-      // provider-locked. Conservatively treat it as not-provider-capable so
-      // the UI dropdown state can never persist a provider against a runtime
-      // that won't actually run it. When pinned, defer to the live dropdown.
-      const llmProviderCanPersistAtSubmit =
-        !inheritHarness && llmProviderFieldVisible;
+      // Derive the effective runtime at submit time — the one that will
+      // actually run AFTER submit. When pinned (inheritHarness=false), it's
+      // the live dropdown selection. When inheriting, match agent.agentCommand
+      // against the loaded catalog (same match as the catalog-arrival effect).
+      // If the inherited command has no catalog entry, fall through to the
+      // not-provider-capable path ("" is the safe unknown default).
+      // This correctly handles both:
+      //   - inherited Claude → not-provider-capable → clear stale provider
+      //   - inherited buzz-agent/Goose → provider-capable → preserve snapshot
+      const effectiveRuntimeIdForSubmit = inheritHarness
+        ? (runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
+            ?.id ?? "")
+        : (selectedRuntime?.id ?? selectedRuntimeId);
+
+      const llmProviderCanPersistAtSubmit = runtimeSupportsLlmProviderSelection(
+        effectiveRuntimeIdForSubmit,
+      );
 
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
