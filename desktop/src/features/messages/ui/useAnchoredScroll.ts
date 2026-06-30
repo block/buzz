@@ -45,7 +45,7 @@ type UseAnchoredScrollOptions = {
   isLoading: boolean;
   /** Source of truth for the rendered list. Used to detect new-at-bottom
    *  arrivals and to seed/refresh the anchor pre-render. */
-  messages: TimelineMessage[];
+  messages: Array<{ id: string }>;
 
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;

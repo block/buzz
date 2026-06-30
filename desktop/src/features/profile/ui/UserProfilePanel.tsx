@@ -680,10 +680,13 @@ export function UserProfilePanel({
     ],
   );
 
-  const handleOpenActivity = React.useCallback(() => {
-    if (!effectivePubkey) return;
-    onOpenAgentSession?.(effectivePubkey);
-  }, [effectivePubkey, onOpenAgentSession]);
+  const handleOpenActivity = React.useCallback(
+    (channelId?: string | null) => {
+      if (!effectivePubkey) return;
+      onOpenAgentSession?.(effectivePubkey, channelId ?? null);
+    },
+    [effectivePubkey, onOpenAgentSession],
+  );
 
   const handleOpenChannel = React.useCallback(
     (channelId: string) => {

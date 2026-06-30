@@ -273,7 +273,7 @@ export function ProfileInfoTabContent({
   channelIdToName: Record<string, string>;
   isArchived: boolean;
   managedAgent?: ManagedAgent;
-  onOpenActivity: () => void;
+  onOpenActivity: (channelId?: string | null) => void;
   pubkey: string | null;
   showActivityIngress: boolean;
 }) {
@@ -310,7 +310,7 @@ export function ProfileInfoTabContent({
           <ProfileIngressRow
             icon={Wrench}
             label="Activity log"
-            onClick={onOpenActivity}
+            onClick={() => onOpenActivity(null)}
             testId={`user-profile-view-activity-${pubkey}`}
             trailing="View"
           />
@@ -330,7 +330,7 @@ function ProfileLiveActivityEmbed({
   activeTurns: ActiveTurnSummary[];
   channelIdToName: Record<string, string>;
   managedAgent: ManagedAgent;
-  onOpenActivity: () => void;
+  onOpenActivity: (channelId?: string | null) => void;
 }) {
   const [selectedChannelId, setSelectedChannelId] = React.useState<
     string | null
@@ -355,68 +355,21 @@ function ProfileLiveActivityEmbed({
   const activeChannelId = selectedTurn?.channelId ?? null;
   const showSwitcher = activeTurns.length > 1;
 
-  const handleClick = React.useCallback(
-    (event: React.MouseEvent<HTMLDivElement>) => {
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const target = event.target as HTMLElement | null;
-      const interactiveTarget = target?.closest(
-        "button, a, [role='button'], [role='link']",
-      );
-      if (interactiveTarget && interactiveTarget !== event.currentTarget) {
-        return;
-      }
-
-      onOpenActivity();
-    },
-    [onOpenActivity],
-  );
-
-  const handleKeyDown = React.useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const target = event.target as HTMLElement | null;
-      const interactiveTarget = target?.closest(
-        "button, a, [role='button'], [role='link']",
-      );
-      if (interactiveTarget && interactiveTarget !== event.currentTarget) {
-        return;
-      }
-
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        onOpenActivity();
-      }
-    },
-    [onOpenActivity],
-  );
-
   return (
-    // biome-ignore lint/a11y/useSemanticElements: The embedded transcript contains its own buttons and links, so the clickable shell cannot be a semantic button.
-    <div
-      aria-label="Open live activity feed"
-      className="group flex h-48 cursor-pointer flex-col overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    <section
+      aria-label="Live activity preview"
+      className="flex h-48 flex-col overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left"
       data-testid={`user-profile-live-activity-${managedAgent.pubkey}`}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
-      role="button"
-      tabIndex={0}
     >
       {showSwitcher ? (
         <div className="border-border/60 border-b px-3 py-2">
-          <div className="flex items-center justify-between gap-2 text-xs">
-            <span className="font-medium text-foreground">Live activity</span>
-            {selectedTurn ? (
-              <span className="shrink-0 text-muted-foreground">
-                {formatElapsed(now - selectedTurn.anchorAt)}
-              </span>
-            ) : null}
-          </div>
+          <LiveActivityEmbedHeader
+            activeChannelId={activeChannelId}
+            elapsedLabel={
+              selectedTurn ? formatElapsed(now - selectedTurn.anchorAt) : null
+            }
+            onOpenActivity={onOpenActivity}
+          />
           <div
             aria-label="Choose active channel feed"
             className="mt-2 flex gap-1 overflow-x-auto pb-0.5"
@@ -448,17 +401,56 @@ function ProfileLiveActivityEmbed({
             })}
           </div>
         </div>
-      ) : null}
+      ) : (
+        <div className="border-border/60 border-b px-3 py-2">
+          <LiveActivityEmbedHeader
+            activeChannelId={activeChannelId}
+            elapsedLabel={
+              selectedTurn ? formatElapsed(now - selectedTurn.anchorAt) : null
+            }
+            onOpenActivity={onOpenActivity}
+          />
+        </div>
+      )}
       <ManagedAgentSessionPanel
         agent={managedAgent}
         autoTail={true}
         channelId={activeChannelId}
-        className="min-h-0 flex-1 overflow-y-auto rounded-none border-0 bg-transparent p-3 shadow-none"
+        className="min-h-0 flex-1 rounded-none border-0 bg-transparent p-3 shadow-none"
         emptyDescription="Live activity will appear here."
         rawLayout="responsive"
         showHeader={false}
         showRaw={false}
       />
+    </section>
+  );
+}
+
+function LiveActivityEmbedHeader({
+  activeChannelId,
+  elapsedLabel,
+  onOpenActivity,
+}: {
+  activeChannelId: string | null;
+  elapsedLabel: string | null;
+  onOpenActivity: (channelId?: string | null) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 text-xs">
+      <span className="font-medium text-foreground">Live activity</span>
+      <div className="flex shrink-0 items-center gap-2">
+        {elapsedLabel ? (
+          <span className="text-muted-foreground">{elapsedLabel}</span>
+        ) : null}
+        <Button
+          className="h-6 px-2 text-2xs"
+          onClick={() => onOpenActivity(activeChannelId)}
+          type="button"
+          variant="ghost"
+        >
+          Open full activity
+        </Button>
+      </div>
     </div>
   );
 }

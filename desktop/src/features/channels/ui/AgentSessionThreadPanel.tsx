@@ -32,6 +32,7 @@ import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
   channel: Channel | null;
+  channelId?: string | null;
   canInterruptTurn: boolean;
   isWorking: boolean;
   layout?: "standalone" | "split";
@@ -47,6 +48,7 @@ export function AgentSessionThreadPanel({
   agent,
   canInterruptTurn,
   channel,
+  channelId = null,
   isWorking,
   layout = "standalone",
   isSinglePanelView = false,
@@ -62,7 +64,8 @@ export function AgentSessionThreadPanel({
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-  const rawFeedScopeKey = `${agent.pubkey}:${channel?.id ?? "all"}`;
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
   const [rawFeedState, setRawFeedState] = React.useState(() => ({
     scopeKey: rawFeedScopeKey,
     show: false,
@@ -223,10 +226,10 @@ export function AgentSessionThreadPanel({
       >
         <ManagedAgentSessionPanel
           agent={agent}
-          channelId={channel?.id ?? null}
+          channelId={sessionChannelId}
           className="border-0 bg-transparent p-0 shadow-none"
           emptyDescription={
-            channel
+            sessionChannelId
               ? `Mention ${agent.name} in the channel to see its work here.`
               : `Mention ${agent.name} in any channel to see its work here.`
           }

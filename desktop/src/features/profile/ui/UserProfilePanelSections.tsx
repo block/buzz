@@ -95,7 +95,7 @@ export type ProfileSummaryViewProps = {
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
   onAddToChannel: () => void;
-  onOpenActivity: () => void;
+  onOpenActivity: (channelId?: string | null) => void;
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;

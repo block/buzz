@@ -1,7 +1,9 @@
 import * as React from "react";
 
 type AgentSessionContextValue = {
-  onOpenAgentSession: ((pubkey: string) => void) | null;
+  onOpenAgentSession:
+    | ((pubkey: string, channelId?: string | null) => void)
+    | null;
 };
 
 const AgentSessionContext = React.createContext<AgentSessionContextValue>({
@@ -13,7 +15,7 @@ export function AgentSessionProvider({
   onOpenAgentSession,
 }: {
   children: React.ReactNode;
-  onOpenAgentSession: (pubkey: string) => void;
+  onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
 }) {
   const value = React.useMemo(
     () => ({ onOpenAgentSession }),

@@ -56,7 +56,7 @@ export type ChannelPaneProps = {
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
   onJoinChannel?: () => Promise<void>;
-  onOpenAgentSession: (pubkey: string) => void;
+  onOpenAgentSession: (pubkey: string, channelId?: string | null) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenMembers?: () => void;
   onOpenProfilePanel: (pubkey: string) => void;
@@ -100,6 +100,7 @@ export type ChannelPaneProps = {
   profiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   shouldShowThreadSkeleton: boolean;
+  openAgentSessionChannelId: string | null;
   openAgentSessionPubkey: string | null;
   onProfilePanelViewChange: (
     view: ProfilePanelView,

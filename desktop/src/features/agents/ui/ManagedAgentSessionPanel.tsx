@@ -109,6 +109,7 @@ export function ManagedAgentSessionPanel({
         agentPubkey={agent.pubkey}
         connectionState={connectionState}
         autoTail={autoTail}
+        channelId={channelId}
         emptyDescription={emptyDescription}
         errorMessage={errorMessage}
         events={displayEvents}
@@ -164,6 +165,7 @@ function SessionBody({
   agentPubkey,
   autoTail,
   connectionState,
+  channelId,
   emptyDescription,
   errorMessage,
   events,
@@ -178,6 +180,7 @@ function SessionBody({
   agentName: string;
   agentPubkey: string;
   autoTail: boolean;
+  channelId: string | null;
   connectionState: ConnectionState;
   emptyDescription: string;
   errorMessage: string | null;
@@ -229,6 +232,7 @@ function SessionBody({
             emptyDescription={emptyDescription}
             items={transcript}
             profiles={profiles}
+            scrollScopeKey={`${agentPubkey}:${channelId ?? "all"}`}
             autoTail={autoTail}
           />
           {rawRail.mode === "side" ? <RawEventRail events={events} /> : null}

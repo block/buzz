@@ -2,6 +2,7 @@ import * as React from "react";
 import { CheckCheck, Radio } from "lucide-react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
@@ -70,26 +71,27 @@ export function AgentSessionTranscriptList({
   emptyDescription,
   items,
   profiles,
+  scrollScopeKey,
 }: AgentTranscriptIdentityProps & {
   autoTail?: boolean;
   emptyDescription: string;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
+  scrollScopeKey?: string | null;
 }) {
   const displayBlocks = React.useMemo(
     () => buildTranscriptDisplayBlocks(items),
     [items],
   );
-  const tailRef = React.useRef<HTMLDivElement>(null);
-  const latestItemId = items.length > 0 ? items[items.length - 1]?.id : null;
-
-  React.useEffect(() => {
-    if (!autoTail || !latestItemId) {
-      return;
-    }
-
-    tailRef.current?.scrollIntoView({ block: "end" });
-  }, [autoTail, latestItemId]);
+  const scrollContainerRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null);
+  const anchoredScroll = useAnchoredScroll({
+    channelId: autoTail ? (scrollScopeKey ?? agentPubkey) : null,
+    contentRef,
+    isLoading: false,
+    messages: items,
+    scrollContainerRef,
+  });
 
   if (items.length === 0) {
     return (
@@ -102,16 +104,22 @@ export function AgentSessionTranscriptList({
   }
 
   return (
-    <div className="w-full">
+    <div
+      className={cn("w-full", autoTail ? "h-full overflow-y-auto" : null)}
+      onScroll={autoTail ? anchoredScroll.onScroll : undefined}
+      ref={autoTail ? scrollContainerRef : undefined}
+    >
       <div
         aria-label="Live ACP transcript"
         aria-live="polite"
         className="flex w-full flex-col gap-2.5"
+        ref={autoTail ? contentRef : undefined}
         role="log"
       >
         {displayBlocks.map((block) => (
           <div
             className="content-visibility-auto"
+            data-message-id={getDisplayBlockKey(block)}
             key={getDisplayBlockKey(block)}
           >
             <TranscriptDisplayBlockView
@@ -123,7 +131,6 @@ export function AgentSessionTranscriptList({
             />
           </div>
         ))}
-        {autoTail ? <div aria-hidden="true" ref={tailRef} /> : null}
       </div>
     </div>
   );
