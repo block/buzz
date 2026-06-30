@@ -12,6 +12,12 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
+import {
+  ActivityRow,
+  ActivityRowContent,
+  ActivityRowLabel,
+  splitActivityRowLabel,
+} from "./activityRenderClasses/ActivityRow";
 import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
 import type { AgentTranscriptIdentityProps } from "./activityRenderClasses/types";
 import {
@@ -241,16 +247,14 @@ function SameKindSummaryItem({
   );
 
   return (
-    <details
-      className="group/summary not-prose flex flex-col gap-0.5"
-      data-testid="transcript-same-kind-summary"
+    <ActivityRow
+      className="flex flex-col gap-0.5"
+      openToneScope="summary"
+      testId="transcript-same-kind-summary"
     >
-      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground">
-        <ToolRunSummaryLabel label={summary.label} />
-        <TranscriptTimestamp timestamp={summary.timestamp} />
-        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open/summary:rotate-180" />
-      </summary>
-      <div
+      <ToolRunSummaryLabel label={summary.label} />
+      <TranscriptTimestamp timestamp={summary.timestamp} />
+      <ActivityRowContent
         className={cn(
           "flex flex-col",
           expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
@@ -277,33 +281,25 @@ function SameKindSummaryItem({
                   : item.title}
               </p>
             ))}
-      </div>
-    </details>
+      </ActivityRowContent>
+    </ActivityRow>
   );
 }
 
 function ToolRunSummaryLabel({ label }: { label: string }) {
-  const parts = splitToolRunLabel(label);
+  const parts = splitActivityRowLabel(label);
 
   if (!parts) {
     return <span className="truncate text-sm font-medium">{label}</span>;
   }
 
   return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
-      <span className="shrink-0 text-sm font-semibold text-muted-foreground/50 group-open/summary:text-muted-foreground/70">
-        {parts.verb}
-      </span>
-      <span className="min-w-0 truncate text-sm font-normal text-muted-foreground/80 group-open/summary:text-muted-foreground">
-        {parts.object}
-      </span>
-    </span>
+    <ActivityRowLabel
+      object={parts.object}
+      openToneScope="summary"
+      verb={parts.verb}
+    />
   );
-}
-
-function splitToolRunLabel(label: string) {
-  const match = label.match(/^(Edited|Ran|Read)\s+(.+)$/);
-  return match ? { verb: match[1], object: match[2] } : null;
 }
 
 function TurnPromptBlock({

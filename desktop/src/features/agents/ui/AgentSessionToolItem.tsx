@@ -15,6 +15,11 @@ import type {
   FileEditDiffLine,
 } from "./agentSessionFileEditDiff";
 import {
+  ActivityRowLabel,
+  splitActivityRowLabel,
+  type ActivityRowLabelParts,
+} from "./activityRenderClasses/ActivityRow";
+import {
   formatCodeValue,
   getToolDurationDisplay,
   isInlineImageData,
@@ -121,11 +126,21 @@ function CompactToolSummaryRow({
     if (!thumbnailSrc || thumbnailFailed) return null;
     return resolveImageSrc(thumbnailSrc);
   }, [thumbnailFailed, thumbnailSrc]);
+  const actionLabel = fileEditSummary
+    ? null
+    : getCompactToolActionLabel(label, preview);
 
   return (
     <>
       {fileEditSummary ? (
         <CompactFileEditSummaryView summary={fileEditSummary} />
+      ) : actionLabel ? (
+        <ActivityRowLabel
+          object={actionLabel.object}
+          openToneScope="tool"
+          title={actionLabel.title}
+          verb={actionLabel.verb}
+        />
       ) : (
         <span className={cn("shrink-0 text-sm font-semibold", mutedTone)}>
           {label}
@@ -141,7 +156,7 @@ function CompactToolSummaryRow({
           src={resolvedThumbnail}
           title={preview ?? undefined}
         />
-      ) : !fileEditSummary && preview ? (
+      ) : !fileEditSummary && !actionLabel && preview ? (
         <span
           className={cn("min-w-0 max-w-48 truncate text-sm", mutedTone)}
           title={preview}
@@ -162,29 +177,44 @@ function CompactToolSummaryRow({
   );
 }
 
+function getCompactToolActionLabel(
+  label: string,
+  preview: string | null,
+): (ActivityRowLabelParts & { title?: string }) | null {
+  const parts = splitActivityRowLabel(label);
+  if (!parts) return null;
+
+  if (!preview) return parts;
+
+  if (
+    label === "Ran command" ||
+    label === "Read file" ||
+    label === "Updated todos" ||
+    label === "Viewed image"
+  ) {
+    return { verb: parts.verb, object: preview, title: preview };
+  }
+
+  return parts;
+}
+
 function CompactFileEditSummaryView({
   summary,
 }: {
   summary: CompactFileEditSummary;
 }) {
   return (
-    <span
-      className="inline-flex min-w-0 max-w-72 items-center gap-1.5"
+    <ActivityRowLabel
+      className="max-w-72"
+      object={summary.filename}
+      openToneScope="tool"
+      stats={{
+        additions: summary.additions,
+        deletions: summary.deletions,
+      }}
       title={summary.path}
-    >
-      <span className="shrink-0 text-sm font-semibold text-muted-foreground/50 group-open:text-muted-foreground/70">
-        Edited
-      </span>
-      <span className="min-w-0 truncate text-sm font-normal text-muted-foreground/80 group-open:text-muted-foreground">
-        {summary.filename}
-      </span>
-      <span className="shrink-0 text-xs font-semibold text-green-600 dark:text-green-400">
-        +{summary.additions}
-      </span>
-      <span className="shrink-0 text-xs font-semibold text-red-500 dark:text-red-400">
-        -{summary.deletions}
-      </span>
-    </span>
+      verb="Edited"
+    />
   );
 }
 
