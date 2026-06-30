@@ -705,8 +705,8 @@ function ProjectListRow({
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="grid gap-3 lg:grid-cols-[minmax(18rem,34rem)_minmax(14rem,1fr)_minmax(13rem,16rem)] lg:items-center">
-        <div className="min-w-0 max-w-[34rem] space-y-1">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_17rem_16rem] lg:items-center">
+        <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-2">
             <FolderGit2 className="h-4 w-4 shrink-0 text-muted-foreground" />
             <span className="truncate text-sm font-medium text-foreground">
@@ -725,8 +725,8 @@ function ProjectListRow({
           </div>
         </div>
 
-        <div className="min-w-0 justify-self-start space-y-1">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <div className="min-w-0 justify-self-end space-y-1 lg:w-68">
+          <div className="flex flex-wrap items-center justify-start gap-x-3 gap-y-1 text-left text-xs text-muted-foreground">
             <MetadataItem icon={Users}>
               {pluralize(people.length, "person", "people")}
             </MetadataItem>

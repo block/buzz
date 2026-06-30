@@ -2077,5 +2077,5 @@ export const Markdown = React.memo(
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,
 );
-
 Markdown.displayName = "Markdown";
+export { SyntaxHighlightedCode } from "./markdown/CodeBlock";
