@@ -215,7 +215,7 @@ List<CustomEmoji> _mergeCustomEmoji(
   return merged;
 }
 
-class _MessageImagePreview extends StatefulWidget {
+class _MessageImagePreview extends HookWidget {
   final String url;
   final ImetaEntry? imeta;
   final String semanticLabel;
@@ -227,40 +227,31 @@ class _MessageImagePreview extends StatefulWidget {
   });
 
   @override
-  State<_MessageImagePreview> createState() => _MessageImagePreviewState();
-}
-
-class _MessageImagePreviewState extends State<_MessageImagePreview> {
-  late final Object _heroTag = Object();
-
-  @override
   Widget build(BuildContext context) {
-    final layout = _resolveImagePreviewLayout(
-      context,
-      widget.imeta?.aspectRatio,
-    );
+    final heroTag = useMemoized(() => Object());
+    final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
 
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half),
       child: GestureDetector(
         onTap: () => openImageViewer(
           context,
-          imageUrl: widget.url,
-          heroTag: _heroTag,
-          semanticLabel: widget.semanticLabel,
+          imageUrl: url,
+          heroTag: heroTag,
+          semanticLabel: semanticLabel,
         ),
         child: _MessageMediaPreviewFrame(
-          previewKey: ValueKey('message-media-image-preview:${widget.url}'),
+          previewKey: ValueKey('message-media-image-preview:$url'),
           backgroundColor: context.colors.surfaceContainerHighest,
           width: layout.width,
           height: layout.height,
           constraints: layout.constraints,
           child: Hero(
-            tag: _heroTag,
+            tag: heroTag,
             child: Image.network(
-              widget.url,
+              url,
               fit: layout.fit,
-              semanticLabel: widget.semanticLabel,
+              semanticLabel: semanticLabel,
               errorBuilder: (_, _, _) => _MediaPreviewFallback(
                 icon: LucideIcons.imageOff,
                 label: 'Image unavailable',
