@@ -31,7 +31,7 @@ pub use env_vars::*;
 pub use nest::*;
 pub use persona_card::*;
 pub use personas::*;
-pub(crate) use readiness::{agent_readiness, AgentReadiness, EffectiveAgentEnv, Requirement,
+pub(crate) use readiness::{agent_readiness, AgentReadiness, Requirement,
     resolve_effective_agent_env};
 #[cfg(windows)]
 pub use process_lifecycle::*;

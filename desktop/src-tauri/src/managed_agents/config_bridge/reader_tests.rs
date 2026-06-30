@@ -659,3 +659,18 @@ fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
         "thinking_effort must not appear in advanced when normalized"
     );
 }
+
+#[test]
+fn missing_required_provider_still_returns_dropdown_field() {
+    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, true)
+        .expect("required provider field should be surfaced even when empty");
+
+    assert_eq!(provider.value, None);
+    assert_eq!(provider.origin, ConfigOrigin::EnvVar);
+    assert!(provider.is_required);
+}
+
+#[test]
+fn missing_optional_provider_stays_hidden() {
+    assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
+}
