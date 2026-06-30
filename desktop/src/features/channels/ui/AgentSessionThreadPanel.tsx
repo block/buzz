@@ -21,11 +21,12 @@ import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Switch } from "@/shared/ui/switch";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
@@ -97,34 +98,6 @@ export function AgentSessionThreadPanel({
   const agentHeaderActions = (
     <AuxiliaryPanelHeaderActions>
       {isLive ? (
-        <div
-          className="flex min-w-19 shrink-0 items-center justify-end gap-2"
-          title={
-            showRawFeed
-              ? "Hide raw JSON-RPC payloads."
-              : channel
-                ? "Show raw JSON-RPC payloads for this channel."
-                : "Show raw JSON-RPC payloads for this agent."
-          }
-        >
-          <label
-            className="flex shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground"
-            htmlFor="agent-session-raw-feed-switch"
-          >
-            <TerminalSquare className="h-3 w-3" />
-            Raw
-          </label>
-          <Switch
-            aria-label={showRawFeed ? "Hide raw feed" : "Show raw feed"}
-            checked={showRawFeed}
-            className="shrink-0 data-[state=unchecked]:bg-muted-foreground/45 [&>span]:bg-white"
-            data-testid="agent-session-toggle-raw-feed"
-            id="agent-session-raw-feed-switch"
-            onCheckedChange={handleRawFeedChange}
-          />
-        </div>
-      ) : null}
-      {isLive && isWorking ? (
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
@@ -151,6 +124,30 @@ export function AgentSessionThreadPanel({
             className="min-w-56"
             onCloseAutoFocus={(event) => event.preventDefault()}
           >
+            <DropdownMenuCheckboxItem
+              checked={showRawFeed}
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-raw-feed"
+              onCheckedChange={handleRawFeedChange}
+              title={
+                showRawFeed
+                  ? "Hide raw JSON-RPC payloads."
+                  : channel
+                    ? "Show raw JSON-RPC payloads for this channel."
+                    : "Show raw JSON-RPC payloads for this agent."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <TerminalSquare className="h-4 w-4 text-muted-foreground" />
+                  Raw
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Show raw JSON-RPC activity.
+                </span>
+              </span>
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               className="items-start gap-3"
               data-testid="agent-session-stop-turn"
@@ -161,7 +158,9 @@ export function AgentSessionThreadPanel({
               title={
                 canStopCurrentTurn
                   ? "Interrupt the current ACP turn without stopping the agent process."
-                  : "Only locally managed agents can be interrupted from this workspace."
+                  : isWorking
+                    ? "Only locally managed agents can be interrupted from this workspace."
+                    : "Available while the agent is working."
               }
             >
               <Octagon className="mt-0.5 h-4 w-4 text-muted-foreground" />
@@ -171,7 +170,9 @@ export function AgentSessionThreadPanel({
                 </span>
                 {!canStopCurrentTurn ? (
                   <span className="mt-0.5 block text-xs text-muted-foreground">
-                    Only available for locally managed agents.
+                    {isWorking
+                      ? "Only available for locally managed agents."
+                      : "Available while the agent is working."}
                   </span>
                 ) : null}
               </span>
