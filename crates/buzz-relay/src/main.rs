@@ -33,8 +33,8 @@ async fn main() -> anyhow::Result<()> {
     // layer that exports spans via OTLP gRPC alongside the JSON stdout logs.
     //
     // Build a single shared Resource (service.name=buzz-relay by default, overridable
-    // via OTEL_SERVICE_NAME) used by both the trace and metric providers so that
-    // Datadog can correlate spans and metrics under the same service identity.
+    // via OTEL_SERVICE_NAME) for the trace provider so that Datadog can identify
+    // spans under the correct service identity.
     let resource = telemetry::service_resource();
     let tracer_provider = telemetry::try_init_tracer(resource.clone());
     let otel_layer = tracer_provider.as_ref().map(|p| {
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         "Config loaded"
     );
 
-    let meter_provider = relay_metrics::install(config.metrics_port, resource);
+    relay_metrics::install(config.metrics_port);
     info!(
         port = config.metrics_port,
         "Prometheus metrics exporter started"
@@ -661,9 +661,6 @@ async fn main() -> anyhow::Result<()> {
         let state_for_sub = Arc::clone(&state);
         let mut rx = state_for_sub.pubsub.subscribe_local();
         tokio::spawn(async move {
-            let fanout_lag = relay_metrics::meter()
-                .u64_counter("buzz_multinode_fanout_lag_total")
-                .build();
             loop {
                 match rx.recv().await {
                     Ok(channel_event) => {
@@ -674,7 +671,7 @@ async fn main() -> anyhow::Result<()> {
                         .await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        fanout_lag.add(n, &[]);
+                        metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
                         tracing::warn!("Multi-node fan-out lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -694,9 +691,6 @@ async fn main() -> anyhow::Result<()> {
         let state_for_cache = Arc::clone(&state);
         let mut rx = state_for_cache.pubsub.subscribe_cache_invalidations();
         tokio::spawn(async move {
-            let cache_inval_lag = relay_metrics::meter()
-                .u64_counter("buzz_cache_invalidation_lag_total")
-                .build();
             loop {
                 match rx.recv().await {
                     Ok(scoped) => {
@@ -708,7 +702,7 @@ async fn main() -> anyhow::Result<()> {
                             .apply_cache_invalidation(scoped.community_id, scoped.invalidation);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        cache_inval_lag.add(n, &[]);
+                        metrics::counter!("buzz_cache_invalidation_lag_total").increment(n);
                         tracing::warn!("Cache-invalidation consumer lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -732,29 +726,20 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(10)
             .max(1); // tokio::time::interval panics on Duration::ZERO
         tokio::spawn(async move {
-            let m = relay_metrics::meter();
-            let db_pool_size = m.u64_gauge("buzz_db_pool_size").build();
-            let db_pool_idle = m.u64_gauge("buzz_db_pool_idle").build();
-            let db_pool_active = m.u64_gauge("buzz_db_pool_active").build();
-            let redis_pool_available = m.u64_gauge("buzz_redis_pool_available").build();
-            let redis_pool_size = m.u64_gauge("buzz_redis_pool_size").build();
-            let redis_pool_max = m.u64_gauge("buzz_redis_pool_max").build();
-            let redis_pool_waiting = m.u64_gauge("buzz_redis_pool_waiting").build();
-
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
                 interval.tick().await;
                 let db_stats = pool_state.db.pool_stats();
                 let active = db_stats.size.saturating_sub(db_stats.idle);
-                db_pool_size.record(db_stats.size as u64, &[]);
-                db_pool_idle.record(db_stats.idle as u64, &[]);
-                db_pool_active.record(active as u64, &[]);
+                metrics::gauge!("buzz_db_pool_size").set(db_stats.size as f64);
+                metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
+                metrics::gauge!("buzz_db_pool_active").set(active as f64);
 
                 let rs = pool_state.redis_pool.status();
-                redis_pool_available.record(rs.available as u64, &[]);
-                redis_pool_size.record(rs.size as u64, &[]);
-                redis_pool_max.record(rs.max_size as u64, &[]);
-                redis_pool_waiting.record(rs.waiting as u64, &[]);
+                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
+                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
+                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
+                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
             }
         });
     }
@@ -768,10 +753,7 @@ async fn main() -> anyhow::Result<()> {
         .drain(std::time::Duration::from_secs(5))
         .await;
 
-    // Flush pending OTEL spans and metrics before exit.
-    if let Err(e) = meter_provider.shutdown() {
-        tracing::warn!(error = %e, "OTEL meter provider shutdown error");
-    }
+    // Flush pending OTEL spans before exit.
     if let Some(tp) = tracer_provider {
         if let Err(e) = tp.shutdown() {
             tracing::warn!(error = %e, "OTEL tracer provider shutdown error");

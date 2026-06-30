@@ -25,7 +25,7 @@
 
 use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider, Resource};
 
-/// Build the OTEL [`Resource`] shared by the trace and metric providers.
+/// Build the OTEL [`Resource`] used by the trace provider.
 ///
 /// Strategy (priority order):
 /// 1. `service.name` in `OTEL_RESOURCE_ATTRIBUTES` — overlaid last by
@@ -40,9 +40,8 @@ use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider,
 /// `buzz-relay` default.  We therefore read `OTEL_SERVICE_NAME` explicitly
 /// so the fallback is fully under our control.
 ///
-/// Both the tracer provider (traces) and the meter provider (metrics) receive
-/// the same `Resource` instance so Datadog can correlate spans and metrics on
-/// the same `service.name`.
+/// The tracer provider receives this `Resource` so Datadog can identify
+/// spans under the correct `service.name`.
 pub fn service_resource() -> Resource {
     // Honor OTEL_SERVICE_NAME when set+non-empty; otherwise use buzz-relay.
     // EnvResourceDetector overlays OTEL_RESOURCE_ATTRIBUTES last, so an

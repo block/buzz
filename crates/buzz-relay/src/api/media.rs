@@ -193,15 +193,13 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         .map_err(|_| MediaError::RelayMembershipRequired)?;
 
         if upload_rate_limited(state, &auth_event.pubkey) {
-            crate::metrics::metrics()
-                .media_upload_rejections_total
-                .add(1, &[opentelemetry::KeyValue::new("reason", "rate_limit")]);
+            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
+                .increment(1);
             return Err(MediaError::UploadRateLimitExceeded);
         }
         let upload_permit = acquire_upload_permit(state, &auth_event.pubkey).inspect_err(|_| {
-            crate::metrics::metrics()
-                .media_upload_rejections_total
-                .add(1, &[opentelemetry::KeyValue::new("reason", "concurrency")]);
+            metrics::counter!("buzz_media_upload_rejections_total", "reason" => "concurrency")
+                .increment(1);
         })?;
 
         Ok(AuthenticatedUpload {
@@ -312,10 +310,7 @@ pub async fn upload_blob(
         }
         _ => "other",
     };
-    crate::metrics::metrics().media_uploads_total.add(
-        1,
-        &[opentelemetry::KeyValue::new("mime", mime_label.to_string())],
-    );
+    metrics::counter!("buzz_media_uploads_total", "mime" => mime_label.to_owned()).increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
     let desc = descriptor.clone();
@@ -335,9 +330,7 @@ pub async fn upload_blob(
         .await
     {
         tracing::error!("Media audit channel closed — entry lost: {e}");
-        crate::metrics::metrics()
-            .audit_send_errors_total
-            .add(1, &[]);
+        metrics::counter!("buzz_audit_send_errors_total").increment(1);
     }
 
     Ok(Json(descriptor))
