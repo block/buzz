@@ -5,11 +5,13 @@ class AccentColor {
   final String name;
   final Color light;
   final Color dark;
+  final bool useThemeForegroundInDark;
 
   const AccentColor({
     required this.name,
     required this.light,
     required this.dark,
+    this.useThemeForegroundInDark = false,
   });
 }
 
@@ -34,8 +36,24 @@ const accentColors = [
     light: Color(0xFF6366F1),
     dark: Color(0xFF818CF8),
   ),
-  AccentColor(name: 'Black', light: Color(0xFF000000), dark: Color(0xFF000000)),
+  AccentColor(
+    name: 'Black',
+    light: Color(0xFF000000),
+    dark: Color(0xFFFFFFFF),
+    useThemeForegroundInDark: true,
+  ),
 ];
+
+Color accentColorForScheme(ColorScheme scheme, int accentIndex) {
+  if (accentIndex < 0 || accentIndex >= accentColors.length) {
+    return scheme.primary;
+  }
+  final accent = accentColors[accentIndex];
+  if (scheme.brightness == Brightness.dark && accent.useThemeForegroundInDark) {
+    return scheme.onSurface;
+  }
+  return scheme.brightness == Brightness.light ? accent.light : accent.dark;
+}
 
 /// New default: Black.
 ///
