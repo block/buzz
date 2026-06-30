@@ -522,6 +522,25 @@ impl AcpClient {
         self.steer_rx = Some(rx);
     }
 
+    /// Clear any installed steer receiver without consuming it.
+    ///
+    /// Called by `send_prompt_result` on every exit path of `run_prompt_task`
+    /// so that `install_steer_rx`'s `is_none()` invariant holds for the next
+    /// dispatch even when the turn ended before the read loop ran `take()`.
+    /// Idempotent — safe to call when `steer_rx` is already `None`.
+    pub fn clear_steer_rx(&mut self) {
+        self.steer_rx = None;
+    }
+
+    /// Returns `true` if no steer receiver is currently installed.
+    ///
+    /// Test-only: used by `pool` tests to assert the post-return invariant
+    /// without exposing the private field directly.
+    #[cfg(test)]
+    pub fn steer_rx_is_none(&self) -> bool {
+        self.steer_rx.is_none()
+    }
+
     /// Cancel a turn cleanly, handling any pending permission request first.
     ///
     /// Steps:
