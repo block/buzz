@@ -175,8 +175,9 @@ test.describe("config bridge screenshots", () => {
 
     const panel = await openAgentProfileFromChannel(page, "Goose Agent");
 
-    // The folded config panel: provenance sentences inline under each value.
-    await expect(panel.getByText("Set in Buzz")).toBeVisible();
+    // Buzz-native fields don't need provenance chrome, but this test still needs
+    // a visible folded-panel row before screenshots settle.
+    await expect(panel.getByText("Model").first()).toBeVisible();
     await settleAnimations(panel);
 
     await panel.screenshot({ path: `${SHOTS}/01-folded-config-panel.png` });
@@ -208,14 +209,13 @@ test.describe("config bridge screenshots", () => {
 
     const panel = await openAgentProfileFromChannel(page, "Multi-Origin Agent");
 
-    // Multiple distinct provenance origins visible at once.
-    await expect(panel.getByText("Set in Buzz")).toBeVisible();
-    await expect(panel.getByText("Inherited from persona")).toBeVisible();
+    // Multiple distinct non-native provenance origins visible at once.
+    await expect(panel.getByText("Persona default")).toBeVisible();
     await expect(
-      panel.getByText("From environment variable (GOOSE_MODE)"),
+      panel.getByText("Environment variable (GOOSE_MODE)"),
     ).toBeVisible();
     await expect(
-      panel.getByText("From config file (~/.config/goose/config.yaml)").first(),
+      panel.getByText("Config file (~/.config/goose/config.yaml)").first(),
     ).toBeVisible();
     await settleAnimations(panel);
 
@@ -238,15 +238,12 @@ test.describe("config bridge screenshots", () => {
     await panel.screenshot({ path: `${SHOTS}/04-pre-spawn-state.png` });
   });
 
-  test("05 — advanced expanded", async ({ page }) => {
+  test("05 — advanced flat list", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
 
     const panel = await openAgentProfileFromChannel(page, "Goose Agent");
 
-    const advancedButton = panel.getByRole("button", { name: /Advanced/i });
-    await advancedButton.click();
-
-    // Wait for advanced fields to appear.
+    // Advanced runtime fields render directly in the profile panel's flat list.
     await expect(panel.getByText("Extension: developer")).toBeVisible();
     await settleAnimations(panel);
 

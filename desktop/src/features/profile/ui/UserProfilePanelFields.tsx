@@ -134,10 +134,7 @@ export function useProfileFieldBuckets({
           })
         : []),
     ];
-    return {
-      ...bucketProfileFields(metadataFields),
-      modelLabel: managedAgent?.model ?? persona?.model ?? "Auto",
-    };
+    return bucketProfileFields(metadataFields);
   }, [
     isBot,
     isOwner,

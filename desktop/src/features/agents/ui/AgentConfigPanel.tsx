@@ -5,12 +5,15 @@ import {
   Brain,
   ChevronDown,
   ChevronRight,
+  Copy,
   Cpu,
   Hash,
   Layers,
+  Lock,
   MessageSquare,
   Server,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
@@ -25,7 +28,74 @@ import type {
 
 type Props = {
   pubkey: string;
+  advancedMode?: "collapsed" | "flat";
 };
+
+async function copyToClipboard(value: string, label: string) {
+  await navigator.clipboard.writeText(value);
+  toast.success(`Copied ${label}`);
+}
+
+function isReadOnlyField({
+  origin,
+  writeVia,
+}: {
+  origin: ConfigOrigin;
+  writeVia: ConfigWriteMechanism;
+}) {
+  return writeVia.type === "readOnly" || origin === "harnessConstraint";
+}
+
+function ConfigFieldLabel({
+  label,
+  locked,
+}: {
+  label: string;
+  locked: boolean;
+}) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-foreground">
+      <span className="truncate">{label}</span>
+      {locked ? (
+        <Lock
+          aria-label="Read-only"
+          className="h-3 w-3 shrink-0 text-muted-foreground/70"
+        />
+      ) : null}
+    </span>
+  );
+}
+
+function shouldOfferCopy({
+  fieldKey,
+  origin,
+  value,
+}: {
+  fieldKey?: keyof NormalizedConfig;
+  origin: ConfigOrigin;
+  value: string | null;
+}) {
+  if (!value) {
+    return false;
+  }
+
+  if (
+    fieldKey === "model" ||
+    fieldKey === "provider" ||
+    fieldKey === "maxOutputTokens" ||
+    fieldKey === "contextLimit"
+  ) {
+    return true;
+  }
+
+  if (origin === "envVar") {
+    return true;
+  }
+
+  return value.includes("/") || value.startsWith("~") || value.includes(":");
+}
+
+type RowVariant = "compact" | "profile";
 
 // ── Provenance sentence ──────────────────────────────────────────────────────
 
@@ -33,29 +103,27 @@ function provenanceSentence(
   origin: ConfigOrigin,
   writeVia: ConfigWriteMechanism,
   configFilePath: string | null,
-): string {
+): string | null {
   switch (origin) {
     case "buzzExplicit":
-      return "Set in Buzz";
+      return null;
     case "personaDefault":
-      return "Inherited from persona";
+      return "Persona default";
     case "runtimeOverride":
       return "Live override (this session only)";
     case "harnessConstraint":
       return "Locked by harness";
     case "envVar": {
       if (writeVia.type === "respawnWithEnvVar") {
-        return `From environment variable (${writeVia.envKey})`;
+        return `Environment variable (${writeVia.envKey})`;
       }
-      return "From environment variable";
+      return "Environment variable";
     }
     case "configFile":
-      return configFilePath
-        ? `From config file (${configFilePath})`
-        : "From config file";
+      return configFilePath ? `Config file (${configFilePath})` : "Config file";
     case "acpConfigOption":
     case "acpNativeRead":
-      return "From ACP session";
+      return "ACP session";
   }
 }
 
@@ -87,58 +155,92 @@ function NormalizedRow({
   field,
   isPreSpawn,
   configFilePath,
+  variant = "compact",
 }: {
   fieldKey: keyof NormalizedConfig;
   label: string;
   field: NormalizedField;
   isPreSpawn: boolean;
   configFilePath: string | null;
+  variant?: RowVariant;
 }) {
   const Icon = NORMALIZED_ICONS[fieldKey];
   // ACP-sourced origins only become meaningful post-spawn
   const isAcpOnly =
     field.origin === "acpNativeRead" || field.origin === "acpConfigOption";
+  const displayValue =
+    isPreSpawn && isAcpOnly
+      ? "Available after agent starts"
+      : (field.value ?? "—");
+  const provenance = field.value
+    ? provenanceSentence(field.origin, field.writeVia, configFilePath)
+    : null;
+  const locked = isReadOnlyField(field);
+  const isCopyable =
+    variant === "profile" &&
+    shouldOfferCopy({
+      fieldKey,
+      origin: field.origin,
+      value: field.value,
+    });
 
-  return (
-    <div className="flex items-center gap-3 px-4 py-3">
+  const content = (
+    <>
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
         <Icon className="h-4 w-4 text-muted-foreground" />
       </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-xs font-medium text-foreground">
-          {label}
-        </span>
+      <span className="min-w-0 flex-1 text-left">
+        {variant === "profile" ? (
+          <ConfigFieldLabel label={label} locked={locked} />
+        ) : (
+          <span className="block text-xs font-medium text-foreground">
+            {label}
+          </span>
+        )}
         <span
           className="mt-0.5 block truncate text-sm text-muted-foreground"
           title={field.value ?? undefined}
         >
-          {isPreSpawn && isAcpOnly ? (
-            "Available after agent starts"
-          ) : (
-            <>
-              {field.value ?? "—"}
-              {field.overriddenValue && (
-                <span
-                  className={cn(
-                    "ml-2 text-xs text-muted-foreground/60",
-                    field.origin !== "runtimeOverride" && "line-through",
-                  )}
-                  title={field.overriddenValue ?? undefined}
-                >
-                  {field.overriddenValue}
-                </span>
+          {displayValue}
+          {!(isPreSpawn && isAcpOnly) && field.overriddenValue ? (
+            <span
+              className={cn(
+                "ml-2 text-xs text-muted-foreground/60",
+                field.origin !== "runtimeOverride" && "line-through",
               )}
-            </>
-          )}
+              title={field.overriddenValue ?? undefined}
+            >
+              {field.overriddenValue}
+            </span>
+          ) : null}
         </span>
-        {field.value && (
+        {provenance ? (
           <span className="mt-0.5 block text-2xs text-muted-foreground/70">
-            {provenanceSentence(field.origin, field.writeVia, configFilePath)}
+            {provenance}
           </span>
-        )}
+        ) : null}
       </span>
-    </div>
+      {isCopyable ? (
+        <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : null}
+    </>
   );
+
+  if (isCopyable && field.value) {
+    return (
+      <button
+        aria-label={`Copy ${label}`}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        onClick={() => void copyToClipboard(field.value ?? "", label)}
+        title={`Copy ${label}`}
+        type="button"
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return <div className="flex items-center gap-3 px-4 py-3">{content}</div>;
 }
 
 // ── Advanced row ──────────────────────────────────────────────────────────────
@@ -146,35 +248,91 @@ function NormalizedRow({
 function AdvancedRow({
   field,
   configFilePath,
+  variant = "compact",
 }: {
   field: ConfigField;
   configFilePath: string | null;
+  variant?: RowVariant;
 }) {
-  return (
-    <div className="py-2">
-      <div className="text-xs text-muted-foreground">{field.label}</div>
-      <div
-        className="mt-0.5 truncate text-sm font-medium font-mono"
-        title={field.value ?? undefined}
-      >
-        {field.value ?? (
-          <span className="font-sans text-muted-foreground">—</span>
-        )}
-      </div>
-      {field.value && (
-        <div className="mt-0.5 text-2xs text-muted-foreground/70">
-          {provenanceSentence(field.origin, field.writeVia, configFilePath)}
+  const provenance = field.value
+    ? provenanceSentence(field.origin, field.writeVia, configFilePath)
+    : null;
+  const locked = isReadOnlyField(field);
+
+  if (variant === "compact") {
+    return (
+      <div className="py-2">
+        <div className="text-xs text-muted-foreground">{field.label}</div>
+        <div
+          className="mt-0.5 truncate text-sm font-medium font-mono"
+          title={field.value ?? undefined}
+        >
+          {field.value ?? (
+            <span className="font-sans text-muted-foreground">—</span>
+          )}
         </div>
-      )}
-    </div>
+        {provenance ? (
+          <div className="mt-0.5 text-2xs text-muted-foreground/70">
+            {provenance}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  const isCopyable = shouldOfferCopy({
+    origin: field.origin,
+    value: field.value,
+  });
+  const content = (
+    <>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+        <Hash className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <span className="min-w-0 flex-1 text-left">
+        <ConfigFieldLabel label={field.label} locked={locked} />
+        <span
+          className="mt-0.5 block truncate text-sm text-muted-foreground"
+          title={field.value ?? undefined}
+        >
+          {field.value ?? "—"}
+        </span>
+        {provenance ? (
+          <span className="mt-0.5 block text-2xs text-muted-foreground/70">
+            {provenance}
+          </span>
+        ) : null}
+      </span>
+      {isCopyable ? (
+        <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
+      ) : null}
+    </>
   );
+
+  if (isCopyable && field.value) {
+    return (
+      <button
+        aria-label={`Copy ${field.label}`}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        onClick={() => void copyToClipboard(field.value ?? "", field.label)}
+        title={`Copy ${field.label}`}
+        type="button"
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return <div className="flex items-center gap-3 px-4 py-3">{content}</div>;
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function AgentConfigPanel({ pubkey }: Props) {
+export function AgentConfigPanel({
+  advancedMode = "collapsed",
+  pubkey,
+}: Props) {
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-
   const { data, isLoading, error } = useAgentConfigSurface(pubkey);
 
   if (isLoading) {
@@ -204,10 +362,10 @@ export function AgentConfigPanel({ pubkey }: Props) {
       keyof NormalizedConfig,
       NormalizedField | null,
     ][]
-  ).filter(([, field]) => field !== null) as [
-    keyof NormalizedConfig,
-    NormalizedField,
-  ][];
+  ).filter(
+    ([key, field]) =>
+      field !== null && !(advancedMode === "flat" && key === "systemPrompt"),
+  ) as [keyof NormalizedConfig, NormalizedField][];
 
   return (
     <div className="space-y-0.5">
@@ -228,18 +386,31 @@ export function AgentConfigPanel({ pubkey }: Props) {
               field={field}
               isPreSpawn={isPreSpawn}
               configFilePath={configFilePath}
+              variant={advancedMode === "flat" ? "profile" : "compact"}
             />
           ))
         )}
       </div>
 
-      {/* Advanced section */}
-      {advanced.length > 0 && (
+      {advanced.length > 0 && advancedMode === "flat" ? (
+        <div className="divide-y divide-border/50 border-t border-border/50">
+          {advanced.map((field) => (
+            <AdvancedRow
+              key={field.key}
+              field={field}
+              configFilePath={configFilePath}
+              variant="profile"
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {advanced.length > 0 && advancedMode === "collapsed" ? (
         <div className="mt-3 border-t border-border/50 pt-2">
           <button
-            type="button"
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
             onClick={() => setAdvancedOpen((v) => !v)}
+            type="button"
           >
             {advancedOpen ? (
               <ChevronDown className="h-3 w-3" />
@@ -249,7 +420,7 @@ export function AgentConfigPanel({ pubkey }: Props) {
             Advanced ({advanced.length})
           </button>
 
-          {advancedOpen && (
+          {advancedOpen ? (
             <div className="mt-1 divide-y divide-border/50">
               {advanced.map((field) => (
                 <AdvancedRow
@@ -259,9 +430,9 @@ export function AgentConfigPanel({ pubkey }: Props) {
                 />
               ))}
             </div>
-          )}
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
