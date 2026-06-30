@@ -17,9 +17,9 @@
 //! the JSON stdout logs continue to work exactly as before and no OTLP
 //! connection is attempted.
 //!
-//! Standard OTEL env vars honoured automatically by the SDK:
-//! - `OTEL_SERVICE_NAME` (default: `buzz-relay`)
-//! - `OTEL_RESOURCE_ATTRIBUTES`
+//! Standard OTEL env vars honoured:
+//! - `OTEL_SERVICE_NAME` (default: `buzz-relay`; read explicitly — not via SDK detector)
+//! - `OTEL_RESOURCE_ATTRIBUTES` (overlaid by [`EnvResourceDetector`])
 //! - `OTEL_TRACES_SAMPLER` (default: `parentbased_always_on`)
 //! - `OTEL_TRACES_SAMPLER_ARG`
 
@@ -28,24 +28,32 @@ use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider,
 /// Build the OTEL [`Resource`] shared by the trace and metric providers.
 ///
 /// Strategy (priority order):
-/// 1. `OTEL_SERVICE_NAME` env var (standard OTEL env, read by [`EnvResourceDetector`])
-/// 2. `service.name` in `OTEL_RESOURCE_ATTRIBUTES` env var (also read by env detector)
-/// 3. Hard-coded fallback `buzz-relay`
+/// 1. `service.name` in `OTEL_RESOURCE_ATTRIBUTES` — overlaid last by
+///    [`EnvResourceDetector`], wins over everything below.
+/// 2. `OTEL_SERVICE_NAME` — read explicitly (non-empty wins over the fallback).
+/// 3. Hard-coded fallback `buzz-relay`.
 ///
-/// The env detector is run first; its attributes win on merge.  The fallback
-/// resource only provides `service.name` when neither env var sets it, so
-/// user-supplied values are always respected.
+/// Note: [`EnvResourceDetector`] only reads `OTEL_RESOURCE_ATTRIBUTES`; it
+/// does **not** read `OTEL_SERVICE_NAME`.  `SdkProvidedResourceDetector` does
+/// read `OTEL_SERVICE_NAME` but always emits a `service.name` key (falling
+/// back to `unknown_service:<exe>` when unset), which would clobber our
+/// `buzz-relay` default.  We therefore read `OTEL_SERVICE_NAME` explicitly
+/// so the fallback is fully under our control.
 ///
 /// Both the tracer provider (traces) and the meter provider (metrics) receive
 /// the same `Resource` instance so Datadog can correlate spans and metrics on
 /// the same `service.name`.
 pub fn service_resource() -> Resource {
-    // Start with buzz-relay as the service.name fallback, then overlay the env
-    // detector.  The builder's `with_detector` call passes the detector output
-    // as the "other" in merge(), so env-supplied values (OTEL_SERVICE_NAME,
-    // OTEL_RESOURCE_ATTRIBUTES) always win over the fallback.
+    // Honor OTEL_SERVICE_NAME when set+non-empty; otherwise use buzz-relay.
+    // EnvResourceDetector overlays OTEL_RESOURCE_ATTRIBUTES last, so an
+    // explicit service.name there still wins over OTEL_SERVICE_NAME per spec.
+    let service_name = std::env::var("OTEL_SERVICE_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "buzz-relay".to_string());
+
     Resource::builder_empty()
-        .with_service_name("buzz-relay")
+        .with_service_name(service_name)
         .with_detector(Box::new(EnvResourceDetector::new()))
         .build()
 }
