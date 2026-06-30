@@ -7,6 +7,7 @@ import {
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
@@ -102,17 +103,6 @@ type MessageThreadPanelSkeletonProps = {
   widthPx: number;
   transparentChrome?: boolean;
 };
-
-function canManageMessage(
-  message: TimelineMessage,
-  currentPubkey: string | undefined,
-): boolean {
-  return Boolean(
-    currentPubkey &&
-      message.pubkey &&
-      currentPubkey.toLowerCase() === message.pubkey.toLowerCase(),
-  );
-}
 
 function hasLaterVisibleSibling(
   entries: readonly MainTimelineEntry[],
@@ -583,12 +573,22 @@ export function MessageThreadPanel({
               layoutVariant="thread-reply"
               message={threadHead}
               onDelete={
-                onDelete && canManageMessage(threadHead, currentPubkey)
+                onDelete &&
+                canManageMessageForCurrentUser(
+                  threadHead,
+                  currentPubkey,
+                  profiles,
+                )
                   ? onDelete
                   : undefined
               }
               onEdit={
-                onEdit && canManageMessage(threadHead, currentPubkey)
+                onEdit &&
+                canManageMessageForCurrentUser(
+                  threadHead,
+                  currentPubkey,
+                  profiles,
+                )
                   ? onEdit
                   : undefined
               }
@@ -665,7 +665,7 @@ export function MessageThreadPanel({
                   return (
                     <div
                       className={cn(
-                        "content-visibility-auto-interactive flex flex-col gap-0",
+                        "flex flex-col gap-0",
                         entry.summary &&
                           "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}
@@ -717,13 +717,21 @@ export function MessageThreadPanel({
                         }
                         onDelete={
                           onDelete &&
-                          canManageMessage(entry.message, currentPubkey)
+                          canManageMessageForCurrentUser(
+                            entry.message,
+                            currentPubkey,
+                            profiles,
+                          )
                             ? onDelete
                             : undefined
                         }
                         onEdit={
                           onEdit &&
-                          canManageMessage(entry.message, currentPubkey)
+                          canManageMessageForCurrentUser(
+                            entry.message,
+                            currentPubkey,
+                            profiles,
+                          )
                             ? onEdit
                             : undefined
                         }

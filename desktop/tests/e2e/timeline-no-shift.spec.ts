@@ -427,3 +427,172 @@ test("thread panel late row reflow keeps the reading reply stable", async ({
   expect(drift.missingSamples).toBe(0);
   expect(drift.maxDrift).toBeLessThanOrEqual(2);
 });
+
+test("thread panel stays put while replies stream in mid-scroll", async ({
+  page,
+}, testInfo) => {
+  testInfo.setTimeout(45_000);
+
+  await installMockBridge(page);
+  await page.goto("/");
+  await waitForMockTimelineBridge(page);
+
+  page.on("console", (msg) => {
+    if (msg.text().includes("ANCHOR_DEBUG")) console.info(msg.text());
+  });
+
+  const rootId = await page.evaluate(() => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "thread stream root",
+      createdAt: 1_700_400_000,
+    });
+    if (!root) throw new Error("Failed to seed thread stream root");
+
+    for (let index = 0; index < 48; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `thread stream reply ${index}\nsecond line ${index}\nthird line ${index}`,
+        parentEventId: root.id,
+        createdAt: 1_700_400_001 + index,
+      });
+    }
+
+    return root.id;
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  const summary = timeline.locator(
+    `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+  );
+  await expect(summary).toBeVisible({ timeout: 5_000 });
+  await summary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadBody = threadPanel.getByTestId("message-thread-body");
+  await expect(threadBody.locator("[data-message-id]").first()).toBeVisible();
+  await page.waitForFunction(() => {
+    const element = document.querySelector(
+      '[data-testid="message-thread-body"]',
+    ) as HTMLDivElement | null;
+    return element && element.scrollHeight > element.clientHeight + 800;
+  });
+
+  // Park the reader mid-history (a real "reading older replies" position), not
+  // at the bottom — the at-bottom stick path corrects differently.
+  await threadBody.evaluate((element) => {
+    const scroller = element as HTMLDivElement;
+    scroller.scrollTop = Math.floor(scroller.scrollHeight * 0.4);
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(100);
+
+  const before = await snapshotAnchor(threadBody);
+  expect(before.anchorId).not.toBe("");
+
+  // Scroll-compensated drift probe: a row's position in *content* coordinates
+  // (viewport-top offset + scrollTop) is invariant unless content ABOVE it
+  // changes height. This isolates involuntary jumps (the bug) from the
+  // reader's own deliberate scroll, which the shared viewport-top sampler
+  // cannot distinguish.
+  await threadBody.evaluate((element, anchorId) => {
+    const scroller = element as HTMLDivElement;
+    const win = window as typeof window & {
+      __THREAD_STREAM_PROBE__?: {
+        stop: boolean;
+        maxDrift: number;
+        samples: number;
+        baseline: number | null;
+      };
+    };
+    const probe = { stop: false, maxDrift: 0, samples: 0, baseline: null };
+    win.__THREAD_STREAM_PROBE__ = probe;
+    const contentTop = () => {
+      const row = scroller.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchorId)}"]`,
+      );
+      if (!row) return null;
+      return (
+        row.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top +
+        scroller.scrollTop
+      );
+    };
+    const sample = () => {
+      if (probe.stop) return;
+      const top = contentTop();
+      if (top !== null) {
+        if (probe.baseline === null) probe.baseline = top;
+        probe.maxDrift = Math.max(
+          probe.maxDrift,
+          Math.abs(top - probe.baseline),
+        );
+      }
+      probe.samples += 1;
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  }, before.anchorId);
+
+  // Drive a brisk upward wheel scroll while new replies stream into the open
+  // thread on the live-event path — Wes's exact symptom: scrolling a live
+  // thread while replies arrive. The reading row's CONTENT position must hold;
+  // the reader's scroll is compensated out, so any drift here is the bug.
+  for (let batch = 0; batch < 6; batch += 1) {
+    await threadBody.evaluate((element) => {
+      const scroller = element as HTMLDivElement;
+      const PX = 40;
+      scroller.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaY: -PX,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      scroller.scrollTop = Math.max(0, scroller.scrollTop - PX);
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await page.evaluate(
+      ({ rootEventId, index }) => {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content: `thread stream live reply ${index}\nsecond line ${index}`,
+          parentEventId: rootEventId,
+          createdAt: 1_700_400_100 + index,
+        });
+      },
+      { rootEventId: rootId, index: batch },
+    );
+    await page.waitForTimeout(80);
+  }
+
+  await page.waitForTimeout(300);
+
+  const drift = await threadBody.evaluate((element) => {
+    const win = window as typeof window & {
+      __THREAD_STREAM_PROBE__?: {
+        stop: boolean;
+        maxDrift: number;
+        samples: number;
+      };
+    };
+    const probe = win.__THREAD_STREAM_PROBE__;
+    if (!probe) throw new Error("no thread stream probe installed");
+    probe.stop = true;
+    return {
+      maxDrift: probe.maxDrift,
+      samples: probe.samples,
+      scrollTop: (element as HTMLDivElement).scrollTop,
+    };
+  });
+  console.info("thread-panel-stream-scroll result", JSON.stringify(drift));
+  expect(drift.samples).toBeGreaterThan(0);
+  // The reader is driving the scroll; streamed replies append below the reading
+  // row. In content coordinates the row must not move. Any material drift here
+  // is the "content jumps around like crazy" bug.
+  expect(drift.maxDrift).toBeLessThanOrEqual(2);
+});

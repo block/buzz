@@ -51,6 +51,7 @@ export default defineConfig({
         "**/home-collapsed-top-chrome.spec.ts",
         "**/thread-unread.spec.ts",
         "**/thread-reply-anchor-roleplay.spec.ts",
+        "**/threadpane-ultrawide.spec.ts",
         "**/animated-avatar.spec.ts",
         "**/reminders.spec.ts",
         "**/virtualization.spec.ts",
@@ -58,6 +59,7 @@ export default defineConfig({
         "**/overscroll-boundary.spec.ts",
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
+        "**/human-edit-agent-content.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

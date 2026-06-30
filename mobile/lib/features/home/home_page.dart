@@ -5,7 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import '../../shared/theme/grid.dart';
+import '../../shared/theme/theme.dart';
 import '../activity/activity_page.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
@@ -105,8 +105,8 @@ class _FloatingTabBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final colorScheme = context.colors;
+    final isDark = context.theme.brightness == Brightness.dark;
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     if (destinations.isEmpty) {
       return const SizedBox.shrink();
@@ -263,8 +263,8 @@ class _FloatingTabDestination extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final textStyle = Theme.of(context).textTheme.labelSmall;
+    final colorScheme = context.colors;
+    final textStyle = context.textTheme.labelSmall;
     final reducedMotion = MediaQuery.of(context).disableAnimations;
     final foregroundColor = selected
         ? colorScheme.onSecondaryContainer

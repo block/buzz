@@ -45,10 +45,7 @@ import type {
   RuntimeConfigSurface,
 } from "@/shared/api/types";
 
-type RawIdentity = {
-  pubkey: string;
-  display_name: string;
-};
+type RawIdentity = { pubkey: string; display_name: string };
 
 type RawProfile = {
   pubkey: string;
@@ -206,6 +203,7 @@ export type RawManagedAgent = {
   max_turn_duration_seconds: number | null;
   parallelism: number;
   system_prompt: string | null;
+  avatar_url?: string | null;
   model: string | null;
   provider: string | null;
   persona_out_of_date: boolean;
@@ -869,6 +867,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     maxTurnDurationSeconds: agent.max_turn_duration_seconds,
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
+    avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
     // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,

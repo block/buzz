@@ -1,32 +1,88 @@
 import * as React from "react";
-import { Bot, Brain, ChevronDown, Radio, TerminalSquare } from "lucide-react";
+import { CheckCheck, ChevronDown, Radio } from "lucide-react";
 
-import {
-  resolveUserLabel,
-  type UserProfileLookup,
-} from "@/features/profile/lib/identity";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
-import { Markdown } from "@/shared/ui/markdown";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
-import type { TranscriptItem } from "./agentSessionTypes";
-import { ToolItem } from "./AgentSessionToolItem";
-import { formatTranscriptTime } from "./agentSessionUtils";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/shared/ui/dialog";
+import { Toggle } from "@/shared/ui/toggle";
+import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
+import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
+import {
+  ActivityRow,
+  ActivityRowContent,
+  ActivityRowLabel,
+  type ActivityRowStats,
+  splitActivityRowLabel,
+} from "./activityRenderClasses/ActivityRow";
+import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
+import type { AgentTranscriptIdentityProps } from "./activityRenderClasses/types";
+import type { FileEditDiff } from "./agentSessionFileEditDiff";
+import {
+  buildTranscriptDisplayBlocks,
+  formatTurnSetupLabel,
+  turnSetupDetail,
+  turnSetupTimestamp,
+  type TranscriptDisplayBlock,
+  type TranscriptTurnSegment,
+} from "./agentSessionTranscriptGrouping";
+import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import { formatTranscriptTimestampTitle } from "./agentSessionUtils";
+import { hasFileEditLineDiff } from "./FileEditDiffView";
+import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
+
+const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
+
+/**
+ * Opt-in only: source pills are useful while iterating on observer parsing, but
+ * they should not appear for every local dev session.
+ */
+const SHOW_TRANSCRIPT_ACP_SOURCE = shouldShowTranscriptAcpSource();
+
+function shouldShowTranscriptAcpSource() {
+  const envValue = import.meta.env.VITE_SHOW_TRANSCRIPT_ACP_SOURCE;
+  if (envValue === "1" || envValue === "true") {
+    return true;
+  }
+
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return (
+      window.localStorage.getItem(TRANSCRIPT_ACP_SOURCE_STORAGE_KEY) === "1"
+    );
+  } catch {
+    return false;
+  }
+}
 
 export function AgentSessionTranscriptList({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   emptyDescription,
   items,
   profiles,
-}: {
-  agentName: string;
+}: AgentTranscriptIdentityProps & {
   emptyDescription: string;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
 }) {
+  const displayBlocks = React.useMemo(
+    () => buildTranscriptDisplayBlocks(items),
+    [items],
+  );
+
   if (items.length === 0) {
     return (
-      <div className="flex min-h-56 flex-col items-center justify-center px-6 py-10 text-center">
+      <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
         <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
         <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
         <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
@@ -35,224 +91,598 @@ export function AgentSessionTranscriptList({
   }
 
   return (
-    <div
-      aria-label="Live ACP transcript"
-      aria-live="polite"
-      className="w-full py-1"
-      role="log"
+    <div className="w-full">
+      <div
+        aria-label="Live ACP transcript"
+        aria-live="polite"
+        className="flex w-full flex-col gap-2.5"
+        role="log"
+      >
+        {displayBlocks.map((block) => (
+          <div
+            className="content-visibility-auto"
+            key={getDisplayBlockKey(block)}
+          >
+            <TranscriptDisplayBlockView
+              agentAvatarUrl={agentAvatarUrl}
+              agentName={agentName}
+              agentPubkey={agentPubkey}
+              block={block}
+              profiles={profiles}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TranscriptAcpSourceBadge({ source }: { source: string }) {
+  return (
+    <span
+      className="mb-1 inline-flex max-w-full rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 font-mono text-xs leading-none text-amber-800 dark:text-amber-200"
+      data-testid="transcript-acp-source"
+      title={`ACP wire source: ${source}`}
     >
-      {items.map((item) => (
-        <div className="mt-4 first:mt-0 content-visibility-auto" key={item.id}>
-          <TranscriptItemView
-            agentName={agentName}
-            item={item}
-            profiles={profiles}
-          />
-        </div>
+      {source}
+    </span>
+  );
+}
+
+function getDisplayBlockKey(block: TranscriptDisplayBlock) {
+  if (block.kind === "single") {
+    return block.item.id;
+  }
+  return `turn:${block.turnId}`;
+}
+
+function TranscriptDisplayBlockView({
+  agentAvatarUrl,
+  agentName,
+  agentPubkey,
+  block,
+  profiles,
+}: AgentTranscriptIdentityProps & {
+  block: TranscriptDisplayBlock;
+  profiles?: UserProfileLookup;
+}) {
+  if (block.kind === "single") {
+    return (
+      <TranscriptItemRow
+        agentAvatarUrl={agentAvatarUrl}
+        agentName={agentName}
+        agentPubkey={agentPubkey}
+        item={block.item}
+        profiles={profiles}
+      />
+    );
+  }
+
+  return (
+    <div
+      className="flex flex-col gap-2.5"
+      data-testid="transcript-turn-group"
+      data-turn-id={block.turnId}
+    >
+      {block.segments.map((segment) => (
+        <TranscriptTurnSegmentView
+          agentAvatarUrl={agentAvatarUrl}
+          agentName={agentName}
+          agentPubkey={agentPubkey}
+          key={getTurnSegmentKey(block.turnId, segment)}
+          profiles={profiles}
+          segment={segment}
+        />
       ))}
     </div>
   );
 }
 
-const TranscriptItemView = React.memo(function TranscriptItemView({
+function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
+  if (segment.kind === "setup") {
+    return `turn:${turnId}:setup`;
+  }
+  if (segment.kind === "prompt") {
+    return `turn:${turnId}:prompt`;
+  }
+  if (segment.kind === "summary") {
+    return segment.summary.id;
+  }
+  return segment.item.id;
+}
+
+function TranscriptTurnSegmentView({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
+  profiles,
+  segment,
+}: AgentTranscriptIdentityProps & {
+  profiles?: UserProfileLookup;
+  segment: TranscriptTurnSegment;
+}) {
+  if (segment.kind === "prompt") {
+    return (
+      <TurnPromptBlock
+        context={segment.context}
+        profiles={profiles}
+        setup={segment.setup}
+        user={segment.user}
+      />
+    );
+  }
+
+  if (segment.kind === "setup") {
+    return <TurnSetupStatus items={segment.items} />;
+  }
+
+  if (segment.kind === "summary") {
+    return (
+      <SameKindSummaryItem
+        agentAvatarUrl={agentAvatarUrl}
+        agentName={agentName}
+        agentPubkey={agentPubkey}
+        profiles={profiles}
+        summary={segment.summary}
+      />
+    );
+  }
+
+  return (
+    <TranscriptItemRow
+      agentAvatarUrl={agentAvatarUrl}
+      agentName={agentName}
+      agentPubkey={agentPubkey}
+      item={segment.item}
+      profiles={profiles}
+    />
+  );
+}
+
+function SameKindSummaryItem({
+  agentAvatarUrl,
+  agentName,
+  agentPubkey,
+  profiles,
+  summary,
+}: AgentTranscriptIdentityProps & {
+  profiles?: UserProfileLookup;
+  summary: Extract<TranscriptTurnSegment, { kind: "summary" }>["summary"];
+}) {
+  const groupedFileEditDiffs = React.useMemo(
+    () =>
+      summary.renderClass === "file-edit"
+        ? getGroupedFileEditDiffs(summary.items)
+        : [],
+    [summary.items, summary.renderClass],
+  );
+  const groupedFileEditStats = summarizeFileEditDiffs(groupedFileEditDiffs);
+  const expandsToToolItems = summary.items.every(
+    (item) => item.type === "tool",
+  );
+
+  return (
+    <ActivityRow
+      className="flex flex-col gap-0.5"
+      openToneScope="summary"
+      testId="transcript-same-kind-summary"
+      title={formatTranscriptTimestampTitle(summary.timestamp)}
+    >
+      <ToolRunSummaryLabel label={summary.label} stats={groupedFileEditStats} />
+      <ActivityRowContent
+        className={cn(
+          "flex flex-col",
+          expandsToToolItems ? "gap-0.5" : "gap-1 pl-5",
+        )}
+      >
+        {expandsToToolItems
+          ? summary.items.map((item) => (
+              <TranscriptItemView
+                agentAvatarUrl={agentAvatarUrl}
+                agentName={agentName}
+                agentPubkey={agentPubkey}
+                item={item}
+                key={item.id}
+                profiles={profiles}
+              />
+            ))
+          : summary.items.map((item) => (
+              <p
+                className="truncate text-xs text-muted-foreground"
+                key={item.id}
+              >
+                {item.type === "tool"
+                  ? item.descriptor.preview || item.descriptor.label
+                  : item.title}
+              </p>
+            ))}
+      </ActivityRowContent>
+    </ActivityRow>
+  );
+}
+
+function getGroupedFileEditDiffs(items: TranscriptItem[]): FileEditDiff[] {
+  return items.flatMap((item) => {
+    if (item.type !== "tool" || item.isError) {
+      return [];
+    }
+
+    const diff = buildCompactToolSummary(item).fileEditDiff;
+    return diff && hasFileEditLineDiff(diff) ? [diff] : [];
+  });
+}
+
+function summarizeFileEditDiffs(
+  diffs: FileEditDiff[],
+): ActivityRowStats | null {
+  if (diffs.length === 0) {
+    return null;
+  }
+
+  return diffs.reduce(
+    (stats, diff) => ({
+      additions: stats.additions + diff.additions,
+      deletions: stats.deletions + diff.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+}
+
+function ToolRunSummaryLabel({
+  label,
+  stats,
+}: {
+  label: string;
+  stats?: ActivityRowStats | null;
+}) {
+  const parts = splitActivityRowLabel(label);
+
+  if (!parts) {
+    return <span className="truncate text-sm font-medium">{label}</span>;
+  }
+
+  return (
+    <ActivityRowLabel
+      object={parts.object}
+      openToneScope="summary"
+      stats={stats}
+      verb={parts.verb}
+    />
+  );
+}
+
+function TurnPromptBlock({
+  context,
+  profiles,
+  setup,
+  user,
+}: {
+  context: Extract<TranscriptItem, { type: "metadata" }> | null;
+  profiles?: UserProfileLookup;
+  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  user: Extract<TranscriptItem, { type: "message" }>;
+}) {
+  return (
+    <div data-testid="transcript-prompt-bundle">
+      {SHOW_TRANSCRIPT_ACP_SOURCE ? (
+        <div className="mb-1 flex flex-wrap gap-1">
+          <TranscriptAcpSourceBadge source="session/prompt:user" />
+          {context ? (
+            <TranscriptAcpSourceBadge source="session/prompt:context" />
+          ) : null}
+        </div>
+      ) : null}
+      <PromptUserMessage
+        context={context}
+        item={user}
+        profiles={profiles}
+        setup={setup}
+      />
+    </div>
+  );
+}
+
+function PromptUserMessage({
+  context = null,
   item,
   profiles,
+  setup = [],
 }: {
-  agentName: string;
+  context?: Extract<TranscriptItem, { type: "metadata" }> | null;
+  item: Extract<TranscriptItem, { type: "message" }>;
+  profiles?: UserProfileLookup;
+  setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
+  const [contextOpen, setContextOpen] = React.useState(false);
+
+  return (
+    <>
+      <UserMessageBubble
+        bubbleClassName="p-2.5"
+        footer={
+          <TurnSetupFooter
+            context={context}
+            contextOpen={contextOpen}
+            items={setup}
+            messageLink={getTranscriptMessageLink(item)}
+            onContextOpenChange={setContextOpen}
+            timestamp={item.timestamp}
+          />
+        }
+        item={item}
+        profiles={profiles}
+      />
+      <PromptContextDialog
+        context={context}
+        onOpenChange={setContextOpen}
+        open={contextOpen}
+        setup={setup}
+      />
+    </>
+  );
+}
+
+function PromptContextSections({
+  className,
+  sections,
+}: {
+  className?: string;
+  sections: PromptSection[];
+}) {
+  return (
+    <div
+      className={cn("space-y-3", className)}
+      data-testid="transcript-prompt-context-sections"
+    >
+      {sections.map((section) => (
+        <PromptContextSectionAccordion
+          key={`${section.title}:${section.body.slice(0, 48)}`}
+          section={section}
+        />
+      ))}
+    </div>
+  );
+}
+
+function PromptContextSectionAccordion({
+  section,
+}: {
+  section: PromptSection;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const body = section.body.trim();
+
+  return (
+    <article className="overflow-hidden rounded-2xl bg-muted/40">
+      <button
+        aria-expanded={open}
+        className="w-full px-4 py-3 text-left transition-colors hover:bg-muted/50"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        <div className="flex items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <div
+              className={cn(
+                "text-sm font-semibold text-foreground",
+                !open && "line-clamp-2",
+              )}
+            >
+              {section.title}
+            </div>
+            <div
+              className={cn(
+                "mt-1 text-xs leading-5 text-foreground/70",
+                open ? "whitespace-pre-wrap wrap-break-word" : "line-clamp-2",
+              )}
+            >
+              {body.length > 0 ? (
+                body
+              ) : (
+                <span className="italic text-foreground/50">No metadata.</span>
+              )}
+            </div>
+          </div>
+          <ChevronDown
+            className={cn(
+              "mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+              open && "rotate-180",
+            )}
+          />
+        </div>
+      </button>
+    </article>
+  );
+}
+
+function PromptContextDialog({
+  context,
+  onOpenChange,
+  open,
+  setup,
+}: {
+  context: Extract<TranscriptItem, { type: "metadata" }> | null;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
+  if (!open || !context || context.sections.length === 0) {
+    return null;
+  }
+
+  const setupText = formatPromptSetupSummary(setup);
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent className="max-w-xl overflow-hidden p-0">
+        <div className="flex max-h-[85vh] flex-col">
+          <DialogHeader className="px-6 pb-3 pt-5 pr-14">
+            <DialogTitle>Prompt context</DialogTitle>
+            {setupText ? (
+              <div className="flex items-center gap-1.5">
+                <CheckCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <DialogDescription>{setupText}</DialogDescription>
+              </div>
+            ) : null}
+          </DialogHeader>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-2">
+            <PromptContextSections sections={context.sections} />
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function formatPromptSetupSummary(
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[],
+) {
+  const label = formatTurnSetupLabel(items);
+  const detail = turnSetupDetail(items);
+  return [label, detail].filter(Boolean).join(" · ");
+}
+
+function TurnSetupFooter({
+  context = null,
+  contextOpen = false,
+  items,
+  messageLink = null,
+  onContextOpenChange,
+  showTimestamp = true,
+  timestamp,
+}: {
+  context?: Extract<TranscriptItem, { type: "metadata" }> | null;
+  contextOpen?: boolean;
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  messageLink?: { channelId: string; messageId: string } | null;
+  onContextOpenChange?: (open: boolean) => void;
+  showTimestamp?: boolean;
+  timestamp: string;
+}) {
+  const label = formatTurnSetupLabel(items);
+  const detail = turnSetupDetail(items);
+  const tooltipText = [label, detail].filter(Boolean).join(" · ");
+  const showSetup = items.length > 0;
+  const showContext = context != null && context.sections.length > 0;
+
+  if (!showSetup && !showContext) {
+    return showTimestamp ? (
+      <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
+    ) : null;
+  }
+
+  const contextToggle = showContext ? (
+    <Toggle
+      aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
+      data-testid="transcript-prompt-context-toggle"
+      className="data-[state=on]:bg-primary/10 data-[state=on]:text-primary dark:data-[state=on]:bg-primary/15"
+      onPressedChange={onContextOpenChange}
+      pressed={contextOpen}
+      size="xs"
+      variant="ghost"
+    >
+      <CheckCheck aria-hidden="true" />
+    </Toggle>
+  ) : null;
+
+  return (
+    <div
+      className="flex items-center gap-1.5 text-muted-foreground/80"
+      data-testid="transcript-turn-setup"
+    >
+      {showContext && showSetup ? contextToggle : null}
+      {!showContext && showSetup ? (
+        <span className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70">
+          <CheckCheck className="h-3.5 w-3.5" />
+          <span className="sr-only">{tooltipText}</span>
+        </span>
+      ) : null}
+      {showContext && !showSetup ? contextToggle : null}
+      {showTimestamp ? (
+        <TranscriptTimestamp messageLink={messageLink} timestamp={timestamp} />
+      ) : null}
+    </div>
+  );
+}
+
+function getTranscriptMessageLink(
+  item: Extract<TranscriptItem, { type: "message" }>,
+) {
+  if (!item.channelId || !item.messageId) return null;
+  return {
+    channelId: item.channelId,
+    messageId: item.messageId,
+  };
+}
+
+function TranscriptItemRow({
+  agentAvatarUrl,
+  agentName,
+  agentPubkey,
+  item,
+  profiles,
+}: AgentTranscriptIdentityProps & {
   item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
-  if (item.type === "message") {
-    return (
-      <MessageItem agentName={agentName} item={item} profiles={profiles} />
-    );
-  }
-  if (item.type === "tool") {
-    return <ToolItem item={item} />;
-  }
-  if (item.type === "thought") {
-    return <ThoughtItem item={item} />;
-  }
-  if (item.type === "metadata") {
-    return <MetadataItem item={item} />;
-  }
-  return <LifecycleItem item={item} />;
-});
+  return (
+    <div key={item.id}>
+      {SHOW_TRANSCRIPT_ACP_SOURCE && item.acpSource ? (
+        <TranscriptAcpSourceBadge source={item.acpSource} />
+      ) : null}
+      <TranscriptItemView
+        agentAvatarUrl={agentAvatarUrl}
+        agentName={agentName}
+        agentPubkey={agentPubkey}
+        item={item}
+        profiles={profiles}
+      />
+    </div>
+  );
+}
 
-function MessageItem({
+function TurnSetupStatus({
+  items,
+}: {
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
+  const timestamp = turnSetupTimestamp(items);
+  if (items.length === 0 || !timestamp) {
+    return null;
+  }
+
+  return (
+    <div
+      className="rounded-md px-2"
+      title={formatTranscriptTimestampTitle(timestamp)}
+    >
+      <TurnSetupFooter
+        items={items}
+        showTimestamp={false}
+        timestamp={timestamp}
+      />
+    </div>
+  );
+}
+
+const TranscriptItemView = React.memo(function TranscriptItemView({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   item,
   profiles,
-}: {
-  agentName: string;
-  item: Extract<TranscriptItem, { type: "message" }>;
+}: AgentTranscriptIdentityProps & {
+  item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
-  const isAssistant = item.role === "assistant";
-  const text = item.text.trim();
-  const authorProfile = item.authorPubkey
-    ? profiles?.[item.authorPubkey.toLowerCase()]
-    : null;
-  const authorLabel = item.authorPubkey
-    ? resolveUserLabel({
-        pubkey: item.authorPubkey,
-        fallbackName: item.title,
-        profiles,
-      })
-    : item.title || "User";
-
   return (
-    <div
-      className={cn(
-        "flex flex-row px-1 py-1 animate-in fade-in duration-200 motion-reduce:animate-none",
-      )}
-      data-role={isAssistant ? "assistant-message" : "user-message"}
-    >
-      {!isAssistant ? (
-        <UserAvatar
-          avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="mr-2 mt-1 h-5 w-5 shrink-0 text-3xs"
-          displayName={authorLabel}
-          size="xs"
-        />
-      ) : null}
-      <div
-        className={cn(
-          "group relative min-w-0 flex flex-col items-start gap-1",
-          isAssistant ? "w-full" : "max-w-[85%]",
-        )}
-      >
-        {isAssistant ? (
-          <div className="mb-0.5 flex items-center gap-1 text-xs">
-            <span className="flex h-5 w-5 items-center justify-center">
-              <Bot className="h-4 w-4 text-muted-foreground" />
-            </span>
-            <span className="font-normal text-foreground">{agentName}</span>
-            <TranscriptTimestamp timestamp={item.timestamp} />
-          </div>
-        ) : null}
-        <div
-          className={cn(
-            "w-full min-w-0 text-sm leading-relaxed",
-            !isAssistant && "rounded-2xl bg-muted p-3 text-foreground",
-          )}
-        >
-          {isAssistant ? (
-            <Markdown content={text || " "} />
-          ) : (
-            <>
-              <p className="whitespace-pre-wrap break-words">{text}</p>
-              <TranscriptTimestamp timestamp={item.timestamp} />
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+    <TranscriptActivityItem
+      agentAvatarUrl={agentAvatarUrl}
+      agentName={agentName}
+      agentPubkey={agentPubkey}
+      item={item}
+      profiles={profiles}
+    />
   );
-}
-
-function ThoughtItem({
-  item,
-}: {
-  item: Extract<TranscriptItem, { type: "thought" }>;
-}) {
-  return (
-    <details className="group not-prose w-full px-1">
-      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px text-muted-foreground">
-        <Brain className="h-4 w-4" />
-        <span className="truncate text-sm font-medium">{item.title}</span>
-        <TranscriptTimestamp timestamp={item.timestamp} />
-        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="py-2 pl-5 text-sm leading-6 text-muted-foreground">
-        <Markdown content={item.text.trim() || " "} />
-      </div>
-    </details>
-  );
-}
-
-function MetadataItem({
-  item,
-}: {
-  item: Extract<TranscriptItem, { type: "metadata" }>;
-}) {
-  return (
-    <details className="group not-prose w-full px-1">
-      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px text-muted-foreground">
-        <TerminalSquare className="h-4 w-4" />
-        <span className="truncate text-sm font-medium">{item.title}</span>
-        <span className="shrink-0 text-xs">
-          {item.sections.length} section{item.sections.length === 1 ? "" : "s"}
-        </span>
-        <TranscriptTimestamp timestamp={item.timestamp} />
-        <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="space-y-3 py-2 pl-5">
-        {item.sections.map((section) => (
-          <details
-            className="group/section"
-            key={`${section.title}:${section.body.slice(0, 48)}`}
-          >
-            <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-foreground/80">
-              <span className="truncate">{section.title}</span>
-              <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
-            </summary>
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-2xs leading-5 text-muted-foreground">
-              {section.body.trim() || "No metadata."}
-            </pre>
-          </details>
-        ))}
-      </div>
-    </details>
-  );
-}
-
-function LifecycleItem({
-  item,
-}: {
-  item: Extract<TranscriptItem, { type: "lifecycle" }>;
-}) {
-  const isError = item.title.toLowerCase().includes("error");
-  return (
-    <div
-      className={cn(
-        "flex items-center justify-start gap-1.5 px-1 py-2 text-left text-xs",
-        isError ? "text-destructive" : "text-muted-foreground",
-      )}
-    >
-      <span className="font-medium">{item.title}</span>
-      {item.text ? <span> - {item.text}</span> : null}
-      <TranscriptTimestamp timestamp={item.timestamp} />
-    </div>
-  );
-}
-
-const fullDateTimeFormat = new Intl.DateTimeFormat(undefined, {
-  weekday: "long",
-  year: "numeric",
-  month: "long",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  second: "2-digit",
 });
-
-function TranscriptTimestamp({ timestamp }: { timestamp: string }) {
-  const formatted = formatTranscriptTime(timestamp);
-  if (!formatted) return null;
-  const date = new Date(timestamp);
-  const fullDateTime = Number.isNaN(date.getTime())
-    ? timestamp
-    : fullDateTimeFormat.format(date);
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-2xs text-muted-foreground/60">
-          {formatted}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="top">{fullDateTime}</TooltipContent>
-    </Tooltip>
-  );
-}

@@ -23,7 +23,7 @@ use crate::managed_agents::{ManagedAgentRecord, PersonaRecord, TeamRecord};
 /// Note: the `team.id` fallback namespace (UUIDs) is near-disjoint from
 /// manifest IDs (dotted reverse-domain), so collisions are near-zero
 /// probability. Documented, not fixed.
-pub(super) fn team_persona_key(team: &TeamRecord) -> &str {
+pub fn team_persona_key(team: &TeamRecord) -> &str {
     team.source_dir
         .as_deref()
         .and_then(|dir| dir.file_name())

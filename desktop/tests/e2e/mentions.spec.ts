@@ -26,6 +26,8 @@ const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
+const UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY =
+  "7777777777777777777777777777777777777777777777777777777777777777";
 const SYSTEM_MESSAGE_KIND = 40099;
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
@@ -1463,7 +1465,17 @@ test("wave attachment huddle passes the bot DM pubkey", async ({ page }) => {
 test("wave attachment huddle waits for placeholder profile-only bot data", async ({
   page,
 }) => {
-  await installMockBridge(page, { usersBatchDelayMs: 2_000 });
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY,
+        displayName: "nova",
+        ownerPubkey: TEST_IDENTITIES.tyler.pubkey,
+        isAgent: true,
+      },
+    ],
+    usersBatchDelayMs: 2_000,
+  });
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -1484,7 +1496,7 @@ test("wave attachment huddle waits for placeholder profile-only bot data", async
     },
     {
       kind: SYSTEM_MESSAGE_KIND,
-      targetPubkey: PROFILE_ONLY_AGENT_PUBKEY,
+      targetPubkey: UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY,
     },
   );
   await waitForTimelineSettled(page);
@@ -1492,12 +1504,9 @@ test("wave attachment huddle waits for placeholder profile-only bot data", async
   const joinedRow = page
     .getByTestId("system-message-row")
     .filter({ hasText: "joined the channel" });
-  const agentChip = joinedRow.locator(
-    "[data-mention].agent-mention-highlight",
-    {
-      hasText: "mira",
-    },
-  );
+  const agentChip = joinedRow.locator("[data-mention]", {
+    hasText: "77777777…7777",
+  });
   await expect(agentChip).toBeVisible({ timeout: 5_000 });
   await agentChip.hover();
 
@@ -1506,7 +1515,9 @@ test("wave attachment huddle waits for placeholder profile-only bot data", async
   );
   await expect(profilePopover).toBeVisible();
   await profilePopover
-    .getByTestId(`user-profile-popover-wave-${PROFILE_ONLY_AGENT_PUBKEY}`)
+    .getByTestId(
+      `user-profile-popover-wave-${UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY}`,
+    )
     .click();
 
   const startHuddleButton = page
@@ -1518,7 +1529,7 @@ test("wave attachment huddle waits for placeholder profile-only bot data", async
 
   await expect
     .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([PROFILE_ONLY_AGENT_PUBKEY]));
+    .toEqual(expect.arrayContaining([UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY]));
 });
 
 test("wave attachment huddle waits for delayed bot DM pubkey", async ({

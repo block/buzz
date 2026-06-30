@@ -596,7 +596,7 @@ export function UserProfilePopover({
                 <div className="flex gap-2">
                   <Button
                     aria-label="Wave"
-                    className="buzz-wave-hover-trigger shrink-0 px-3"
+                    className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
                     data-testid={`user-profile-popover-wave-${pubkey}`}
                     disabled={
                       pendingAction !== null || openDmMutation.isPending

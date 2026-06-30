@@ -89,6 +89,8 @@ mod tests {
             provider_binary_path: None,
             persona_team_dir: None,
             persona_name_in_team: None,
+            persona_source_version: None,
+            provider: None,
             created_at: "now".into(),
             updated_at: "now".into(),
             last_started_at: None,

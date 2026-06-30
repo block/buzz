@@ -961,6 +961,14 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
     "alice",
   );
+  await expect(page.getByTestId("agent-transcript-now-summary")).toHaveCount(0);
+  await page.getByTestId("agent-session-settings-menu-trigger").click();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
+    "No ACP activity yet",
+  );
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
   await page.evaluate((pubkey) => {

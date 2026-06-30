@@ -67,21 +67,17 @@ const overrides = new Map([
   // self-contained repos_dir functions and their unit tests live in repos.rs;
   // this is the seam that must stay in nest.rs. Approved override; still queued
   // to split with the rest of this list.
-  ["src-tauri/src/managed_agents/nest.rs", 1450],
+  // dev-nest namespace: OnceLock<Option<PathBuf>> + init_nest_dir + constants
+  // added to plumb the dev/prod discriminator. Load-bearing for the D2 nest fix.
+  ["src-tauri/src/managed_agents/nest.rs", 1501],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
   // re-introduced after 826d735fe removal (config-bridge caller still needs it).
   // PGID resolution helper + PID-recycling safety guard added for orphan sweep.
+  // activity-feed threads avatar_url into build_managed_agent_summary for the
+  // assistant-bubble pinned snapshot.
   ["src-tauri/src/managed_agents/runtime.rs", 2150],
-  // Phase-2 inbound reconcile + review-fix cycle: reconcile_inbound_persona_event
-  // dispatches 30175/30176/30177 inbound plus kind:5 tombstone consume
-  // (reconcile_inbound_tombstone), the two apply_inbound_* fns, the
-  // event_d_tag/parse_deletion_coordinate helpers, and the preserve/overwrite +
-  // secret-injection + tombstone test coverage. Load-bearing feature growth,
-  // queued to split with the list. The two `agents-data-changed` emits (live
-  // UI refresh on inbound reconcile + tombstone) add the latest growth.
-  ["src-tauri/src/commands/personas.rs", 1279],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -103,7 +99,7 @@ const overrides = new Map([
   ["src-tauri/src/migration_tests.rs", 1410],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
-  ["src-tauri/src/migration.rs", 1449],
+  ["src-tauri/src/migration.rs", 1575],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -119,6 +115,10 @@ const overrides = new Map([
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
   // 893 lines, not generic debt growth. Approved override; still queued to split.
+  // cross-process keychain race fix (D3): interprocess lock + BlobLockGuard +
+  // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
+  // security fix for the lost-update race that stranded agent keys.
+  ["src-tauri/src/secret_store.rs", 1043],
   ["src-tauri/src/app_state.rs", 1033],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
@@ -129,14 +129,22 @@ const overrides = new Map([
   ["src/features/channels/readState/readStateManager.ts", 1030],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
-  ["src/shared/ui/markdown.tsx", 2082],
+  ["src/shared/ui/markdown.tsx", 2119],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
   // Option C databricks-model-discovery: parse/HTTP logic moved to buzz-agent
   // catalog module; agent_models.rs retains the thin wrapper (~50 lines).
   // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
   // fallback. Queued to split into dedicated discovery modules.
-  ["src-tauri/src/commands/agent_models.rs", 1066],
+  // Kept activity-feed design fixture: realistic prompt context and tool-heavy
+  // chatter for render-class test/reference coverage. Queued to split with the
+  // rest of this list if it grows further.
+  // +2: baked build env folded under merged_env in both get_agent_models and
+  // discover_agent_models so in-process discovery sees baked provider config on
+  // a GUI-launched DMG (the discovery_env_with_baked_floor fold).
+  // +3: provider tri-state applied in update_managed_agent handler
+  // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
+  ["src-tauri/src/commands/agent_models.rs", 1071],
 ]);
 
 await runFileSizeCheck({

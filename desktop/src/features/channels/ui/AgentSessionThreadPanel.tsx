@@ -1,4 +1,5 @@
-import { Octagon, Settings } from "lucide-react";
+import * as React from "react";
+import { Octagon, Settings, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
@@ -20,8 +21,10 @@ import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
@@ -59,7 +62,19 @@ export function AgentSessionThreadPanel({
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-
+  const rawFeedScopeKey = `${agent.pubkey}:${channel?.id ?? "all"}`;
+  const [rawFeedState, setRawFeedState] = React.useState(() => ({
+    scopeKey: rawFeedScopeKey,
+    show: false,
+  }));
+  const showRawFeed =
+    rawFeedState.scopeKey === rawFeedScopeKey && rawFeedState.show;
+  const handleRawFeedChange = React.useCallback(
+    (checked: boolean) => {
+      setRawFeedState({ scopeKey: rawFeedScopeKey, show: checked });
+    },
+    [rawFeedScopeKey],
+  );
   async function handleInterruptTurn() {
     if (!channel) {
       return;
@@ -81,7 +96,7 @@ export function AgentSessionThreadPanel({
 
   const agentHeaderActions = (
     <AuxiliaryPanelHeaderActions>
-      {isLive && isWorking ? (
+      {isLive ? (
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <Button
@@ -108,6 +123,30 @@ export function AgentSessionThreadPanel({
             className="min-w-56"
             onCloseAutoFocus={(event) => event.preventDefault()}
           >
+            <DropdownMenuCheckboxItem
+              checked={showRawFeed}
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-raw-feed"
+              onCheckedChange={handleRawFeedChange}
+              title={
+                showRawFeed
+                  ? "Hide raw JSON-RPC payloads."
+                  : channel
+                    ? "Show raw JSON-RPC payloads for this channel."
+                    : "Show raw JSON-RPC payloads for this agent."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <TerminalSquare className="h-4 w-4 text-muted-foreground" />
+                  Raw
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Show raw JSON-RPC activity.
+                </span>
+              </span>
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem
               className="items-start gap-3"
               data-testid="agent-session-stop-turn"
@@ -118,7 +157,9 @@ export function AgentSessionThreadPanel({
               title={
                 canStopCurrentTurn
                   ? "Interrupt the current ACP turn without stopping the agent process."
-                  : "Only locally managed agents can be interrupted from this workspace."
+                  : isWorking
+                    ? "Only locally managed agents can be interrupted from this workspace."
+                    : "Available while the agent is working."
               }
             >
               <Octagon className="mt-0.5 h-4 w-4 text-muted-foreground" />
@@ -128,7 +169,9 @@ export function AgentSessionThreadPanel({
                 </span>
                 {!canStopCurrentTurn ? (
                   <span className="mt-0.5 block text-xs text-muted-foreground">
-                    Only available for locally managed agents.
+                    {isWorking
+                      ? "Only available for locally managed agents."
+                      : "Available while the agent is working."}
                   </span>
                 ) : null}
               </span>
@@ -146,7 +189,9 @@ export function AgentSessionThreadPanel({
         backButtonTestId="agent-session-back"
         onBack={onBackToProfile}
       >
-        <AuxiliaryPanelTitle>Activity</AuxiliaryPanelTitle>
+        <AuxiliaryPanelTitle>
+          {showRawFeed ? "Raw ACP Activity" : "Activity"}
+        </AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
@@ -186,8 +231,9 @@ export function AgentSessionThreadPanel({
               : `Mention ${agent.name} in any channel to see its work here.`
           }
           profiles={profiles}
+          rawLayout="exclusive"
           showHeader={false}
-          showRaw={false}
+          showRaw={showRawFeed}
         />
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>

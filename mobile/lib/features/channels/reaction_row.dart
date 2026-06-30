@@ -118,7 +118,7 @@ void showReactionDetailSheet({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) =>
         _ReactionDetailSheet(reactions: reactions, initialEmoji: initialEmoji),
   );

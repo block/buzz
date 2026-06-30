@@ -14,9 +14,9 @@ import {
   hasVideoAttachment,
 } from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
+import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
@@ -335,21 +335,13 @@ function MessageRowItem({
   videoReviewContext,
 }: MessageRowItemProps) {
   const { message, summary } = entry;
-  const isMutableMessage = message.kind !== KIND_HUDDLE_STARTED;
-  const canDelete =
-    isMutableMessage &&
-    onDelete &&
-    currentPubkey &&
-    message.pubkey === currentPubkey
-      ? onDelete
-      : undefined;
-  const canEdit =
-    isMutableMessage &&
-    onEdit &&
-    currentPubkey &&
-    message.pubkey === currentPubkey
-      ? onEdit
-      : undefined;
+  const canManage = canManageMessageForCurrentUser(
+    message,
+    currentPubkey,
+    profiles,
+  );
+  const canDelete = canManage && onDelete ? onDelete : undefined;
+  const canEdit = canManage && onEdit ? onEdit : undefined;
 
   if (summary && onReply) {
     const isHighlighted = message.id === highlightedMessageId;

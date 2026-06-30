@@ -16,7 +16,7 @@ void showEmojiPicker({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) => EmojiPickerSheet(
       onSelect: (emoji) {
         Navigator.of(sheetContext).pop();
@@ -213,7 +213,7 @@ class _EmojiPickerSheetState extends ConsumerState<EmojiPickerSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final colors = context.colors;
     final customEmoji = ref.watch(customEmojiListProvider);
     final isCustomCategory =
         customEmoji.isNotEmpty && _selectedCategory == emojiCategories.length;
@@ -341,7 +341,7 @@ class CategoryIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final colors = context.colors;
     return SizedBox(
       width: 40,
       height: 40,

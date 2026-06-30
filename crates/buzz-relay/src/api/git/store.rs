@@ -91,6 +91,9 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// Invalid storage configuration detected at client construction.
+    #[error("git store config error: {0}")]
+    Config(String),
     /// Conformance probe failed — backend does not satisfy A1/A2/A3.
     #[error(transparent)]
     Probe(ProbeFailure),
@@ -172,18 +175,40 @@ impl GitStore {
     /// Build a client against an S3-compatible endpoint (e.g. MinIO).
     ///
     /// Uses path-style addressing for MinIO compatibility; AWS S3 accepts both.
+    ///
+    /// Credential selection mirrors [`buzz_media::MediaStorage::new`]:
+    /// - both `access_key` and `secret_key` non-empty → static credentials
+    ///   (MinIO/local/dev, or any static-key deployment);
+    /// - both empty → the AWS default credential chain via
+    ///   [`Credentials::default`] (env, profile, web-identity/IRSA, container,
+    ///   instance metadata), so the relay can use its pod IAM role;
+    /// - exactly one empty → a config error, to surface a half-configured
+    ///   static deployment instead of silently falling back to the chain.
     pub fn new(
         endpoint: &str,
         access_key: &str,
         secret_key: &str,
         bucket_name: &str,
+        region: &str,
     ) -> Result<Self, StoreError> {
         let region = Region::Custom {
-            region: "us-east-1".into(),
+            region: region.into(),
             endpoint: endpoint.into(),
         };
-        let creds = Credentials::new(Some(access_key), Some(secret_key), None, None, None)
-            .map_err(|e| StoreError::Backend(S3Error::Credentials(e)))?;
+        let creds = match (access_key.is_empty(), secret_key.is_empty()) {
+            (false, false) => Credentials::new(Some(access_key), Some(secret_key), None, None, None),
+            (true, true) => {
+                // No static keys configured: resolve from the AWS credential
+                // chain (IRSA web-identity, env, profile, instance metadata).
+                Credentials::default()
+            }
+            _ => {
+                return Err(StoreError::Config(
+                    "s3 access_key and secret_key must be configured together, or both empty to use the AWS credential chain".to_string(),
+                ));
+            }
+        }
+        .map_err(|e| StoreError::Backend(S3Error::Credentials(e)))?;
         let bucket = Bucket::new(bucket_name, region, creds)
             .map_err(StoreError::Backend)?
             .with_path_style();
@@ -896,6 +921,44 @@ mod tests {
             Err(StoreError::Backend(S3Error::HttpFailWithBody(403, _)))
         ));
     }
+
+    #[test]
+    fn static_keys_build_store_with_configured_region() {
+        let store = GitStore::new(
+            "http://localhost:9000",
+            "buzz_dev",
+            "buzz_dev_secret",
+            "buzz-git",
+            "us-west-2",
+        )
+        .expect("static creds should build a git store");
+        match store.bucket.region {
+            Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
+            ref other => panic!("expected Custom region, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_static_keys_are_rejected() {
+        for (access, secret) in [("buzz_dev", ""), ("", "buzz_dev_secret")] {
+            let err = match GitStore::new(
+                "http://localhost:9000",
+                access,
+                secret,
+                "buzz-git",
+                "us-east-1",
+            ) {
+                Ok(_) => {
+                    panic!("partial static creds must not silently use the credential chain")
+                }
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err, StoreError::Config(_)),
+                "expected Config error, got {err:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -920,6 +983,7 @@ mod probe {
             "buzz_dev",
             "buzz_dev_secret",
             "buzz-git",
+            "us-east-1",
         )
         .expect("connect minio")
     }
