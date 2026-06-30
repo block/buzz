@@ -1,16 +1,16 @@
 import * as React from "react";
 
 import {
+  useAcpRuntimesQuery,
   usePersonasQuery,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import type {
-  AgentModelsResponse,
+  AcpRuntimeCatalogEntry,
   ManagedAgent,
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
-import { getAgentModels } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -21,11 +21,20 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import {
+  AUTO_PROVIDER_DROPDOWN_VALUE,
+  CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  getPersonaProviderOptions,
+  runtimeSupportsLlmProviderSelection,
+  type PersonaModelOption,
+} from "./personaDialogPickers";
+import type { PersonaModelDiscoveryStatus } from "./personaModelDiscoveryStatus";
+import {
   CreateAgentBasicsFields,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
+import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
 
 const AUTO_MODEL_VALUE = "__auto_model__";
 const CUSTOM_MODEL_VALUE = "__custom_model__";
@@ -42,6 +51,8 @@ export function EditAgentDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
+  const runtimes = runtimesQuery.data ?? [];
 
   const [name, setName] = React.useState(agent.name);
   const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
@@ -66,10 +77,9 @@ export function EditAgentDialog({
     agent.systemPrompt ?? "",
   );
   const [model, setModel] = React.useState(agent.model ?? "");
-  const [modelsData, setModelsData] =
-    React.useState<AgentModelsResponse | null>(null);
-  const [modelsLoading, setModelsLoading] = React.useState(false);
-  const [modelsError, setModelsError] = React.useState<string | null>(null);
+  const [provider, setProvider] = React.useState(agent.provider ?? "");
+  const [isCustomProviderEditing, setIsCustomProviderEditing] =
+    React.useState(false);
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
@@ -108,6 +118,8 @@ export function EditAgentDialog({
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
       setModel(agent.model ?? "");
+      setProvider(agent.provider ?? "");
+      setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
@@ -115,39 +127,33 @@ export function EditAgentDialog({
     }
   }, [open, agent.pubkey]);
 
-  React.useEffect(() => {
-    if (!open) {
-      return;
-    }
+  // Derive selectedRuntime from the catalog — needed by usePersonaModelDiscovery.
+  const selectedRuntime = React.useMemo(
+    () => runtimes.find((r) => r.command?.trim() === agentCommand.trim()),
+    [runtimes, agentCommand],
+  );
 
-    let cancelled = false;
-    setModelsData(null);
-    setModelsError(null);
-    setModelsLoading(true);
+  // Show the provider picker when the agent command maps to a runtime that
+  // supports LLM-provider selection, or when the agent already has a provider
+  // saved (so a pre-existing value is always editable).
+  const llmProviderFieldVisible =
+    runtimeSupportsLlmProviderSelection(selectedRuntime?.id ?? "") ||
+    (agent.provider != null && agent.provider.trim().length > 0);
 
-    getAgentModels(agent.pubkey)
-      .then((data) => {
-        if (!cancelled) {
-          setModelsData(data);
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          setModelsError(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setModelsLoading(false);
-        }
-      });
+  const providerForDiscovery = llmProviderFieldVisible ? provider : "";
 
-    return () => {
-      cancelled = true;
-    };
-  }, [open, agent.pubkey]);
+  const {
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    modelDiscoveryStatus,
+  } = usePersonaModelDiscovery({
+    envVars,
+    isCustomProviderEditing,
+    modelFieldVisible: true,
+    open,
+    provider: providerForDiscovery,
+    selectedRuntime,
+  });
 
   function handleOpenChange(next: boolean) {
     onOpenChange(next);
@@ -185,6 +191,7 @@ export function EditAgentDialog({
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
       const normalizedModel = model.trim() || null;
+      const normalizedProvider = provider.trim() || null;
 
       // Harness pin resolution. The backend treats an empty string as the
       // "inherit from persona" sentinel (clears the override) and any concrete
@@ -239,6 +246,11 @@ export function EditAgentDialog({
           normalizedModel !== (agent.model ?? null)
             ? normalizedModel
             : undefined,
+        // Tri-state: send null to clear, value to set, omit if unchanged.
+        provider:
+          normalizedProvider !== (agent.provider ?? null)
+            ? normalizedProvider
+            : undefined,
         envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
@@ -290,12 +302,23 @@ export function EditAgentDialog({
 
             <EditAgentModelField
               disabled={updateMutation.isPending}
+              discoveredModelOptions={discoveredModelOptions}
               model={model}
-              modelsData={modelsData}
-              modelsError={modelsError}
-              modelsLoading={modelsLoading}
+              modelDiscoveryLoading={modelDiscoveryLoading}
+              modelDiscoveryStatus={modelDiscoveryStatus}
               onModelChange={setModel}
             />
+
+            {llmProviderFieldVisible ? (
+              <EditAgentProviderField
+                disabled={updateMutation.isPending}
+                isCustomProviderEditing={isCustomProviderEditing}
+                onIsCustomProviderEditingChange={setIsCustomProviderEditing}
+                onProviderChange={setProvider}
+                provider={provider}
+                selectedRuntime={selectedRuntime}
+              />
+            ) : null}
 
             {linkedPersona ? (
               <div className="space-y-1.5">
@@ -392,25 +415,26 @@ export function EditAgentDialog({
 
 function EditAgentModelField({
   disabled,
+  discoveredModelOptions,
   model,
-  modelsData,
-  modelsError,
-  modelsLoading,
+  modelDiscoveryLoading,
+  modelDiscoveryStatus,
   onModelChange,
 }: {
   disabled: boolean;
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
   model: string;
-  modelsData: AgentModelsResponse | null;
-  modelsError: string | null;
-  modelsLoading: boolean;
+  modelDiscoveryLoading: boolean;
+  modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
   onModelChange: (value: string) => void;
 }) {
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const trimmedModel = model.trim();
-  const modelOptions = modelsData?.models ?? [];
-  const selectedKnownModel = modelOptions.some(
-    (option) => option.id === trimmedModel,
-  );
+  const hasDiscoveredOptions =
+    discoveredModelOptions !== null && discoveredModelOptions.length > 0;
+  const selectedKnownModel =
+    hasDiscoveredOptions &&
+    discoveredModelOptions.some((option) => option.id === trimmedModel);
   const hasCustomModel = trimmedModel.length > 0 && !selectedKnownModel;
   const showCustomModelInput = isCustomModelEditing || hasCustomModel;
   const modelSelectValue = showCustomModelInput
@@ -420,11 +444,9 @@ function EditAgentModelField({
       : selectedKnownModel
         ? trimmedModel
         : CUSTOM_MODEL_VALUE;
-  const supportsSwitching = modelsData?.supportsSwitching === true;
-  const selectDisabled = disabled || modelsLoading || !supportsSwitching;
-  const defaultModelLabel = modelsData?.agentDefaultModel
-    ? `Default model (${modelsData.agentDefaultModel})`
-    : "Default model";
+  // Discovery is "active" when we have live options from usePersonaModelDiscovery.
+  const selectDisabled =
+    disabled || modelDiscoveryLoading || !hasDiscoveredOptions;
 
   return (
     <div className="space-y-1.5">
@@ -451,15 +473,17 @@ function EditAgentModelField({
         }}
         value={modelSelectValue}
       >
-        <option value={AUTO_MODEL_VALUE}>{defaultModelLabel}</option>
-        {modelOptions.map((option) => (
-          <option key={option.id} value={option.id}>
-            {option.name ?? option.id}
+        {(discoveredModelOptions ?? []).map((option) => (
+          <option key={option.id} value={option.id || AUTO_MODEL_VALUE}>
+            {option.label}
           </option>
         ))}
+        {!hasDiscoveredOptions ? (
+          <option value={AUTO_MODEL_VALUE}>Default model</option>
+        ) : null}
         <option value={CUSTOM_MODEL_VALUE}>Custom model...</option>
       </select>
-      {showCustomModelInput && supportsSwitching ? (
+      {showCustomModelInput && hasDiscoveredOptions ? (
         <Input
           aria-label="Custom model ID"
           autoCorrect="off"
@@ -470,13 +494,91 @@ function EditAgentModelField({
         />
       ) : null}
       <p className="text-xs text-muted-foreground">
-        {modelsLoading
+        {modelDiscoveryLoading
           ? "Loading models..."
-          : modelsError
-            ? `Could not load models: ${modelsError}`
-            : supportsSwitching
+          : modelDiscoveryStatus !== null
+            ? modelDiscoveryStatus.message
+            : hasDiscoveredOptions
               ? "Saved changes take effect on the next start."
-              : "This runtime does not report switchable models."}
+              : "Select a provider above to see available models."}
+      </p>
+    </div>
+  );
+}
+
+function EditAgentProviderField({
+  disabled,
+  isCustomProviderEditing,
+  onIsCustomProviderEditingChange,
+  onProviderChange,
+  provider,
+  selectedRuntime,
+}: {
+  disabled: boolean;
+  isCustomProviderEditing: boolean;
+  onIsCustomProviderEditingChange: (value: boolean) => void;
+  onProviderChange: (value: string) => void;
+  provider: string;
+  selectedRuntime: AcpRuntimeCatalogEntry | undefined;
+}) {
+  const trimmedProvider = provider.trim();
+  const providerOptions = getPersonaProviderOptions(
+    trimmedProvider,
+    selectedRuntime?.id ?? "",
+  );
+  const providerSelectValue = isCustomProviderEditing
+    ? CUSTOM_PROVIDER_DROPDOWN_VALUE
+    : trimmedProvider || AUTO_PROVIDER_DROPDOWN_VALUE;
+
+  return (
+    <div className="space-y-1.5">
+      <label className="text-sm font-medium" htmlFor="agent-provider">
+        LLM provider
+      </label>
+      <select
+        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={disabled}
+        id="agent-provider"
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          if (nextValue === AUTO_PROVIDER_DROPDOWN_VALUE) {
+            onIsCustomProviderEditingChange(false);
+            onProviderChange("");
+            return;
+          }
+          if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+            onIsCustomProviderEditingChange(true);
+            return;
+          }
+          onIsCustomProviderEditingChange(false);
+          onProviderChange(nextValue);
+        }}
+        value={providerSelectValue}
+      >
+        {providerOptions.map((option) => (
+          <option
+            key={option.id}
+            value={option.id || AUTO_PROVIDER_DROPDOWN_VALUE}
+          >
+            {option.label}
+          </option>
+        ))}
+        <option value={CUSTOM_PROVIDER_DROPDOWN_VALUE}>
+          Custom provider...
+        </option>
+      </select>
+      {isCustomProviderEditing ? (
+        <Input
+          aria-label="Custom provider ID"
+          autoCorrect="off"
+          disabled={disabled}
+          onChange={(event) => onProviderChange(event.target.value)}
+          placeholder="Custom provider ID"
+          value={provider}
+        />
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        Changing the provider updates the available model list immediately.
       </p>
     </div>
   );

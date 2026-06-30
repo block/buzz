@@ -574,6 +574,7 @@ export type UpdateManagedAgentInput = {
   pubkey: string;
   name?: string;
   model?: string | null;
+  provider?: string | null;
   systemPrompt?: string | null;
   mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
