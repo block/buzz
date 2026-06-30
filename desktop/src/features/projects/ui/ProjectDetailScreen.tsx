@@ -1,12 +1,10 @@
 import {
   ArrowLeft,
   BookOpen,
-  Bot,
   Check,
   ChevronDown,
   Copy,
   ExternalLink,
-  FileDiff,
   FolderGit2,
   GitBranch,
   GitFork,
@@ -911,44 +909,18 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 snapshotLoading={repoSnapshotQuery.isLoading}
               />
 
-              <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">
-                  <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    <Bot className="h-4 w-4" />
-                    Agent Work
-                  </h3>
-                  <p className="text-sm text-muted-foreground">
-                    Start agents from project issues so their summaries,
-                    branches, patches, and review notes stay attached to this
-                    project.
-                  </p>
-                </Card>
-                <Card className="space-y-2 border-border/50 bg-card/60 p-4 shadow-none">
-                  <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                    <FileDiff className="h-4 w-4" />
-                    Code Discussion
-                  </h3>
-                  <p className="text-sm text-muted-foreground">
-                    Diff messages and NIP-34 patches render in the linked
-                    discussion channel, giving humans and agents a shared review
-                    surface.
-                  </p>
-                </Card>
-              </section>
-
-              <section className="space-y-2">
-                <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Details
-                </h3>
-                <div className="space-y-1 text-sm text-muted-foreground">
-                  <p className="truncate">Repo: {project.repoAddress}</p>
-                  <p className="truncate">
-                    Owner:{" "}
+              <section className="rounded-xl border border-border/50 bg-card/60 px-4 py-3">
+                <p className="truncate text-sm text-muted-foreground">
+                  <span className="font-medium text-foreground">Details:</span>{" "}
+                  <span>Repo: {project.repoAddress}</span>
+                  <span className="mx-2 text-border">•</span>
+                  <span>
+                    Creator:{" "}
                     <ProfileAuthorName pubkey={project.owner}>
-                      {resolveUserLabel({ pubkey: project.owner, profiles })}
+                      {ownerLabel}
                     </ProfileAuthorName>
-                  </p>
-                </div>
+                  </span>
+                </p>
               </section>
             </div>
           </div>

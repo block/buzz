@@ -250,6 +250,40 @@ fn parse_latest_commit_by_path(
     result
 }
 
+fn normalize_branch_name(branch: &str) -> &str {
+    branch
+        .trim()
+        .strip_prefix("refs/heads/")
+        .unwrap_or_else(|| branch.trim())
+}
+
+fn branch_activity_range(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    branch_name: Option<&str>,
+    base_branch: Option<&str>,
+) -> Option<String> {
+    let branch_name = branch_name.map(normalize_branch_name)?;
+    let base_branch = base_branch.map(normalize_branch_name)?;
+
+    if branch_name.is_empty() || base_branch.is_empty() || branch_name == base_branch {
+        return None;
+    }
+
+    let remote_base_ref = format!("refs/remotes/origin/{base_branch}");
+    if run_git(
+        &["rev-parse", "--verify", "--quiet", remote_base_ref.as_str()],
+        Some(repo_dir),
+        auth,
+    )
+    .is_err()
+    {
+        return None;
+    }
+
+    Some(format!("origin/{base_branch}..HEAD"))
+}
+
 fn parse_ls_tree(
     repo_dir: &std::path::Path,
     output: &str,
@@ -284,7 +318,12 @@ fn parse_ls_tree(
         .collect()
 }
 
-fn snapshot_from_repo(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> ProjectRepoSnapshotInfo {
+fn snapshot_from_repo(
+    repo_dir: &std::path::Path,
+    auth: &GitAuthConfig,
+    branch_name: Option<&str>,
+    base_branch: Option<&str>,
+) -> ProjectRepoSnapshotInfo {
     let latest_commit = run_git(
         &["log", "-1", "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s"],
         Some(repo_dir),
@@ -292,13 +331,15 @@ fn snapshot_from_repo(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> Proje
     )
     .ok()
     .and_then(|output| parse_latest_commit(&output));
+    let branch_activity_range = branch_activity_range(repo_dir, auth, branch_name, base_branch);
+    let branch_activity_ref = branch_activity_range.as_deref().unwrap_or("HEAD");
     let (commits, contributors) = if latest_commit.is_some() {
         let commits = run_git(
             &[
                 "log",
                 "--max-count=50",
                 "--format=%H%x00%h%x00%an%x00%ae%x00%at%x00%s",
-                "HEAD",
+                branch_activity_ref,
             ],
             Some(repo_dir),
             auth,
@@ -306,7 +347,7 @@ fn snapshot_from_repo(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> Proje
         .map(|output| parse_commits(&output))
         .unwrap_or_default();
         let contributors = run_git(
-            &["log", "--format=%an%x00%ae%x00%at", "HEAD"],
+            &["log", "--format=%an%x00%ae%x00%at", branch_activity_ref],
             Some(repo_dir),
             auth,
         )
@@ -355,18 +396,24 @@ fn current_checkout_snapshot(auth: &GitAuthConfig) -> Option<ProjectRepoSnapshot
     let cwd = std::env::current_dir().ok()?;
     let root = run_git(&["rev-parse", "--show-toplevel"], Some(&cwd), auth).ok()?;
     let root = std::path::PathBuf::from(root.trim());
-    Some(snapshot_from_repo(&root, auth))
+    Some(snapshot_from_repo(&root, auth, None, None))
 }
 
 #[tauri::command]
 pub async fn get_project_repo_snapshot(
     clone_url: String,
     default_branch: Option<String>,
+    base_branch: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
     validate_clone_url(&clone_url)?;
     let auth = build_git_auth_config(&state)?;
     let branch = default_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let base_branch = base_branch
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -400,7 +447,8 @@ pub async fn get_project_repo_snapshot(
             )?;
         }
 
-        let snapshot = snapshot_from_repo(&repo_dir, &auth);
+        let snapshot =
+            snapshot_from_repo(&repo_dir, &auth, branch.as_deref(), base_branch.as_deref());
         if snapshot.latest_commit.is_none() && snapshot.files.is_empty() {
             if let Some(local_snapshot) = current_checkout_snapshot(&auth) {
                 return Ok(local_snapshot);
