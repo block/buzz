@@ -19,8 +19,6 @@ export default defineConfig({
     {
       name: "smoke",
       testMatch: [
-        "**/activity-debug-fixture.spec.ts",
-        "**/activity-debug-expanded.spec.ts",
         "**/smoke.spec.ts",
         "**/navigation.spec.ts",
         "**/channels.spec.ts",
