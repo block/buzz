@@ -17,7 +17,7 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
   }
 
   return (
-    <ActivityRow defaultOpen testId="transcript-plan-item">
+    <ActivityRow testId="transcript-plan-item">
       <ActivityRowLabel object="plan" openToneScope="tool" verb="Updated" />
       <TranscriptTimestamp timestamp={props.item.timestamp} />
       <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-6 text-muted-foreground">

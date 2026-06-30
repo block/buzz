@@ -16,10 +16,12 @@ import {
   ActivityRow,
   ActivityRowContent,
   ActivityRowLabel,
+  type ActivityRowStats,
   splitActivityRowLabel,
 } from "./activityRenderClasses/ActivityRow";
 import { TranscriptTimestamp } from "./activityRenderClasses/TranscriptTimestamp";
 import type { AgentTranscriptIdentityProps } from "./activityRenderClasses/types";
+import type { FileEditDiff } from "./agentSessionFileEditDiff";
 import {
   buildTranscriptDisplayBlocks,
   formatTurnSetupLabel,
@@ -28,6 +30,8 @@ import {
   type TranscriptDisplayBlock,
   type TranscriptTurnSegment,
 } from "./agentSessionTranscriptGrouping";
+import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import { hasFileEditLineDiff } from "./FileEditDiffView";
 
 const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
 
@@ -242,6 +246,14 @@ function SameKindSummaryItem({
   profiles?: UserProfileLookup;
   summary: Extract<TranscriptTurnSegment, { kind: "summary" }>["summary"];
 }) {
+  const groupedFileEditDiffs = React.useMemo(
+    () =>
+      summary.renderClass === "file-edit"
+        ? getGroupedFileEditDiffs(summary.items)
+        : [],
+    [summary.items, summary.renderClass],
+  );
+  const groupedFileEditStats = summarizeFileEditDiffs(groupedFileEditDiffs);
   const expandsToToolItems = summary.items.every(
     (item) => item.type === "tool",
   );
@@ -252,7 +264,7 @@ function SameKindSummaryItem({
       openToneScope="summary"
       testId="transcript-same-kind-summary"
     >
-      <ToolRunSummaryLabel label={summary.label} />
+      <ToolRunSummaryLabel label={summary.label} stats={groupedFileEditStats} />
       <TranscriptTimestamp timestamp={summary.timestamp} />
       <ActivityRowContent
         className={cn(
@@ -286,7 +298,40 @@ function SameKindSummaryItem({
   );
 }
 
-function ToolRunSummaryLabel({ label }: { label: string }) {
+function getGroupedFileEditDiffs(items: TranscriptItem[]): FileEditDiff[] {
+  return items.flatMap((item) => {
+    if (item.type !== "tool" || item.isError) {
+      return [];
+    }
+
+    const diff = buildCompactToolSummary(item).fileEditDiff;
+    return diff && hasFileEditLineDiff(diff) ? [diff] : [];
+  });
+}
+
+function summarizeFileEditDiffs(
+  diffs: FileEditDiff[],
+): ActivityRowStats | null {
+  if (diffs.length === 0) {
+    return null;
+  }
+
+  return diffs.reduce(
+    (stats, diff) => ({
+      additions: stats.additions + diff.additions,
+      deletions: stats.deletions + diff.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+}
+
+function ToolRunSummaryLabel({
+  label,
+  stats,
+}: {
+  label: string;
+  stats?: ActivityRowStats | null;
+}) {
   const parts = splitActivityRowLabel(label);
 
   if (!parts) {
@@ -297,6 +342,7 @@ function ToolRunSummaryLabel({ label }: { label: string }) {
     <ActivityRowLabel
       object={parts.object}
       openToneScope="summary"
+      stats={stats}
       verb={parts.verb}
     />
   );

@@ -18,7 +18,6 @@ export type ActivityRowToneScope = "none" | "tool" | "summary";
 type ActivityRowProps = {
   children: React.ReactNode;
   className?: string;
-  defaultOpen?: boolean;
   openToneScope?: Exclude<ActivityRowToneScope, "none">;
   testId?: string;
 };
@@ -37,7 +36,6 @@ type ActivityRowContentComponent = React.FC<ActivityRowContentProps> & {
 export function ActivityRow({
   children,
   className,
-  defaultOpen = false,
   openToneScope = "tool",
   testId,
 }: ActivityRowProps) {
@@ -66,7 +64,6 @@ export function ActivityRow({
         className,
       )}
       data-testid={testId}
-      open={defaultOpen}
     >
       <summary
         className={cn(
