@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { buildTranscript } from "./agentSessionTranscript.ts";
 import { formatToolTitle } from "./agentSessionToolCatalog.ts";
-import { DEBUG_AGENT_ACTIVITY_TRANSCRIPT } from "./debugAgentActivityRawFixture.ts";
 
 const baseEvent = {
   seq: 1,
@@ -545,8 +544,46 @@ test("buildTranscript stamps completedAt when a terminal tool update is inserted
   assert.equal(transcript[0].completedAt, "2026-06-30T09:00:00.000Z");
 });
 
-test("debug raw fixture makes permission, free-form status, and raw rail screenshotable", () => {
-  const permissionItem = DEBUG_AGENT_ACTIVITY_TRANSCRIPT.find(
+test("buildTranscript preserves permission, free-form status, and raw rail render classes", () => {
+  const transcript = buildTranscript([
+    {
+      ...baseEvent,
+      seq: 1,
+      kind: "acp_read",
+      payload: {
+        method: "session/request_permission",
+        params: {
+          title: "Confirm force-with-lease push",
+          toolCallId: "tool-push",
+          options: [
+            { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+            { optionId: "reject_once", kind: "reject_once", name: "Reject" },
+          ],
+        },
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 2,
+      kind: "acp_read",
+      payload: {
+        type: "observer_connected",
+        title: "Observer connected",
+        text: "ACP stream attached",
+      },
+    },
+    {
+      ...baseEvent,
+      seq: 3,
+      kind: "raw_json_rpc",
+      payload: {
+        method: "workspace/diagnostic",
+        params: { ok: true },
+      },
+    },
+  ]);
+
+  const permissionItem = transcript.find(
     (item) =>
       item.id.startsWith("permission:") && item.renderClass === "permission",
   );
@@ -560,14 +597,14 @@ test("debug raw fixture makes permission, free-form status, and raw rail screens
     "permission detail should not duplicate the row title",
   );
   assert.ok(
-    DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(
+    transcript.some(
       (item) =>
         item.renderClass === "status" && item.title === "Observer connected",
     ),
     "free-form status fixture should flow through the reducer",
   );
   assert.ok(
-    DEBUG_AGENT_ACTIVITY_TRANSCRIPT.some(
+    transcript.some(
       (item) => item.type === "metadata" && item.renderClass === "raw-rail",
     ),
     "raw_json_rpc fixture should flow through the reducer",

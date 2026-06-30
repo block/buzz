@@ -134,7 +134,6 @@ const overrides = new Map([
   // Kept activity-feed design fixture: realistic prompt context and tool-heavy
   // chatter for render-class test/reference coverage. Queued to split with the
   // rest of this list if it grows further.
-  ["src/features/agents/ui/debugAgentActivityFixture.ts", 1025],
 ]);
 
 await runFileSizeCheck({
