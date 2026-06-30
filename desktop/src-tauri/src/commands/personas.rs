@@ -1949,4 +1949,70 @@ You are Paul.
         let not_found = find_team_for_persona_source(&teams, "com.other.pack");
         assert!(not_found.is_none(), "unrelated source_team must not match");
     }
+
+    #[test]
+    fn test_multi_save_round_trip_short_circuit_holds_both_times() {
+        // Regression: the `==` short-circuit must hold on the second save too.
+        //
+        // Without the frontend fix (removing systemPrompt.trim()), the first
+        // save stores the trimmed composed prompt; on re-open the form emits the
+        // trimmed value, which != compose_prompt(body, instructions\n) — the `==`
+        // check fails, suffix-strip fails on the trimmed string, and the safety
+        // guard fires on every subsequent save. This test verifies the path stays
+        // clean across two consecutive no-edit saves.
+        let instructions = "Follow the rules.\n"; // realistic: trailing newline from file
+        // `split_frontmatter` strips the "\n" after the closing "---" delimiter
+        // but preserves the rest of the body verbatim. PROMPT_MD's body line ends
+        // with "\n", so loaded.prompt at runtime = "You are Paul.\n".
+        let (_, raw_body) = buzz_persona_pkg::persona::split_frontmatter(PROMPT_MD).unwrap();
+        // compose_prompt equivalent (must match the real impl exactly)
+        let composed = format!("{raw_body}\n\n---\n# Team Instructions\n{instructions}");
+
+        // ── Save 1: user opens dialog, saves without editing ─────────────────
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        p.system_prompt = composed.clone(); // no frontend trim — system_prompt is the full composed value
+
+        let written_1 = rewrite_persona_md(PROMPT_MD, &p, raw_body, Some(instructions)).unwrap();
+        // Short-circuit must have fired: body is preserved (still "You are Paul.\n").
+        assert!(
+            written_1.ends_with("You are Paul.\n"),
+            "save 1: body must be preserved by == short-circuit: {written_1:?}"
+        );
+        assert!(
+            !written_1.contains("# Team Instructions"),
+            "save 1: Team Instructions must not appear in file body: {written_1}"
+        );
+
+        // ── Save 2: user re-opens (reads written_1), saves again without editing
+        // `loaded.prompt` comes from split_frontmatter on the written file — same
+        // raw_body as before (the write-back preserved it byte-for-byte).
+        let (_, body_from_file) =
+            buzz_persona_pkg::persona::split_frontmatter(&written_1).unwrap();
+        assert_eq!(
+            body_from_file, raw_body,
+            "split_frontmatter after save 1 must return the original raw_body"
+        );
+
+        // Compose again from the read-back body — must equal the stored system_prompt.
+        let recomposed = format!("{body_from_file}\n\n---\n# Team Instructions\n{instructions}");
+        assert_eq!(
+            recomposed, composed,
+            "save 2 precondition: recomposed must equal stored system_prompt so == holds"
+        );
+
+        // Now simulate save 2: system_prompt is the recomposed value (no trim).
+        p.system_prompt = recomposed;
+        let written_2 = rewrite_persona_md(&written_1, &p, body_from_file, Some(instructions)).unwrap();
+        // Short-circuit must fire again: body still preserved, no corruption.
+        assert!(
+            written_2.ends_with("You are Paul.\n"),
+            "save 2: body must still be preserved by == short-circuit: {written_2:?}"
+        );
+        assert!(
+            !written_2.contains("# Team Instructions"),
+            "save 2: Team Instructions must not appear after second save: {written_2}"
+        );
+        // Both writes are byte-identical — no spurious mutations.
+        assert_eq!(written_1, written_2, "save 2: file content must be identical to save 1");
+    }
 }
