@@ -150,129 +150,142 @@ pub(super) fn tombstone_persona_pending(app: &AppHandle, state: &AppState, d_tag
 }
 
 #[tauri::command]
-pub fn list_personas(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<PersonaRecord>, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    load_personas(&app)
+pub async fn list_personas(app: AppHandle) -> Result<Vec<PersonaRecord>, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        load_personas(&app)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn create_persona(
+pub async fn create_persona(
     input: CreatePersonaRequest,
     app: AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<PersonaRecord, String> {
-    let display_name = trim_required(&input.display_name, "Display name")?;
-    // System prompt optional: core memory is auto-injected. Empty is valid.
-    let system_prompt = input.system_prompt.trim().to_string();
-    let avatar_url = trim_optional(input.avatar_url);
-    let runtime = trim_optional(input.runtime);
-    let model = trim_optional(input.model);
-    let provider = trim_optional(input.provider);
-    let now = now_iso();
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut personas = load_personas(&app)?;
-    let name_pool: Vec<String> = input
-        .name_pool
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
-    let persona = PersonaRecord {
-        id: Uuid::new_v4().to_string(),
-        display_name,
-        avatar_url,
-        system_prompt,
-        runtime,
-        model,
-        provider,
-        name_pool,
-        is_builtin: false,
-        is_active: true,
-        source_team: None,
-        source_team_persona_slug: None,
-        env_vars: input.env_vars,
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    personas.push(persona.clone());
-    save_personas(&app, &personas)?;
-    retain_persona_pending(&app, &state, &persona);
-    try_regenerate_nest(&app);
-    Ok(persona)
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let display_name = trim_required(&input.display_name, "Display name")?;
+        // System prompt optional: core memory is auto-injected. Empty is valid.
+        let system_prompt = input.system_prompt.trim().to_string();
+        let avatar_url = trim_optional(input.avatar_url);
+        let runtime = trim_optional(input.runtime);
+        let model = trim_optional(input.model);
+        let provider = trim_optional(input.provider);
+        let now = now_iso();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut personas = load_personas(&app)?;
+        let name_pool: Vec<String> = input
+            .name_pool
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+        let persona = PersonaRecord {
+            id: Uuid::new_v4().to_string(),
+            display_name,
+            avatar_url,
+            system_prompt,
+            runtime,
+            model,
+            provider,
+            name_pool,
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: input.env_vars,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        personas.push(persona.clone());
+        save_personas(&app, &personas)?;
+        retain_persona_pending(&app, &state, &persona);
+        try_regenerate_nest(&app);
+        Ok(persona)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn update_persona(
+pub async fn update_persona(
     input: UpdatePersonaRequest,
     app: AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<PersonaRecord, String> {
-    let display_name = trim_required(&input.display_name, "Display name")?;
-    // Do not trim system_prompt: `compose_prompt` appends pack_instructions
-    // verbatim (including any trailing newline), and write_back_persona_md
-    // decomposes by suffix-stripping. Trimming would break that exact-suffix
-    // match for the common case where instructions.md has a trailing newline.
-    let system_prompt = input.system_prompt.clone();
-    let avatar_url = trim_optional(input.avatar_url);
-    let runtime = trim_optional(input.runtime);
-    let model = trim_optional(input.model);
-    let provider = trim_optional(input.provider);
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let display_name = trim_required(&input.display_name, "Display name")?;
+        // Do not trim system_prompt: `compose_prompt` appends pack_instructions
+        // verbatim (including any trailing newline), and write_back_persona_md
+        // decomposes by suffix-stripping. Trimming would break that exact-suffix
+        // match for the common case where instructions.md has a trailing newline.
+        let system_prompt = input.system_prompt.clone();
+        let avatar_url = trim_optional(input.avatar_url);
+        let runtime = trim_optional(input.runtime);
+        let model = trim_optional(input.model);
+        let provider = trim_optional(input.provider);
 
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut personas = load_personas(&app)?;
-    let persona = personas
-        .iter_mut()
-        .find(|record| record.id == input.id)
-        .ok_or_else(|| format!("persona {} not found", input.id))?;
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut personas = load_personas(&app)?;
+        let persona = personas
+            .iter_mut()
+            .find(|record| record.id == input.id)
+            .ok_or_else(|| format!("persona {} not found", input.id))?;
 
-    if persona.is_builtin {
-        return Err("Built-in personas cannot be edited.".to_string());
-    }
-    persona.display_name = display_name;
-    persona.avatar_url = avatar_url;
-    persona.system_prompt = system_prompt;
-    persona.runtime = runtime;
-    persona.model = model;
-    persona.provider = provider;
-    persona.name_pool = input
-        .name_pool
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if let Some(env_vars) = input.env_vars {
-        crate::managed_agents::validate_user_env_keys(&env_vars)?;
-        persona.env_vars = env_vars;
-    }
-    persona.updated_at = now_iso();
+        if persona.is_builtin {
+            return Err("Built-in personas cannot be edited.".to_string());
+        }
+        persona.display_name = display_name;
+        persona.avatar_url = avatar_url;
+        persona.system_prompt = system_prompt;
+        persona.runtime = runtime;
+        persona.model = model;
+        persona.provider = provider;
+        persona.name_pool = input
+            .name_pool
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if let Some(env_vars) = input.env_vars {
+            crate::managed_agents::validate_user_env_keys(&env_vars)?;
+            persona.env_vars = env_vars;
+        }
+        persona.updated_at = now_iso();
 
-    save_personas(&app, &personas)?;
-    let result = personas
-        .into_iter()
-        .find(|record| record.id == input.id)
-        .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
+        save_personas(&app, &personas)?;
+        let result = personas
+            .into_iter()
+            .find(|record| record.id == input.id)
+            .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
 
-    // For pack-backed personas, also write the edit back to the source
-    // `.persona.md` so that launch sync (which reads the file) becomes a
-    // no-op rather than overwriting the record we just saved.
-    write_back_persona_md(&app, &result);
+        // For pack-backed personas, also write the edit back to the source
+        // `.persona.md` so that launch sync (which reads the file) becomes a
+        // no-op rather than overwriting the record we just saved.
+        write_back_persona_md(&app, &result);
 
-    retain_persona_pending(&app, &state, &result);
-    try_regenerate_nest(&app);
-    Ok(result)
+        retain_persona_pending(&app, &state, &result);
+        try_regenerate_nest(&app);
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 mod writeback;
@@ -282,55 +295,57 @@ use writeback::write_back_persona_md;
 mod inbound_tests;
 
 #[tauri::command]
-pub fn delete_persona(
-    id: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut personas = load_personas(&app)?;
-    let persona = personas
-        .iter()
-        .find(|record| record.id == id)
-        .ok_or_else(|| format!("persona {id} not found"))?;
-    let referenced_by_team = load_teams(&app)?.iter().any(|team| {
-        team.persona_ids
+pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut personas = load_personas(&app)?;
+        let persona = personas
             .iter()
-            .any(|persona_id| persona_id == id.as_str())
-    });
-    validate_persona_deletion(persona, referenced_by_team)?;
-    // Capture the coordinate before the record leaves the list. Only reached
-    // for non-builtin, non-team personas (validate_persona_deletion rejects
-    // both), so every deleted persona here is one this owner published.
-    let d_tag = crate::managed_agents::persona_events::persona_d_tag(persona);
+            .find(|record| record.id == id)
+            .ok_or_else(|| format!("persona {id} not found"))?;
+        let referenced_by_team = load_teams(&app)?.iter().any(|team| {
+            team.persona_ids
+                .iter()
+                .any(|persona_id| persona_id == id.as_str())
+        });
+        validate_persona_deletion(persona, referenced_by_team)?;
+        // Capture the coordinate before the record leaves the list. Only reached
+        // for non-builtin, non-team personas (validate_persona_deletion rejects
+        // both), so every deleted persona here is one this owner published.
+        let d_tag = crate::managed_agents::persona_events::persona_d_tag(persona);
 
-    let original_len = personas.len();
-    personas.retain(|record| record.id != id);
-    if personas.len() == original_len {
-        return Err(format!("persona {id} not found"));
-    }
-    save_personas(&app, &personas)?;
-    tombstone_persona_pending(&app, &state, &d_tag);
-
-    let mut agents = load_managed_agents(&app)?;
-    let mut changed_agents = false;
-    let now = now_iso();
-    for agent in &mut agents {
-        if agent.persona_id.as_deref() == Some(id.as_str()) {
-            agent.persona_id = None;
-            agent.updated_at = now.clone();
-            changed_agents = true;
+        let original_len = personas.len();
+        personas.retain(|record| record.id != id);
+        if personas.len() == original_len {
+            return Err(format!("persona {id} not found"));
         }
-    }
-    if changed_agents {
-        save_managed_agents(&app, &agents)?;
-    }
-    try_regenerate_nest(&app);
+        save_personas(&app, &personas)?;
+        tombstone_persona_pending(&app, &state, &d_tag);
 
-    Ok(())
+        let mut agents = load_managed_agents(&app)?;
+        let mut changed_agents = false;
+        let now = now_iso();
+        for agent in &mut agents {
+            if agent.persona_id.as_deref() == Some(id.as_str()) {
+                agent.persona_id = None;
+                agent.updated_at = now.clone();
+                changed_agents = true;
+            }
+        }
+        if changed_agents {
+            save_managed_agents(&app, &agents)?;
+        }
+        try_regenerate_nest(&app);
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 /// Apply an inbound kind:30175 persona event from the relay onto the local
@@ -679,51 +694,56 @@ fn apply_inbound_team(teams: &mut Vec<TeamRecord>, d_tag: String, inbound: TeamE
 }
 
 #[tauri::command]
-pub fn set_persona_active(
+pub async fn set_persona_active(
     id: String,
     active: bool,
     app: AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<PersonaRecord, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut personas = load_personas(&app)?;
-    let persona = personas
-        .iter_mut()
-        .find(|record| record.id == id)
-        .ok_or_else(|| format!("persona {id} not found"))?;
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut personas = load_personas(&app)?;
+        let persona = personas
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| format!("persona {id} not found"))?;
 
-    let referenced_by_managed_agent = !active
-        && load_managed_agents(&app)?
-            .iter()
-            .any(|agent| agent.persona_id.as_deref() == Some(id.as_str()));
-    let referenced_by_team = !active
-        && load_teams(&app)?.iter().any(|team| {
-            team.persona_ids
+        let referenced_by_managed_agent = !active
+            && load_managed_agents(&app)?
                 .iter()
-                .any(|persona_id| persona_id == id.as_str())
-        });
+                .any(|agent| agent.persona_id.as_deref() == Some(id.as_str()));
+        let referenced_by_team = !active
+            && load_teams(&app)?.iter().any(|team| {
+                team.persona_ids
+                    .iter()
+                    .any(|persona_id| persona_id == id.as_str())
+            });
 
-    validate_persona_activation_change(
-        persona,
-        active,
-        referenced_by_managed_agent,
-        referenced_by_team,
-    )?;
+        validate_persona_activation_change(
+            persona,
+            active,
+            referenced_by_managed_agent,
+            referenced_by_team,
+        )?;
 
-    if persona.is_active == active {
-        return Ok(persona.clone());
-    }
+        if persona.is_active == active {
+            return Ok(persona.clone());
+        }
 
-    persona.is_active = active;
-    persona.updated_at = now_iso();
+        persona.is_active = active;
+        persona.updated_at = now_iso();
 
-    let updated = persona.clone();
-    save_personas(&app, &personas)?;
-    try_regenerate_nest(&app);
-    Ok(updated)
+        let updated = persona.clone();
+        save_personas(&app, &personas)?;
+        try_regenerate_nest(&app);
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 const MAX_PNG_BYTES: usize = 10 * 1024 * 1024;

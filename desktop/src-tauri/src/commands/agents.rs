@@ -452,35 +452,44 @@ async fn deploy_to_provider(
     Ok(())
 }
 
+// Async so the blocking body (disk reads of agent/persona records, per-agent
+// process-liveness syscalls, and a possible save) runs on Tauri's worker pool
+// via spawn_blocking instead of the main UI thread — it was a beachball on the
+// agents menu mount and after every start/stop/edit refetch. State is re-derived
+// from the owned AppHandle inside the closure because `State<'_, _>` is borrowed
+// and `std::sync::MutexGuard` is not `Send`.
 #[tauri::command]
-pub fn list_managed_agents(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<ManagedAgentSummary>, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
+pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSummary>, String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
 
-    let (sync_changed, exited_pubkeys) =
-        sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
-    if sync_changed {
-        save_managed_agents(&app, &records)?;
-    }
-    for pubkey in &exited_pubkeys {
-        state.clear_session_cache(pubkey);
-    }
+        let (sync_changed, exited_pubkeys) =
+            sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
+        if sync_changed {
+            save_managed_agents(&app, &records)?;
+        }
+        for pubkey in &exited_pubkeys {
+            state.clear_session_cache(pubkey);
+        }
 
-    let personas = load_personas(&app).unwrap_or_default();
-    records
-        .iter()
-        .map(|record| build_managed_agent_summary(&app, record, &runtimes, &personas))
-        .collect()
+        let personas = load_personas(&app).unwrap_or_default();
+        records
+            .iter()
+            .map(|record| build_managed_agent_summary(&app, record, &runtimes, &personas))
+            .collect()
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1243,60 +1252,17 @@ fn profile_needs_sync(
     }
 }
 
+// Async so the blocking body (disk reads/writes + process termination) runs off
+// the main UI thread via spawn_blocking. State is re-derived from the owned
+// AppHandle inside the closure (`State<'_, _>` is borrowed, MutexGuard is !Send).
 #[tauri::command]
-pub fn stop_managed_agent(
+pub async fn stop_managed_agent(
     pubkey: String,
     app: AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
-
-    let (sync_changed, exited_pubkeys) =
-        sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
-    if sync_changed {
-        save_managed_agents(&app, &records)?;
-    }
-    for pubkey in &exited_pubkeys {
-        state.clear_session_cache(pubkey);
-    }
-
-    {
-        let record = find_managed_agent_mut(&mut records, &pubkey)?;
-        // Remote agents are stopped via !shutdown @mention from the frontend,
-        // not via this backend command. Reject the call.
-        if record.backend != BackendKind::Local {
-            return Err(
-                "remote agents are stopped via !shutdown message, not this command".to_string(),
-            );
-        }
-        stop_managed_agent_process(&app, record, &mut runtimes)?;
-    }
-    state.clear_session_cache(&pubkey);
-    save_managed_agents(&app, &records)?;
-    let record = records
-        .iter()
-        .find(|record| record.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    let personas = load_personas(&app).unwrap_or_default();
-    build_managed_agent_summary(&app, record, &runtimes, &personas)
-}
-
-#[tauri::command]
-pub fn delete_managed_agent(
-    pubkey: String,
-    force_remote_delete: Option<bool>,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -1316,43 +1282,104 @@ pub fn delete_managed_agent(
             state.clear_session_cache(pubkey);
         }
 
-        // Guard: reject deletion of deployed remote agents unless explicitly forced.
-        // This turns "don't orphan remote infra" from a UI convention into a backend
-        // invariant — a buggy or compromised IPC caller cannot silently orphan a live
-        // remote deployment. The frontend sends force_remote_delete: true only after
-        // the user confirms the orphan warning.
-        if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
-            if record.backend != BackendKind::Local
-                && record.backend_agent_id.is_some()
-                && !force_remote_delete.unwrap_or(false)
-            {
+        {
+            let record = find_managed_agent_mut(&mut records, &pubkey)?;
+            // Remote agents are stopped via !shutdown @mention from the frontend,
+            // not via this backend command. Reject the call.
+            if record.backend != BackendKind::Local {
                 return Err(
-                    "cannot delete a deployed remote agent without force_remote_delete: true"
-                        .to_string(),
+                    "remote agents are stopped via !shutdown message, not this command".to_string(),
                 );
             }
-        }
-
-        if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
             stop_managed_agent_process(&app, record, &mut runtimes)?;
         }
         state.clear_session_cache(&pubkey);
-        let initial_len = records.len();
-        records.retain(|record| record.pubkey != pubkey);
-        if records.len() == initial_len {
-            return Err(format!("agent {pubkey} not found"));
-        }
         save_managed_agents(&app, &records)?;
-        // Remove the agent's nsec from the keyring after the record is gone.
-        crate::managed_agents::delete_agent_key(&pubkey);
-        // Tombstone-after-validation: only reached past the deployed-remote
-        // guard above and a confirmed removal — never orphan a live remote
-        // deployment's relay record. Inside the lock, before the block closes
-        // (no .await here). Every agent published, so every delete tombstones.
-        tombstone_managed_agent_pending(&app, &state, &pubkey);
-    }
-    try_regenerate_nest(&app);
-    Ok(())
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+        let personas = load_personas(&app).unwrap_or_default();
+        build_managed_agent_summary(&app, record, &runtimes, &personas)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+// Async so the blocking body (disk reads/writes, process termination, keyring
+// delete, nest regeneration) runs off the main UI thread via spawn_blocking.
+#[tauri::command]
+pub async fn delete_managed_agent(
+    pubkey: String,
+    force_remote_delete: Option<bool>,
+    app: AppHandle,
+) -> Result<(), String> {
+    use tauri::Manager;
+    tokio::task::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        {
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|error| error.to_string())?;
+            let mut records = load_managed_agents(&app)?;
+            let mut runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|error| error.to_string())?;
+
+            let (sync_changed, exited_pubkeys) = sync_managed_agent_processes(
+                &mut records,
+                &mut runtimes,
+                &current_instance_id(&app),
+            );
+            if sync_changed {
+                save_managed_agents(&app, &records)?;
+            }
+            for pubkey in &exited_pubkeys {
+                state.clear_session_cache(pubkey);
+            }
+
+            // Guard: reject deletion of deployed remote agents unless explicitly forced.
+            // This turns "don't orphan remote infra" from a UI convention into a backend
+            // invariant — a buggy or compromised IPC caller cannot silently orphan a live
+            // remote deployment. The frontend sends force_remote_delete: true only after
+            // the user confirms the orphan warning.
+            if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+                if record.backend != BackendKind::Local
+                    && record.backend_agent_id.is_some()
+                    && !force_remote_delete.unwrap_or(false)
+                {
+                    return Err(
+                        "cannot delete a deployed remote agent without force_remote_delete: true"
+                            .to_string(),
+                    );
+                }
+            }
+
+            if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
+                stop_managed_agent_process(&app, record, &mut runtimes)?;
+            }
+            state.clear_session_cache(&pubkey);
+            let initial_len = records.len();
+            records.retain(|record| record.pubkey != pubkey);
+            if records.len() == initial_len {
+                return Err(format!("agent {pubkey} not found"));
+            }
+            save_managed_agents(&app, &records)?;
+            // Remove the agent's nsec from the keyring after the record is gone.
+            crate::managed_agents::delete_agent_key(&pubkey);
+            // Tombstone-after-validation: only reached past the deployed-remote
+            // guard above and a confirmed removal — never orphan a live remote
+            // deployment's relay record. Inside the lock, before the block closes
+            // (no .await here). Every agent published, so every delete tombstones.
+            tombstone_managed_agent_pending(&app, &state, &pubkey);
+        }
+        try_regenerate_nest(&app);
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
