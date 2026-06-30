@@ -391,29 +391,74 @@ test("editAgent_inheritedAgentRuntimeSwitch_producesConsistentCommandProviderPai
   );
 });
 
-// ── Finding C fix: re-checking inherit after a runtime/provider edit does not
-//                  persist the provider onto the inherited runtime ───────────
+// ── Finding C / D / E fix: provider persistence tri-state ──────────────────
 //
 // The UI dropdown state (selectedRuntimeId / llmProviderFieldVisible) is for
-// visibility only. Provider PERSISTENCE at submit must key on the EFFECTIVE
-// runtime — i.e. the one that will actually run after save. When inheritHarness
-// is true, the effective runtime is derived from agent.agentCommand matched
-// against the catalog. If that runtime is provider-locked (e.g. inherited
-// Claude), the stale dropdown provider is NOT persisted.
+// visibility only. Provider PERSISTENCE at submit keys on a tri-state derived
+// from the EFFECTIVE runtime:
 //
-// Helper mirrors the component's effectiveRuntimeIdForSubmit + gate logic.
-function computeCanPersistAtSubmit({
+//   "capable"  → persist: value if changed, omit if unchanged.
+//   "locked"   → clear: send null if provider was set, else omit.
+//   "unknown"  → omit always (never send null for a transient/loading state).
+//
+// The "unknown" state is the key Finding-E addition: it prevents a transient
+// catalog-loading state or a command:null entry from destructively clearing a
+// valid provider snapshot.
+//
+// Helper mirrors the component's effectiveRuntimeIdForSubmit + tri-state logic.
+function computeProviderCapability({
   inheritHarness,
   agentCommand,
   runtimes,
   selectedRuntimeId,
   selectedRuntime,
 }) {
+  // Step 1: derive the effective runtime id.
+  // Inherit path: command match first, then id-based fallback for command:null
+  // entries (known runtime with missing local adapter).
   const effectiveRuntimeIdForSubmit = inheritHarness
-    ? (runtimes.find((r) => r.command?.trim() === agentCommand.trim())?.id ??
-      "")
+    ? ((runtimes.find((r) => r.command?.trim() === agentCommand.trim())?.id) ??
+        (runtimes.find((r) => r.id === agentCommand.trim())?.id) ??
+        "")
     : (selectedRuntime?.id ?? selectedRuntimeId);
-  return runtimeSupportsLlmProviderSelection(effectiveRuntimeIdForSubmit);
+
+  // Step 2: look up the catalog entry by id (not command) and classify.
+  const matchedCatalogEntry =
+    effectiveRuntimeIdForSubmit.length > 0
+      ? runtimes.find((r) => r.id === effectiveRuntimeIdForSubmit)
+      : undefined;
+  if (matchedCatalogEntry === undefined) return "unknown";
+  return runtimeSupportsLlmProviderSelection(matchedCatalogEntry.id)
+    ? "capable"
+    : "locked";
+}
+
+// Legacy boolean wrapper used by pre-Finding-E tests.
+// Maps "capable" → true, "locked" → false, "unknown" → false.
+// Note: "unknown" maps to false here (pre-Finding-E behaviour), but the real
+// component now treats it as "omit" not "clear", which is what the new tests
+// verify separately.
+function computeCanPersistAtSubmit(args) {
+  return computeProviderCapability(args) === "capable";
+}
+
+// Helper to simulate the full provider submit branch for the tri-state.
+function computeProviderUpdate({
+  capability,
+  savedProvider,
+  currentProvider,
+}) {
+  const normalizedProvider = currentProvider?.trim() || null;
+  if (capability === "capable") {
+    return normalizedProvider !== (savedProvider ?? null)
+      ? normalizedProvider
+      : undefined;
+  }
+  if (capability === "locked") {
+    return (savedProvider ?? null) !== null ? null : undefined;
+  }
+  // "unknown" → omit always
+  return undefined;
 }
 
 test("editAgent_inheritCheckboxRoundTrip_doesNotPersistProviderOnInheritedRuntime", () => {
@@ -629,5 +674,171 @@ test("editAgent_inheritedBuzzAgentProvider_clearsWhenUserSwitchesToInheritedClau
     providerUpdate,
     null,
     "stale databricks_v2 on an inherited-Claude agent must be cleared on save",
+  );
+});
+
+// ── Finding E fix: empty catalog and command:null do not clear a valid provider
+//
+// Two reachable forms can leave effectiveRuntimeIdForSubmit unresolvable:
+//
+//   Form 1: catalog is still loading at submit (runtimes=[]).
+//   Form 2: catalog is loaded but the entry has command:null (adapter missing).
+//
+// In both cases, capability is "unknown" — the component must OMIT the provider
+// field, never send null. "unknown" is not "locked"; only "locked" clears.
+
+test("editAgent_findingE_emptyCatalog_providerOmittedNotCleared", () => {
+  // Form 1: runtimes has not loaded yet at submit time.
+  // Inherited buzz-agent agent with saved databricks_v2.
+  // A name-only save must omit provider (not send null).
+
+  const inheritHarness = true;
+  const agentCommand = "buzz-agent"; // inherited command (short form)
+  const runtimes = []; // catalog still loading
+  const selectedRuntimeId = "custom"; // not yet derived
+  const selectedRuntime = undefined;
+  const savedProvider = "databricks_v2";
+  const currentProvider = "databricks_v2"; // unchanged by user
+
+  const capability = computeProviderCapability({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
+  assert.equal(
+    capability,
+    "unknown",
+    "empty catalog must yield 'unknown' capability — not 'locked'",
+  );
+
+  const providerUpdate = computeProviderUpdate({
+    capability,
+    savedProvider,
+    currentProvider,
+  });
+  assert.equal(
+    providerUpdate,
+    undefined,
+    "empty-catalog submit must OMIT provider (undefined), not send null to clear it",
+  );
+});
+
+test("editAgent_findingE_commandNullCatalogEntry_providerPreservedByIdMatch", () => {
+  // Form 2: catalog loaded, but buzz-agent's entry has command:null (adapter
+  // binary not installed). The command-based match fails; id-based fallback
+  // finds the entry. Capability resolves to "capable" via id.
+  // A name-only save must omit provider (unchanged → no-op, not null-clear).
+
+  const inheritHarness = true;
+  const agentCommand = "buzz-agent"; // inherited command (short form = runtime id)
+  const runtimes = [
+    { id: "buzz-agent", command: null, defaultArgs: [] }, // adapter missing
+    { id: "claude", command: "claude-agent-acp", defaultArgs: [] },
+  ];
+  const selectedRuntimeId = "custom"; // command match failed → not re-derived
+  const selectedRuntime = undefined;
+  const savedProvider = "databricks_v2";
+  const currentProvider = "databricks_v2"; // unchanged
+
+  const capability = computeProviderCapability({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
+  assert.equal(
+    capability,
+    "capable",
+    "command:null buzz-agent entry must resolve to 'capable' via id-based fallback",
+  );
+
+  const providerUpdate = computeProviderUpdate({
+    capability,
+    savedProvider,
+    currentProvider,
+  });
+  assert.equal(
+    providerUpdate,
+    undefined,
+    "name-only save on inherited buzz-agent (command:null) must omit provider, not clear it",
+  );
+});
+
+test("editAgent_findingE_lockedRuntimeStillClears", () => {
+  // Confirm that "locked" (known provider-incapable runtime) still sends null
+  // to clear a stale provider — the Finding C/D behaviour must not regress.
+
+  const inheritHarness = true;
+  const agentCommand = "claude-agent-acp"; // inherited Claude
+  const runtimes = [
+    { id: "buzz-agent", command: "buzz-agent", defaultArgs: [] },
+    { id: "claude", command: "claude-agent-acp", defaultArgs: [] },
+  ];
+  const selectedRuntimeId = "buzz-agent"; // stale dropdown state (irrelevant)
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
+  const savedProvider = "databricks_v2"; // stale saved provider
+  const currentProvider = "databricks_v2";
+
+  const capability = computeProviderCapability({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
+  assert.equal(
+    capability,
+    "locked",
+    "inherited Claude must classify as 'locked'",
+  );
+
+  const providerUpdate = computeProviderUpdate({
+    capability,
+    savedProvider,
+    currentProvider,
+  });
+  assert.equal(
+    providerUpdate,
+    null,
+    "locked runtime with a stale saved provider must send null to clear it",
+  );
+});
+
+test("editAgent_findingE_capableBuzzAgentLoadedCatalog_preservedOnNoOpSave", () => {
+  // Confirm loaded-catalog inherited buzz-agent still preserves provider.
+  // This is Finding D's good path — must not regress with the tri-state change.
+
+  const inheritHarness = true;
+  const agentCommand = "buzz-agent";
+  const runtimes = [
+    { id: "buzz-agent", command: "buzz-agent", defaultArgs: [] },
+    { id: "claude", command: "claude-agent-acp", defaultArgs: [] },
+  ];
+  const selectedRuntimeId = "buzz-agent";
+  const selectedRuntime = runtimes.find((r) => r.id === selectedRuntimeId);
+  const savedProvider = "databricks_v2";
+  const currentProvider = "databricks_v2"; // unchanged
+
+  const capability = computeProviderCapability({
+    inheritHarness,
+    agentCommand,
+    runtimes,
+    selectedRuntimeId,
+    selectedRuntime,
+  });
+  assert.equal(capability, "capable", "loaded buzz-agent must be 'capable'");
+
+  const providerUpdate = computeProviderUpdate({
+    capability,
+    savedProvider,
+    currentProvider,
+  });
+  assert.equal(
+    providerUpdate,
+    undefined,
+    "no-op save on inherited buzz-agent (loaded catalog) must omit provider",
   );
 });

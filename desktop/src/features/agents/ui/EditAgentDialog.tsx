@@ -427,20 +427,38 @@ export function EditAgentDialog({
       // Derive the effective runtime at submit time — the one that will
       // actually run AFTER submit. When pinned (inheritHarness=false), it's
       // the live dropdown selection. When inheriting, match agent.agentCommand
-      // against the loaded catalog (same match as the catalog-arrival effect).
-      // If the inherited command has no catalog entry, fall through to the
-      // not-provider-capable path ("" is the safe unknown default).
-      // This correctly handles both:
-      //   - inherited Claude → not-provider-capable → clear stale provider
-      //   - inherited buzz-agent/Goose → provider-capable → preserve snapshot
+      // first by command (the normal path), then fall back to id-match for
+      // runtimes where the adapter is missing (command:null in the catalog).
+      // The id of a known runtime is stable even when its adapter binary is
+      // absent, so id-fallback lets us classify capability correctly without
+      // treating a "known adapter missing" as "completely unknown runtime."
       const effectiveRuntimeIdForSubmit = inheritHarness
-        ? (runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
-            ?.id ?? "")
+        ? ((runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
+            ?.id) ??
+            // Fallback: id-based match for command:null catalog entries (adapter
+            // missing but runtime is known and its capability is still static).
+            (runtimes.find((r) => r.id === agent.agentCommand.trim())?.id) ??
+            "")
         : (selectedRuntime?.id ?? selectedRuntimeId);
 
-      const llmProviderCanPersistAtSubmit = runtimeSupportsLlmProviderSelection(
-        effectiveRuntimeIdForSubmit,
-      );
+      // Classify the effective runtime's provider capability as a tri-state so
+      // the provider submit branch can distinguish "known-locked" (clear) from
+      // "unknown" (omit). Clearing must ONLY happen when we KNOW the runtime is
+      // provider-locked (e.g. Claude). When capability is unknown — because the
+      // catalog is still loading, the query errored, or the inherited command
+      // matched nothing — we OMIT the field rather than sending null, so a
+      // transient discovery/loading state never becomes a destructive write.
+      type ProviderRuntimeCapability = "capable" | "locked" | "unknown";
+      const matchedCatalogEntry =
+        effectiveRuntimeIdForSubmit.length > 0
+          ? runtimes.find((r) => r.id === effectiveRuntimeIdForSubmit)
+          : undefined;
+      const providerRuntimeCapability: ProviderRuntimeCapability =
+        matchedCatalogEntry === undefined
+          ? "unknown"
+          : runtimeSupportsLlmProviderSelection(matchedCatalogEntry.id)
+            ? "capable"
+            : "locked";
 
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
@@ -481,17 +499,21 @@ export function EditAgentDialog({
           normalizedModel !== (agent.model ?? null)
             ? normalizedModel
             : undefined,
-        // Tri-state: send null to clear, value to set, omit if unchanged.
-        // Only persist provider when the effective runtime at submit supports
-        // provider selection — visibility (llmProviderFieldVisible) is for UX
-        // only; persistence uses the runtime that will actually run after save.
-        provider: llmProviderCanPersistAtSubmit
-          ? normalizedProvider !== (agent.provider ?? null)
-            ? normalizedProvider
-            : undefined
-          : (agent.provider ?? null) !== null
-            ? null
-            : undefined,
+        // Tri-state provider persistence keyed on providerRuntimeCapability:
+        //   "capable"  → persist: value if changed, omit if unchanged.
+        //   "locked"   → clear: send null if provider was set, else omit.
+        //   "unknown"  → omit always (never send null for a transient state).
+        // llmProviderFieldVisible is for UX visibility only; not used here.
+        provider:
+          providerRuntimeCapability === "capable"
+            ? normalizedProvider !== (agent.provider ?? null)
+              ? normalizedProvider
+              : undefined
+            : providerRuntimeCapability === "locked"
+              ? (agent.provider ?? null) !== null
+                ? null
+                : undefined
+              : undefined, // "unknown" → omit always
         envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
