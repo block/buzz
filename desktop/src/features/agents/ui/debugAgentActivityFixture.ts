@@ -49,6 +49,12 @@ type ToolFixtureOptions = {
   descriptorOptions?: Partial<AgentActivityDescriptor>;
 };
 
+type FileEditScenario = {
+  oldStr: string;
+  newStr: string;
+  diff: string;
+};
+
 function toolItem({
   id,
   renderClass,
@@ -91,11 +97,83 @@ function toolItem({
   };
 }
 
+function fileEditScenario(path: string): FileEditScenario {
+  if (path.endsWith("AgentSessionThreadPanel.tsx")) {
+    return {
+      oldStr:
+        "          showRaw={showRawFeed}\n          transcriptOverride={\n            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_FIXTURE : undefined\n          }\n",
+      newStr:
+        "          showRaw={showRawFeed}\n          transcriptOverride={debugTranscript}\n",
+      diff: "           showRaw={showRawFeed}\n-          transcriptOverride={\n-            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_FIXTURE : undefined\n-          }\n+          transcriptOverride={debugTranscript}\n",
+    };
+  }
+
+  if (path.endsWith("ManagedAgentSessionPanel.tsx")) {
+    return {
+      oldStr:
+        "  const displayTranscript = transcriptOverride ?? scopedTranscript;\n\n  const scopedEvents = React.useMemo(\n",
+      newStr:
+        "  const displayTranscript = transcriptOverride ?? scopedTranscript;\n  const displayEventCount = transcriptOverride?.length ?? scopedEvents.length;\n\n  const scopedEvents = React.useMemo(\n",
+      diff: "   const displayTranscript = transcriptOverride ?? scopedTranscript;\n+  const displayEventCount = transcriptOverride?.length ?? scopedEvents.length;\n \n   const scopedEvents = React.useMemo(\n",
+    };
+  }
+
+  if (path.endsWith("AgentSessionTranscriptList.tsx")) {
+    return {
+      oldStr:
+        '        {displayBlocks.map((block) => (\n          <div\n            className="content-visibility-auto"\n',
+      newStr:
+        '        {displayBlocks.map((block, index) => (\n          <div\n            className="content-visibility-auto"\n            data-debug-index={index}\n',
+      diff: '         {displayBlocks.map((block) => (\n+        {displayBlocks.map((block, index) => (\n           <div\n             className="content-visibility-auto"\n+            data-debug-index={index}\n',
+    };
+  }
+
+  if (path.endsWith("agentSessionTranscriptGrouping.ts")) {
+    return {
+      oldStr:
+        '    if (run.length >= 3) {\n      grouped.push({\n        kind: "summary",\n',
+      newStr:
+        '    const minimumRunLength = key === "shell:command" ? 3 : 4;\n    if (run.length >= minimumRunLength) {\n      grouped.push({\n        kind: "summary",\n',
+      diff: '     if (run.length >= 3) {\n+    const minimumRunLength = key === "shell:command" ? 3 : 4;\n+    if (run.length >= minimumRunLength) {\n       grouped.push({\n',
+    };
+  }
+
+  if (path.endsWith("AgentSessionToolItem.tsx")) {
+    return {
+      oldStr:
+        '      {duration ? (\n        <span className={cn("shrink-0 text-xs", mutedTone)}>{duration}</span>\n      ) : null}\n',
+      newStr:
+        '      {duration ? (\n        <span className={cn("shrink-0 font-mono text-xs", mutedTone)}>\n          {duration}\n        </span>\n      ) : null}\n',
+      diff: '       {duration ? (\n-        <span className={cn("shrink-0 text-xs", mutedTone)}>{duration}</span>\n+        <span className={cn("shrink-0 font-mono text-xs", mutedTone)}>\n+          {duration}\n+        </span>\n       ) : null}\n',
+    };
+  }
+
+  if (path.endsWith("agentSessionToolSummary.ts")) {
+    return {
+      oldStr:
+        "  return {\n    label: descriptor.label,\n    preview: descriptor.preview,\n",
+      newStr:
+        "  return {\n    label: descriptor.label,\n    preview: descriptor.preview?.trim() || null,\n",
+      diff: "   return {\n     label: descriptor.label,\n-    preview: descriptor.preview,\n+    preview: descriptor.preview?.trim() || null,\n",
+    };
+  }
+
+  return {
+    oldStr:
+      '  if (kind === "str_replace") {\n    const path = getToolString(input.args, ["path"]);\n',
+    newStr:
+      '  if (kind === "str_replace") {\n    const path = getToolString(input.args, ["path"]);\n    const replaceAll = Boolean(input.args.replace_all);\n',
+    diff: '   if (kind === "str_replace") {\n     const path = getToolString(input.args, ["path"]);\n+    const replaceAll = Boolean(input.args.replace_all);\n',
+  };
+}
+
 function fileEditItem(
   id: string,
   path: string,
   seconds: number,
+  durationMs = 420,
 ): Extract<TranscriptItem, { type: "tool" }> {
+  const change = fileEditScenario(path);
   return toolItem({
     id,
     renderClass: "file-edit",
@@ -107,13 +185,12 @@ function fileEditItem(
     toolName: "dev__str_replace",
     args: {
       path,
-      old_str:
-        "          <ManagedAgentSessionPanel\n            agent={agent}\n            channelId={channel?.id ?? null}\n",
-      new_str:
-        "          <ManagedAgentSessionPanel\n            agent={agent}\n            channelId={channel?.id ?? null}\n            transcriptOverride={debugTranscript}\n",
+      old_str: change.oldStr,
+      new_str: change.newStr,
       workdir: workspacePath,
     },
-    result: `Replaced 1 occurrence in ${workspacePath}/${path}.\n\n--- a/${workspacePath}/${path}\n+++ b/${workspacePath}/${path}\n@@\n           <ManagedAgentSessionPanel\n             agent={agent}\n             channelId={channel?.id ?? null}\n+            transcriptOverride={debugTranscript}\n`,
+    result: `Replaced 1 occurrence in ${workspacePath}/${path}.\n\n--- a/${workspacePath}/${path}\n+++ b/${workspacePath}/${path}\n@@\n${change.diff}`,
+    completedSeconds: seconds + durationMs / 1000,
     descriptorOptions: {
       operation: "str_replace",
       object: path,
@@ -157,6 +234,7 @@ function shellCommandItem(
   command: string,
   seconds: number,
   result = "",
+  durationMs = 420,
 ): Extract<TranscriptItem, { type: "tool" }> {
   return toolItem({
     id,
@@ -168,7 +246,8 @@ function shellCommandItem(
     title: "Shell",
     toolName: "dev__shell",
     args: { command, workdir: workspacePath, timeout_ms: 120000 },
-    result: shellResultJson(result),
+    result: shellResultJson(result, { durationMs }),
+    completedSeconds: seconds + durationMs / 1000,
     descriptorOptions: {
       operation: "shell",
     },
@@ -425,77 +504,92 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     "debug:file-edit-thread-panel-2",
     "desktop/src/features/channels/ui/AgentSessionThreadPanel.tsx",
     15.2,
+    180,
   ),
   fileEditItem(
     "debug:file-edit-managed-panel-1",
     "desktop/src/features/agents/ui/ManagedAgentSessionPanel.tsx",
     15.6,
+    530,
   ),
   fileEditItem(
     "debug:file-edit-transcript-list-1",
     "desktop/src/features/agents/ui/AgentSessionTranscriptList.tsx",
     16,
+    260,
   ),
   fileEditItem(
     "debug:file-edit-grouping-1",
     "desktop/src/features/agents/ui/agentSessionTranscriptGrouping.ts",
     16.4,
+    740,
   ),
   fileEditItem(
     "debug:file-edit-tool-item-1",
     "desktop/src/features/agents/ui/AgentSessionToolItem.tsx",
     16.8,
+    310,
   ),
   fileEditItem(
     "debug:file-edit-tool-summary-1",
     "desktop/src/features/agents/ui/agentSessionToolSummary.ts",
     17.2,
+    480,
   ),
   fileEditItem(
     "debug:file-edit-classifier-1",
     "desktop/src/features/agents/ui/agentSessionToolClassifier.ts",
     17.6,
+    690,
   ),
   shellCommandItem(
     "debug:shell-burst-1",
     "git status --short",
     18.2,
     "M desktop/src/features/agents/ui/ManagedAgentSessionPanel.tsx\n",
+    96,
   ),
   shellCommandItem(
     "debug:shell-burst-2",
     "pnpm --dir desktop lint",
     18.6,
     "Checked 812 files in 1.9s. No fixes applied.\n",
+    1900,
   ),
   shellCommandItem(
     "debug:shell-burst-3",
     "node --import ./test-loader.mjs --experimental-strip-types --test src/features/agents/ui/debugAgentActivityFixture.test.mjs",
     19,
     "1 test passed\n",
+    183,
   ),
   shellCommandItem(
     "debug:shell-burst-4",
     "pnpm --dir desktop typecheck",
     19.4,
     "Typecheck completed.\n",
+    3600,
   ),
   shellCommandItem(
     "debug:shell-burst-5",
     "git diff --stat",
     19.8,
     "4 files changed, 211 insertions(+), 38 deletions(-)\n",
+    122,
   ),
   shellCommandItem(
     "debug:shell-burst-6",
     "git add desktop/src/features/agents/ui desktop/src/features/channels/ui",
     20.2,
+    "",
+    140,
   ),
   shellCommandItem(
     "debug:shell-burst-7",
     'git commit -m "feat(desktop): add activity render-class debug fixture"',
     20.6,
     "[tho/activity-feed-rebuild aa84200ad] feat(desktop): add activity render-class debug fixture\n",
+    5530,
   ),
   toolItem({
     id: "debug:block-safe-github",
@@ -516,18 +610,26 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     "Inspect transcript panel settings and debug activity fixture",
     22,
   ),
-  shellCommandItem("debug:shell-push-burst-1", "git status --short", 22.8, ""),
+  shellCommandItem(
+    "debug:shell-push-burst-1",
+    "git status --short",
+    22.8,
+    "",
+    88,
+  ),
   shellCommandItem(
     "debug:shell-push-burst-2",
     "git push -u origin HEAD",
     23.2,
     "branch 'tho/activity-feed-rebuild' set up to track 'origin/tho/activity-feed-rebuild'.\n",
+    5400,
   ),
   shellCommandItem(
     "debug:shell-push-burst-3",
     "git rev-parse --short=40 HEAD",
     23.6,
     "aa84200ad266d16f81da2f9c347518a7525a3ef4\n",
+    74,
   ),
   todoUpdateItem(
     "debug:todo-after-push",
