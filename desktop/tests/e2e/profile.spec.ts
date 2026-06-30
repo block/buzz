@@ -792,6 +792,43 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
   await expect(page.getByTestId("agent-memory-list")).toContainText("orphan");
 });
 
+test("declared owner sees runtime tab for a remote relay agent", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-agents").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("agents");
+
+  const messageRow = page.getByTestId("message-row").filter({
+    has: page.getByText("Indexing remotely for my owner."),
+  });
+  await expect(messageRow.first()).toBeVisible({ timeout: 5_000 });
+  await messageRow.first().getByRole("button").first().click();
+
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByRole("tab", { name: "Runtime" })).toBeVisible();
+  await panel.getByRole("tab", { name: "Runtime" }).click();
+
+  await expect(panel.getByTestId("user-profile-runtime")).toContainText(
+    "Runtime",
+  );
+  await expect(panel.getByTestId("user-profile-runtime")).toContainText(
+    "Goose",
+  );
+  await expect(panel.getByTestId("user-profile-respond-to")).toContainText(
+    "anyone",
+  );
+
+  // Declared ownership grants read visibility only; local-management write UI
+  // stays hidden because this relay agent is not in the managed-agents list.
+  await expect(panel.getByText("Model").first()).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
+  ).toHaveCount(0);
+});
+
 test("owned agent absent from relay/managed lists still renders agent framing", async ({
   page,
 }) => {

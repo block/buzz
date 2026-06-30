@@ -249,10 +249,11 @@ export function buildOwnerFields({
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
-  const respondToDisplayValue = managedAgent
-    ? managedAgent.respondTo === "owner-only" && ownerDisplayName
+  const respondTo = managedAgent?.respondTo ?? relayAgent?.respondTo ?? null;
+  const respondToDisplayValue = respondTo
+    ? respondTo === "owner-only" && ownerDisplayName
       ? ownerDisplayName
-      : managedAgent.respondTo.replace(/-/g, " ")
+      : respondTo.replace(/-/g, " ")
     : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerProfilePubkey);
@@ -394,14 +395,15 @@ export function buildOwnerFields({
       label: "Start on launch",
       testId: "user-profile-start-on-launch",
     });
-    if (respondToDisplayValue) {
-      fields.push({
-        displayValue: respondToDisplayValue,
-        icon: Ear,
-        label: "Respond to",
-        testId: "user-profile-respond-to",
-      });
-    }
+  }
+
+  if (respondToDisplayValue) {
+    fields.push({
+      displayValue: respondToDisplayValue,
+      icon: Ear,
+      label: "Respond to",
+      testId: "user-profile-respond-to",
+    });
   }
 
   if (managedAgent?.lastError) {

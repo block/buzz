@@ -771,7 +771,7 @@ export function UserProfilePanel({
   const { agentInfoFields, agentSettingsFields, diagnosticsFields } =
     useProfileFieldBuckets({
       isBot,
-      isOwner,
+      isOwner: viewerIsOwner,
       managedAgent,
       onOpenProfile,
       ownerAvatarUrl: ownerAvatarProfile?.avatarUrl ?? null,

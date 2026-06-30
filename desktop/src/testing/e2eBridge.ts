@@ -2867,6 +2867,18 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 content: "Indexing the channel catalog now.",
                 sig: "mocksig".repeat(20).slice(0, 128),
               },
+              // Owned remote relay agent: declared-owned by the mock viewer,
+              // present in the relay registry, but NOT locally managed. This
+              // keeps the profile Runtime-tab owner gate honest.
+              {
+                id: "mock-agents-owned-relay-nadia",
+                pubkey: OWNED_RELAY_AGENT_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - 85,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: "Indexing remotely for my owner.",
+                sig: "mocksig".repeat(20).slice(0, 128),
+              },
               // Seed one message per managed agent that is a member of #agents.
               // This lets e2e specs open the profile panel by clicking the
               // agent's avatar in a message-row (the same pattern as charlie).
