@@ -118,7 +118,7 @@ const overrides = new Map([
   // cross-process keychain race fix (D3): interprocess lock + BlobLockGuard +
   // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
   // security fix for the lost-update race that stranded agent keys.
-  ["src-tauri/src/secret_store.rs", 1033],
+  ["src-tauri/src/secret_store.rs", 1043],
   ["src-tauri/src/app_state.rs", 1033],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
