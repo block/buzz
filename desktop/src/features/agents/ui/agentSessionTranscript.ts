@@ -226,9 +226,11 @@ function upsertPlan(
   timestamp: string,
   ctx: TranscriptItemContext,
   acpSource?: string,
+  updateMarkerId?: string,
 ) {
   const existing = d.itemsById.get(id);
   if (existing?.type === "plan") {
+    const changed = existing.text !== text;
     replaceItem(d, id, {
       ...existing,
       text,
@@ -237,6 +239,22 @@ function upsertPlan(
       sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
     });
+    if (changed) {
+      pushItem(d, {
+        id: updateMarkerId ?? `${id}:update:${timestamp}`,
+        type: "plan",
+        renderClass: "plan",
+        title: "Plan updated",
+        text: summarizePlanUpdate(text),
+        timestamp,
+        isUpdate: true,
+        targetId: id,
+        channelId: ctx.channelId,
+        turnId: ctx.turnId,
+        sessionId: ctx.sessionId,
+        acpSource,
+      });
+    }
     return;
   }
   sealOpenMessages(d);
@@ -252,6 +270,21 @@ function upsertPlan(
     sessionId: ctx.sessionId,
     acpSource,
   });
+}
+
+function summarizePlanUpdate(text: string) {
+  const taskMatches = [...text.matchAll(/\[[ xX]\]/g)];
+  if (taskMatches.length > 0) {
+    const completed = taskMatches.filter((match) =>
+      match[0].toLowerCase().includes("x"),
+    ).length;
+    return `${completed}/${taskMatches.length} complete`;
+  }
+
+  const stepCount = text
+    .split(/\r?\n/)
+    .filter((line) => /^\s*(?:[-*]|\d+[.)])\s+\S/.test(line)).length;
+  return stepCount > 0 ? `${stepCount} step${stepCount === 1 ? "" : "s"}` : "";
 }
 
 function upsertMetadata(
@@ -639,6 +672,7 @@ export function processTranscriptEvent(
           event.timestamp,
           ctx,
           updateType,
+          `plan-update:${ch}:${turnKey}:${event.seq}`,
         );
       }
     }

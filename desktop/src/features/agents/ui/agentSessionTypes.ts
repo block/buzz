@@ -92,6 +92,8 @@ export type TranscriptItem =
       title: string;
       text: string;
       timestamp: string;
+      isUpdate?: boolean;
+      targetId?: string;
       acpSource?: TranscriptAcpSource;
     } & TranscriptItemIdentity)
   | ({

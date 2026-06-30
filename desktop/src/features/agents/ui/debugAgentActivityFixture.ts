@@ -3,6 +3,7 @@ import type {
   TranscriptItem,
 } from "./agentSessionTypes";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { debugPlanUpdateItem } from "./debugAgentActivityPlanFixture";
 
 const sessionId = "debug-session-render-classes";
 const turnId = "debug-turn-render-classes";
@@ -461,18 +462,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     "Yep, and make sure the fixture includes the boring chatter too — short status messages are most of what I see in real agent turns.",
     5.4,
   ),
-  {
-    id: "debug:plan",
-    type: "plan",
-    renderClass: "plan",
-    title: "Plan updated",
-    text: "1. Read the transcript components.\n2. Classify the observed tools.\n3. Patch the Activity header.\n4. Run desktop gates and report the pushed SHA.",
-    timestamp: timestamp(5),
-    acpSource: "plan",
-    turnId,
-    sessionId,
-    channelId,
-  },
+  debugPlanUpdateItem(
+    "debug:plan-initial",
+    "1. [ ] Read the transcript components.\n2. [ ] Classify the observed tools.\n3. [ ] Patch the Activity header.\n4. [ ] Run desktop gates and report the pushed SHA.",
+    5,
+  ),
   assistantMessage(
     "debug:assistant-ack-location",
     "Makes sense. I’ll bias this toward the ordinary path: small observations, quick shell checks, file edits, and a final report instead of only taxonomy edge cases.",
@@ -575,6 +569,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     "Could you include one of the raw payload examples in the middle of the turn? That’s where I usually need to compare the compact row with the wire event.",
     13.4,
   ),
+  debugPlanUpdateItem(
+    "debug:plan-after-inspection",
+    "1. [x] Read the transcript components.\n2. [x] Classify the observed tools.\n3. [ ] Patch the Activity header.\n4. [ ] Run desktop gates and report the pushed SHA.",
+    13.6,
+  ),
   assistantMessage(
     "debug:assistant-before-edits",
     "Good call. I’ll leave a raw ACP sample in the fixture and make the surrounding messages look like a real debugging exchange.",
@@ -658,6 +657,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     17.6,
     690,
   ),
+  debugPlanUpdateItem(
+    "debug:plan-after-edits",
+    "1. [x] Read the transcript components.\n2. [x] Classify the observed tools.\n3. [x] Patch the Activity header.\n4. [ ] Run desktop gates and report the pushed SHA.",
+    18,
+  ),
   shellCommandItem(
     "debug:shell-burst-1",
     "git status --short",
@@ -692,6 +696,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     19.8,
     "4 files changed, 211 insertions(+), 38 deletions(-)\n",
     122,
+  ),
+  debugPlanUpdateItem(
+    "debug:plan-after-gates",
+    "1. [x] Read the transcript components.\n2. [x] Classify the observed tools.\n3. [x] Patch the Activity header.\n4. [x] Run desktop gates.\n5. [ ] Report the pushed SHA.",
+    19.9,
   ),
   assistantMessage(
     "debug:assistant-mid-check",
@@ -759,6 +768,11 @@ export const DEBUG_AGENT_ACTIVITY_FIXTURE: TranscriptItem[] = [
     23.6,
     "aa84200ad266d16f81da2f9c347518a7525a3ef4\n",
     74,
+  ),
+  debugPlanUpdateItem(
+    "debug:plan-after-push",
+    "1. [x] Read the transcript components.\n2. [x] Classify the observed tools.\n3. [x] Patch the Activity header.\n4. [x] Run desktop gates.\n5. [x] Report the pushed SHA.",
+    24,
   ),
   todoUpdateItem(
     "debug:todo-after-push",

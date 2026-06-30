@@ -6,10 +6,12 @@ import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessi
 import {
   DEBUG_AGENT_ACTIVITY_AGENT_AVATAR_URL,
   DEBUG_AGENT_ACTIVITY_AGENT_NAME,
-  DEBUG_AGENT_ACTIVITY_FIXTURE,
   DEBUG_AGENT_ACTIVITY_PROFILES,
 } from "@/features/agents/ui/debugAgentActivityFixture";
-import { DEBUG_AGENT_ACTIVITY_RAW_EVENTS } from "@/features/agents/ui/debugAgentActivityRawFixture";
+import {
+  DEBUG_AGENT_ACTIVITY_RAW_EVENTS,
+  DEBUG_AGENT_ACTIVITY_TRANSCRIPT,
+} from "@/features/agents/ui/debugAgentActivityRawFixture";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
@@ -292,7 +294,7 @@ export function AgentSessionThreadPanel({
           showHeader={false}
           showRaw={showRawFeed}
           transcriptOverride={
-            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_FIXTURE : undefined
+            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_TRANSCRIPT : undefined
           }
         />
       </AuxiliaryPanelBody>

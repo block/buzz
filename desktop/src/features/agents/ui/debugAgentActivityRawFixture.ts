@@ -1,4 +1,5 @@
 import type { ObserverEvent, TranscriptItem } from "./agentSessionTypes";
+import { buildTranscript } from "./agentSessionTranscript";
 import { DEBUG_AGENT_ACTIVITY_FIXTURE } from "./debugAgentActivityFixture";
 
 function rawContent(text: string) {
@@ -156,3 +157,7 @@ export const DEBUG_AGENT_ACTIVITY_RAW_EVENTS: ObserverEvent[] =
     turnId: item.turnId ?? null,
     payload: payloadForItem(item),
   }));
+
+export const DEBUG_AGENT_ACTIVITY_TRANSCRIPT = buildTranscript(
+  DEBUG_AGENT_ACTIVITY_RAW_EVENTS,
+);

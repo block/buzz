@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { DEBUG_AGENT_ACTIVITY_FIXTURE } from "./debugAgentActivityFixture.ts";
-import { DEBUG_AGENT_ACTIVITY_RAW_EVENTS } from "./debugAgentActivityRawFixture.ts";
+import {
+  DEBUG_AGENT_ACTIVITY_RAW_EVENTS,
+  DEBUG_AGENT_ACTIVITY_TRANSCRIPT,
+} from "./debugAgentActivityRawFixture.ts";
 
 const expectedRenderClasses = new Set([
   "message",
@@ -54,4 +57,19 @@ test("debug raw activity fixture aligns with transcript fixture", () => {
     assert.equal(event.sessionId, item.sessionId ?? null);
     assert.equal(event.turnId, item.turnId ?? null);
   }
+});
+
+test("debug transcript fixture shows progressive plan upserts", () => {
+  const planItems = DEBUG_AGENT_ACTIVITY_TRANSCRIPT.filter(
+    (item) => item.type === "plan",
+  );
+  const plan = planItems.find((item) => !item.isUpdate);
+  const updates = planItems.filter((item) => item.isUpdate);
+
+  assert.ok(plan);
+  assert.match(plan.text, /5\. \[x\] Report the pushed SHA/);
+  assert.deepEqual(
+    updates.map((item) => item.text),
+    ["2/4 complete", "3/4 complete", "4/5 complete", "5/5 complete"],
+  );
 });

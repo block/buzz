@@ -16,6 +16,19 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
     return null;
   }
 
+  if (props.item.isUpdate) {
+    return (
+      <ActivityRow testId="transcript-plan-update-item">
+        <ActivityRowLabel
+          object={["plan", props.item.text].filter(Boolean).join(" · ")}
+          openToneScope="none"
+          verb="Updated"
+        />
+        <TranscriptTimestamp timestamp={props.item.timestamp} />
+      </ActivityRow>
+    );
+  }
+
   return (
     <ActivityRow testId="transcript-plan-item">
       <ActivityRowLabel object="plan" openToneScope="tool" verb="Updated" />

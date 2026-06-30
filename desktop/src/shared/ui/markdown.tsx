@@ -65,6 +65,7 @@ import {
 } from "./markdown/CodeBlock";
 import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
+import { MarkdownInput } from "./markdown/MarkdownInput";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { resolveFileCard } from "./markdownFileCard";
 import type {
@@ -1514,10 +1515,7 @@ function createMarkdownComponents(
         ? "leading-6"
         : "leading-[inherit]";
   const listItemClassName = "[&_p]:inline";
-  const listClassName =
-    variant === "tight"
-      ? "space-y-1 pl-6 marker:text-muted-foreground/80"
-      : "space-y-1 pl-6 marker:text-muted-foreground/80";
+  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground/80";
 
   return {
     spoiler: ({
@@ -1738,6 +1736,7 @@ function createMarkdownComponents(
         </span>
       );
     },
+    input: MarkdownInput,
     li: ({ children }) => <li className={listItemClassName}>{children}</li>,
     ol: ({ children }) => (
       <ol className={cn("list-decimal", listClassName)}>{children}</ol>
