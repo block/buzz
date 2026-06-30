@@ -40,6 +40,7 @@ type ManagedAgentSessionPanelProps = {
   showHeader?: boolean;
   showRaw?: boolean;
   profiles?: UserProfileLookup;
+  transcriptOverride?: TranscriptItem[];
 };
 
 export function ManagedAgentSessionPanel({
@@ -51,6 +52,7 @@ export function ManagedAgentSessionPanel({
   showHeader = true,
   showRaw = true,
   profiles,
+  transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = isManagedAgentActive(agent);
   const { connectionState, errorMessage, events } = useObserverEvents(
@@ -63,6 +65,8 @@ export function ManagedAgentSessionPanel({
     () => scopeByChannel(transcript, channelId),
     [channelId, transcript],
   );
+
+  const displayTranscript = transcriptOverride ?? scopedTranscript;
 
   const scopedEvents = React.useMemo(
     () => scopeByChannel(events, channelId),
@@ -99,10 +103,11 @@ export function ManagedAgentSessionPanel({
         errorMessage={errorMessage}
         events={scopedEvents}
         hasObserver={hasObserver}
+        hasTranscriptOverride={transcriptOverride != null}
         profiles={profiles}
         rawLayout={rawLayout}
         showRaw={showRaw}
-        transcript={scopedTranscript}
+        transcript={displayTranscript}
       />
     </section>
   );
@@ -152,6 +157,7 @@ function SessionBody({
   errorMessage,
   events,
   hasObserver,
+  hasTranscriptOverride,
   profiles,
   rawLayout,
   showRaw,
@@ -165,6 +171,7 @@ function SessionBody({
   errorMessage: string | null;
   events: ObserverEvent[];
   hasObserver: boolean;
+  hasTranscriptOverride: boolean;
   profiles?: UserProfileLookup;
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
@@ -189,9 +196,11 @@ function SessionBody({
 
   return (
     <>
-      {!hasObserver ? (
+      {!hasObserver && !hasTranscriptOverride ? (
         <EmptyObserverState />
-      ) : connectionState === "connecting" && events.length === 0 ? (
+      ) : connectionState === "connecting" &&
+        events.length === 0 &&
+        !hasTranscriptOverride ? (
         <SessionLoadingSkeleton />
       ) : (
         <div

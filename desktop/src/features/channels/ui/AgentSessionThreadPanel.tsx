@@ -3,6 +3,7 @@ import { Octagon, Settings, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { DEBUG_AGENT_ACTIVITY_FIXTURE } from "@/features/agents/ui/debugAgentActivityFixture";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
@@ -75,6 +76,14 @@ export function AgentSessionThreadPanel({
     },
     [rawFeedScopeKey],
   );
+  const [showDebugRenderClasses, setShowDebugRenderClasses] =
+    React.useState(false);
+  const handleDebugRenderClassesChange = React.useCallback(
+    (checked: boolean) => {
+      setShowDebugRenderClasses(checked);
+    },
+    [],
+  );
 
   async function handleInterruptTurn() {
     if (!channel) {
@@ -124,6 +133,23 @@ export function AgentSessionThreadPanel({
             className="min-w-56"
             onCloseAutoFocus={(event) => event.preventDefault()}
           >
+            <DropdownMenuCheckboxItem
+              checked={showDebugRenderClasses}
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-debug-render-classes"
+              onCheckedChange={handleDebugRenderClassesChange}
+              title="Swap the live transcript for a temporary fixture covering every activity render class."
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">
+                  Debug: show all render classes
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Temporary fixture for visual taxonomy review.
+                </span>
+              </span>
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuSeparator />
             <DropdownMenuCheckboxItem
               checked={showRawFeed}
               className="items-start gap-3"
@@ -235,6 +261,9 @@ export function AgentSessionThreadPanel({
           rawLayout="exclusive"
           showHeader={false}
           showRaw={showRawFeed}
+          transcriptOverride={
+            showDebugRenderClasses ? DEBUG_AGENT_ACTIVITY_FIXTURE : undefined
+          }
         />
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>
