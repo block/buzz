@@ -6,6 +6,7 @@ import {
   List,
   MessageSquare,
   MoreHorizontal,
+  Plus,
   Trash2,
   Users,
 } from "lucide-react";
@@ -400,6 +401,7 @@ function EmptyFilteredState() {
 
 function ProjectsToolbar({
   filter,
+  onCreateProject,
   onFilterChange,
   onSortChange,
   onViewModeChange,
@@ -407,6 +409,7 @@ function ProjectsToolbar({
   viewMode,
 }: {
   filter: ProjectsFilter;
+  onCreateProject: () => void;
   onFilterChange: (filter: ProjectsFilter) => void;
   onSortChange: (sort: ProjectsSort) => void;
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
@@ -431,10 +434,17 @@ function ProjectsToolbar({
         <h2 className="min-w-0 text-lg font-semibold text-foreground">
           Projects
         </h2>
-        <ProjectsViewModeToggle
-          onViewModeChange={onViewModeChange}
-          viewMode={viewMode}
-        />
+        <Button
+          className="h-8 gap-1.5 self-start rounded-full border-border/60 bg-background/70 px-3 text-muted-foreground shadow-none hover:bg-muted/60 hover:text-foreground lg:self-auto"
+          data-testid="create-project-button"
+          onClick={onCreateProject}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Create Project
+        </Button>
       </div>
 
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
@@ -455,20 +465,26 @@ function ProjectsToolbar({
           ))}
         </fieldset>
 
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          Sort
-          <select
-            className="h-7 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
-            onChange={(event) =>
-              onSortChange(event.target.value as ProjectsSort)
-            }
-            value={sort}
-          >
-            <option value="updated">Recent activity</option>
-            <option value="created">Created date</option>
-            <option value="name">Name</option>
-          </select>
-        </label>
+        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span className="sr-only">Sort projects</span>
+            <select
+              className="h-7 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
+              onChange={(event) =>
+                onSortChange(event.target.value as ProjectsSort)
+              }
+              value={sort}
+            >
+              <option value="updated">Recent activity</option>
+              <option value="created">Created date</option>
+              <option value="name">Name</option>
+            </select>
+          </label>
+          <ProjectsViewModeToggle
+            onViewModeChange={onViewModeChange}
+            viewMode={viewMode}
+          />
+        </div>
       </div>
     </div>
   );
@@ -689,8 +705,8 @@ function ProjectListRow({
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1.5fr)_minmax(14rem,1fr)_auto] lg:items-center">
-        <div className="min-w-0 space-y-1">
+      <div className="grid gap-3 lg:grid-cols-[minmax(18rem,34rem)_minmax(14rem,1fr)_minmax(13rem,16rem)] lg:items-center">
+        <div className="min-w-0 max-w-[34rem] space-y-1">
           <div className="flex min-w-0 items-center gap-2">
             <FolderGit2 className="h-4 w-4 shrink-0 text-muted-foreground" />
             <span className="truncate text-sm font-medium text-foreground">
@@ -709,7 +725,7 @@ function ProjectListRow({
           </div>
         </div>
 
-        <div className="min-w-0 space-y-1">
+        <div className="min-w-0 justify-self-start space-y-1">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <MetadataItem icon={Users}>
               {pluralize(people.length, "person", "people")}
@@ -723,7 +739,7 @@ function ProjectListRow({
           </div>
         </div>
 
-        <div className="relative z-10 flex min-w-0 items-center justify-start gap-2 rounded-lg bg-muted/70 px-2.5 py-2 lg:justify-end">
+        <div className="relative z-10 flex min-w-0 items-center justify-start gap-2 rounded-lg bg-muted/70 px-2.5 py-2 lg:w-full lg:justify-between">
           <p className="truncate text-xs font-medium text-muted-foreground">
             {getActivityLabel(summary)}
           </p>
@@ -801,6 +817,9 @@ export function ProjectsView() {
   const handleSortChange = React.useCallback((nextSort: ProjectsSort) => {
     setSort(nextSort);
     writeStoredSort(nextSort);
+  }, []);
+  const handleCreateProject = React.useCallback(() => {
+    toast.info("Project creation is not available yet.");
   }, []);
 
   const visibleProjects = React.useMemo(() => {
@@ -899,6 +918,7 @@ export function ProjectsView() {
       >
         <ProjectsToolbar
           filter={filter}
+          onCreateProject={handleCreateProject}
           onFilterChange={handleFilterChange}
           onSortChange={handleSortChange}
           onViewModeChange={handleViewModeChange}
