@@ -17,7 +17,7 @@ export function IdentityCardSkeleton({
   return (
     <div
       className={cn(
-        "relative aspect-[4/5] w-full min-w-0 overflow-hidden rounded-xl border border-border/70 bg-muted/50 shadow-xs",
+        "relative aspect-[4/5] w-full min-w-0 overflow-hidden rounded-2xl border border-border/70 bg-muted/50 shadow-xs",
         className,
       )}
     >
