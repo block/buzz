@@ -132,6 +132,11 @@ const overrides = new Map([
   ["src/shared/ui/markdown.tsx", 2082],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
+  // Option C databricks-model-discovery: parse/HTTP logic moved to buzz-agent
+  // catalog module; agent_models.rs retains the thin wrapper (~50 lines).
+  // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
+  // fallback. Queued to split into dedicated discovery modules.
+  ["src-tauri/src/commands/agent_models.rs", 1066],
 ]);
 
 await runFileSizeCheck({

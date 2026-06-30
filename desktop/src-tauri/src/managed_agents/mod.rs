@@ -1,4 +1,6 @@
+mod agent_env;
 pub(crate) mod agent_events;
+pub(crate) use agent_env::build_buzz_agent_provider_defaults;
 mod backend;
 pub(crate) mod config_bridge;
 mod discovery;

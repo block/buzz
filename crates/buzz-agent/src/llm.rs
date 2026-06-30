@@ -982,7 +982,7 @@ where
 ///   Otherwise a `PkceOAuthTokenSource` pointed at the workspace's OIDC
 ///   discovery URL. First request without a cached token triggers a browser
 ///   flow; subsequent requests use the cache + refresh transparently.
-fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
+pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
         Provider::Anthropic | Provider::OpenAi => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))

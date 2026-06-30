@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
+use super::agent_env::build_buzz_agent_provider_defaults;
+
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
@@ -1796,6 +1798,10 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
     }
+    // Baked-in provider defaults for internal builds (buzz-releases sets
+    // BUZZ_BUILD_BUZZ_AGENT_* at compile time; OSS builds bake nothing).
+    // Written FIRST so that record/persona metadata env vars below override them.
+    build_buzz_agent_provider_defaults(&mut command);
     if let Some(meta) = runtime_meta {
         for (key, value) in runtime_metadata_env_vars(
             meta.model_env_var,
@@ -1868,13 +1874,6 @@ pub fn spawn_agent_child(
             "buzz-desktop: git-credential-nostr not found — agent {} will not have automatic Buzz git auth",
             record.name,
         );
-    }
-
-    // Baked-in Databricks defaults for internal builds (buzz-releases sets
-    // BUZZ_BUILD_DATABRICKS_* at compile time; OSS builds bake nothing).
-    // Written BEFORE user env_vars so a GUI/persona override still wins.
-    for (key, value) in build_databricks_defaults() {
-        command.env(key, value);
     }
 
     // ── User env vars: the record snapshot ─────────────────────────────
@@ -1951,23 +1950,6 @@ fn child_rust_log_filter() -> String {
         Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
         _ => "buzz_acp=info".to_string(),
     }
-}
-
-/// Databricks host/model baked in at compile time for internal builds. Empty
-/// in OSS builds, where the `BUZZ_BUILD_DATABRICKS_*` env is unset.
-pub(crate) fn build_databricks_defaults() -> Vec<(&'static str, &'static str)> {
-    let mut defaults = Vec::new();
-    if let Some(host) = option_env!("BUZZ_DESKTOP_BUILD_DATABRICKS_HOST") {
-        if !host.is_empty() {
-            defaults.push(("DATABRICKS_HOST", host));
-        }
-    }
-    if let Some(model) = option_env!("BUZZ_DESKTOP_BUILD_DATABRICKS_MODEL") {
-        if !model.is_empty() {
-            defaults.push(("DATABRICKS_MODEL", model));
-        }
-    }
-    defaults
 }
 
 pub fn start_managed_agent_process(

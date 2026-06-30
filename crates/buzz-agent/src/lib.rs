@@ -2,13 +2,18 @@
 mod agent;
 pub mod auth;
 mod builtin;
-mod config;
+pub mod catalog;
+pub mod config;
 mod handoff;
 mod hints;
 mod llm;
 mod mcp;
-mod types;
+pub mod types;
 mod wire;
+
+pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
+pub use config::Provider;
+pub use types::AgentError;
 
 use std::collections::HashMap;
 use std::path::Path;
