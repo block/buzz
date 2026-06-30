@@ -114,6 +114,13 @@ export function requiredCredentialEnvKeys(
   return [];
 }
 
+export function isMissingRequiredDropdownField(
+  field: { isRequired: boolean } | null | undefined,
+  value: string,
+) {
+  return field?.isRequired === true && value.trim().length === 0;
+}
+
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
   return runtimeId === "buzz-agent" || runtimeId === "goose";
 }

@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {
   useAcpRuntimesQuery,
+  useAgentConfigSurface,
   usePersonasQuery,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
@@ -30,6 +31,7 @@ import {
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
   hasPersonaModelOption,
+  isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
   requiredCredentialEnvKeys,
@@ -51,6 +53,27 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 
+function RequiredFieldLabel({
+  children,
+  htmlFor,
+  isRequired,
+}: {
+  children: React.ReactNode;
+  htmlFor: string;
+  isRequired: boolean;
+}) {
+  return (
+    <label className="text-sm font-medium" htmlFor={htmlFor}>
+      {children}
+      {isRequired ? (
+        <span className="ml-1 text-destructive" aria-label="required">
+          *
+        </span>
+      ) : null}
+    </label>
+  );
+}
+
 export function EditAgentDialog({
   agent,
   open,
@@ -64,6 +87,7 @@ export function EditAgentDialog({
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
+  const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
 
   const [name, setName] = React.useState(agent.name);
@@ -230,6 +254,15 @@ export function EditAgentDialog({
   );
 
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
+  const normalizedConfig = configSurfaceQuery.data?.normalized;
+  const modelRequired = isMissingRequiredDropdownField(
+    normalizedConfig?.model,
+    model,
+  );
+  const providerRequired = isMissingRequiredDropdownField(
+    normalizedConfig?.provider,
+    provider,
+  );
 
   // Required credential env keys for the currently selected runtime + provider.
   // These are surfaced as first-class required rows in the EnvVarsEditor so the
@@ -586,6 +619,7 @@ export function EditAgentDialog({
               disabled={updateMutation.isPending}
               discoveredModelOptions={discoveredModelOptions}
               isCustomModelEditing={isCustomModelEditing}
+              isRequired={modelRequired}
               model={model}
               modelDiscoveryLoading={modelDiscoveryLoading}
               modelDiscoveryStatus={modelDiscoveryStatus}
@@ -597,6 +631,7 @@ export function EditAgentDialog({
               <EditAgentProviderField
                 disabled={updateMutation.isPending}
                 isCustomProviderEditing={isCustomProviderEditing}
+                isRequired={providerRequired}
                 onProviderChange={handleProviderDropdownChange}
                 provider={provider}
                 selectedRuntime={selectedRuntime}
@@ -738,6 +773,7 @@ function EditAgentModelField({
   disabled,
   discoveredModelOptions,
   isCustomModelEditing,
+  isRequired,
   model,
   modelDiscoveryLoading,
   modelDiscoveryStatus,
@@ -747,6 +783,7 @@ function EditAgentModelField({
   disabled: boolean;
   discoveredModelOptions: readonly PersonaModelOption[] | null;
   isCustomModelEditing: boolean;
+  isRequired: boolean;
   model: string;
   modelDiscoveryLoading: boolean;
   modelDiscoveryStatus: PersonaModelDiscoveryStatus | null;
@@ -787,10 +824,11 @@ function EditAgentModelField({
 
   return (
     <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor="agent-model">
+      <RequiredFieldLabel htmlFor="agent-model" isRequired={isRequired}>
         Model
-      </label>
+      </RequiredFieldLabel>
       <select
+        aria-required={isRequired}
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
         disabled={selectDisabled}
         id="agent-model"
@@ -851,12 +889,14 @@ function EditAgentModelField({
 function EditAgentProviderField({
   disabled,
   isCustomProviderEditing,
+  isRequired,
   onProviderChange,
   provider,
   selectedRuntime,
 }: {
   disabled: boolean;
   isCustomProviderEditing: boolean;
+  isRequired: boolean;
   onProviderChange: (value: string) => void;
   provider: string;
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -872,10 +912,11 @@ function EditAgentProviderField({
 
   return (
     <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor="agent-provider">
+      <RequiredFieldLabel htmlFor="agent-provider" isRequired={isRequired}>
         LLM provider
-      </label>
+      </RequiredFieldLabel>
       <select
+        aria-required={isRequired}
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60"
         disabled={disabled}
         id="agent-provider"

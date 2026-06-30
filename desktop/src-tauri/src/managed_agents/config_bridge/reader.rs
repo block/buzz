@@ -360,7 +360,11 @@ fn build_provider_field(
         (record_provider.as_deref(), ConfigOrigin::BuzzExplicit),
         (file_provider.as_deref(), ConfigOrigin::ConfigFile),
     ];
-    let (value, origin, overridden_value, overridden_origin) = resolve_with_override(tiers)?;
+    let (value, origin, overridden_value, overridden_origin) = match resolve_with_override(tiers) {
+        Some(resolved) => resolved,
+        None if is_required => (None, ConfigOrigin::EnvVar, None, None),
+        None => return None,
+    };
 
     let write_via = if let Some(env_key) = provider_env_var {
         ConfigWriteMechanism::RespawnWithEnvVar {
