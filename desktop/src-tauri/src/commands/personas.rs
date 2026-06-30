@@ -217,7 +217,11 @@ pub fn update_persona(
     state: State<'_, AppState>,
 ) -> Result<PersonaRecord, String> {
     let display_name = trim_required(&input.display_name, "Display name")?;
-    let system_prompt = input.system_prompt.trim().to_string();
+    // Do not trim system_prompt: `compose_prompt` appends pack_instructions
+    // verbatim (including any trailing newline), and write_back_persona_md
+    // decomposes by suffix-stripping. Trimming would break that exact-suffix
+    // match for the common case where instructions.md has a trailing newline.
+    let system_prompt = input.system_prompt.clone();
     let avatar_url = trim_optional(input.avatar_url);
     let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
@@ -1738,6 +1742,27 @@ You are Paul.
         // Re-compose: body + instructions must equal the original composed prompt.
         let recomposed = format!("{written_body}\n\n---\n# Team Instructions\n{instructions}");
         assert_eq!(recomposed, composed, "round-trip failed — double-append would occur: recomposed={recomposed:?}");
+    }
+
+    #[test]
+    fn test_prompt_edited_with_trailing_newline_in_instructions() {
+        // Regression: normal instructions.md files have a trailing newline.
+        // compose_prompt includes it verbatim; system_prompt must NOT be trimmed
+        // in update_persona or the suffix-strip fails and the safety guard fires.
+        //
+        // This test verifies that pack_instructions with a trailing "\n" still
+        // decomposes correctly — i.e., the body is rewritten, not preserved.
+        let instructions = "Follow the rules.\n"; // trailing newline from file read
+        let new_raw_body = "You are Paul, rewritten.";
+        let composed = format!("{new_raw_body}\n\n---\n# Team Instructions\n{instructions}");
+        // system_prompt is NOT trimmed (update_persona must preserve it as-is).
+
+        let mut p = persona("Paul", None, None, None, Some("goose-claude-4-6-opus"));
+        p.system_prompt = composed;
+
+        let result = rewrite_persona_md(PROMPT_MD, &p, "You are Paul.", Some(instructions)).unwrap();
+        assert!(result.contains("You are Paul, rewritten."), "body not rewritten with trailing-newline instructions: {result:?}");
+        assert!(!result.contains("# Team Instructions"), "Team Instructions must not appear in body: {result}");
     }
 
     // ── write_back_persona_md path-resolution tests ───────────────────────────
