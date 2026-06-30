@@ -3,7 +3,13 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { getIdentity, signRelayEvent } from "@/shared/api/tauri";
-import { getProjectRepoSnapshot } from "@/shared/api/projectGit";
+import {
+  getProjectRepoSyncStatus,
+  getProjectLocalRepoSnapshot,
+  getProjectRepoSnapshot,
+  listProjectLocalRepositories,
+  pushProjectLocalRepository,
+} from "@/shared/api/projectGit";
 import {
   KIND_DELETION,
   KIND_GIT_ISSUE,
@@ -18,9 +24,13 @@ import {
   KIND_REPO_STATE,
 } from "@/shared/constants/kinds";
 import type {
+  ProjectLocalRepository,
+  ProjectLocalRepoSnapshot,
+  ProjectRepoPushResult,
   ProjectRepoContributor,
   ProjectRepoFile,
   ProjectRepoSnapshot,
+  ProjectRepoSyncStatus,
   RelayEvent,
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
@@ -65,7 +75,15 @@ export type ProjectActivitySummary = {
   participantPubkeys: string[];
 };
 
-export type { ProjectRepoContributor, ProjectRepoFile, ProjectRepoSnapshot };
+export type {
+  ProjectLocalRepository,
+  ProjectLocalRepoSnapshot,
+  ProjectRepoPushResult,
+  ProjectRepoContributor,
+  ProjectRepoFile,
+  ProjectRepoSnapshot,
+  ProjectRepoSyncStatus,
+};
 
 function getTag(event: RelayEvent, name: string): string | undefined {
   return event.tags.find((t) => t[0] === name)?.[1];
@@ -294,6 +312,20 @@ async function fetchProjectRepoSnapshot(
   });
 }
 
+async function fetchProjectLocalRepoSnapshot(
+  project: Project,
+  reposDir?: string | null,
+  branchName?: string | null,
+): Promise<ProjectLocalRepoSnapshot | null> {
+  return getProjectLocalRepoSnapshot({
+    reposDir,
+    projectDtag: project.dtag,
+    cloneUrl: project.cloneUrls[0] ?? null,
+    defaultBranch: branchName ?? project.defaultBranch,
+    baseBranch: project.defaultBranch,
+  });
+}
+
 async function fetchProjectActivitySummaries(
   projects: Project[],
 ): Promise<Record<string, ProjectActivitySummary>> {
@@ -392,6 +424,70 @@ export function useProjectRepoSnapshotQuery(
   });
 }
 
+export function useProjectLocalRepoSnapshotQuery(
+  project: Project | null | undefined,
+  reposDir?: string | null,
+  branchName?: string | null,
+) {
+  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+
+  return useQuery({
+    enabled: Boolean(project),
+    queryKey: [
+      "project",
+      project?.id ?? "none",
+      "local-repo-snapshot",
+      reposDir ?? "default",
+      selectedBranch ?? "default",
+    ],
+    queryFn: () => {
+      if (!project) throw new Error("No project selected.");
+      return fetchProjectLocalRepoSnapshot(project, reposDir, selectedBranch);
+    },
+    staleTime: 10_000,
+    retry: 1,
+  });
+}
+
+export function useProjectLocalRepositoriesQuery(reposDir?: string | null) {
+  return useQuery({
+    queryKey: ["projects", "local-repositories", reposDir ?? "default"],
+    queryFn: () => listProjectLocalRepositories({ reposDir }),
+    staleTime: 10_000,
+    retry: 1,
+  });
+}
+
+export function useProjectRepoSyncStatusQuery(
+  project: Project | null | undefined,
+  reposDir?: string | null,
+  branchName?: string | null,
+) {
+  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+
+  return useQuery({
+    enabled: Boolean(project?.cloneUrls[0]),
+    queryKey: [
+      "project",
+      project?.id ?? "none",
+      "repo-sync-status",
+      reposDir ?? "default",
+      selectedBranch ?? "default",
+    ],
+    queryFn: () => {
+      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
+      return getProjectRepoSyncStatus({
+        reposDir,
+        projectDtag: project.dtag,
+        cloneUrl: project.cloneUrls[0],
+        defaultBranch: selectedBranch,
+      });
+    },
+    staleTime: 10_000,
+    retry: 1,
+  });
+}
+
 export function useProjectIssuesQuery(project: Project | null | undefined) {
   return useQuery({
     enabled: Boolean(project),
@@ -446,6 +542,33 @@ export function useDeleteProjectMutation() {
       void queryClient.invalidateQueries({
         queryKey: ["project", project.dtag],
       });
+    },
+  });
+}
+
+export function usePushProjectLocalRepositoryMutation(
+  project: Project | null | undefined,
+  reposDir?: string | null,
+  branchName?: string | null,
+) {
+  const queryClient = useQueryClient();
+  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+
+  return useMutation({
+    mutationFn: () => {
+      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
+      return pushProjectLocalRepository({
+        reposDir,
+        projectDtag: project.dtag,
+        cloneUrl: project.cloneUrls[0],
+        defaultBranch: selectedBranch,
+      });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["project", project?.id ?? "none"],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }

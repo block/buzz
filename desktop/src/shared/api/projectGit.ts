@@ -1,4 +1,10 @@
-import type { ProjectRepoSnapshot } from "@/shared/api/types";
+import type {
+  ProjectLocalRepository,
+  ProjectLocalRepoSnapshot,
+  ProjectRepoPushResult,
+  ProjectRepoSnapshot,
+  ProjectRepoSyncStatus,
+} from "@/shared/api/types";
 import { invokeTauri } from "@/shared/api/tauri";
 
 type RawProjectRepoCommit = {
@@ -44,6 +50,37 @@ type RawProjectRepoSnapshot = {
   contributors?: RawProjectRepoContributor[];
 };
 
+type RawProjectLocalRepoSnapshot = {
+  path: string;
+  snapshot: RawProjectRepoSnapshot;
+};
+
+type RawProjectLocalRepository = {
+  name: string;
+  path: string;
+};
+
+type RawProjectRepoSyncStatus = {
+  local_path: string | null;
+  local_branch: string | null;
+  local_head: string | null;
+  local_short_head: string | null;
+  remote_branch: string | null;
+  remote_head: string | null;
+  remote_short_head: string | null;
+  ahead_count: number;
+  behind_count: number;
+  has_uncommitted_changes: boolean;
+  has_untracked_files: boolean;
+  can_push: boolean;
+  push_block_reason: string | null;
+};
+
+type RawProjectRepoPushResult = {
+  pushed: boolean;
+  message: string;
+};
+
 function fromRawProjectRepoSnapshot(
   snapshot: RawProjectRepoSnapshot,
 ): ProjectRepoSnapshot {
@@ -85,4 +122,102 @@ export async function getProjectRepoSnapshot(input: {
     },
   );
   return fromRawProjectRepoSnapshot(snapshot);
+}
+
+export async function getProjectLocalRepoSnapshot(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl?: string | null;
+  defaultBranch?: string | null;
+  baseBranch?: string | null;
+}): Promise<ProjectLocalRepoSnapshot | null> {
+  const localSnapshot = await invokeTauri<RawProjectLocalRepoSnapshot | null>(
+    "get_project_local_repo_snapshot",
+    {
+      reposDir: input.reposDir ?? null,
+      projectDtag: input.projectDtag,
+      cloneUrl: input.cloneUrl ?? null,
+      defaultBranch: input.defaultBranch ?? null,
+      baseBranch: input.baseBranch ?? null,
+    },
+  );
+  if (!localSnapshot) return null;
+  return {
+    path: localSnapshot.path,
+    snapshot: fromRawProjectRepoSnapshot(localSnapshot.snapshot),
+  };
+}
+
+export async function listProjectLocalRepositories(input: {
+  reposDir?: string | null;
+}): Promise<ProjectLocalRepository[]> {
+  const repositories = await invokeTauri<RawProjectLocalRepository[]>(
+    "list_project_local_repositories",
+    {
+      reposDir: input.reposDir ?? null,
+    },
+  );
+  return repositories.map((repository) => ({
+    name: repository.name,
+    path: repository.path,
+  }));
+}
+
+function fromRawProjectRepoSyncStatus(
+  status: RawProjectRepoSyncStatus,
+): ProjectRepoSyncStatus {
+  return {
+    localPath: status.local_path,
+    localBranch: status.local_branch,
+    localHead: status.local_head,
+    localShortHead: status.local_short_head,
+    remoteBranch: status.remote_branch,
+    remoteHead: status.remote_head,
+    remoteShortHead: status.remote_short_head,
+    aheadCount: status.ahead_count,
+    behindCount: status.behind_count,
+    hasUncommittedChanges: status.has_uncommitted_changes,
+    hasUntrackedFiles: status.has_untracked_files,
+    canPush: status.can_push,
+    pushBlockReason: status.push_block_reason,
+  };
+}
+
+export async function getProjectRepoSyncStatus(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl: string;
+  defaultBranch?: string | null;
+}): Promise<ProjectRepoSyncStatus> {
+  const status = await invokeTauri<RawProjectRepoSyncStatus>(
+    "get_project_repo_sync_status",
+    {
+      reposDir: input.reposDir ?? null,
+      projectDtag: input.projectDtag,
+      cloneUrl: input.cloneUrl,
+      defaultBranch: input.defaultBranch ?? null,
+    },
+  );
+  return fromRawProjectRepoSyncStatus(status);
+}
+
+export async function pushProjectLocalRepository(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl: string;
+  defaultBranch?: string | null;
+}): Promise<ProjectRepoPushResult> {
+  const result = await invokeTauri<RawProjectRepoPushResult>(
+    "push_project_local_repository",
+    {
+      reposDir: input.reposDir ?? null,
+      projectDtag: input.projectDtag,
+      cloneUrl: input.cloneUrl,
+      defaultBranch: input.defaultBranch ?? null,
+    },
+  );
+  return {
+    pushed: result.pushed,
+    message: result.message,
+  };
 }

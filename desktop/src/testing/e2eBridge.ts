@@ -7237,6 +7237,31 @@ export function maybeInstallE2eTauriMocks() {
             },
           ],
         };
+      case "get_project_local_repo_snapshot":
+        return null;
+      case "get_project_repo_sync_status":
+        return {
+          local_path: null,
+          local_branch: null,
+          local_head: null,
+          local_short_head: null,
+          remote_branch: "main",
+          remote_head: "0123456789abcdef0123456789abcdef01234567",
+          remote_short_head: "0123456",
+          ahead_count: 0,
+          behind_count: 0,
+          has_uncommitted_changes: false,
+          has_untracked_files: false,
+          can_push: false,
+          push_block_reason: "No local checkout found.",
+        };
+      case "list_project_local_repositories":
+        return [];
+      case "push_project_local_repository":
+        return {
+          pushed: true,
+          message: "Pushed main to remote.",
+        };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":

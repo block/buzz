@@ -24,8 +24,12 @@ import {
   type ProjectActivitySummary,
   useDeleteProjectMutation,
   useProjectActivitySummariesQuery,
+  useProjectLocalRepositoriesQuery,
   useProjectsQuery,
 } from "@/features/projects/hooks";
+import { getDiscussionLabel } from "@/features/projects/lib/projectLabels";
+import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
@@ -60,6 +64,7 @@ type ProjectsViewMode = "grid" | "list";
 type ProjectsFilter =
   | "all"
   | "mine"
+  | "local"
   | "repositories"
   | "prs"
   | "agents"
@@ -94,6 +99,7 @@ function readStoredFilter(): ProjectsFilter {
   try {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
     return value === "mine" ||
+      value === "local" ||
       value === "repositories" ||
       value === "prs" ||
       value === "agents" ||
@@ -154,10 +160,6 @@ function projectPeople(
       ].map(normalizePubkey),
     ),
   ];
-}
-
-function getDiscussionLabel(project: Project) {
-  return project.projectChannelId ? "Discussion linked" : "No discussion";
 }
 
 function normalizeRepositoryUrl(url: string) {
@@ -419,6 +421,7 @@ function ProjectsToolbar({
   const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
     { label: "All", value: "all" },
     { label: "Mine", value: "mine" },
+    { label: "Local", value: "local" },
     { label: "Repositories", value: "repositories" },
     { label: "PRs", value: "prs" },
     { label: "Agents", value: "agents" },
@@ -762,6 +765,7 @@ function ProjectListRow({
 
 export function ProjectsView() {
   const { goProject } = useAppNavigation();
+  const { activeWorkspace } = useWorkspaces();
   const mainInsetRef = useMainInsetRef();
   const projectsHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
@@ -771,6 +775,9 @@ export function ProjectsView() {
   const identityQuery = useIdentityQuery();
   const projects = projectsQuery.data ?? [];
   const activitySummariesQuery = useProjectActivitySummariesQuery(projects);
+  const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
+    activeWorkspace?.reposDir,
+  );
   const [storedViewMode, setStoredViewMode] =
     React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
   const [filter, setFilter] = React.useState<ProjectsFilter>(() =>
@@ -823,11 +830,16 @@ export function ProjectsView() {
   }, []);
 
   const visibleProjects = React.useMemo(() => {
+    const localRepoNames = new Set(
+      (localRepositoriesQuery.data ?? []).map((repository) => repository.name),
+    );
     const sortedProjects = projects
       .filter((project) => {
         const summary = activitySummariesQuery.data?.[project.repoAddress];
         const people = projectPeople(project, summary);
         if (filter === "mine") return isProjectMine(project, currentPubkey);
+        if (filter === "local")
+          return hasLocalCheckout(project, localRepoNames);
         if (filter === "prs") return (summary?.prCount ?? 0) > 0;
         if (filter === "agents") {
           return projectHasAgent(project, people, profiles);
@@ -857,6 +869,7 @@ export function ProjectsView() {
     activitySummariesQuery.data,
     currentPubkey,
     filter,
+    localRepositoriesQuery.data,
     profiles,
     projects,
     sort,

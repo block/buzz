@@ -190,6 +190,37 @@ export type ProjectRepoSnapshot = {
   contributors: ProjectRepoContributor[];
 };
 
+export type ProjectLocalRepoSnapshot = {
+  path: string;
+  snapshot: ProjectRepoSnapshot;
+};
+
+export type ProjectLocalRepository = {
+  name: string;
+  path: string;
+};
+
+export type ProjectRepoSyncStatus = {
+  localPath: string | null;
+  localBranch: string | null;
+  localHead: string | null;
+  localShortHead: string | null;
+  remoteBranch: string | null;
+  remoteHead: string | null;
+  remoteShortHead: string | null;
+  aheadCount: number;
+  behindCount: number;
+  hasUncommittedChanges: boolean;
+  hasUntrackedFiles: boolean;
+  canPush: boolean;
+  pushBlockReason: string | null;
+};
+
+export type ProjectRepoPushResult = {
+  pushed: boolean;
+  message: string;
+};
+
 export type RelayEvent = {
   id: string;
   /** Local-only render identity for optimistic events that are later acknowledged. */

@@ -1,27 +1,27 @@
 import {
   ArrowLeft,
   BookOpen,
-  Check,
-  ChevronDown,
-  Copy,
   ExternalLink,
   FolderGit2,
-  GitBranch,
-  GitFork,
   GitPullRequest,
   MessageSquare,
   Users,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useOpenDmMutation } from "@/features/channels/hooks";
 import {
   type Project,
+  type ProjectLocalRepoSnapshot,
   type ProjectPullRequest,
   type ProjectRepoContributor,
   type ProjectRepoSnapshot,
   useProjectQuery,
+  useProjectLocalRepoSnapshotQuery,
+  useProjectRepoSyncStatusQuery,
+  usePushProjectLocalRepositoryMutation,
   useProjectPullRequestsQuery,
   useProjectRepoSnapshotQuery,
   useRepoStateQuery,
@@ -57,14 +57,7 @@ import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
-import { Card } from "@/shared/ui/card";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import {
   findReadmeFile,
@@ -72,107 +65,14 @@ import {
   RepositoryFilesPanel,
 } from "./ProjectRepositoryPanel";
 import {
+  RepositorySourceCard,
+  RepositorySourceNotice,
+  RepositorySyncStatusCard,
+} from "./ProjectRepositorySource";
+import {
   ProfileAuthorName,
   ProfileIdentityButton,
 } from "./ProjectProfileIdentity";
-
-function CloneUrlRow({ url }: { url: string }) {
-  const [copied, setCopied] = React.useState(false);
-
-  const handleCopy = React.useCallback(() => {
-    void navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2_000);
-    });
-  }, [url]);
-
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <GitFork className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-      <code className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-        {url}
-      </code>
-      <Button
-        className="h-6 w-6 shrink-0"
-        onClick={handleCopy}
-        size="icon"
-        variant="ghost"
-      >
-        {copied ? (
-          <Check className="h-4 w-4 text-green-500" />
-        ) : (
-          <Copy className="h-4 w-4" />
-        )}
-      </Button>
-    </div>
-  );
-}
-
-function RepositorySourceCard({
-  branch,
-  branchOptions,
-  cloneUrls,
-  onBranchChange,
-}: {
-  branch: string;
-  branchOptions: string[];
-  cloneUrls: string[];
-  onBranchChange: (branch: string) => void;
-}) {
-  if (cloneUrls.length === 0 && !branch) return null;
-  const selectableBranches =
-    branchOptions.length > 0 ? branchOptions : [branch];
-
-  return (
-    <Card className="border-border/50 bg-card/60 p-4 shadow-none">
-      <div className="flex min-w-0 flex-col">
-        <div className="flex min-w-0 items-center gap-2">
-          <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />
-          {branch ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  className="h-6 max-w-full gap-1.5 px-2 font-mono text-sm font-semibold"
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                >
-                  <span className="truncate">{branch || "—"}</span>
-                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="min-w-56">
-                <DropdownMenuRadioGroup
-                  onValueChange={onBranchChange}
-                  value={branch}
-                >
-                  {selectableBranches.map((option) => (
-                    <DropdownMenuRadioItem key={option} value={option}>
-                      <span className="truncate font-mono">{option}</span>
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <span className="truncate font-mono text-sm font-semibold text-foreground">
-              {branch || "—"}
-            </span>
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          {cloneUrls.length > 0 ? (
-            cloneUrls.map((url) => <CloneUrlRow key={url} url={url} />)
-          ) : (
-            <div className="text-sm text-muted-foreground">
-              No clone URL published yet.
-            </div>
-          )}
-        </div>
-      </div>
-    </Card>
-  );
-}
 
 function compactDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
@@ -514,7 +414,20 @@ function PullRequestsPanel({
   );
 }
 
+function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
+  return Boolean(
+    snapshot &&
+      (snapshot.latestCommit ||
+        snapshot.commits.length > 0 ||
+        snapshot.files.length > 0 ||
+        snapshot.contributors.length > 0),
+  );
+}
+
 function WorkspaceTabs({
+  localSnapshot,
+  localSnapshotError,
+  localSnapshotLoading,
   project,
   pullRequests,
   pullRequestsError,
@@ -524,7 +437,11 @@ function WorkspaceTabs({
   snapshotLoading,
   profiles,
   repoContributors,
+  repoSource,
 }: {
+  localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
+  localSnapshotError: unknown;
+  localSnapshotLoading: boolean;
   project: Project;
   pullRequests: ProjectPullRequest[];
   pullRequestsError: unknown;
@@ -534,18 +451,28 @@ function WorkspaceTabs({
   snapshotLoading: boolean;
   profiles?: UserProfileLookup;
   repoContributors: ProjectRepoContributor[];
+  repoSource: "remote" | "local";
 }) {
-  const files = snapshot?.files ?? [];
+  const localCheckoutSnapshot = localSnapshot?.snapshot ?? null;
+  const displayedSnapshot =
+    repoSource === "local" ? localCheckoutSnapshot : snapshot;
+  const displayedSnapshotError =
+    repoSource === "local" ? localSnapshotError : snapshotError;
+  const displayedSnapshotLoading =
+    repoSource === "local" ? localSnapshotLoading : snapshotLoading;
+  const displayedContributors =
+    displayedSnapshot?.contributors ?? repoContributors;
+  const files = displayedSnapshot?.files ?? [];
   const readmeFile = React.useMemo(() => findReadmeFile(files), [files]);
   const [selectedTab, setSelectedTab] = React.useState("readme");
 
   React.useEffect(() => {
     setSelectedTab((currentTab) =>
-      currentTab === "readme" && !readmeFile && !snapshotLoading
+      currentTab === "readme" && !readmeFile && !displayedSnapshotLoading
         ? "activity"
         : currentTab,
     );
-  }, [readmeFile, snapshotLoading]);
+  }, [displayedSnapshotLoading, readmeFile]);
 
   return (
     <Tabs
@@ -582,12 +509,17 @@ function WorkspaceTabs({
         className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
         value="activity"
       >
+        {repoSource === "local" ? (
+          <div className="p-3 pb-0">
+            <RepositorySourceNotice path={localSnapshot?.path} source="local" />
+          </div>
+        ) : null}
         <ActivityPanel
-          error={snapshotError}
-          isLoading={snapshotLoading}
+          error={displayedSnapshotError}
+          isLoading={displayedSnapshotLoading}
           profiles={profiles}
-          repoContributors={repoContributors}
-          snapshot={snapshot}
+          repoContributors={displayedContributors}
+          snapshot={displayedSnapshot}
         />
       </TabsContent>
 
@@ -603,26 +535,51 @@ function WorkspaceTabs({
       </TabsContent>
 
       <TabsContent className="m-0" value="files">
+        <div className="mb-3">
+          <RepositorySourceNotice
+            path={repoSource === "local" ? localSnapshot?.path : null}
+            source={repoSource}
+          />
+        </div>
+        {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
+          <div className="mb-3">
+            <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
+              No local checkout found.
+            </div>
+          </div>
+        ) : null}
         <RepositoryFilesPanel
-          error={snapshotError}
+          error={displayedSnapshotError}
           fallbackAuthorPubkey={project.owner}
           files={files}
-          isLoading={snapshotLoading}
+          isLoading={displayedSnapshotLoading}
           profiles={profiles}
-          snapshot={snapshot}
+          snapshot={displayedSnapshot}
         />
       </TabsContent>
 
       {readmeFile ? (
         <TabsContent className="m-0" value="readme">
+          <div className="mb-3">
+            <RepositorySourceNotice
+              path={repoSource === "local" ? localSnapshot?.path : null}
+              source={repoSource}
+            />
+          </div>
           <ReadmePanel file={readmeFile} />
         </TabsContent>
       ) : null}
 
       <TabsContent className="m-0" value="contributors">
+        <div className="mb-3">
+          <RepositorySourceNotice
+            path={repoSource === "local" ? localSnapshot?.path : null}
+            source={repoSource}
+          />
+        </div>
         <ContributorsPanel
           profiles={profiles}
-          repoContributors={repoContributors}
+          repoContributors={displayedContributors}
         />
       </TabsContent>
     </Tabs>
@@ -644,6 +601,7 @@ const PROJECT_TAB_TRIGGER_CLASS =
 
 export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const { goChannel, goProjects } = useAppNavigation();
+  const { activeWorkspace } = useWorkspaces();
   const mainInsetRef = useMainInsetRef();
   const projectDetailHeaderChromeRef = useMeasuredCssVariable({
     targetRef: mainInsetRef,
@@ -672,7 +630,29 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const displayedBranchOptions =
     displayedBranch === activeBranch ? branchOptions : [];
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
+  const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
+    project,
+    activeWorkspace?.reposDir,
+    activeBranch,
+  );
+  const repoSyncStatusQuery = useProjectRepoSyncStatusQuery(
+    project,
+    activeWorkspace?.reposDir,
+    activeBranch,
+  );
+  const pushLocalRepoMutation = usePushProjectLocalRepositoryMutation(
+    project,
+    activeWorkspace?.reposDir,
+    activeBranch,
+  );
   const pullRequestsQuery = useProjectPullRequestsQuery(project);
+  const hasLocalCheckout = Boolean(
+    localRepoSnapshotQuery.data || repoSyncStatusQuery.data?.localPath,
+  );
+  const hasRemoteSnapshot = snapshotHasContent(repoSnapshotQuery.data);
+  const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
+    "remote",
+  );
 
   React.useEffect(() => {
     if (!project) {
@@ -687,6 +667,20 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       return project.defaultBranch ?? branchOptions[0] ?? null;
     });
   }, [project, branchOptions]);
+
+  React.useEffect(() => {
+    setRepoSource((currentSource) => {
+      if (currentSource === "local" && !hasLocalCheckout) return "remote";
+      if (
+        currentSource === "remote" &&
+        !hasRemoteSnapshot &&
+        hasLocalCheckout
+      ) {
+        return "local";
+      }
+      return currentSource;
+    });
+  }, [hasLocalCheckout, hasRemoteSnapshot]);
 
   const peoplePubkeys = React.useMemo(
     () => (project ? projectPeople(project) : []),
@@ -739,6 +733,28 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
     },
     [goChannel, openDmMutation],
   );
+  const handlePushLocalRepo = React.useCallback(async () => {
+    try {
+      const result = await pushLocalRepoMutation.mutateAsync();
+      toast.success(result.message);
+      await Promise.all([
+        repoSnapshotQuery.refetch(),
+        localRepoSnapshotQuery.refetch(),
+        repoSyncStatusQuery.refetch(),
+        repoStateQuery.refetch(),
+      ]);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to push repository",
+      );
+    }
+  }, [
+    localRepoSnapshotQuery,
+    pushLocalRepoMutation,
+    repoSnapshotQuery,
+    repoStateQuery,
+    repoSyncStatusQuery,
+  ]);
 
   if (projectQuery.isLoading) {
     return null;
@@ -892,18 +908,52 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                   branch={displayedBranch ?? ""}
                   branchOptions={displayedBranchOptions}
                   cloneUrls={project.cloneUrls}
+                  localDisabled={
+                    !repoSyncStatusQuery.data?.localPath &&
+                    !localRepoSnapshotQuery.data &&
+                    !localRepoSnapshotQuery.isLoading
+                  }
+                  localLabel={
+                    localRepoSnapshotQuery.isLoading
+                      ? "Local checking"
+                      : repoSyncStatusQuery.data?.localPath ||
+                          localRepoSnapshotQuery.data
+                        ? "Local"
+                        : "Local missing"
+                  }
                   onBranchChange={setSelectedBranch}
+                  onSourceChange={setRepoSource}
+                  remoteLabel={
+                    repoSnapshotQuery.isLoading ? "Remote checking" : "Remote"
+                  }
+                  source={repoSource}
+                />
+                <RepositorySyncStatusCard
+                  isLoading={repoSyncStatusQuery.isLoading}
+                  onPush={() => {
+                    void handlePushLocalRepo();
+                  }}
+                  pushDisabled={
+                    pushLocalRepoMutation.isPending ||
+                    !repoSyncStatusQuery.data?.canPush
+                  }
+                  pushPending={pushLocalRepoMutation.isPending}
+                  status={repoSyncStatusQuery.data}
                 />
               </section>
 
               <WorkspaceTabs
                 key={project.id}
+                localSnapshot={localRepoSnapshotQuery.data}
+                localSnapshotError={localRepoSnapshotQuery.error}
+                localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                 profiles={profiles}
                 project={project}
                 pullRequests={pullRequestsQuery.data ?? []}
                 pullRequestsError={pullRequestsQuery.error}
                 pullRequestsLoading={pullRequestsQuery.isLoading}
                 repoContributors={repoContributors}
+                repoSource={repoSource}
                 snapshot={repoSnapshotQuery.data}
                 snapshotError={repoSnapshotQuery.error}
                 snapshotLoading={repoSnapshotQuery.isLoading}
