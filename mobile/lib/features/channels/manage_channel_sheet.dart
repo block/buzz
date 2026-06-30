@@ -98,9 +98,9 @@ class ManageChannelSheet extends HookConsumerWidget {
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.xs,
+        Grid.gutter,
         0,
-        Grid.xs,
+        Grid.gutter,
         MediaQuery.viewInsetsOf(context).bottom + Grid.xs,
       ),
       child: SafeArea(

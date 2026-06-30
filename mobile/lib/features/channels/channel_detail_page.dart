@@ -445,8 +445,8 @@ class _MessageList extends HookConsumerWidget {
           controller: scrollController,
           reverse: true,
           padding: EdgeInsets.only(
-            left: Grid.xs,
-            right: Grid.xs,
+            left: Grid.gutter,
+            right: Grid.gutter,
             top: frostedAppBarHeight(context),
             bottom: Grid.xxs,
           ),
@@ -540,7 +540,7 @@ class _MessageList extends HookConsumerWidget {
                   backgroundColor: context.colors.primaryContainer,
                   foregroundColor: context.colors.onPrimaryContainer,
                   padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.xs,
+                    horizontal: Grid.gutter,
                     vertical: Grid.xxs,
                   ),
                 ),
@@ -969,8 +969,8 @@ class _ReadOnlyNotice extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: EdgeInsets.only(
-        left: Grid.xs,
-        right: Grid.xs,
+        left: Grid.gutter,
+        right: Grid.gutter,
         top: Grid.xxs,
         bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
       ),
@@ -1028,7 +1028,7 @@ class _DetailConnectionBanner extends StatelessWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.quarter + 2,
       ),
       color: context.colors.surfaceContainerHighest,
@@ -1082,7 +1082,7 @@ class _TypingIndicator extends ConsumerWidget {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.quarter + 2,
       ),
       child: Row(

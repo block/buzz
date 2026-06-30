@@ -36,7 +36,12 @@ void showMessageActions({
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+        padding: const EdgeInsets.fromLTRB(
+          Grid.gutter,
+          0,
+          Grid.gutter,
+          Grid.xs,
+        ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -186,9 +191,9 @@ void _showEditSheet({
     showDragHandle: true,
     builder: (sheetContext) => Padding(
       padding: EdgeInsets.fromLTRB(
-        Grid.xs,
+        Grid.gutter,
         0,
-        Grid.xs,
+        Grid.gutter,
         MediaQuery.viewInsetsOf(sheetContext).bottom,
       ),
       child: Column(

@@ -366,8 +366,8 @@ class ComposeBar extends HookConsumerWidget {
                 : null,
           ),
           padding: EdgeInsets.only(
-            left: Grid.xs,
-            right: Grid.xs,
+            left: Grid.gutter,
+            right: Grid.gutter,
             top: Grid.xs,
             bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.twelve,
           ),

@@ -264,7 +264,9 @@ class _EmojiPickerSheetState extends ConsumerState<EmojiPickerSheet> {
                     onSelect: widget.onSelect,
                   )
                 : GridView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.gutter,
+                    ),
                     gridDelegate:
                         const SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: 8,
@@ -298,7 +300,7 @@ class _CustomEmojiGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GridView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 6,
         mainAxisSpacing: Grid.half,
