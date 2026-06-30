@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
+import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
 import {
   buildTimelineItems,
   getTimelineItemKey,
@@ -245,7 +246,11 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   return (
     <div className="flex flex-col">
       {itemsResult.items.map((item) => (
-        <div className="timeline-row-cv" key={getTimelineItemKey(item)}>
+        <div
+          className="timeline-row-cv"
+          key={getTimelineItemKey(item)}
+          style={timelineRowReserveStyle(item)}
+        >
           {renderItem(item)}
         </div>
       ))}

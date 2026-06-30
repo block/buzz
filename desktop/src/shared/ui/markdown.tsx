@@ -78,9 +78,13 @@ import { SpoilerInline } from "./markdown/SpoilerInline";
 import {
   aspectRatioFromDim,
   dimensionsFromDim,
+  getDecodedImageDimensions,
+  imageReserveStyle,
   isInsideHiddenSpoiler,
   getReactNodeText,
   messageLinkUrlTransform,
+  rememberDecodedImageDimensions,
+  useFrozenImageReserve,
   useStableArray,
 } from "./markdown/utils";
 import { VideoPlayer, type VideoReviewContext } from "./VideoPlayer";
@@ -293,7 +297,8 @@ function imageLightboxBasisBoxForItem(
   item: ImageGalleryItem,
   fallbackBox: ImageLightboxBox,
 ): ImageLightboxBox {
-  const dimensions = dimensionsFromDim(item.dim);
+  const dimensions =
+    dimensionsFromDim(item.dim) ?? getDecodedImageDimensions(item.resolvedSrc);
   if (!dimensions) {
     return item.thumbnailBox ?? fallbackBox;
   }
@@ -1330,12 +1335,29 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
     [resolvedSrc],
   );
 
+  const handleImageLoad = React.useCallback(
+    (image: HTMLImageElement) => {
+      rememberDecodedImageDimensions(
+        resolvedSrc,
+        image.naturalWidth,
+        image.naturalHeight,
+      );
+      updateSpoilerMediaSize(image);
+    },
+    [resolvedSrc, updateSpoilerMediaSize],
+  );
+
   const imageRef = React.useCallback(
     (image: HTMLImageElement | null) => {
       inlineImageRef.current = image;
-      if (image?.complete) updateSpoilerMediaSize(image);
+      if (image?.complete) handleImageLoad(image);
     },
-    [updateSpoilerMediaSize],
+    [handleImageLoad],
+  );
+
+  const { intrinsicDimensions, useFixedReserveBox } = useFrozenImageReserve(
+    dim,
+    resolvedSrc,
   );
 
   const currentSpoilerMediaSize =
@@ -1344,15 +1366,11 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
     ? currentSpoilerMediaSize
     : null;
 
-  const spoilerMediaStyle = hiddenSpoilerMediaSize
-    ? ({
-        "--buzz-spoiler-media-aspect-ratio": `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
-        "--buzz-spoiler-media-width": `${hiddenSpoilerMediaSize.width}px`,
-        aspectRatio: `${hiddenSpoilerMediaSize.width} / ${hiddenSpoilerMediaSize.height}`,
-        height: "auto",
-        width: `${hiddenSpoilerMediaSize.width}px`,
-      } as React.CSSProperties)
-    : undefined;
+  const spoilerMediaStyle = imageReserveStyle({
+    hiddenSpoilerMediaSize,
+    intrinsicDimensions,
+    useFixedReserveBox,
+  });
 
   React.useLayoutEffect(() => {
     const trigger = triggerRef.current;
@@ -1378,12 +1396,6 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
 
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissImageContextMenu(Boolean(menu), closeMenu);
-
-  // Intrinsic dimensions from the NIP-92 `dim` tag, stamped as width/height
-  // attributes so the browser reserves aspect-ratio space before the image
-  // decodes. Without this the row grows from ~0 on load and shoves the
-  // timeline — the exact reflow the anchored-scroll restore then has to fight.
-  const intrinsicDimensions = dimensionsFromDim(dim);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -1471,12 +1483,12 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
           alt={alt}
           className="block h-auto max-h-64 max-w-[min(24rem,100%)] rounded-xl object-contain"
           data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
-          height={intrinsicDimensions?.height}
+          height={intrinsicDimensions.height}
           ref={imageRef}
           src={resolvedSrc}
           style={spoilerMediaStyle}
-          width={intrinsicDimensions?.width}
-          onLoad={(event) => updateSpoilerMediaSize(event.currentTarget)}
+          width={intrinsicDimensions.width}
+          onLoad={(event) => handleImageLoad(event.currentTarget)}
         />
       </button>
       {menu && src ? (
