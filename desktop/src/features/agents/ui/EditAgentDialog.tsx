@@ -2,7 +2,6 @@ import * as React from "react";
 
 import {
   useAcpRuntimesQuery,
-  useAgentConfigSurface,
   usePersonasQuery,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
@@ -33,6 +32,7 @@ import {
   hasPersonaModelOption,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
+  runtimeRequiresNormalizedField,
   runtimeSupportsLlmProviderSelection,
   requiredCredentialEnvKeys,
   shouldClearKnownModelForSelectionScope,
@@ -87,7 +87,6 @@ export function EditAgentDialog({
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
-  const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
 
   const [name, setName] = React.useState(agent.name);
@@ -254,13 +253,13 @@ export function EditAgentDialog({
   );
 
   const providerForDiscovery = llmProviderFieldVisible ? provider : "";
-  const normalizedConfig = configSurfaceQuery.data?.normalized;
+  const effectiveRuntimeId = selectedRuntime?.id ?? selectedRuntimeId;
   const modelRequired = isMissingRequiredDropdownField(
-    normalizedConfig?.model,
+    runtimeRequiresNormalizedField(effectiveRuntimeId, "model"),
     model,
   );
   const providerRequired = isMissingRequiredDropdownField(
-    normalizedConfig?.provider,
+    runtimeRequiresNormalizedField(effectiveRuntimeId, "provider"),
     provider,
   );
 
