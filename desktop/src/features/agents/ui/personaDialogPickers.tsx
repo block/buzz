@@ -114,11 +114,22 @@ export function requiredCredentialEnvKeys(
   return [];
 }
 
+export function runtimeRequiresNormalizedField(
+  runtimeId: string,
+  field: string,
+) {
+  const normalizedRuntime = runtimeId.trim();
+  return (
+    (normalizedRuntime === "buzz-agent" || normalizedRuntime === "goose") &&
+    (field === "model" || field === "provider")
+  );
+}
+
 export function isMissingRequiredDropdownField(
-  field: { isRequired: boolean } | null | undefined,
+  isRequired: boolean,
   value: string,
 ) {
-  return field?.isRequired === true && value.trim().length === 0;
+  return isRequired && value.trim().length === 0;
 }
 
 export function runtimeSupportsLlmProviderSelection(runtimeId: string) {
