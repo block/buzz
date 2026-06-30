@@ -1,7 +1,5 @@
 import * as React from "react";
 
-import { flushSync } from "react-dom";
-
 import type {
   useDeleteMessageMutation,
   useEditMessageMutation,
@@ -81,19 +79,26 @@ export function useChannelPaneHandlers({
   const toggleMutateRef = React.useRef(toggleReactionMutation.mutateAsync);
   toggleMutateRef.current = toggleReactionMutation.mutateAsync;
 
+  const deferPanelState = React.useCallback((update: () => void) => {
+    window.setTimeout(() => {
+      React.startTransition(update);
+    }, 0);
+  }, []);
+
   const handleCancelThreadReply = React.useCallback(() => {
     setThreadReplyTargetId(openThreadHeadIdRef.current);
   }, [setThreadReplyTargetId]);
 
   const handleCloseThread = React.useCallback(() => {
-    flushSync(() => {
+    deferPanelState(() => {
       onOptimisticOpenThreadHeadIdChange(null);
+      setOpenThreadHeadId(null);
+      setThreadReplyTargetId(null);
+      setThreadScrollTargetId(null);
+      setExpandedThreadReplyIds(new Set());
     });
-    setOpenThreadHeadId(null);
-    setThreadReplyTargetId(null);
-    setThreadScrollTargetId(null);
-    setExpandedThreadReplyIds(new Set());
   }, [
+    deferPanelState,
     onOptimisticOpenThreadHeadIdChange,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,
@@ -135,27 +140,28 @@ export function useChannelPaneHandlers({
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
       if (openThreadHeadIdRef.current === message.id) {
-        flushSync(() => {
+        deferPanelState(() => {
           onOptimisticOpenThreadHeadIdChange(null);
+          setOpenThreadHeadId(null);
+          setThreadReplyTargetId(null);
+          setThreadScrollTargetId(null);
+          setExpandedThreadReplyIds(new Set());
         });
-        setOpenThreadHeadId(null);
-        setThreadReplyTargetId(null);
-        setThreadScrollTargetId(null);
-        setExpandedThreadReplyIds(new Set());
         setEditTargetId(null);
         return;
       }
 
-      flushSync(() => {
+      deferPanelState(() => {
         onOptimisticOpenThreadHeadIdChange(message.id);
+        setOpenThreadHeadId(message.id);
+        setThreadReplyTargetId(message.id);
+        setThreadScrollTargetId(null);
+        setExpandedThreadReplyIds(new Set());
       });
-      setOpenThreadHeadId(message.id);
-      setThreadReplyTargetId(message.id);
-      setThreadScrollTargetId(null);
-      setExpandedThreadReplyIds(new Set());
       setEditTargetId(null);
     },
     [
+      deferPanelState,
       onOptimisticOpenThreadHeadIdChange,
       setEditTargetId,
       setExpandedThreadReplyIds,

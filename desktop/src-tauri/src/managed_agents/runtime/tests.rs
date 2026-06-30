@@ -92,6 +92,13 @@ fn buzz_agent_resolved_via_path() {
 }
 
 #[test]
+fn codex_has_mcp_command() {
+    let p = known_acp_runtime("codex-acp").expect("should resolve");
+    assert!(!p.mcp_hooks, "codex-acp does not handle MCP_HOOK_SERVERS");
+    assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
+}
+
+#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);

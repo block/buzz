@@ -561,6 +561,7 @@ export function MessageThreadPanel({
   const threadScrollRegion = (
     <AuxiliaryPanelBody
       className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
+      data-buzz-conversation-scroll
       data-testid="message-thread-body"
       onScroll={onScroll}
       ref={threadBodyRef}
@@ -664,7 +665,7 @@ export function MessageThreadPanel({
                   return (
                     <div
                       className={cn(
-                        "content-visibility-auto-interactive flex flex-col gap-0",
+                        "flex flex-col gap-0",
                         entry.summary &&
                           "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                       )}
@@ -832,13 +833,15 @@ export function MessageThreadPanel({
           />
           <div
             className={cn(
-              "h-7 bg-background pb-1 pt-0",
+              "min-h-8 bg-background pb-1.5 pt-0",
               THREAD_PANEL_COMPOSER_GUTTER_CLASS,
             )}
           >
-            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
+            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
               {toolbarExtraActions ? (
-                <div className="shrink-0">{toolbarExtraActions}</div>
+                <div className="flex min-w-0 flex-1 overflow-visible">
+                  {toolbarExtraActions}
+                </div>
               ) : null}
               {threadTypingPubkeys.length > 0 ? (
                 <TypingIndicatorRow

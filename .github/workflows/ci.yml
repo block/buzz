@@ -305,7 +305,18 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
       - name: Start integration services
-        run: docker compose up -d postgres redis minio minio-init
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose up -d postgres redis minio minio-init; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "docker compose up failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
+            sleep $((attempt * 5))
+          done
       - name: Get pnpm store directory
         id: pnpm-cache
         run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
@@ -380,6 +391,13 @@ jobs:
           PGUSER: buzz
           PGPASSWORD: buzz_dev
           PGDATABASE: buzz
+          # Use the already-running docker postgres for desired-state planning instead of
+          # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
+          PGSCHEMA_PLAN_HOST: localhost
+          PGSCHEMA_PLAN_PORT: "5432"
+          PGSCHEMA_PLAN_DB: buzz
+          PGSCHEMA_PLAN_USER: buzz
+          PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
           ./bin/pgschema apply --file schema/schema.sql --auto-approve
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \
@@ -471,7 +489,18 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Start integration services
-        run: docker compose up -d postgres redis minio minio-init
+        run: |
+          for attempt in 1 2 3; do
+            if docker compose up -d postgres redis minio minio-init; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "docker compose up failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "docker compose up failed (attempt $attempt), retrying in $((attempt * 5))s..." >&2
+            sleep $((attempt * 5))
+          done
       - name: Wait for integration services
         run: |
           wait_healthy() {
@@ -513,6 +542,13 @@ jobs:
           PGUSER: buzz
           PGPASSWORD: buzz_dev
           PGDATABASE: buzz
+          # Use the already-running docker postgres for desired-state planning instead of
+          # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
+          PGSCHEMA_PLAN_HOST: localhost
+          PGSCHEMA_PLAN_PORT: "5432"
+          PGSCHEMA_PLAN_DB: buzz
+          PGSCHEMA_PLAN_USER: buzz
+          PGSCHEMA_PLAN_PASSWORD: buzz_dev
         run: |
           ./bin/pgschema apply --file schema/schema.sql --auto-approve
           docker exec -i -e PGPASSWORD=buzz_dev buzz-postgres \

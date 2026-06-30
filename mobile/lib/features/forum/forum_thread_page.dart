@@ -130,13 +130,11 @@ class ForumThreadPage extends HookConsumerWidget {
               ListTile(
                 leading: Icon(
                   LucideIcons.trash2,
-                  color: Theme.of(sheetContext).colorScheme.error,
+                  color: sheetContext.colors.error,
                 ),
                 title: Text(
                   'Delete post',
-                  style: TextStyle(
-                    color: Theme.of(sheetContext).colorScheme.error,
-                  ),
+                  style: TextStyle(color: sheetContext.colors.error),
                 ),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
@@ -174,7 +172,7 @@ class ForumThreadPage extends HookConsumerWidget {
               }
             },
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              backgroundColor: dialogContext.colors.error,
             ),
             child: const Text('Delete'),
           ),
@@ -496,13 +494,11 @@ class _ReplyRow extends ConsumerWidget {
                 ListTile(
                   leading: Icon(
                     LucideIcons.trash2,
-                    color: Theme.of(sheetContext).colorScheme.error,
+                    color: sheetContext.colors.error,
                   ),
                   title: Text(
                     'Delete reply',
-                    style: TextStyle(
-                      color: Theme.of(sheetContext).colorScheme.error,
-                    ),
+                    style: TextStyle(color: sheetContext.colors.error),
                   ),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -538,7 +534,7 @@ class _ReplyRow extends ConsumerWidget {
               );
             },
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              backgroundColor: dialogContext.colors.error,
             ),
             child: const Text('Delete'),
           ),

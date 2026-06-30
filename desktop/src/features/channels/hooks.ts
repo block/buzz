@@ -150,8 +150,8 @@ export function useOpenDmMutation() {
         ]),
       );
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     },
   });
 }

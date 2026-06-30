@@ -39,6 +39,7 @@ type MockCommandAvailability = {
 type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  avatarUrl?: string | null;
   personaId?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
@@ -389,6 +390,7 @@ type RawManagedAgent = {
   max_turn_duration_seconds: number | null;
   parallelism: number;
   system_prompt: string | null;
+  avatar_url: string | null;
   model: string | null;
   env_vars?: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -937,6 +939,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     max_turn_duration_seconds: agent.max_turn_duration_seconds ?? null,
     parallelism: agent.parallelism,
     system_prompt: agent.system_prompt,
+    avatar_url: agent.avatar_url ?? null,
     model: agent.model,
     env_vars: { ...(agent.env_vars ?? {}) },
     status: agent.status,
@@ -1450,6 +1453,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     max_turn_duration_seconds: null,
     parallelism: 1,
     system_prompt: null,
+    avatar_url: seed.avatarUrl ?? null,
     model: null,
     env_vars: {},
     status,
@@ -5670,6 +5674,7 @@ async function handleCreateManagedAgent(
     max_turn_duration_seconds: args.input.maxTurnDurationSeconds ?? null,
     parallelism: args.input.parallelism ?? 1,
     system_prompt: args.input.systemPrompt?.trim() || null,
+    avatar_url: avatarUrl,
     model: args.input.model?.trim() || null,
     env_vars: { ...(args.input.envVars ?? {}) },
     status: args.input.spawnAfterCreate ? "running" : "stopped",

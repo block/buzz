@@ -505,15 +505,21 @@ The mobile app lives in `mobile/` — a Flutter app using Riverpod + Hooks.
 
 ### Rules
 
-- **NEVER use `StatefulWidget`** — always use `HookConsumerWidget` or
-  `ConsumerWidget` with `flutter_hooks` for local state.
+- **NEVER use `StatefulWidget`** — favor Riverpod for state and always use
+  `HookConsumerWidget` or `ConsumerWidget` with `flutter_hooks` for local state.
 - **NEVER run `flutter run`, `flutter build`, `flutter clean`, or
   `flutter upgrade`** — only `flutter test`, `flutter analyze`, and
   `dart format` are safe for agents to run.
 - **Do NOT use `print()`** — use `debugPrint()` or structured logging.
 - Prefer `context.colors` and `context.textTheme` (via theme extensions)
   over raw `Theme.of(context)` calls.
-- Keep widgets small and composable.
+- **Keep widgets small and composable.** One public widget per file; push
+  private sub-widgets (`_Foo`) into sibling `part` files under a
+  `<page>/` folder rather than growing the page file. Hard ceiling:
+  **1000 lines/file**, enforced by `mobile/scripts/check-file-sizes.mjs` via
+  `just mobile-check` (runs in `just check` + pre-push, mirroring desktop/web).
+  If the guard trips, **split the file — never bump the limit or add an
+  override to slip under it.**
 - Feature modules must not import from other feature modules — only from
   `shared/`.
 - Use `Grid` tokens for spacing, `Radii` for border radius.

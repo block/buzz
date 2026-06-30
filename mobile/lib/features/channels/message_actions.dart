@@ -62,9 +62,7 @@ void showMessageActions({
                       height: 44,
                       alignment: Alignment.center,
                       decoration: BoxDecoration(
-                        color: Theme.of(
-                          sheetContext,
-                        ).colorScheme.surfaceContainerHighest,
+                        color: sheetContext.colors.surfaceContainerHighest,
                         shape: BoxShape.circle,
                       ),
                       child: Text(emoji, style: const TextStyle(fontSize: 20)),
@@ -87,17 +85,13 @@ void showMessageActions({
                     height: 44,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
-                      color: Theme.of(
-                        sheetContext,
-                      ).colorScheme.surfaceContainerHighest,
+                      color: sheetContext.colors.surfaceContainerHighest,
                       shape: BoxShape.circle,
                     ),
                     child: Icon(
                       LucideIcons.plus,
                       size: 20,
-                      color: Theme.of(
-                        sheetContext,
-                      ).colorScheme.onSurfaceVariant,
+                      color: sheetContext.colors.onSurfaceVariant,
                     ),
                   ),
                 ),
@@ -152,13 +146,11 @@ void showMessageActions({
               ListTile(
                 leading: Icon(
                   LucideIcons.trash2,
-                  color: Theme.of(sheetContext).colorScheme.error,
+                  color: sheetContext.colors.error,
                 ),
                 title: Text(
                   'Delete message',
-                  style: TextStyle(
-                    color: Theme.of(sheetContext).colorScheme.error,
-                  ),
+                  style: TextStyle(color: sheetContext.colors.error),
                 ),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
@@ -269,7 +261,7 @@ void _confirmDelete({
                 .deleteMessage(channelId: channelId, eventId: messageId);
           },
           style: FilledButton.styleFrom(
-            backgroundColor: Theme.of(dialogContext).colorScheme.error,
+            backgroundColor: dialogContext.colors.error,
           ),
           child: const Text('Delete'),
         ),

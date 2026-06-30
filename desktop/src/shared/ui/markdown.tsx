@@ -25,7 +25,6 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { cn } from "@/shared/lib/cn";
 import {
   extractSupportedLinkPreviews,
-  isSupportedLinkAutolinkLabel,
   parseSupportedLinkPreview,
 } from "@/shared/lib/linkPreview";
 import { useResolvedLinkPreviews } from "@/shared/lib/useResolvedLinkPreviews";
@@ -66,12 +65,14 @@ import {
 } from "./markdown/CodeBlock";
 import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
+import { MarkdownInput } from "./markdown/MarkdownInput";
 import { MessageLinkPill } from "./markdown/MessageLinkPill";
 import { resolveFileCard } from "./markdownFileCard";
 import type {
   ImetaEntry,
   MarkdownProps,
   MarkdownRuntime,
+  MarkdownVariant,
 } from "./markdown/types";
 import { SpoilerInline } from "./markdown/SpoilerInline";
 import {
@@ -1502,12 +1503,19 @@ function ImageBlock({ alt, dim, resolvedSrc, src }: ImageBlockProps) {
 }
 
 function createMarkdownComponents(
+  variant: MarkdownVariant,
   runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
+  mediaInset = false,
 ): Components {
-  const paragraphClassName = "leading-[inherit]";
-  const listItemClassName = "my-1 [&_p]:inline";
-  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground";
+  const paragraphClassName =
+    variant === "tight"
+      ? "leading-5"
+      : variant === "compact"
+        ? "leading-6"
+        : "leading-[inherit]";
+  const listItemClassName = "[&_p]:inline";
+  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground/80";
 
   return {
     spoiler: ({
@@ -1525,8 +1533,7 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
-      const { imetaByUrl, linkPreviewHrefs, onOpenMessageLink } =
-        runtimeRef.current;
+      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -1601,13 +1608,6 @@ function createMarkdownComponents(
         ? parseSupportedLinkPreview(href)
         : null;
       const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
-      if (
-        supportedLinkPreview &&
-        linkPreviewHrefs.has(supportedLinkPreview.href) &&
-        isSupportedLinkAutolinkLabel(label, supportedLinkPreview)
-      ) {
-        return null;
-      }
 
       return (
         <a
@@ -1708,7 +1708,12 @@ function createMarkdownComponents(
       if (resolvedSrc?.endsWith(".mp4")) {
         const entry = src ? imetaByUrl?.get(src) : undefined;
         return (
-          <span data-block-media="">
+          <span
+            className={cn(
+              mediaInset && "mx-1.5 block max-w-[calc(100%-0.75rem)]",
+            )}
+            data-block-media=""
+          >
             <MarkdownVideoPlayer
               key={src ?? resolvedSrc}
               alt={alt}
@@ -1731,6 +1736,7 @@ function createMarkdownComponents(
         </span>
       );
     },
+    input: MarkdownInput,
     li: ({ children }) => <li className={listItemClassName}>{children}</li>,
     ol: ({ children }) => (
       <ol className={cn("list-decimal", listClassName)}>{children}</ol>
@@ -1919,14 +1925,17 @@ function createMarkdownComponents(
 function MarkdownInner({
   channelNames,
   className,
+  compact = false,
   content,
   customEmoji,
   imetaByUrl,
   interactive = true,
   agentMentionPubkeysByName,
+  mediaInset = false,
   mentionNames,
   mentionPubkeysByName,
   searchQuery,
+  tight = false,
   videoReviewContext,
 }: MarkdownProps) {
   const { channels: rawChannels } = useChannelNavigation();
@@ -1958,23 +1967,25 @@ function MarkdownInner({
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
   );
-  const linkPreviewHrefs = React.useMemo(
-    () => new Set(linkPreviews.map((preview) => preview.href)),
-    [linkPreviews],
-  );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
     imetaByUrl,
-    linkPreviewHrefs,
     mentionPubkeysByName,
     onOpenChannel,
     onOpenMessageLink,
   });
 
+  const variant: MarkdownVariant = tight
+    ? "tight"
+    : compact
+      ? "compact"
+      : "default";
+
   const components = React.useMemo(
-    () => createMarkdownComponents(runtimeRef, interactive),
-    [runtimeRef, interactive],
+    () =>
+      createMarkdownComponents(variant, runtimeRef, interactive, mediaInset),
+    [variant, runtimeRef, interactive, mediaInset],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
@@ -2042,6 +2053,13 @@ function MarkdownInner({
           "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
           "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
         ].join(" "),
+        // Variant overrides: density tweaks for agent-session transcript surfaces.
+        // Layered after the base owl-spacing set so tailwind-merge lets the
+        // narrower leading + tighter inter-block gaps win for compact/tight.
+        variant === "compact" &&
+          "leading-6 [&>*+*]:mt-2 [&>*+h1]:mt-3 [&>*+h2]:mt-3 [&>*+h3]:mt-3 [&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3 [&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3 [&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3 [&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5 [&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
+        variant === "tight" &&
+          "leading-5 [&>*+*]:mt-2 [&>*+h1]:mt-2.5 [&>*+h2]:mt-2.5 [&>*+h3]:mt-2.5 [&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3 [&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3 [&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3 [&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5 [&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
         className,
       )}
     >
@@ -2067,8 +2085,11 @@ export const Markdown = React.memo(
   (prev, next) =>
     prev.content === next.content &&
     prev.className === next.className &&
+    prev.compact === next.compact &&
     prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&
+    prev.mediaInset === next.mediaInset &&
+    prev.tight === next.tight &&
     prev.agentMentionPubkeysByName === next.agentMentionPubkeysByName &&
     prev.mentionPubkeysByName === next.mentionPubkeysByName &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&

@@ -356,6 +356,7 @@ export type ManagedAgent = {
   maxTurnDurationSeconds: number | null;
   parallelism: number;
   systemPrompt: string | null;
+  avatarUrl: string | null;
   model: string | null;
   /** LLM inference provider, from the agent's pinned record snapshot. */
   provider: string | null;
@@ -636,6 +637,7 @@ export type UpdateManagedAgentInput = {
   pubkey: string;
   name?: string;
   model?: string | null;
+  provider?: string | null;
   systemPrompt?: string | null;
   mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */

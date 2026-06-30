@@ -1539,6 +1539,7 @@ pub fn build_managed_agent_summary(
         max_turn_duration_seconds: record.max_turn_duration_seconds,
         parallelism: record.parallelism,
         system_prompt: record.system_prompt.clone(),
+        avatar_url: record.avatar_url.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
         persona_out_of_date,

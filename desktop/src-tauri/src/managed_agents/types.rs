@@ -268,6 +268,7 @@ pub struct ManagedAgentSummary {
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
     pub system_prompt: Option<String>,
+    pub avatar_url: Option<String>,
     pub model: Option<String>,
     /// LLM inference provider, from the agent's pinned record snapshot.
     pub provider: Option<String>,
@@ -505,6 +506,9 @@ pub struct UpdateManagedAgentRequest {
     pub agent_args: Option<Vec<String>>,
     #[serde(default)]
     pub mcp_command: Option<String>,
+    /// Absent = don't touch. null = clear to runtime default. "id" = set.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub provider: Option<Option<String>>,
     /// Absent = don't touch. Present = set mode.
     #[serde(default)]
     pub respond_to: Option<RespondTo>,

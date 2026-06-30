@@ -8,8 +8,9 @@ import 'user_profile.dart';
 /// User avatar with a presence dot indicator, for use in the app bar.
 class ProfileAvatar extends ConsumerWidget {
   final VoidCallback? onTap;
+  final bool showPresence;
 
-  const ProfileAvatar({super.key, this.onTap});
+  const ProfileAvatar({super.key, this.onTap, this.showPresence = true});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -29,12 +30,9 @@ class ProfileAvatar extends ConsumerWidget {
   }
 
   Widget _buildPlaceholder(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(right: Grid.xxs),
-      child: CircleAvatar(
-        radius: 16,
-        backgroundColor: context.colors.primaryContainer,
-      ),
+    return CircleAvatar(
+      radius: 16,
+      backgroundColor: context.colors.primaryContainer,
     );
   }
 
@@ -45,25 +43,24 @@ class ProfileAvatar extends ConsumerWidget {
   ) {
     return GestureDetector(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.only(right: Grid.xxs),
-        child: Stack(
-          children: [
-            CircleAvatar(
-              radius: 16,
-              backgroundColor: context.colors.primaryContainer,
-              backgroundImage: profile?.avatarUrl != null
-                  ? NetworkImage(profile!.avatarUrl!)
-                  : null,
-              child: profile?.avatarUrl == null
-                  ? Text(
-                      profile?.initial ?? '?',
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onPrimaryContainer,
-                      ),
-                    )
-                  : null,
-            ),
+      child: Stack(
+        children: [
+          CircleAvatar(
+            radius: 16,
+            backgroundColor: context.colors.primaryContainer,
+            backgroundImage: profile?.avatarUrl != null
+                ? NetworkImage(profile!.avatarUrl!)
+                : null,
+            child: profile?.avatarUrl == null
+                ? Text(
+                    profile?.initial ?? '?',
+                    style: context.textTheme.labelMedium?.copyWith(
+                      color: context.colors.onPrimaryContainer,
+                    ),
+                  )
+                : null,
+          ),
+          if (showPresence)
             Positioned(
               right: 0,
               bottom: 0,
@@ -80,8 +77,7 @@ class ProfileAvatar extends ConsumerWidget {
                 ),
               ),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }
