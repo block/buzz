@@ -10,6 +10,10 @@ import {
   buildCompactToolSummary,
   type CompactFileEditSummary,
 } from "./agentSessionToolSummary";
+import type {
+  FileEditDiff,
+  FileEditDiffLine,
+} from "./agentSessionFileEditDiff";
 import {
   formatCodeValue,
   getToolDurationDisplay,
@@ -74,6 +78,7 @@ export function ToolItem({
         <ToolDetailBlocks
           args={item.args}
           description={buzzTool?.label}
+          fileEditDiff={compactSummary.fileEditDiff}
           hasArgs={hasArgs}
           hasResult={hasResult}
           imagePreview={
@@ -334,6 +339,7 @@ function ImageLightbox({
 function ToolDetailBlocks({
   args,
   description,
+  fileEditDiff,
   hasArgs,
   hasResult,
   imagePreview,
@@ -342,12 +348,17 @@ function ToolDetailBlocks({
 }: {
   args: Record<string, unknown>;
   description?: string;
+  fileEditDiff: FileEditDiff | null;
   hasArgs: boolean;
   hasResult: boolean;
   imagePreview: { src: string | null; title: string | null } | null;
   isError: boolean;
   result: string;
 }) {
+  const showFileEditDiff =
+    fileEditDiff && hasLineDiff(fileEditDiff) && !isError;
+  const showParameters = hasArgs && !showFileEditDiff;
+
   return (
     <div className="space-y-4 py-2 pl-5 text-popover-foreground outline-hidden">
       {description ? (
@@ -361,7 +372,7 @@ function ToolDetailBlocks({
           title={imagePreview.title}
         />
       ) : null}
-      {hasArgs ? (
+      {showParameters ? (
         <ToolCodeBlock
           label="Parameters"
           tone="muted"
@@ -369,18 +380,68 @@ function ToolDetailBlocks({
         />
       ) : null}
       {hasResult ? (
-        <ToolCodeBlock
-          label={isError ? "Error" : "Result"}
-          tone={isError ? "error" : "muted"}
-          value={result}
-        />
+        showFileEditDiff ? (
+          <FileEditDiffBlock diff={fileEditDiff} />
+        ) : (
+          <ToolCodeBlock
+            label={isError ? "Error" : "Result"}
+            tone={isError ? "error" : "muted"}
+            value={result}
+          />
+        )
       ) : null}
-      {!hasArgs && !hasResult ? (
+      {!showParameters && !hasResult ? (
         <p className="text-sm text-muted-foreground/80">
           Waiting for tool details.
         </p>
       ) : null}
     </div>
+  );
+}
+
+function hasLineDiff(diff: FileEditDiff) {
+  return diff.lines.some(
+    (line) => line.kind === "add" || line.kind === "remove",
+  );
+}
+
+function FileEditDiffBlock({ diff }: { diff: FileEditDiff }) {
+  return (
+    <div className="space-y-2 overflow-hidden">
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 truncate text-xs font-normal text-muted-foreground/70">
+          {diff.path}
+        </span>
+      </div>
+      <pre className="max-h-64 overflow-auto rounded-md border border-border/50 bg-muted/35 py-2 font-mono text-xs leading-5 text-foreground">
+        {diff.lines
+          .filter((line) => line.kind !== "meta")
+          .map((line, index) => (
+            <FileEditDiffLineView
+              // biome-ignore lint/suspicious/noArrayIndexKey: diff lines are positional
+              key={index}
+              line={line}
+            />
+          ))}
+      </pre>
+    </div>
+  );
+}
+
+function FileEditDiffLineView({ line }: { line: FileEditDiffLine }) {
+  return (
+    <span
+      className={cn(
+        "block min-w-full whitespace-pre-wrap wrap-break-word px-3",
+        line.kind === "add" &&
+          "border-l-2 border-green-500/50 bg-green-500/12 text-foreground dark:bg-green-500/10",
+        line.kind === "remove" &&
+          "border-l-2 border-red-500/50 bg-red-500/12 text-foreground dark:bg-red-500/10",
+        line.kind === "meta" && "text-muted-foreground/70",
+      )}
+    >
+      {line.text || " "}
+    </span>
   );
 }
 

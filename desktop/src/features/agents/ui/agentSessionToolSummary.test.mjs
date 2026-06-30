@@ -212,6 +212,14 @@ test("buildCompactToolSummary formats file edits as filename plus diff stats", (
     additions: 2,
     deletions: 1,
   });
+  assert.deepEqual(summary.fileEditDiff?.lines, [
+    { kind: "meta", text: "--- a/desktop/src/app/App.tsx" },
+    { kind: "meta", text: "+++ b/desktop/src/app/App.tsx" },
+    { kind: "meta", text: "@@" },
+    { kind: "remove", text: "-<Switch />" },
+    { kind: "add", text: "+<DropdownMenuCheckboxItem />" },
+    { kind: "add", text: "+<DropdownMenuSeparator />" },
+  ]);
 });
 
 test("buildCompactToolSummary counts Shiki diff markers for file edit stats", () => {
@@ -233,6 +241,11 @@ test("buildCompactToolSummary counts Shiki diff markers for file edit stats", ()
     additions: 1,
     deletions: 1,
   });
+  assert.deepEqual(summary.fileEditDiff?.lines, [
+    { kind: "context", text: "const keep = true;" },
+    { kind: "add", text: "const next = true;" },
+    { kind: "remove", text: "const old = true;" },
+  ]);
 });
 
 test("buildCompactToolSummary parses file edit stats from shell JSON stdout", () => {
@@ -259,4 +272,42 @@ test("buildCompactToolSummary parses file edit stats from shell JSON stdout", ()
     additions: 1,
     deletions: 1,
   });
+  assert.deepEqual(summary.fileEditDiff?.lines, [
+    {
+      kind: "meta",
+      text: "diff --git a/desktop/src/app/App.tsx b/desktop/src/app/App.tsx",
+    },
+    { kind: "meta", text: "--- a/desktop/src/app/App.tsx" },
+    { kind: "meta", text: "+++ b/desktop/src/app/App.tsx" },
+    { kind: "meta", text: "@@" },
+    { kind: "remove", text: "-old" },
+    { kind: "add", text: "+new" },
+  ]);
+});
+
+test("buildCompactToolSummary trims only trailing blank diff lines", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "str_replace",
+      args: { path: "desktop/src/app/App.tsx" },
+      result: [
+        "--- a/desktop/src/app/App.tsx",
+        "+++ b/desktop/src/app/App.tsx",
+        "@@",
+        " const before = true;",
+        "",
+        "+const after = true;",
+        "",
+      ].join("\n"),
+    }),
+  );
+
+  assert.deepEqual(summary.fileEditDiff?.lines, [
+    { kind: "meta", text: "--- a/desktop/src/app/App.tsx" },
+    { kind: "meta", text: "+++ b/desktop/src/app/App.tsx" },
+    { kind: "meta", text: "@@" },
+    { kind: "context", text: " const before = true;" },
+    { kind: "context", text: "" },
+    { kind: "add", text: "+const after = true;" },
+  ]);
 });
