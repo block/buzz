@@ -608,13 +608,8 @@ pub async fn validate_admin_event(
                     // Allow the owning human of any active owner-role agent in the
                     // channel, even when the human is not a channel member —
                     // diverges from kind:9001 intentionally.
-                    if actor_owns_any_owner_agent(
-                        state,
-                        tenant.community(),
-                        &members,
-                        &actor_bytes,
-                    )
-                    .await?
+                    if actor_owns_any_owner_agent(state, tenant.community(), &members, &actor_bytes)
+                        .await?
                     {
                         return Ok(());
                     }

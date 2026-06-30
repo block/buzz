@@ -17,7 +17,6 @@
 //! cargo test --test e2e_human_edit_agent_content -- --ignored
 //! ```
 
-
 use buzz_sdk::nip_oa;
 use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -33,7 +32,6 @@ fn relay_http_url() -> String {
         .trim_end_matches('/')
         .to_string()
 }
-
 
 /// Create a fresh channel owned by `owner_keys`, return the channel UUID string.
 async fn create_agent_owned_channel(agent_keys: &Keys) -> String {
@@ -212,12 +210,11 @@ async fn test_agent_can_self_edit_message() {
         .sign_with_keys(&agent_keys)
         .unwrap();
 
-    let ok = agent_client.send_event(edit_event).await.expect("send edit");
-    assert!(
-        ok.accepted,
-        "agent self-edit rejected: {}",
-        ok.message
-    );
+    let ok = agent_client
+        .send_event(edit_event)
+        .await
+        .expect("send edit");
+    assert!(ok.accepted, "agent self-edit rejected: {}", ok.message);
 
     agent_client.disconnect().await.ok();
 }
@@ -506,7 +503,11 @@ async fn create_private_agent_owned_channel(agent_keys: &Keys) -> String {
     let event = EventBuilder::new(Kind::Custom(9007), "")
         .tags(vec![
             Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
-            Tag::parse(["name", &format!("haec-private-test-{}", channel_uuid.simple())]).unwrap(),
+            Tag::parse([
+                "name",
+                &format!("haec-private-test-{}", channel_uuid.simple()),
+            ])
+            .unwrap(),
             Tag::parse(["channel_type", "stream"]).unwrap(),
             Tag::parse(["visibility", "private"]).unwrap(),
         ])
@@ -556,7 +557,11 @@ async fn test_owner_can_edit_agent_message_in_private_channel() {
         .send_text_message(&agent_keys, &channel_id, &content, 9)
         .await
         .expect("agent send message to private channel");
-    assert!(ok.accepted, "agent message to private channel rejected: {}", ok.message);
+    assert!(
+        ok.accepted,
+        "agent message to private channel rejected: {}",
+        ok.message
+    );
     let msg_event_id = ok.event_id;
     agent_client.disconnect().await.ok();
 
@@ -571,7 +576,10 @@ async fn test_owner_can_edit_agent_message_in_private_channel() {
         ])
         .sign_with_keys(&owner_keys)
         .unwrap();
-    let ok = owner_client.send_event(edit_event).await.expect("send edit");
+    let ok = owner_client
+        .send_event(edit_event)
+        .await
+        .expect("send edit");
     assert!(
         ok.accepted,
         "owner edit of agent message in private channel rejected (membership gate not bypassed): {}",
@@ -594,7 +602,11 @@ async fn test_owner_can_delete_agent_message_in_private_channel() {
         .send_text_message(&agent_keys, &channel_id, &content, 9)
         .await
         .expect("agent send message to private channel");
-    assert!(ok.accepted, "agent message to private channel rejected: {}", ok.message);
+    assert!(
+        ok.accepted,
+        "agent message to private channel rejected: {}",
+        ok.message
+    );
     let msg_event_id = ok.event_id;
     agent_client.disconnect().await.ok();
 
@@ -608,7 +620,10 @@ async fn test_owner_can_delete_agent_message_in_private_channel() {
         ])
         .sign_with_keys(&owner_keys)
         .unwrap();
-    let ok = owner_client.send_event(delete_event).await.expect("send delete");
+    let ok = owner_client
+        .send_event(delete_event)
+        .await
+        .expect("send delete");
     assert!(
         ok.accepted,
         "owner delete of agent message in private channel rejected (membership gate not bypassed): {}",
@@ -638,7 +653,10 @@ async fn test_owner_can_edit_metadata_of_private_agent_channel() {
         ])
         .sign_with_keys(&owner_keys)
         .unwrap();
-    let ok = owner_client.send_event(edit_event).await.expect("send edit metadata");
+    let ok = owner_client
+        .send_event(edit_event)
+        .await
+        .expect("send edit metadata");
     assert!(
         ok.accepted,
         "owner edit of private agent channel metadata rejected (membership gate not bypassed): {}",
@@ -665,7 +683,10 @@ async fn test_owner_can_delete_private_agent_channel() {
         .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
         .sign_with_keys(&owner_keys)
         .unwrap();
-    let ok = owner_client.send_event(delete_event).await.expect("send delete group");
+    let ok = owner_client
+        .send_event(delete_event)
+        .await
+        .expect("send delete group");
     assert!(
         ok.accepted,
         "owner delete of private agent channel rejected (membership gate not bypassed): {}",
@@ -729,8 +750,15 @@ async fn test_removed_author_cannot_edit_own_message_in_private_channel() {
         ])
         .sign_with_keys(&agent_keys)
         .unwrap();
-    let ok = agent_client.send_event(add_event).await.expect("send PUT_USER");
-    assert!(ok.accepted, "agent failed to add victim to private channel: {}", ok.message);
+    let ok = agent_client
+        .send_event(add_event)
+        .await
+        .expect("send PUT_USER");
+    assert!(
+        ok.accepted,
+        "agent failed to add victim to private channel: {}",
+        ok.message
+    );
 
     // Victim connects and sends a message while still a member.
     let mut victim_client = BuzzTestClient::connect(&relay_url(), &victim_keys)
@@ -741,7 +769,11 @@ async fn test_removed_author_cannot_edit_own_message_in_private_channel() {
         .send_text_message(&victim_keys, &channel_id, &content, 9)
         .await
         .expect("victim send message");
-    assert!(ok.accepted, "victim message rejected while still a member: {}", ok.message);
+    assert!(
+        ok.accepted,
+        "victim message rejected while still a member: {}",
+        ok.message
+    );
     let msg_event_id = ok.event_id;
 
     // Agent removes victim from the channel via kind:9001 (REMOVE_USER).
@@ -752,8 +784,15 @@ async fn test_removed_author_cannot_edit_own_message_in_private_channel() {
         ])
         .sign_with_keys(&agent_keys)
         .unwrap();
-    let ok = agent_client.send_event(remove_event).await.expect("send REMOVE_USER");
-    assert!(ok.accepted, "agent failed to remove victim from private channel: {}", ok.message);
+    let ok = agent_client
+        .send_event(remove_event)
+        .await
+        .expect("send REMOVE_USER");
+    assert!(
+        ok.accepted,
+        "agent failed to remove victim from private channel: {}",
+        ok.message
+    );
     agent_client.disconnect().await.ok();
 
     // Victim (now removed) attempts to edit their old message — must be rejected.
@@ -764,7 +803,10 @@ async fn test_removed_author_cannot_edit_own_message_in_private_channel() {
         ])
         .sign_with_keys(&victim_keys)
         .unwrap();
-    let ok = victim_client.send_event(edit_event).await.expect("send edit attempt");
+    let ok = victim_client
+        .send_event(edit_event)
+        .await
+        .expect("send edit attempt");
     assert!(
         !ok.accepted,
         "removed author should NOT be able to edit old message in private channel, but was accepted"
@@ -792,8 +834,15 @@ async fn test_removed_author_cannot_delete_own_message_in_private_channel() {
         ])
         .sign_with_keys(&agent_keys)
         .unwrap();
-    let ok = agent_client.send_event(add_event).await.expect("send PUT_USER");
-    assert!(ok.accepted, "agent failed to add victim to private channel: {}", ok.message);
+    let ok = agent_client
+        .send_event(add_event)
+        .await
+        .expect("send PUT_USER");
+    assert!(
+        ok.accepted,
+        "agent failed to add victim to private channel: {}",
+        ok.message
+    );
 
     // Victim connects and sends a message while still a member.
     let mut victim_client = BuzzTestClient::connect(&relay_url(), &victim_keys)
@@ -804,7 +853,11 @@ async fn test_removed_author_cannot_delete_own_message_in_private_channel() {
         .send_text_message(&victim_keys, &channel_id, &content, 9)
         .await
         .expect("victim send message");
-    assert!(ok.accepted, "victim message rejected while still a member: {}", ok.message);
+    assert!(
+        ok.accepted,
+        "victim message rejected while still a member: {}",
+        ok.message
+    );
     let msg_event_id = ok.event_id;
 
     // Agent removes victim from the channel via kind:9001 (REMOVE_USER).
@@ -815,8 +868,15 @@ async fn test_removed_author_cannot_delete_own_message_in_private_channel() {
         ])
         .sign_with_keys(&agent_keys)
         .unwrap();
-    let ok = agent_client.send_event(remove_event).await.expect("send REMOVE_USER");
-    assert!(ok.accepted, "agent failed to remove victim from private channel: {}", ok.message);
+    let ok = agent_client
+        .send_event(remove_event)
+        .await
+        .expect("send REMOVE_USER");
+    assert!(
+        ok.accepted,
+        "agent failed to remove victim from private channel: {}",
+        ok.message
+    );
     agent_client.disconnect().await.ok();
 
     // Victim (now removed) attempts to delete their old message — must be rejected.
@@ -827,7 +887,10 @@ async fn test_removed_author_cannot_delete_own_message_in_private_channel() {
         ])
         .sign_with_keys(&victim_keys)
         .unwrap();
-    let ok = victim_client.send_event(delete_event).await.expect("send delete attempt");
+    let ok = victim_client
+        .send_event(delete_event)
+        .await
+        .expect("send delete attempt");
     assert!(
         !ok.accepted,
         "removed author should NOT be able to delete old message in private channel, but was accepted"
