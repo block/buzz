@@ -17,10 +17,8 @@ import { toast } from "sonner";
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
@@ -55,7 +53,6 @@ import type {
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
-import { useNow } from "@/shared/lib/useNow";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -222,7 +219,6 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
-  const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
 
   const showMemoriesTab = isOwner === true && Boolean(pubkey);
@@ -377,20 +373,6 @@ export function ProfileSummaryView({
         />
       ) : null}
 
-      {activeTurns.length > 0 ? (
-        <div className="flex flex-wrap justify-center gap-1.5">
-          {activeTurns.map(({ channelId, anchorAt }) => (
-            <ProfileWorkingBadge
-              key={channelId}
-              channelId={channelId}
-              name={channelIdToName[channelId] ?? channelId}
-              anchorAt={anchorAt}
-              onNavigate={goChannel}
-            />
-          ))}
-        </div>
-      ) : null}
-
       {showTabSection ? (
         <section className="space-y-3">
           {showTabBar ? (
@@ -455,30 +437,6 @@ export function ProfileSummaryView({
         </section>
       ) : null}
     </div>
-  );
-}
-
-function ProfileWorkingBadge({
-  channelId,
-  name,
-  anchorAt,
-  onNavigate,
-}: {
-  channelId: string;
-  name: string;
-  anchorAt: number;
-  onNavigate: (channelId: string) => void;
-}) {
-  const now = useNow(1000);
-
-  return (
-    <Badge
-      className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
-      variant="default"
-      onClick={() => onNavigate(channelId)}
-    >
-      Working in #{name} · {formatElapsed(now - anchorAt)}
-    </Badge>
   );
 }
 
