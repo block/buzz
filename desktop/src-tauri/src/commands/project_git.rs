@@ -609,34 +609,37 @@ fn find_local_repo_dir(
     project_dtag: &str,
     clone_url: Option<&str>,
 ) -> Result<Option<std::path::PathBuf>, String> {
-    let repos_root = canonical_repos_root(repos_dir)?;
+    let repos_roots = canonical_repos_roots(repos_dir)?;
 
-    for candidate in local_repo_candidates(project_dtag, clone_url) {
-        let candidate_path = repos_root.join(candidate);
-        let Ok(candidate_path) = candidate_path.canonicalize() else {
-            continue;
-        };
-        if !candidate_path.starts_with(&repos_root) || !candidate_path.is_dir() {
-            continue;
-        }
-        if candidate_path.join(".git").exists() {
-            return Ok(Some(candidate_path));
+    for repos_root in repos_roots {
+        for candidate in local_repo_candidates(project_dtag, clone_url) {
+            let candidate_path = repos_root.join(candidate);
+            let Ok(candidate_path) = candidate_path.canonicalize() else {
+                continue;
+            };
+            if !candidate_path.starts_with(&repos_root) || !candidate_path.is_dir() {
+                continue;
+            }
+            if candidate_path.join(".git").exists() {
+                return Ok(Some(candidate_path));
+            }
         }
     }
-
     Ok(None)
 }
 
-fn canonical_repos_root(repos_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
-    let repos_root = repos_dir
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            nest_dir()
-                .map(|path| path.join("REPOS"))
-                .unwrap_or_else(|| std::path::PathBuf::from("REPOS"))
-        });
+fn default_repos_root_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    candidates.extend(nest_dir().map(|path| path.join("REPOS")));
+    candidates.extend(
+        dirs::home_dir()
+            .map(|home| home.join(".buzz").join("REPOS"))
+            .filter(|path| !candidates.iter().any(|candidate| candidate == path)),
+    );
+    candidates
+}
+
+fn canonicalize_repos_root(repos_root: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
     if !repos_root.is_absolute() {
         return Err("reposDir must be an absolute path".to_string());
     }
@@ -647,6 +650,25 @@ fn canonical_repos_root(repos_dir: Option<&str>) -> Result<std::path::PathBuf, S
         return Err("reposDir is not a directory".to_string());
     }
     Ok(repos_root)
+}
+
+fn canonical_repos_roots(repos_dir: Option<&str>) -> Result<Vec<std::path::PathBuf>, String> {
+    if let Some(repos_root) = repos_dir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+    {
+        return canonicalize_repos_root(repos_root).map(|root| vec![root]);
+    }
+
+    let roots = default_repos_root_candidates()
+        .into_iter()
+        .filter_map(|root| canonicalize_repos_root(root).ok())
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Err("reposDir is not accessible".to_string());
+    }
+    Ok(roots)
 }
 
 fn normalize_branch_option(branch: Option<&str>) -> Option<String> {
@@ -853,26 +875,34 @@ pub async fn list_project_local_repositories(
     repos_dir: Option<String>,
 ) -> Result<Vec<ProjectLocalRepoInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let repos_root = canonical_repos_root(repos_dir.as_deref())?;
-        let entries =
-            std::fs::read_dir(&repos_root).map_err(|error| format!("read reposDir: {error}"))?;
-        let mut repos = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let file_type = entry.file_type().ok()?;
+        let repos_roots = canonical_repos_roots(repos_dir.as_deref())?;
+        let mut seen_paths = std::collections::HashSet::new();
+        let mut repos = Vec::new();
+        for repos_root in repos_roots {
+            let entries = std::fs::read_dir(&repos_root)
+                .map_err(|error| format!("read reposDir: {error}"))?;
+            for entry in entries.filter_map(Result::ok) {
+                let Some(file_type) = entry.file_type().ok() else {
+                    continue;
+                };
                 if !file_type.is_dir() && !file_type.is_symlink() {
-                    return None;
+                    continue;
                 }
-                let path = entry.path().canonicalize().ok()?;
+                let Ok(path) = entry.path().canonicalize() else {
+                    continue;
+                };
                 if !path.starts_with(&repos_root) || !path.is_dir() || !path.join(".git").exists() {
-                    return None;
+                    continue;
                 }
-                Some(ProjectLocalRepoInfo {
+                if !seen_paths.insert(path.clone()) {
+                    continue;
+                }
+                repos.push(ProjectLocalRepoInfo {
                     name: entry.file_name().to_string_lossy().to_string(),
                     path: path.display().to_string(),
-                })
-            })
-            .collect::<Vec<_>>();
+                });
+            }
+        }
         repos.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(repos)
     })
