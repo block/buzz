@@ -263,3 +263,45 @@ test("authGuard_matchingAuthor_caseInsensitive", () => {
     "case-insensitive pubkey comparison must pass auth",
   );
 });
+
+// ── Signer-vs-tag-attribution regression ─────────────────────────────────────
+//
+// Pass 2 finding: message.pubkey (display author) can be overridden by actor/p
+// tags, so a human-signed event can carry the agent pubkey as its attributed
+// author. The auth guard must check the RAW EVENT SIGNER (signerPubkey from
+// formatTimelineMessages), not the display author.
+//
+// We simulate this by passing the HUMAN pubkey as configNudgeAuthorPubkey
+// while the payload's agent_pubkey is the AGENT pubkey — as MessageRow now
+// does (passes signerPubkey, not pubkey).
+//
+// If the guard were still using the tag-attributed pubkey (display author =
+// agent pubkey), it would pass auth and return the payload — a forged card.
+// With the signer check, the human signer != agent payload key → null.
+
+const HUMAN_PUBKEY =
+  "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+const AGENT_PUBKEY_FOR_SPOOF =
+  "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+
+test("authGuard_signerIsHuman_tagAttributedToAgent_returnsNull", () => {
+  // The event was signed by HUMAN_PUBKEY but its `actor` or first `p` tag
+  // attributes it to AGENT_PUBKEY_FOR_SPOOF (display author = agent).
+  // The payload's agent_pubkey matches the ATTRIBUTED pubkey, not the signer.
+  // MessageRow now passes signerPubkey (HUMAN) as configNudgeAuthorPubkey;
+  // the auth guard must reject since HUMAN != AGENT.
+  const body = makeNudgeBody(AGENT_PUBKEY_FOR_SPOOF);
+
+  // Simulate what MessageRow does: pass the RAW SIGNER, not the display author.
+  const result = authGuardedExtract(body, HUMAN_PUBKEY);
+  assert.equal(
+    result,
+    null,
+    "raw signer is human; even if actor-tag attributes to agent, must yield null",
+  );
+  // Fence must remain — not stripped — when auth fails.
+  assert.ok(
+    body.includes("buzz:config-nudge"),
+    "fence must remain in body when signer auth fails",
+  );
+});
