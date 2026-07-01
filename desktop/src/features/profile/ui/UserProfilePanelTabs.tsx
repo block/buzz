@@ -367,6 +367,9 @@ function ProfileLiveActivityEmbed({
     : null;
   const activeChannelId =
     selectedChannelId ?? feedScope.preferredChannelId ?? null;
+  const activeChannelName = activeChannelId
+    ? (channelIdToName[activeChannelId] ?? activeChannelId)
+    : null;
   const showSwitcher = switcherChannelIds.length > 1;
   const lastLiveAt =
     (activeChannelId
@@ -448,10 +451,20 @@ function ProfileLiveActivityEmbed({
         className="pointer-events-none absolute inset-0 z-20"
       >
         <div className="absolute inset-x-0 top-0 h-10 bg-linear-to-b from-muted/80 to-transparent" />
-        <div className="absolute inset-x-0 bottom-0 flex h-20 items-end bg-linear-to-t from-muted to-transparent px-3 pb-3">
-          <span className="text-xs font-semibold text-muted-foreground">
-            Latest Activity
-          </span>
+        <div className="absolute inset-x-0 bottom-0 flex h-28 items-end bg-linear-to-t from-muted to-transparent px-3 pb-3">
+          <div className="min-w-0">
+            <span className="block text-xs font-semibold text-muted-foreground">
+              Latest Activity
+            </span>
+            {activeChannelName ? (
+              <span
+                className="block truncate text-2xs font-medium text-muted-foreground/75"
+                title={`#${activeChannelName}`}
+              >
+                #{activeChannelName}
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
     </section>
