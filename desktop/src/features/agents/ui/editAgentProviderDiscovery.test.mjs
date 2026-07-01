@@ -1205,3 +1205,59 @@ test("blockSave_nullField_allowed", () => {
     "undefined field must not block save",
   );
 });
+
+// ── Block-save gate: inherit-runtime transition cases ──────────────────────
+//
+// When inheritHarness=true, prospectiveRuntimeId resolves from agent.agentCommand
+// (the persona's runtime), not the current dropdown. These tests guard the two
+// failure modes Thufir flagged:
+//   FALSE-ALLOW: claude pin → inherit buzz-agent persona → missing ANTHROPIC_API_KEY
+//     → must be BLOCKED (prospective runtime is buzz-agent/anthropic, key absent)
+//   FALSE-BLOCK: buzz-agent pin → inherit claude persona
+//     → must NOT be blocked (claude has no dialog-fixable credential requirement)
+
+test("blockSave_inheritTransition_claudePin_toBuzzAgentPersona_missingKey_blocked", () => {
+  // Scenario: agent is currently pinned to claude (CLI-login, requiredKeys=[])
+  // but the user checks "Inherit runtime from persona", and the persona uses
+  // buzz-agent/anthropic. prospectiveRuntimeId resolves to "buzz-agent".
+  // The gate must use buzz-agent's required keys, not claude's empty set.
+  const prospectiveRuntimeId = "buzz-agent"; // resolved from persona's agentCommand
+  const provider = "anthropic"; // agent's configured provider
+  const requiredKeys = requiredCredentialEnvKeys(
+    prospectiveRuntimeId,
+    provider,
+  );
+  const envVars = {}; // ANTHROPIC_API_KEY absent
+
+  const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+  assert.equal(
+    missing,
+    true,
+    "inheriting buzz-agent/anthropic persona with no key must BLOCK save (false-allow prevented)",
+  );
+});
+
+test("blockSave_inheritTransition_buzzAgentPin_toClaudePersona_notBlocked", () => {
+  // Scenario: agent is pinned to buzz-agent/anthropic (requiredKeys=[ANTHROPIC_API_KEY])
+  // but the user checks "Inherit runtime from persona", and the persona uses claude.
+  // prospectiveRuntimeId resolves to "claude". claude has no dialog-fixable requirement.
+  const prospectiveRuntimeId = "claude"; // resolved from persona's agentCommand
+  const provider = "anthropic"; // agent's old provider (no longer relevant for claude)
+  const requiredKeys = requiredCredentialEnvKeys(
+    prospectiveRuntimeId,
+    provider,
+  );
+  const envVars = {}; // nothing set — but claude doesn't require dialog credentials
+
+  const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+  assert.equal(
+    missing,
+    false,
+    "inheriting claude persona must NOT block save (false-block prevented — CLI login is out-of-band)",
+  );
+  assert.equal(
+    requiredKeys.length,
+    0,
+    "claude must return empty required keys — no dialog-fixable credential",
+  );
+});
