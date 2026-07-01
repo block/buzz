@@ -39,6 +39,20 @@ import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgent
 import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
+import {
+  requiredCredentialEnvKeys,
+  runtimeSupportsLlmProviderSelection,
+  shouldClearKnownModelForSelectionScope,
+  getProviderApiKeyEnvVar,
+  CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  AUTO_PROVIDER_DROPDOWN_VALUE,
+} from "./personaDialogPickers";
+import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import {
+  AgentModelField,
+  AgentProviderField,
+} from "./personaProviderModelFields";
+import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
 
 export function CreateAgentDialog({
   open,
@@ -88,6 +102,15 @@ export function CreateAgentDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
+  // Local-mode LLM provider and model — structured state for the credential
+  // gate and live discovery. Only rendered when the runtime supports provider
+  // selection (buzz-agent / goose).
+  const [provider, setProvider] = React.useState("");
+  const [model, setModel] = React.useState("");
+  const [isCustomProviderEditing, setIsCustomProviderEditing] =
+    React.useState(false);
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
+
   // When `useMesh` is on, the agent runs buzz-agent against a member's
   // shared compute. The ACP runtime + backend selectors are hidden; runtime
   // fields are driven by `mesh_agent_preset(meshModelId)` and the submit
@@ -130,6 +153,62 @@ export function CreateAgentDialog({
   const spawnToggleDisabled =
     prereqsQuery.isLoading || (prereqs !== null && !isSpawnSupported);
   const isDiscoveryPending = providersQuery.isLoading || prereqsQuery.isLoading;
+
+  // Local mode: provider/model field visibility and live discovery.
+  // Create has no inherit checkbox — selectedRuntimeId IS the prospective runtime.
+  const llmProviderFieldVisible =
+    !isProviderMode &&
+    !useMesh &&
+    runtimeSupportsLlmProviderSelection(selectedRuntimeId);
+  const providerForDiscovery = llmProviderFieldVisible ? provider : "";
+
+  const {
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    modelDiscoveryStatus,
+  } = usePersonaModelDiscovery({
+    envVars,
+    isCustomProviderEditing,
+    modelFieldVisible: llmProviderFieldVisible,
+    open,
+    provider: providerForDiscovery,
+    selectedRuntime: selectedRuntime ?? undefined,
+  });
+
+  // Required credential env keys for local mode — keyed off selectedRuntimeId
+  // (which IS the prospective runtime on create; no inherit transition).
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    selectedRuntimeId,
+  )
+    ? provider
+    : "";
+  const requiredEnvKeys = React.useMemo(
+    () => requiredCredentialEnvKeys(selectedRuntimeId, providerForRequiredKeys),
+    [selectedRuntimeId, providerForRequiredKeys],
+  );
+
+  // Clear model when provider scope changes, mirroring EditAgentDialog.
+  React.useEffect(() => {
+    if (
+      !open ||
+      isCustomModelEditing ||
+      !shouldClearKnownModelForSelectionScope({
+        model,
+        provider: providerForDiscovery,
+        runtime: selectedRuntimeId,
+      })
+    ) {
+      return;
+    }
+    setModel("");
+    setIsCustomModelEditing(false);
+  }, [
+    isCustomModelEditing,
+    model,
+    open,
+    providerForDiscovery,
+    selectedRuntimeId,
+  ]);
 
   React.useEffect(() => {
     if (hasSyncedProviderSelection || providersQuery.isLoading) {
@@ -249,6 +328,10 @@ export function CreateAgentDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+    setProvider("");
+    setModel("");
+    setIsCustomProviderEditing(false);
+    setIsCustomModelEditing(false);
     setUseMesh(false);
     setMeshModelId("");
     setMeshClientError(null);
@@ -266,24 +349,40 @@ export function CreateAgentDialog({
   }
 
   function handleProviderChange(nextProviderId: string) {
+    const previousRuntimeId = selectedRuntimeId;
     setSelectedRuntimeId(nextProviderId);
 
     if (nextProviderId === "custom") {
       setShowAdvanced(true);
-      return;
+    } else {
+      const runtime = runtimes.find(
+        (candidate) => candidate.id === nextProviderId,
+      );
+      if (runtime) {
+        setLastRuntime(nextProviderId);
+        setAgentCommand(runtime.command);
+        setAgentArgs(runtime.defaultArgs.join(","));
+        setMcpCommand(runtime.mcpCommand ?? "");
+      }
     }
 
-    const provider = runtimes.find(
-      (candidate) => candidate.id === nextProviderId,
-    );
-    if (!provider) {
-      return;
+    // Clear model when switching to a runtime with a different model scope,
+    // and clear provider/model when switching away from provider-selection runtimes.
+    if (
+      shouldClearModelForRuntimeChange(previousRuntimeId, nextProviderId) ||
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider,
+        runtime: nextProviderId,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
     }
-
-    setLastRuntime(nextProviderId);
-    setAgentCommand(provider.command);
-    setAgentArgs(provider.defaultArgs.join(","));
-    setMcpCommand(provider.mcpCommand ?? "");
+    if (!runtimeSupportsLlmProviderSelection(nextProviderId)) {
+      setProvider("");
+      setIsCustomProviderEditing(false);
+    }
   }
 
   function handleRunOnChange(value: string) {
@@ -291,6 +390,52 @@ export function CreateAgentDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+  }
+
+  // Provider dropdown handler for local-mode provider field — mirrors Edit.
+  function handleProviderDropdownChange(nextValue: string) {
+    if (nextValue === CUSTOM_PROVIDER_DROPDOWN_VALUE) {
+      const previousApiKey = getProviderApiKeyEnvVar(provider);
+      if (previousApiKey) {
+        setEnvVars((current) => {
+          const next = { ...current };
+          delete next[previousApiKey];
+          return next;
+        });
+      }
+      setIsCustomProviderEditing(true);
+      setProvider("");
+      return;
+    }
+
+    const nextProvider =
+      nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
+
+    // Clear the old API key when switching providers.
+    const previousApiKey = getProviderApiKeyEnvVar(provider);
+    const nextApiKey = getProviderApiKeyEnvVar(nextProvider);
+    if (previousApiKey && previousApiKey !== nextApiKey) {
+      setEnvVars((current) => {
+        const next = { ...current };
+        delete next[previousApiKey];
+        return next;
+      });
+    }
+
+    setIsCustomProviderEditing(false);
+    setProvider(nextProvider);
+
+    if (
+      !isCustomModelEditing &&
+      shouldClearKnownModelForSelectionScope({
+        model,
+        provider: nextProvider,
+        runtime: selectedRuntimeId,
+      })
+    ) {
+      setModel("");
+      setIsCustomModelEditing(false);
+    }
   }
 
   // Check provider config required fields are filled.
@@ -309,6 +454,14 @@ export function CreateAgentDialog({
   const respondToValid =
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
+  // Block local-mode creates when a dialog-fixable required credential is
+  // missing. Mirrors the Edit gate: provider-mode and mesh paths are
+  // unaffected — they have their own gates (providerConfigComplete, meshTarget).
+  const localCredsSatisfied =
+    isProviderMode ||
+    useMesh ||
+    requiredEnvKeys.every((key) => (envVars[key] ?? "").length > 0);
+
   const canSubmit =
     name.trim().length > 0 &&
     !isDiscoveryPending &&
@@ -322,6 +475,7 @@ export function CreateAgentDialog({
     // fields and config schema are only known after a successful probe.
     !(isProviderMode && !probedProvider) &&
     providerConfigComplete &&
+    localCredsSatisfied &&
     // Relay-mesh mode requires a concrete serve target, not just a model name.
     !(useMesh && (meshModelId.trim().length === 0 || meshTarget == null)) &&
     respondToValid &&
@@ -407,7 +561,10 @@ export function CreateAgentDialog({
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
             envVars,
-            model: useMesh ? meshModelId.trim() || undefined : undefined,
+            model: useMesh
+              ? meshModelId.trim() || undefined
+              : model.trim() || undefined,
+            provider: !useMesh ? provider.trim() || undefined : undefined,
             relayMesh: useMesh ? { modelRef: meshModelId.trim() } : undefined,
             spawnAfterCreate,
             // Relay-mesh agents need a freshly selected serve target to start;
@@ -543,6 +700,32 @@ export function CreateAgentDialog({
                 selectedRuntime={selectedRuntime}
                 selectedRuntimeId={selectedRuntimeId}
                 unavailableCount={unavailableCount}
+              />
+            ) : null}
+
+            {/* Local mode: structured provider + model fields for credential
+                gate and live discovery. Only when the runtime supports it. */}
+            {llmProviderFieldVisible ? (
+              <AgentProviderField
+                disabled={createMutation.isPending}
+                isCustomProviderEditing={isCustomProviderEditing}
+                isRequired={false}
+                onProviderChange={handleProviderDropdownChange}
+                provider={provider}
+                selectedRuntime={selectedRuntime ?? undefined}
+              />
+            ) : null}
+            {llmProviderFieldVisible ? (
+              <AgentModelField
+                disabled={createMutation.isPending}
+                discoveredModelOptions={discoveredModelOptions}
+                isCustomModelEditing={isCustomModelEditing}
+                isRequired={false}
+                model={model}
+                modelDiscoveryLoading={modelDiscoveryLoading}
+                modelDiscoveryStatus={modelDiscoveryStatus}
+                onIsCustomModelEditingChange={setIsCustomModelEditing}
+                onModelChange={setModel}
               />
             ) : null}
 

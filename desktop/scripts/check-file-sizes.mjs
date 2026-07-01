@@ -192,11 +192,6 @@ const overrides = new Map([
   // path writes in the draft-key effect body, fixing the image-drop bug on
   // top-level nav switch (StrictMode simulate-unmount race on remount).
   ["src/features/messages/ui/MessageComposer.tsx", 1021],
-  // block-save validation: prospectiveRuntimeId useMemo + providerForRequiredKeys
-  // keyed to prospective runtime (not current dropdown) to correctly gate on
-  // the runtime that will actually be saved. Load-bearing correctness fix for
-  // the inherit-transition path. Queued to split with the rest of this list.
-  ["src/features/agents/ui/EditAgentDialog.tsx", 1004],
 ]);
 
 await runFileSizeCheck({
