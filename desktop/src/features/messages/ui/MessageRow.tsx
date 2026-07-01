@@ -18,9 +18,9 @@ import {
 } from "@/features/messages/lib/threadTreeLayout";
 import {
   KIND_HUDDLE_STARTED,
-  KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
+import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -325,15 +325,13 @@ export const MessageRow = React.memo(
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
               // Only pass the author pubkey for agent-authored messages so
-              // config-nudge cards can authenticate the sender. Non-agent
-              // authors get undefined, keeping the card path off by default.
-              configNudgeAuthorPubkey={
-                message.kind === KIND_STREAM_MESSAGE &&
-                message.signerPubkey &&
-                resolvedAgentPubkeys.has(message.signerPubkey)
-                  ? message.signerPubkey
-                  : undefined
-              }
+              // config-nudge cards can authenticate the sender. Uses the
+              // raw event signer (signerPubkey) — not the tag-attributed
+              // display author — to prevent actor/p-tag spoofing.
+              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                message,
+                resolvedAgentPubkeys,
+              )}
               content={message.body}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
