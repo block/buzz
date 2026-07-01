@@ -10,6 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { Spinner } from "@/shared/ui/spinner";
 import type { TranscriptItem } from "./agentSessionTypes";
 import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
 import {
@@ -49,6 +50,8 @@ const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
  */
 const SHOW_TRANSCRIPT_ACP_SOURCE = shouldShowTranscriptAcpSource();
 
+export type AgentSessionTranscriptEmptyState = "idle" | "loading";
+
 function shouldShowTranscriptAcpSource() {
   const envValue = import.meta.env.VITE_SHOW_TRANSCRIPT_ACP_SOURCE;
   if (envValue === "1" || envValue === "true") {
@@ -74,15 +77,19 @@ export function AgentSessionTranscriptList({
   agentPubkey,
   autoTail = false,
   emptyDescription,
+  emptyState = "idle",
   items,
   profiles,
+  scrollContainerClassName,
   scrollScopeKey,
   variant = "default",
 }: AgentTranscriptIdentityProps & {
   autoTail?: boolean;
   emptyDescription: string;
+  emptyState?: AgentSessionTranscriptEmptyState;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
+  scrollContainerClassName?: string;
   scrollScopeKey?: string | null;
   variant?: AgentSessionTranscriptVariant;
 }) {
@@ -108,12 +115,33 @@ export function AgentSessionTranscriptList({
     anchoredScroll.scrollToBottom("auto");
   }, [anchoredScroll.scrollToBottom, autoTail, items]);
 
+  const scrollContainerClassNames = cn(
+    "w-full",
+    autoTail ? "h-full overflow-y-auto" : null,
+    scrollContainerClassName,
+  );
+
   if (items.length === 0) {
+    const isLoading = emptyState === "loading";
+
     return (
-      <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
-        <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
-        <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
-        <p className="mt-1 text-sm text-muted-foreground">{emptyDescription}</p>
+      <div className={scrollContainerClassNames}>
+        <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
+          {isLoading ? (
+            <Spinner
+              aria-label="Waiting for ACP activity"
+              className="mx-auto h-4 w-4 border-2 text-muted-foreground"
+            />
+          ) : (
+            <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
+          )}
+          <p className="mt-3 text-sm font-medium">
+            {isLoading ? "Waiting for ACP activity" : "No ACP activity yet"}
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {emptyDescription}
+          </p>
+        </div>
       </div>
     );
   }
@@ -122,7 +150,7 @@ export function AgentSessionTranscriptList({
 
   return (
     <div
-      className={cn("w-full", autoTail ? "h-full overflow-y-auto" : null)}
+      className={scrollContainerClassNames}
       onScroll={autoTail ? anchoredScroll.onScroll : undefined}
       ref={autoTail ? scrollContainerRef : undefined}
     >
