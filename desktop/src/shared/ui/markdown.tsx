@@ -23,7 +23,6 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   extractSupportedLinkPreviews,
   parseSupportedLinkPreview,
@@ -41,10 +40,8 @@ import { AttachmentGroup } from "@/shared/ui/attachment";
 import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
-import {
-  extractConfigNudge,
-  stripConfigNudgeSentinel,
-} from "@/shared/lib/configNudge";
+import { stripConfigNudgeSentinel } from "@/shared/lib/configNudge";
+import { computeConfigNudge } from "@/shared/lib/computeConfigNudge";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -1989,20 +1986,10 @@ function MarkdownInner({
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
   );
-  const configNudge = React.useMemo(() => {
-    if (!interactive || !configNudgeAuthorPubkey) return null;
-    const payload = extractConfigNudge(content);
-    if (payload === null) return null;
-    // Only render if the message author matches the payload's agent_pubkey.
-    // Guards against untrusted content forging an official-looking nudge card.
-    if (
-      normalizePubkey(payload.agent_pubkey) !==
-      normalizePubkey(configNudgeAuthorPubkey)
-    ) {
-      return null;
-    }
-    return payload;
-  }, [content, interactive, configNudgeAuthorPubkey]);
+  const configNudge = React.useMemo(
+    () => computeConfigNudge(content, interactive, configNudgeAuthorPubkey),
+    [content, interactive, configNudgeAuthorPubkey],
+  );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
