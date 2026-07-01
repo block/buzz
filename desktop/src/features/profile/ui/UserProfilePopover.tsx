@@ -10,7 +10,11 @@ import {
   useChannelsQuery,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
-import { useProfileQuery, useUserProfileQuery } from "@/features/profile/hooks";
+import {
+  useProfileQuery,
+  useUserProfileQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   useRelayAgentsQuery,
@@ -178,6 +182,9 @@ export function UserProfilePopover({
   const openDmMutation = useOpenDmMutation();
   const { isStarting: isStartingHuddle, startHuddle } = useHuddle();
   const profileQuery = useUserProfileQuery(open ? pubkey : undefined);
+  const usersBatchQuery = useUsersBatchQuery(open ? [pubkey] : [], {
+    enabled: open,
+  });
   const relayAgentsQuery = useRelayAgentsQuery({
     enabled: open,
   });
@@ -196,12 +203,24 @@ export function UserProfilePopover({
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
   );
-  const isBotProfile = role === "bot" || Boolean(relayAgent || managedAgent);
+  const profile = profileQuery.data;
+  const normalizedPubkey = normalizePubkey(pubkey);
+  const isAgentByOaOwner = Boolean(
+    usersBatchQuery.data?.profiles[normalizedPubkey]?.isAgent,
+  );
+  const isAgentByProfileOwner = profile?.ownerPubkey != null;
+  const isBotProfile =
+    role === "bot" ||
+    Boolean(relayAgent || managedAgent) ||
+    isAgentByProfileOwner ||
+    isAgentByOaOwner;
   const isAgentClassificationPending =
     open &&
     role !== "bot" &&
-    (relayAgentsQuery.isPending || managedAgentsQuery.isPending);
-  const profile = profileQuery.data;
+    (profileQuery.isPending ||
+      relayAgentsQuery.isPending ||
+      managedAgentsQuery.isPending ||
+      usersBatchQuery.isPending);
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone

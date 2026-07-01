@@ -997,6 +997,44 @@ test("system agent avatar only exposes message action", async ({ page }) => {
   );
 });
 
+test("profile-only agent author popover only exposes message action", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        displayName: "mira",
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Mira status update.", {
+    pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Mira status update." })
+    .first();
+  await messageRow.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
+});
+
 test("system member-joined rows render the joined person as a mention chip", async ({
   page,
 }) => {
