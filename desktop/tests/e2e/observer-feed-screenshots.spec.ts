@@ -404,13 +404,23 @@ test.describe("observer feed screenshots", () => {
       timeout: 5_000,
     });
 
-    // Open all native <details> elements inside the metadata item.
+    // Open the outer ActivityRow <details> to reveal the section content,
+    // then click each section accordion button to expand it (mirrors shot 05 —
+    // system-prompt sections now render as React button accordions, not native
+    // <details> elements).
     await feedPanel.getByTestId("transcript-metadata-item").evaluate((el) => {
       if (el.tagName === "DETAILS") (el as HTMLDetailsElement).open = true;
       for (const details of el.querySelectorAll("details")) {
         details.open = true;
       }
     });
+    const sectionButtons = feedPanel
+      .getByTestId("transcript-metadata-item")
+      .getByTestId("transcript-prompt-context-sections")
+      .getByRole("button");
+    for (const btn of await sectionButtons.all()) {
+      await btn.click();
+    }
     await settleAnimations(feedPanel);
     await feedPanel.screenshot({
       path: `${SHOTS}/06-system-prompt-expanded.png`,
