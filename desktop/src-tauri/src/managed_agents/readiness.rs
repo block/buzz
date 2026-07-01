@@ -255,7 +255,13 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     let mut missing = Vec::new();
 
     // Provider is required — maps to BUZZ_AGENT_PROVIDER in the effective env.
-    let provider = effective.env.get("BUZZ_AGENT_PROVIDER").map(String::as_str);
+    // An empty string is treated as absent: a key set to "" is not a valid
+    // provider and must not pass the readiness gate.
+    let provider = effective
+        .env
+        .get("BUZZ_AGENT_PROVIDER")
+        .filter(|v| !v.is_empty())
+        .map(String::as_str);
     if provider.is_none() {
         missing.push(Requirement::NormalizedField {
             field: "provider".to_string(),
@@ -263,7 +269,12 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     }
 
     // Model is required — maps to BUZZ_AGENT_MODEL in the effective env.
-    let model = effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str);
+    // Same empty-string treatment as provider.
+    let model = effective
+        .env
+        .get("BUZZ_AGENT_MODEL")
+        .filter(|v| !v.is_empty())
+        .map(String::as_str);
     if model.is_none() {
         missing.push(Requirement::NormalizedField {
             field: "model".to_string(),
@@ -271,16 +282,19 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     }
 
     // Provider-specific credential requirements.
+    // A key present with an empty value is treated as absent — matching the
+    // dialog's (envVars[key] ?? "").length === 0 emptiness check.
+    let env_key_missing = |key: &str| effective.env.get(key).map_or(true, |v| v.is_empty());
     match provider {
         Some("anthropic") => {
-            if !effective.env.contains_key("ANTHROPIC_API_KEY") {
+            if env_key_missing("ANTHROPIC_API_KEY") {
                 missing.push(Requirement::EnvKey {
                     key: "ANTHROPIC_API_KEY".to_string(),
                 });
             }
         }
         Some("openai") => {
-            if !effective.env.contains_key("OPENAI_COMPAT_API_KEY") {
+            if env_key_missing("OPENAI_COMPAT_API_KEY") {
                 missing.push(Requirement::EnvKey {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
@@ -289,7 +303,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("databricks") | Some("databricks_v2") => {
             // DATABRICKS_HOST is hard-required; DATABRICKS_TOKEN is optional
             // (OAuth PKCE is the normal path — see buzz-agent/src/config.rs:143).
-            if !effective.env.contains_key("DATABRICKS_HOST") {
+            if env_key_missing("DATABRICKS_HOST") {
                 missing.push(Requirement::EnvKey {
                     key: "DATABRICKS_HOST".to_string(),
                 });
@@ -310,38 +324,48 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
 fn goose_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     let mut missing = Vec::new();
 
-    let provider = effective.env.get("GOOSE_PROVIDER").map(String::as_str);
+    // Empty string treated as absent — same as buzz_agent_requirements.
+    let provider = effective
+        .env
+        .get("GOOSE_PROVIDER")
+        .filter(|v| !v.is_empty())
+        .map(String::as_str);
     if provider.is_none() {
         missing.push(Requirement::NormalizedField {
             field: "provider".to_string(),
         });
     }
 
-    let model = effective.env.get("GOOSE_MODEL").map(String::as_str);
+    let model = effective
+        .env
+        .get("GOOSE_MODEL")
+        .filter(|v| !v.is_empty())
+        .map(String::as_str);
     if model.is_none() {
         missing.push(Requirement::NormalizedField {
             field: "model".to_string(),
         });
     }
 
-    // Provider-specific credentials — same logic as buzz-agent.
+    // Provider-specific credentials — same empty-string semantics as buzz-agent.
+    let env_key_missing = |key: &str| effective.env.get(key).map_or(true, |v| v.is_empty());
     match provider {
         Some("anthropic") => {
-            if !effective.env.contains_key("ANTHROPIC_API_KEY") {
+            if env_key_missing("ANTHROPIC_API_KEY") {
                 missing.push(Requirement::EnvKey {
                     key: "ANTHROPIC_API_KEY".to_string(),
                 });
             }
         }
         Some("openai") => {
-            if !effective.env.contains_key("OPENAI_COMPAT_API_KEY") {
+            if env_key_missing("OPENAI_COMPAT_API_KEY") {
                 missing.push(Requirement::EnvKey {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
             }
         }
         Some("databricks") | Some("databricks_v2") => {
-            if !effective.env.contains_key("DATABRICKS_HOST") {
+            if env_key_missing("DATABRICKS_HOST") {
                 missing.push(Requirement::EnvKey {
                     key: "DATABRICKS_HOST".to_string(),
                 });
@@ -568,6 +592,132 @@ mod tests {
             ]),
         );
         assert!(agent_readiness(&env).is_ready());
+    }
+
+    // ── empty-string semantics ────────────────────────────────────────────
+    //
+    // A key present with an empty value ("") must be treated as MISSING, to
+    // match the dialog's (envVars[key] ?? "").length === 0 emptiness check.
+
+    #[test]
+    fn buzz_agent_empty_string_provider_is_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", ""),
+                ("BUZZ_AGENT_MODEL", "claude-opus-4-5"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string BUZZ_AGENT_PROVIDER must be treated as missing"
+        );
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "provider".to_string()
+            }));
+    }
+
+    #[test]
+    fn buzz_agent_empty_string_model_is_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "anthropic"),
+                ("BUZZ_AGENT_MODEL", ""),
+                ("ANTHROPIC_API_KEY", "sk-test"),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string BUZZ_AGENT_MODEL must be treated as missing"
+        );
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }));
+    }
+
+    #[test]
+    fn buzz_agent_empty_string_anthropic_key_is_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "anthropic"),
+                ("BUZZ_AGENT_MODEL", "claude-opus-4-5"),
+                ("ANTHROPIC_API_KEY", ""),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string ANTHROPIC_API_KEY must be treated as missing"
+        );
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "ANTHROPIC_API_KEY".to_string()
+        }));
+    }
+
+    #[test]
+    fn buzz_agent_empty_string_databricks_host_is_not_ready() {
+        let env = make_env(
+            "buzz-agent",
+            env_with(&[
+                ("BUZZ_AGENT_PROVIDER", "databricks"),
+                ("BUZZ_AGENT_MODEL", "dbrx-instruct"),
+                ("DATABRICKS_HOST", ""),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string DATABRICKS_HOST must be treated as missing"
+        );
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "DATABRICKS_HOST".to_string()
+        }));
+    }
+
+    #[test]
+    fn goose_empty_string_provider_is_not_ready() {
+        let env = make_env(
+            "goose",
+            env_with(&[("GOOSE_PROVIDER", ""), ("GOOSE_MODEL", "claude-opus-4-5")]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string GOOSE_PROVIDER must be treated as missing"
+        );
+        assert!(result
+            .requirements()
+            .contains(&Requirement::NormalizedField {
+                field: "provider".to_string()
+            }));
+    }
+
+    #[test]
+    fn goose_empty_string_anthropic_key_is_not_ready() {
+        let env = make_env(
+            "goose",
+            env_with(&[
+                ("GOOSE_PROVIDER", "anthropic"),
+                ("GOOSE_MODEL", "claude-opus-4-5"),
+                ("ANTHROPIC_API_KEY", ""),
+            ]),
+        );
+        let result = agent_readiness(&env);
+        assert!(
+            !result.is_ready(),
+            "empty-string ANTHROPIC_API_KEY must be treated as missing (goose)"
+        );
+        assert!(result.requirements().contains(&Requirement::EnvKey {
+            key: "ANTHROPIC_API_KEY".to_string()
+        }));
     }
 
     // ── codex tests ───────────────────────────────────────────────────────
