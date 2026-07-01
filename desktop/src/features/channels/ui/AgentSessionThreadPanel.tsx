@@ -2,20 +2,30 @@ import * as React from "react";
 import { Octagon, Settings, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
-import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
+import type {
+  ObserverEvent,
+  TranscriptItem,
+} from "@/features/agents/ui/agentSessionTypes";
+import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import {
+  useAgentTranscript,
+  useObserverEvents,
+} from "@/features/agents/ui/useObserverEvents";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
+import { useNow } from "@/shared/lib/useNow";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
+  AuxiliaryPanelHeaderTitleBlock,
 } from "@/shared/layout/AuxiliaryPanel";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -65,6 +75,30 @@ export function AgentSessionThreadPanel({
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
   const sessionChannelId = channelId ?? channel?.id ?? null;
+  const now = useNow(1000);
+  const { events } = useObserverEvents(isLive, agent.pubkey);
+  const transcript = useAgentTranscript(isLive, agent.pubkey);
+  const scopedEvents = React.useMemo(
+    () => scopeByChannel(events, sessionChannelId),
+    [events, sessionChannelId],
+  );
+  const scopedTranscript = React.useMemo(
+    () => scopeByChannel(transcript, sessionChannelId),
+    [sessionChannelId, transcript],
+  );
+  const latestActivityAt = React.useMemo(
+    () =>
+      getLatestActivityTimestamp({
+        events: scopedEvents,
+        transcript: scopedTranscript,
+      }),
+    [scopedEvents, scopedTranscript],
+  );
+  const lastUpdatedLabel = formatLastUpdatedLabel(latestActivityAt, now);
+  const lastUpdatedTitle =
+    latestActivityAt === null
+      ? undefined
+      : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
   const [rawFeedState, setRawFeedState] = React.useState(() => ({
     scopeKey: rawFeedScopeKey,
@@ -188,13 +222,16 @@ export function AgentSessionThreadPanel({
   const agentHeaderContent = (
     <>
       <AuxiliaryPanelHeaderGroup
+        align="start"
         backButtonAriaLabel="Back from activity"
         backButtonTestId="agent-session-back"
         onBack={onBackToProfile}
       >
-        <AuxiliaryPanelTitle>
-          {showRawFeed ? "Raw ACP Activity" : "Activity"}
-        </AuxiliaryPanelTitle>
+        <AuxiliaryPanelHeaderTitleBlock
+          subtitle={lastUpdatedLabel}
+          subtitleTitle={lastUpdatedTitle}
+          title={showRawFeed ? "Raw ACP Activity" : "Activity"}
+        />
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
@@ -241,4 +278,70 @@ export function AgentSessionThreadPanel({
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>
   );
+}
+
+function getLatestActivityTimestamp({
+  events,
+  transcript,
+}: {
+  events: readonly ObserverEvent[];
+  transcript: readonly TranscriptItem[];
+}): number | null {
+  let latest: number | null = null;
+
+  const record = (timestamp: string) => {
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+
+    if (latest === null || parsed > latest) {
+      latest = parsed;
+    }
+  };
+
+  for (const event of events) {
+    record(event.timestamp);
+  }
+
+  for (const item of transcript) {
+    record(item.timestamp);
+  }
+
+  return latest;
+}
+
+function formatLastUpdatedLabel(timestamp: number | null, now: number): string {
+  if (timestamp === null) {
+    return "No updates yet";
+  }
+
+  return `Last updated ${formatRelativeActivityTime(timestamp, now)}`;
+}
+
+function formatRelativeActivityTime(timestamp: number, now: number): string {
+  const elapsedMs = Math.max(0, now - timestamp);
+  const totalSeconds = Math.floor(elapsedMs / 1_000);
+
+  if (totalSeconds < 60) {
+    return "just now";
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ago`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h ago`;
+  }
+
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 7) {
+    return `${totalDays}d ago`;
+  }
+
+  const totalWeeks = Math.floor(totalDays / 7);
+  return `${totalWeeks}w ago`;
 }
