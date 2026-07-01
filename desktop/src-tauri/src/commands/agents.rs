@@ -10,8 +10,9 @@ use crate::{
         resolve_provider_binary, save_managed_agents, start_managed_agent_process,
         stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
         validate_provider_config, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, PersonaRecord,
+        RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -1152,6 +1153,7 @@ pub async fn delete_managed_agent(
 #[path = "agents_deploy.rs"]
 mod deploy;
 use deploy::build_deploy_payload;
+pub(crate) use deploy::resolve_deploy_model_provider;
 #[cfg(test)]
 use deploy::deploy_payload_json;
 
