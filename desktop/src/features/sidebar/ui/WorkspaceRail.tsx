@@ -20,10 +20,7 @@ type WorkspaceRailProps = {
 
 const MAX_BADGE = 99;
 
-/**
- * Workspace-button initials. Strips punctuation/symbols first so a name like
- * "B (relay)" yields "BR", not "B(".
- */
+// Strip punctuation before initials so "B (relay)" yields "BR", not "B(".
 export function workspaceInitials(name: string): string {
   const cleaned = name.replace(/[^\p{L}\p{N}\s]/gu, " ");
   return getInitials(cleaned);
