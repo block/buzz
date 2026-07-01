@@ -869,14 +869,10 @@ export function processTranscriptEvent(
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
       // the harness as [Base]/[System]. Surface them as one "System prompt" item
-      // keyed per channel-session — the frame carries no session id (it predates
-      // session creation), and session/new fires once per channel-session, so a
-      // re-created session correctly replaces the prior item.
-      //
-      // System prompt is per-channel, not per-turn. Passing turnId: null keeps
-      // the item out of any turn bucket in the display grouping layer so it
-      // always renders before the per-turn prompt-context block, regardless of
-      // which turnId the session/new event carries on the wire.
+      // keyed per channel-session — session/new fires once per channel-session,
+      // so a re-created session correctly replaces the prior item.
+      // turnId: null keeps it out of turn buckets; acpSource "session/new" lets
+      // the display grouper inject it before prompt-context in the prompt segment.
       const params = asRecord(payload.params);
       const systemPrompt = asString(params.systemPrompt);
       if (systemPrompt) {
@@ -889,6 +885,7 @@ export function processTranscriptEvent(
             sections,
             event.timestamp,
             { ...ctx, turnId: null },
+            "session/new",
           );
         }
       }

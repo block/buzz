@@ -206,6 +206,7 @@ function TranscriptTurnSegmentView({
         context={segment.context}
         profiles={profiles}
         setup={segment.setup}
+        systemPrompt={segment.systemPrompt}
         user={segment.user}
       />
     );
@@ -354,11 +355,13 @@ function TurnPromptBlock({
   context,
   profiles,
   setup,
+  systemPrompt,
   user,
 }: {
   context: Extract<TranscriptItem, { type: "metadata" }> | null;
   profiles?: UserProfileLookup;
   setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
   user: Extract<TranscriptItem, { type: "message" }>;
 }) {
   return (
@@ -376,6 +379,7 @@ function TurnPromptBlock({
         item={user}
         profiles={profiles}
         setup={setup}
+        systemPrompt={systemPrompt}
       />
     </div>
   );
@@ -386,11 +390,13 @@ function PromptUserMessage({
   item,
   profiles,
   setup = [],
+  systemPrompt = null,
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  systemPrompt?: Extract<TranscriptItem, { type: "metadata" }> | null;
 }) {
   return (
     <>
@@ -406,6 +412,9 @@ function PromptUserMessage({
         item={item}
         profiles={profiles}
       />
+      {systemPrompt && systemPrompt.sections.length > 0 ? (
+        <PromptContextInline context={systemPrompt} />
+      ) : null}
       {context && context.sections.length > 0 ? (
         <PromptContextInline context={context} />
       ) : null}

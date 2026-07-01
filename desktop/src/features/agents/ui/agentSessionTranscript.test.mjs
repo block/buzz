@@ -948,22 +948,32 @@ test("buildTranscript does not render unknown session/update types (firehose saf
 
 // --- system-prompt ordering ---
 
-test("observer feed renders system-prompt before prompt-context in display order (first turn, shared turnId)", () => {
-  // Reproduces the ordering bug: session/new and session/prompt arrive with the
-  // same turnId (as the harness emits on the first turn). Without turnId=null on
-  // the system-prompt item, both items land in the same turn bucket and
-  // classifyTurnItems renders system-prompt AFTER prompt-context (as "activity").
-  // The ordering assertion runs through the display layer — buildTranscript alone
-  // is a tautology because session/new always arrives before session/prompt.
+test("observer feed renders system-prompt before prompt-context in display order (first turn, realistic pool.rs sequence)", () => {
+  // Reproduces the real ordering bug: pool.rs emits turn_started BEFORE session/new,
+  // so turn_started creates the turn bucket first. Without the injection mechanism,
+  // displayOrder becomes [turn(turn-1), single(system-prompt)] and System prompt
+  // renders after the entire turn block — after Prompt context.
+  // The fix: system-prompt items (acpSource "session/new") are held and injected
+  // into the prompt segment of the first turn that follows them in stream order.
   const events = [
     {
       seq: 1,
       timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
       kind: "acp_write",
       agentIndex: 0,
       channelId: "ch-1",
       sessionId: null,
-      turnId: "turn-1", // same as session/prompt — the bug trigger
+      turnId: "turn-1",
       payload: {
         jsonrpc: "2.0",
         id: 1,
@@ -975,7 +985,17 @@ test("observer feed renders system-prompt before prompt-context in display order
       },
     },
     {
-      seq: 2,
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-1", isNewSession: true },
+    },
+    {
+      seq: 4,
       timestamp: "2026-07-01T10:00:01.000Z",
       kind: "acp_write",
       agentIndex: 0,
@@ -1001,8 +1021,6 @@ test("observer feed renders system-prompt before prompt-context in display order
   ];
 
   // Route through the display layer — this is the layer that contained the bug.
-  // buildTranscriptDisplayBlocks groups items into turn buckets; flattenDisplayBlocks
-  // returns them in final render order.
   const rawItems = buildTranscript(events);
   const displayItems = flattenDisplayBlocks(
     buildTranscriptDisplayBlocks(rawItems),
@@ -1032,10 +1050,22 @@ test("observer feed renders system-prompt before prompt-context in display order
 });
 
 test("observer feed renders system-prompt before prompt-context in display order (multi-turn)", () => {
+  // On subsequent turns, session/new does not re-fire. The system-prompt item
+  // injected into turn-1 must not re-appear in turn-2's prompt segment.
   const events = [
     {
       seq: 1,
       timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
       kind: "acp_write",
       agentIndex: 0,
       channelId: "ch-1",
@@ -1051,7 +1081,17 @@ test("observer feed renders system-prompt before prompt-context in display order
       },
     },
     {
-      seq: 2,
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-1", isNewSession: true },
+    },
+    {
+      seq: 4,
       timestamp: "2026-07-01T10:00:01.000Z",
       kind: "acp_write",
       agentIndex: 0,
@@ -1075,8 +1115,18 @@ test("observer feed renders system-prompt before prompt-context in display order
       },
     },
     {
-      seq: 3,
+      seq: 5,
       timestamp: "2026-07-01T10:05:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-2",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 6,
+      timestamp: "2026-07-01T10:05:01.000Z",
       kind: "acp_write",
       agentIndex: 0,
       channelId: "ch-1",
