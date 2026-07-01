@@ -293,6 +293,29 @@ pub struct ThreadRepliesResponse {
     pub next_cursor: Option<ThreadCursor>,
 }
 
+/// Composite backward keyset cursor for channel-timeline paging via the bridge
+/// (`get_channel_messages_before`). The relay orders `created_at DESC, id ASC`
+/// and advances past a tied second with `id > before_id`, so the event id is the
+/// tiebreak that lets paging escape a second denser than one WS page —
+/// the case a bare `until` cursor cannot advance through.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ChannelPageCursor {
+    /// `created_at` of the last (oldest) message already loaded (Unix seconds).
+    pub created_at: i64,
+    /// Hex event id of that message — the `before_id` tiebreak within a second.
+    pub event_id: String,
+}
+
+/// Response for `get_channel_messages_before` — one keyset page of top-level
+/// channel history, oldest-last (relay order: `created_at DESC, id ASC`).
+/// `next_cursor` is the composite key of the last (oldest) event when a full
+/// page was returned, else `None`.
+#[derive(Serialize, Deserialize)]
+pub struct ChannelMessagesPageResponse {
+    pub events: Vec<serde_json::Value>,
+    pub next_cursor: Option<ChannelPageCursor>,
+}
+
 fn deserialize_null_string_as_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,

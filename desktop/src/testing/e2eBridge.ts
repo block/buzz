@@ -2968,9 +2968,22 @@ function emitMockHistory(
       }
       return true;
     })
-    .sort((left, right) => right.created_at - left.created_at)
+    // Relay order is `created_at DESC, id ASC` — match it (both the WS history
+    // page and the `get_channel_messages_before` keyset are backed by that one
+    // order in production, so the mock must be self-consistent too, else a
+    // same-second slice returned here won't line up with the keyset's tiebreak
+    // and the dense-second escape hatch can't prove completeness). Bare `until`
+    // still can't advance past a second denser than one page; the composite
+    // keyset is the escape hatch.
+    .sort(
+      (left, right) =>
+        right.created_at - left.created_at || left.id.localeCompare(right.id),
+    )
     .slice(0, filter.limit ?? 50)
-    .sort((left, right) => left.created_at - right.created_at);
+    .sort(
+      (left, right) =>
+        left.created_at - right.created_at || left.id.localeCompare(right.id),
+    );
 
   const emit = () => {
     for (const event of events) {
@@ -3284,6 +3297,213 @@ async function handleGetForumThread(args: {
     total_replies: replies.length,
     next_cursor: null,
   };
+}
+
+type RawThreadCursor = {
+  created_at: number;
+  event_id: string;
+};
+
+type RawThreadRepliesResponse = {
+  events: RelayEvent[];
+  next_cursor: RawThreadCursor | null;
+};
+
+/**
+ * Mirror of the desktop `get_thread_replies` command: return the full reply
+ * subtree under a root, chronological (oldest first) including the root itself,
+ * with gap-free `(created_at, event_id)` keyset paging.
+ *
+ * The event-id tiebreak is load-bearing — same-second replies must all page
+ * through even when they cross a page boundary. This lets a Playwright spec
+ * assert the paged union equals the whole subtree, matching the relay contract.
+ */
+async function handleGetThreadReplies(
+  args: {
+    rootEventId: string;
+    channelId?: string | null;
+    limit?: number | null;
+    depthLimit?: number | null;
+    cursor?: RawThreadCursor | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<RawThreadRepliesResponse> {
+  const cap = Math.min(args.limit ?? 200, 500);
+  const identity = getIdentity(config);
+
+  let subtree: RelayEvent[];
+  if (!identity) {
+    // Mock store: walk the reply forest transitively from the root so nested
+    // replies (reply-to-a-reply) are included, matching thread_metadata depth.
+    const events = args.channelId
+      ? getMockMessageStore(args.channelId)
+      : Array.from(mockMessages.values()).flat();
+    const byId = new Map(events.map((event) => [event.id, event]));
+    const included = new Set<string>();
+    const root = byId.get(args.rootEventId);
+    const collected: RelayEvent[] = root ? [root] : [];
+    if (root) {
+      included.add(root.id);
+    }
+    for (const event of events) {
+      const ref = getThreadReferenceFromTags(event.tags);
+      const belongsToThread =
+        (ref.rootEventId ?? ref.parentEventId) === args.rootEventId;
+      if (belongsToThread && !included.has(event.id)) {
+        included.add(event.id);
+        collected.push(event);
+      }
+    }
+    subtree = collected;
+  } else {
+    // Config mode: exercise the real bridge thread path over /query.
+    const filter: Record<string, unknown> = {
+      "#e": [args.rootEventId],
+      depth_limit: args.depthLimit ?? 64,
+      limit: cap,
+    };
+    if (args.channelId) {
+      filter["#h"] = [args.channelId];
+    }
+    if (args.cursor) {
+      filter.thread_cursor = args.cursor.created_at;
+      filter.thread_cursor_id = args.cursor.event_id;
+    }
+    const events = await relayQuery(config, [filter]);
+    const nextCursor =
+      events.length >= cap
+        ? {
+            created_at: events[events.length - 1].created_at,
+            event_id: events[events.length - 1].id,
+          }
+        : null;
+    return { events, next_cursor: nextCursor };
+  }
+
+  // Mock mode paging: sort by the composite key, then slice strictly after the
+  // cursor so same-second ties can never be skipped across a page boundary.
+  subtree.sort(
+    (left, right) =>
+      left.created_at - right.created_at || left.id.localeCompare(right.id),
+  );
+  let start = 0;
+  if (args.cursor) {
+    const cursor = args.cursor;
+    start = subtree.findIndex(
+      (event) =>
+        event.created_at > cursor.created_at ||
+        (event.created_at === cursor.created_at &&
+          event.id.localeCompare(cursor.event_id) > 0),
+    );
+    if (start < 0) {
+      start = subtree.length;
+    }
+  }
+  const page = subtree.slice(start, start + cap);
+  const nextCursor =
+    page.length >= cap && start + cap < subtree.length
+      ? {
+          created_at: page[page.length - 1].created_at,
+          event_id: page[page.length - 1].id,
+        }
+      : null;
+
+  return { events: page, next_cursor: nextCursor };
+}
+
+const TIMELINE_KINDS = new Set([
+  9, 40002, 40008, 40099, 43001, 43002, 43003, 43004, 43005, 43006,
+]);
+
+type RawChannelMessagesPageResponse = {
+  events: RelayEvent[];
+  next_cursor: RawThreadCursor | null;
+};
+
+/**
+ * Mirror of the desktop `get_channel_messages_before` command: return one
+ * keyset page of *top-level* channel history strictly older than a composite
+ * `(before, before_id)` cursor, newest first (relay order `created_at DESC,
+ * id ASC`).
+ *
+ * This is the dense-second escape hatch — the id tiebreak is load-bearing so a
+ * single `created_at` second denser than one WS page can still be paged
+ * through: within a tied second the relay advances via `id > before_id`. Lets a
+ * Playwright spec assert the keyset union reaches every top-level message even
+ * when a second holds more than one page.
+ */
+async function handleGetChannelMessagesBefore(
+  args: {
+    channelId: string;
+    before: number;
+    beforeId?: string | null;
+    limit?: number | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<RawChannelMessagesPageResponse> {
+  const cap = Math.min(args.limit ?? 200, 500);
+  const identity = getIdentity(config);
+
+  let events: RelayEvent[];
+  if (!identity) {
+    // Mock store: top-level timeline events for this channel.
+    events = getMockMessageStore(args.channelId).filter((event) => {
+      if (!TIMELINE_KINDS.has(event.kind)) {
+        return false;
+      }
+      return getThreadReferenceFromTags(event.tags).rootEventId === null;
+    });
+  } else {
+    // Config mode: exercise the real bridge keyset over /query.
+    const filter: Record<string, unknown> = {
+      "#h": [args.channelId],
+      kinds: [...TIMELINE_KINDS],
+      until: args.before,
+      limit: cap,
+    };
+    if (args.beforeId) {
+      filter.n = args.beforeId;
+    }
+    const page = await relayQuery(config, [filter]);
+    const nextCursor =
+      page.length >= cap
+        ? {
+            created_at: page[page.length - 1].created_at,
+            event_id: page[page.length - 1].id,
+          }
+        : null;
+    return { events: page, next_cursor: nextCursor };
+  }
+
+  // Mock mode paging: relay order (created_at DESC, id ASC), then take the
+  // slice strictly older than the composite cursor. Strictly-older means
+  // `created_at < before OR (created_at === before AND id > before_id)` — the
+  // id tiebreak walks *forward* through a tied second under ASC id order.
+  events.sort(
+    (left, right) =>
+      right.created_at - left.created_at || left.id.localeCompare(right.id),
+  );
+  const before = args.before;
+  const beforeId = args.beforeId ?? null;
+  const older = events.filter((event) => {
+    if (event.created_at < before) {
+      return true;
+    }
+    if (event.created_at === before && beforeId !== null) {
+      return event.id.localeCompare(beforeId) > 0;
+    }
+    return false;
+  });
+  const page = older.slice(0, cap);
+  const nextCursor =
+    page.length >= cap
+      ? {
+          created_at: page[page.length - 1].created_at,
+          event_id: page[page.length - 1].id,
+        }
+      : null;
+
+  return { events: page, next_cursor: nextCursor };
 }
 
 function getMockUserNotes(pubkey: string): RawUserNote[] {
@@ -7484,6 +7704,16 @@ export function maybeInstallE2eTauriMocks() {
       case "get_forum_thread":
         return handleGetForumThread(
           payload as Parameters<typeof handleGetForumThread>[0],
+        );
+      case "get_thread_replies":
+        return handleGetThreadReplies(
+          payload as Parameters<typeof handleGetThreadReplies>[0],
+          activeConfig,
+        );
+      case "get_channel_messages_before":
+        return handleGetChannelMessagesBefore(
+          payload as Parameters<typeof handleGetChannelMessagesBefore>[0],
+          activeConfig,
         );
       case "send_channel_message":
         return handleSendChannelMessage(

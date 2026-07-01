@@ -275,6 +275,83 @@ pub async fn get_thread_replies(
     })
 }
 
+/// Fetch one keyset page of top-level channel history strictly *older* than a
+/// cursor, server-side via the bridge composite cursor.
+///
+/// The desktop timeline normally pages history over WS `REQ` with a bare `until`
+/// (`created_at`) cursor. That cursor cannot advance past a single `created_at`
+/// second that holds more messages than one page: `until` keeps returning the
+/// same newest slice of that second and history behind it is unreachable. This
+/// command uses the relay's `(created_at, event_id)` keyset (`until` + `n` =
+/// `before_id`), which advances within a tied second via `id > before_id` under
+/// the relay's `created_at DESC, id ASC` order — the escape hatch for that wall.
+///
+/// `before` is the cursor's `created_at` (Unix seconds); `before_id` is the hex
+/// id of the last (oldest) event already loaded at that second, so the page
+/// returned is strictly older. `next_cursor` is the last (oldest) returned
+/// event's composite key when a full page came back, else `None`.
+#[tauri::command]
+pub async fn get_channel_messages_before(
+    channel_id: String,
+    before: i64,
+    before_id: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<crate::models::ChannelMessagesPageResponse, String> {
+    let cap = limit.unwrap_or(200).min(500);
+    // Timeline content kinds — mirror the WS history filter so the keyset page
+    // and the WS page select the same rows. Top-level filtering is enforced by
+    // the relay's thread_metadata join for this channel scope.
+    let mut filter = serde_json::Map::new();
+    filter.insert("#h".to_string(), serde_json::json!([channel_id]));
+    filter.insert(
+        "kinds".to_string(),
+        serde_json::json!([
+            9,
+            40002,
+            40008,
+            40099,
+            43001,
+            43002,
+            43003,
+            43004,
+            43005,
+            43006,
+            buzz_core_pkg::kind::KIND_HUDDLE_STARTED
+        ]),
+    );
+    filter.insert("until".to_string(), serde_json::json!(before));
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    // `n` is the bridge extension name for the composite `before_id` tiebreak;
+    // the relay requires `until` to be set alongside it.
+    if let Some(id) = before_id.as_deref() {
+        filter.insert("n".to_string(), serde_json::json!(id));
+    }
+
+    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+
+    // Relay order is created_at DESC, id ASC — the last event is the oldest, so
+    // it is the cursor for the next (older) page when a full page returned.
+    let next_cursor = if events.len() as u32 >= cap {
+        events.last().map(|ev| crate::models::ChannelPageCursor {
+            created_at: ev.created_at.as_secs() as i64,
+            event_id: ev.id.to_hex(),
+        })
+    } else {
+        None
+    };
+
+    let event_values: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|ev| serde_json::to_value(ev).ok())
+        .collect();
+
+    Ok(crate::models::ChannelMessagesPageResponse {
+        events: event_values,
+        next_cursor,
+    })
+}
+
 #[tauri::command]
 pub async fn get_event(event_id: String, state: State<'_, AppState>) -> Result<String, String> {
     let events = query_relay(

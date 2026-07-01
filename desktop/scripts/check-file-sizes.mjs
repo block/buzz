@@ -82,8 +82,10 @@ const overrides = new Map([
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
   // parameter plumbing, not generic debt growth. Approved override; still
-  // queued to split.
-  ["src/shared/api/tauri.ts", 1235],
+  // queued to split. Read-path lane 1 adds two server-side fetch bindings
+  // (getThreadReplies + getChannelMessagesBefore) with their snake/camel
+  // cursor mapping — load-bearing reachability plumbing, not generic debt.
+  ["src/shared/api/tauri.ts", 1330],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
