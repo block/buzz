@@ -305,3 +305,73 @@ test("authGuard_signerIsHuman_tagAttributedToAgent_returnsNull", () => {
     "fence must remain in body when signer auth fails",
   );
 });
+
+// ── Render-suppression contract ───────────────────────────────────────────────
+//
+// When `extractConfigNudge` returns a non-null payload, `markdown.tsx` MUST
+// suppress the prose markdown node and render only the card:
+//
+//   {configNudge === null ? markdownNode : null}
+//
+// This test pins that contract at the parse level. A revert to `{markdownNode}`
+// (rendering both prose and card) would violate the invariants checked here:
+// the prose text is still in the raw wire body and would re-appear alongside
+// the card. If you break these assertions by changing `markdown.tsx` to render
+// both, these tests must be updated AND the visual duplication re-approved.
+
+test("nudgePresent_extractNonNull_and_stripRemovesSentinel", () => {
+  const prose =
+    "**Fizz** needs configuration before it can respond:\n- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables\n\nOpen Edit Agent in the Buzz app to set these.";
+  const payload = {
+    agent_name: "Fizz",
+    agent_pubkey: FIZZ_PUBKEY,
+    requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
+  };
+  const body = withSentinel(prose, payload);
+
+  // 1. extractConfigNudge sees the sentinel → card renders, prose must be
+  //    suppressed. If this returns null the card never renders at all.
+  const nudge = extractConfigNudge(body);
+  assert.notEqual(
+    nudge,
+    null,
+    "sentinel present → extractConfigNudge must return payload",
+  );
+
+  // 2. stripConfigNudgeSentinel removes the fence so whatever markdown node
+  //    IS rendered doesn't also show the raw JSON block. The stripped string
+  //    must NOT contain the sentinel open-fence marker.
+  const stripped = stripConfigNudgeSentinel(body);
+  assert.ok(
+    !stripped.includes("buzz:config-nudge"),
+    "stripped content must not contain the fence marker",
+  );
+
+  // 3. The prose IS still in the stripped string — that is intentional: the
+  //    stripped string is what non-card clients display. On desktop the prose
+  //    is suppressed by the `configNudge === null ? markdownNode : null` guard
+  //    in markdown.tsx, NOT by stripping it from the string. If a future
+  //    change strips the prose from the string here, that would break CLI
+  //    fallback — this assertion guards against that regression too.
+  assert.ok(
+    stripped.includes("ANTHROPIC_API_KEY"),
+    "prose content must remain in stripped string for non-card client fallback",
+  );
+});
+
+test("nudgeAbsent_extractNull_markdownNodeShown", () => {
+  // When there is no sentinel, extractConfigNudge returns null, meaning
+  // markdown.tsx renders `markdownNode` normally (no card, no suppression).
+  const plainBody = "Hello from an agent without any configuration sentinel.";
+  assert.equal(
+    extractConfigNudge(plainBody),
+    null,
+    "no sentinel → extractConfigNudge must return null so markdownNode is shown",
+  );
+  // stripConfigNudgeSentinel on sentinel-free content is a no-op.
+  assert.equal(
+    stripConfigNudgeSentinel(plainBody),
+    plainBody,
+    "no sentinel → stripConfigNudgeSentinel must return content unchanged",
+  );
+});

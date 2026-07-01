@@ -2082,7 +2082,7 @@ function MarkdownInner({
       )}
     >
       <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
-        {markdownNode}
+        {configNudge === null ? markdownNode : null}
         {configNudge !== null ? (
           <AttachmentGroup
             className="max-w-full flex-wrap overflow-visible pb-0"
