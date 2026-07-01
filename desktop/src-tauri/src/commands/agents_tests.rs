@@ -1,5 +1,140 @@
 use super::*;
 
+fn bare_agent_record(
+    persona_id: Option<&str>,
+    model: Option<&str>,
+    provider: Option<&str>,
+) -> ManagedAgentRecord {
+    use crate::managed_agents::{BackendKind, RespondTo};
+    use std::collections::BTreeMap;
+    ManagedAgentRecord {
+        pubkey: "agent".to_string(),
+        name: "Agent".to_string(),
+        persona_id: persona_id.map(str::to_string),
+        private_key_nsec: "".to_string(),
+        auth_tag: None,
+        relay_url: "ws://localhost:3000".to_string(),
+        avatar_url: None,
+        acp_command: "buzz-acp".to_string(),
+        agent_command: "goose".to_string(),
+        agent_command_override: None,
+        agent_args: vec![],
+        mcp_command: "".to_string(),
+        turn_timeout_seconds: 300,
+        idle_timeout_seconds: None,
+        max_turn_duration_seconds: None,
+        parallelism: 1,
+        system_prompt: None,
+        model: model.map(str::to_string),
+        provider: provider.map(str::to_string),
+        persona_source_version: None,
+        mcp_toolsets: None,
+        env_vars: BTreeMap::new(),
+        start_on_app_launch: false,
+        runtime_pid: None,
+        backend: BackendKind::Local,
+        backend_agent_id: None,
+        provider_binary_path: None,
+        persona_team_dir: None,
+        persona_name_in_team: None,
+        created_at: "".to_string(),
+        updated_at: "".to_string(),
+        last_started_at: None,
+        last_stopped_at: None,
+        last_exit_code: None,
+        last_error: None,
+        respond_to: RespondTo::OwnerOnly,
+        respond_to_allowlist: vec![],
+        relay_mesh: None,
+    }
+}
+
+fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
+    use std::collections::BTreeMap;
+    PersonaRecord {
+        id: id.to_string(),
+        display_name: "Test Persona".to_string(),
+        avatar_url: None,
+        system_prompt: "".to_string(),
+        runtime: None,
+        model: model.map(str::to_string),
+        provider: provider.map(str::to_string),
+        name_pool: vec![],
+        is_builtin: false,
+        is_active: true,
+        source_team: None,
+        source_team_persona_slug: None,
+        env_vars: BTreeMap::new(),
+        created_at: "".to_string(),
+        updated_at: "".to_string(),
+    }
+}
+
+/// Deploy-path regression for Fix 1 of Thufir pass-2: a persona-linked
+/// provider agent with a stale record snapshot must use the live persona
+/// model/provider in the deploy payload, not the stale record values.
+///
+/// Scenario: agent was created with persona at model="old-model"/provider="old-prov".
+/// The persona was subsequently updated to "new-model"/"new-prov" but the record
+/// was NOT re-snapshotted (provider start skips re-snapshot; local spawn does it).
+/// The deploy resolver must use the current persona values.
+///
+/// Fails against `resolve_effective_model_provider` (record-first precedence),
+/// which would return "old-model"/"old-prov" from the stale record.
+#[test]
+fn deploy_resolver_uses_live_persona_over_stale_record_snapshot() {
+    // Record holds the stale snapshot (created when persona had old values).
+    let record = bare_agent_record(Some("p1"), Some("old-model"), Some("old-prov"));
+    // Live persona has been updated since the record was snapshotted.
+    let personas = vec![persona_record("p1", Some("new-model"), Some("new-prov"))];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
+
+    assert_eq!(
+        model,
+        Some("new-model"),
+        "deploy must use live persona model, not stale record snapshot"
+    );
+    assert_eq!(
+        provider,
+        Some("new-prov"),
+        "deploy must use live persona provider, not stale record snapshot"
+    );
+}
+
+/// Deploy resolver falls back to record when persona has no model/provider
+/// (persona without structured model — fallback to record snapshot).
+#[test]
+fn deploy_resolver_falls_back_to_record_when_persona_has_none() {
+    let record = bare_agent_record(Some("p1"), Some("record-model"), Some("record-prov"));
+    // Persona exists but has no model/provider.
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig::default();
+
+    let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
+
+    assert_eq!(model, Some("record-model"));
+    assert_eq!(provider, Some("record-prov"));
+}
+
+/// Deploy resolver falls back to global when both persona and record have none.
+#[test]
+fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
+    let record = bare_agent_record(Some("p1"), None, None);
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-prov".to_string()),
+        ..Default::default()
+    };
+
+    let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
+
+    assert_eq!(model, Some("global-model"));
+    assert_eq!(provider, Some("global-prov"));
+}
+
 #[test]
 fn normalize_relay_mesh_rejects_empty_model_ref() {
     let config = RelayMeshConfig {

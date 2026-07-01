@@ -11,8 +11,8 @@ use crate::{
         save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
-        ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND,
-        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        ManagedAgentRecord, ManagedAgentSummary, PersonaRecord, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -287,13 +287,44 @@ async fn start_local_agent_with_preflight(
     build_managed_agent_summary(app, record, &runtimes, &personas)
 }
 
+/// Resolve the deploy-specific structured model/provider for a managed agent.
+///
+/// Deploy uses **live-persona-first** precedence so remote agents receive
+/// current config after a persona update, without requiring delete+recreate.
+/// Unlike local spawn (which re-snapshots the persona onto `record` at the
+/// start of every spawn), provider start does not re-snapshot — so the
+/// record may hold a stale snapshot while the linked persona has moved on.
+///
+/// Precedence: live-persona → record (snapshot fallback) → global.
+/// Symmetric for both model and provider.
+///
+/// Exported `pub(crate)` for unit testing.
+pub(crate) fn resolve_deploy_model_provider<'a>(
+    record: &'a ManagedAgentRecord,
+    personas: &'a [PersonaRecord],
+    global: &'a crate::managed_agents::GlobalAgentConfig,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let live_persona = record
+        .persona_id
+        .as_deref()
+        .and_then(|pid| personas.iter().find(|p| p.id == pid));
+    let model = live_persona
+        .and_then(|p| p.model.as_deref())
+        .or(record.model.as_deref())
+        .or(global.model.as_deref());
+    let provider = live_persona
+        .and_then(|p| p.provider.as_deref())
+        .or(record.provider.as_deref())
+        .or(global.provider.as_deref());
+    (model, provider)
+}
+
 /// Build the standard agent JSON payload for provider deploy calls.
 ///
 /// Unlike local spawn (which uses only pinned `record.env_vars` for
 /// determinism), provider deploy re-reads live persona env vars and
-/// structured model/provider so remote agents receive current credentials
-/// and the same authoritative values that local spawn derives from
-/// `runtime_metadata_env_vars`. The only field still pinned is
+/// structured model/provider so remote agents receive current credentials.
+/// The only field still pinned is
 /// `agent_command`/`agent_args` — those were captured at create time.
 /// The only read-time resolution is `relay_url`: a blank pin resolves to
 /// the active workspace relay here, matching the create-path contract.
@@ -320,9 +351,8 @@ fn build_deploy_payload(
     // credentials; local spawn uses only pinned record.env_vars for determinism
     // across restarts. Global env vars are the lowest user-settable layer:
     // global < persona < agent (last-wins on key collision).
-    let global_env = crate::managed_agents::load_global_agent_config(app)
-        .unwrap_or_default()
-        .env_vars;
+    let global_config = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let global_env = global_config.env_vars.clone();
     let persona_env =
         crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
     // Merge: global < persona (persona wins over global).
@@ -331,17 +361,14 @@ fn build_deploy_payload(
     let merged_env =
         crate::managed_agents::merged_user_env(&global_persona_merged, &record.env_vars);
 
-    // Resolve the persona's structured provider/model so the remote provider
-    // receives the same authoritative values that local spawn derives from
-    // `runtime_metadata_env_vars`. Uses the shared resolver for consistent
-    // agent → persona → global → None precedence.
-    let global_config = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    // Resolve the deploy-specific structured provider/model. Uses the deploy
+    // resolver with live-persona → record → global precedence.
     let personas = load_personas(app).unwrap_or_default();
     let (effective_model, effective_provider) =
-        crate::managed_agents::resolve_effective_model_provider(record, &personas, &global_config);
+        resolve_deploy_model_provider(record, &personas, &global_config);
     let (effective_model, effective_provider) = (
-        effective_model.map(|s| s.to_string()),
-        effective_provider.map(|s| s.to_string()),
+        effective_model.map(str::to_string),
+        effective_provider.map(str::to_string),
     );
 
     Ok(serde_json::json!({
