@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyOptimisticReaction } from "./useReactionHandler.ts";
+import {
+  applyOptimisticReaction,
+  selectDisplayReactions,
+} from "./useReactionHandler.ts";
 
 // ---------------------------------------------------------------------------
 // applyOptimisticReaction — order-preservation invariant
@@ -85,4 +88,39 @@ test("applyOptimisticReaction: no-op when adding an emoji the user already react
     source,
     "must return same reference when already reacted",
   );
+});
+
+// ---------------------------------------------------------------------------
+// selectDisplayReactions — display-path order guard
+//
+// This is the path that was broken in round 1: reactions were re-sorted by
+// count in the memo AFTER applyOptimisticReaction ran. These tests pin the
+// invariant: chronological (formatter) order must be preserved, count must
+// never influence display position. A test MUST fail if sortReactions or any
+// count-based sort is reintroduced in the display selection path.
+// ---------------------------------------------------------------------------
+
+test("selectDisplayReactions: returns sourceReactions as-is when no optimistic state (count must not influence order)", () => {
+  // Formatter emits 🎉 (count=1) first, then 👍 (count=3) — chronological.
+  // If count-sort were reintroduced, this would flip to [👍, 🎉].
+  const source = [pill("🎉", 1), pill("👍", 3)];
+  const result = selectDisplayReactions(null, source);
+  assert.deepEqual(
+    result.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "lower-count earlier emoji must stay left of higher-count later emoji",
+  );
+  assert.equal(result, source, "must return same reference (no copy/sort)");
+});
+
+test("selectDisplayReactions: returns optimisticReactions when present (not sourceReactions)", () => {
+  const source = [pill("🎉", 1), pill("👍", 3)];
+  const optimistic = [pill("🎉", 1), pill("👍", 3), pill("❤️", 1, true)];
+  const result = selectDisplayReactions(optimistic, source);
+  assert.equal(result, optimistic, "must return optimistic array when present");
+});
+
+test("selectDisplayReactions: returns empty array when both inputs are absent", () => {
+  const result = selectDisplayReactions(null, undefined);
+  assert.deepEqual(result, []);
 });

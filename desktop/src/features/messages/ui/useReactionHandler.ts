@@ -78,8 +78,23 @@ export function applyOptimisticReaction(
 }
 
 /**
+ * Selects the reactions to display: optimistic state when it is still valid
+ * (source has not changed under us), otherwise the formatter-emitted source
+ * order. Chronological ordering is the formatter's responsibility; this helper
+ * must not re-sort.
+ *
+ * @visibleForTesting
+ */
+export function selectDisplayReactions(
+  optimisticReactions: TimelineReaction[] | null,
+  sourceReactions: TimelineReaction[] | undefined,
+): TimelineReaction[] {
+  return optimisticReactions ?? sourceReactions ?? [];
+}
+
+/**
  * Shared reaction state + toggle logic used by both MessageRow and
- * SystemMessageRow. Keeps the pending/error/sorting concerns in one place.
+ * SystemMessageRow. Keeps the pending/error/optimistic-update concerns in one place.
  */
 export function useReactionHandler(
   message: TimelineMessage,
@@ -103,7 +118,7 @@ export function useReactionHandler(
       : null;
 
   const reactions = React.useMemo(() => {
-    return optimisticReactions ?? sourceReactions ?? [];
+    return selectDisplayReactions(optimisticReactions, sourceReactions);
   }, [sourceReactions, optimisticReactions]);
 
   const canToggle = Boolean(onToggleReaction && !message.pending);
