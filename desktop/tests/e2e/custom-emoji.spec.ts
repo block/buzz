@@ -496,3 +496,34 @@ test("emoji picker search input is focused immediately on open (no manual click 
   });
   expect(isFocused).toBe(true);
 });
+
+test("composer emoji picker search input is focused immediately on open", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the composer emoji picker via the toolbar button.
+  await page.getByTestId("composer-emoji-button").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  // The search input must be the active element inside the shadow root so
+  // the user can type immediately without a manual click.
+  const isFocused = await picker.evaluate((el: Element) => {
+    const host = el as HTMLElement & { shadowRoot: ShadowRoot };
+    const input = host.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (!input) return false;
+    return host.shadowRoot?.activeElement === input;
+  });
+  expect(isFocused).toBe(true);
+
+  // Pick an emoji and verify focus returns to the composer message input,
+  // not left stranded in the now-closed popover. The insertEmoji handler
+  // calls editor.chain().focus() before setIsEmojiPickerOpen(false), so
+  // the Tiptap editor owns focus before Radix's onCloseAutoFocus fires.
+  await picker.getByRole("button", { name: "😀" }).first().click();
+  await expect(page.getByTestId("message-input")).toBeFocused();
+});

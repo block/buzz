@@ -47,7 +47,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
         side="top"
         sideOffset={10}
       >
-        <EmojiPicker onSelect={onEmojiSelect} />
+        <EmojiPicker autoFocus onSelect={onEmojiSelect} />
       </PopoverContent>
     </Popover>
   );
