@@ -30,6 +30,67 @@ async function expectThreadReplyUnobscured(row: Locator) {
     .toBe(true);
 }
 
+async function measureThreadSummaryGeometry(summaryRow: Locator) {
+  return summaryRow.evaluate((summaryButton) => {
+    const summaryWrapper = summaryButton.parentElement;
+    const container = summaryWrapper?.parentElement;
+    const messageRow = container?.querySelector<HTMLElement>(
+      '[data-testid="message-row"]',
+    );
+    const messageMarkdown =
+      messageRow?.querySelector<HTMLElement>(".message-markdown");
+    const messageAuthor = messageRow?.querySelector<HTMLElement>(
+      '[data-testid="message-author"]',
+    );
+    const firstParticipant = summaryButton.querySelector<HTMLElement>(
+      '[data-testid="message-thread-summary-participant"]',
+    );
+    const summarySurface = summaryButton.querySelector<HTMLElement>(
+      '[data-testid="message-thread-summary-surface"]',
+    );
+    const firstAvatar = firstParticipant?.firstElementChild;
+
+    if (
+      !summaryWrapper ||
+      !container ||
+      !messageRow ||
+      !messageAuthor ||
+      !messageMarkdown ||
+      !summarySurface ||
+      !(firstAvatar instanceof HTMLElement)
+    ) {
+      throw new Error("Expected measurable thread summary geometry.");
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const messageRowRect = messageRow.getBoundingClientRect();
+    const messageAuthorRect = messageAuthor.getBoundingClientRect();
+    const messageMarkdownRect = messageMarkdown.getBoundingClientRect();
+    const summaryButtonRect = summaryButton.getBoundingClientRect();
+    const summaryButtonStyle = getComputedStyle(summaryButton);
+    const summaryButtonPaddingLeft = Number.parseFloat(
+      summaryButtonStyle.paddingLeft,
+    );
+    const summaryWrapperRect = summaryWrapper.getBoundingClientRect();
+    const firstAvatarRect = firstAvatar.getBoundingClientRect();
+    const summarySurfaceRect = summarySurface.getBoundingClientRect();
+
+    return {
+      authorLeft: messageAuthorRect.left,
+      avatarLeft: firstAvatarRect.left,
+      bodyLeft: messageMarkdownRect.left,
+      bottomPadding: containerRect.bottom - summaryWrapperRect.bottom,
+      messageRowLeft: messageRowRect.left,
+      summaryButtonContentLeft:
+        summaryButtonRect.left + summaryButtonPaddingLeft,
+      summaryButtonLeft: summaryButtonRect.left,
+      summaryButtonPaddingLeft,
+      summarySurfaceLeft: summarySurfaceRect.left,
+      topPadding: messageRowRect.top - containerRect.top,
+    };
+  });
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -583,6 +644,44 @@ test("opens a single-level thread panel with inline expansion", async ({
         }),
     )
     .toBe("28x28");
+  const summaryGeometry = await measureThreadSummaryGeometry(rootSummaryRow);
+  expect(
+    Math.abs(summaryGeometry.authorLeft - summaryGeometry.bodyLeft),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(summaryGeometry.avatarLeft - summaryGeometry.bodyLeft),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      summaryGeometry.summaryButtonContentLeft - summaryGeometry.bodyLeft,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      summaryGeometry.summaryButtonLeft - summaryGeometry.messageRowLeft,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(summaryGeometry.summaryButtonLeft).toBeLessThan(
+    summaryGeometry.bodyLeft,
+  );
+  expect(
+    Math.abs(
+      summaryGeometry.bodyLeft -
+        summaryGeometry.summaryButtonLeft -
+        summaryGeometry.summaryButtonPaddingLeft,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(summaryGeometry.summarySurfaceLeft).toBeLessThan(
+    summaryGeometry.avatarLeft,
+  );
+  expect(
+    Math.abs(
+      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 4,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(summaryGeometry.topPadding - summaryGeometry.bottomPadding),
+  ).toBeLessThanOrEqual(1);
 
   await page.mouse.move(0, 0);
   const rootSummaryWidthBeforeHover = await rootSummaryRow.evaluate((row) =>
