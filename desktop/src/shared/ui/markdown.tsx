@@ -23,6 +23,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   extractSupportedLinkPreviews,
   parseSupportedLinkPreview,
@@ -1946,6 +1947,7 @@ function MarkdownInner({
   channelNames,
   className,
   compact = false,
+  configNudgeAuthorPubkey,
   content,
   customEmoji,
   imetaByUrl,
@@ -1987,10 +1989,20 @@ function MarkdownInner({
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
   );
-  const configNudge = React.useMemo(
-    () => (interactive ? extractConfigNudge(content) : null),
-    [content, interactive],
-  );
+  const configNudge = React.useMemo(() => {
+    if (!interactive || !configNudgeAuthorPubkey) return null;
+    const payload = extractConfigNudge(content);
+    if (payload === null) return null;
+    // Only render if the message author matches the payload's agent_pubkey.
+    // Guards against untrusted content forging an official-looking nudge card.
+    if (
+      normalizePubkey(payload.agent_pubkey) !==
+      normalizePubkey(configNudgeAuthorPubkey)
+    ) {
+      return null;
+    }
+    return payload;
+  }, [content, interactive, configNudgeAuthorPubkey]);
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
@@ -2131,6 +2143,7 @@ export const Markdown = React.memo(
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&
+    prev.configNudgeAuthorPubkey === next.configNudgeAuthorPubkey &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,
 );

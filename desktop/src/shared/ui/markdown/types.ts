@@ -47,6 +47,14 @@ export type MarkdownProps = {
   searchQuery?: string;
   tight?: boolean;
   videoReviewContext?: VideoReviewContext;
+  /**
+   * When set and the nudge payload's agent_pubkey matches, renders the
+   * config-nudge sentinel as an Attachment card and strips the fence from
+   * displayed prose. Must be undefined/null for every non-message Markdown
+   * surface — keeps card rendering opt-in so untrusted content cannot forge
+   * a nudge card.
+   */
+  configNudgeAuthorPubkey?: string | null;
 };
 
 export type MarkdownVariant = "default" | "compact" | "tight";

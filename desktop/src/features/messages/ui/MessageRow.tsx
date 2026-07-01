@@ -323,6 +323,15 @@ export const MessageRow = React.memo(
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
+              // Only pass the author pubkey for agent-authored messages so
+              // config-nudge cards can authenticate the sender. Non-agent
+              // authors get undefined, keeping the card path off by default.
+              configNudgeAuthorPubkey={
+                message.pubkey &&
+                resolvedAgentPubkeys.has(normalizePubkey(message.pubkey))
+                  ? message.pubkey
+                  : undefined
+              }
               content={message.body}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
