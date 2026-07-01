@@ -436,11 +436,12 @@ function ProfileLiveActivityEmbed({
         agent={activityAgent}
         autoTail={true}
         channelId={activeChannelId}
-        className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none **:data-[role=assistant-message-body]:max-w-full! **:data-[role=assistant-message-shell]:max-w-full! **:data-[role=user-message]:justify-start! **:data-[role=user-message-avatar]:hidden **:data-[role=user-message-bubble]:rounded-none! **:data-[role=user-message-bubble]:bg-transparent! **:data-[role=user-message-bubble]:p-0! **:data-[role=user-message-shell]:max-w-full! **:data-[role=user-message-shell]:items-start! [&_[data-role=assistant-message]_*]:text-xs [&_[data-role=assistant-message]_*]:leading-4 [&_[data-role=user-message]_*]:text-xs [&_[data-role=user-message]_*]:leading-4"
+        className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none"
         emptyDescription="Live activity will appear here."
         rawLayout="responsive"
         showHeader={false}
         showRaw={false}
+        transcriptVariant="compactPreview"
       />
       <div
         aria-hidden="true"

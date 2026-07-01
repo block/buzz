@@ -12,6 +12,10 @@ import {
 } from "@/shared/ui/dialog";
 import type { TranscriptItem } from "./agentSessionTypes";
 import { PromptSectionList as PromptContextSections } from "./PromptSectionAccordion";
+import {
+  AgentSessionTranscriptVariantProvider,
+  type AgentSessionTranscriptVariant,
+} from "./agentSessionTranscriptContext";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
   ActivityRow,
@@ -72,12 +76,14 @@ export function AgentSessionTranscriptList({
   items,
   profiles,
   scrollScopeKey,
+  variant = "default",
 }: AgentTranscriptIdentityProps & {
   autoTail?: boolean;
   emptyDescription: string;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
   scrollScopeKey?: string | null;
+  variant?: AgentSessionTranscriptVariant;
 }) {
   const displayBlocks = React.useMemo(
     () => buildTranscriptDisplayBlocks(items),
@@ -124,21 +130,23 @@ export function AgentSessionTranscriptList({
         ref={autoTail ? contentRef : undefined}
         role="log"
       >
-        {displayBlocks.map((block) => (
-          <div
-            className="content-visibility-auto"
-            data-message-id={getDisplayBlockKey(block)}
-            key={getDisplayBlockKey(block)}
-          >
-            <TranscriptDisplayBlockView
-              agentAvatarUrl={agentAvatarUrl}
-              agentName={agentName}
-              agentPubkey={agentPubkey}
-              block={block}
-              profiles={profiles}
-            />
-          </div>
-        ))}
+        <AgentSessionTranscriptVariantProvider value={variant}>
+          {displayBlocks.map((block) => (
+            <div
+              className="content-visibility-auto"
+              data-message-id={getDisplayBlockKey(block)}
+              key={getDisplayBlockKey(block)}
+            >
+              <TranscriptDisplayBlockView
+                agentAvatarUrl={agentAvatarUrl}
+                agentName={agentName}
+                agentPubkey={agentPubkey}
+                block={block}
+                profiles={profiles}
+              />
+            </div>
+          ))}
+        </AgentSessionTranscriptVariantProvider>
       </div>
     </div>
   );

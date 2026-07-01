@@ -5,6 +5,8 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { cn } from "@/shared/lib/cn";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import type { TranscriptItem } from "../agentSessionTypes";
 import { ToolActivity } from "./ToolActivity";
 import { TranscriptTimestamp } from "./TranscriptTimestamp";
@@ -43,6 +45,8 @@ function MessageItem({
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
   const messageLink = getTranscriptMessageLink(item);
@@ -76,35 +80,35 @@ function MessageItem({
       data-role="assistant-message"
       data-testid="transcript-assistant-message"
     >
-      <div
-        className="group relative flex w-full min-w-0 flex-col items-start gap-1"
-        data-role="assistant-message-shell"
-      >
+      <div className="group relative flex w-full min-w-0 flex-col items-start gap-1">
+        {isCompactPreview ? null : (
+          <div className="mb-0.5 flex items-center gap-1.5 text-xs">
+            <UserAvatar
+              avatarUrl={assistantAvatarUrl}
+              className="shrink-0"
+              displayName={assistantLabel}
+              size="xs"
+              testId="transcript-assistant-avatar"
+            />
+            <span className="text-sm font-semibold text-foreground">
+              {assistantLabel}
+            </span>
+            <TranscriptTimestamp
+              messageLink={messageLink}
+              timestamp={item.timestamp}
+            />
+          </div>
+        )}
         <div
-          className="mb-0.5 flex items-center gap-1.5 text-xs"
-          data-role="assistant-message-header"
+          className={cn(
+            "w-full min-w-0 text-sm",
+            isCompactPreview && "text-xs leading-4",
+          )}
         >
-          <UserAvatar
-            avatarUrl={assistantAvatarUrl}
-            className="shrink-0"
-            data-role="assistant-message-avatar"
-            displayName={assistantLabel}
-            size="xs"
-            testId="transcript-assistant-avatar"
+          <Markdown
+            className={isCompactPreview ? "text-xs leading-4" : undefined}
+            content={text || " "}
           />
-          <span className="text-sm font-semibold text-foreground">
-            {assistantLabel}
-          </span>
-          <TranscriptTimestamp
-            messageLink={messageLink}
-            timestamp={item.timestamp}
-          />
-        </div>
-        <div
-          className="w-full min-w-0 text-sm"
-          data-role="assistant-message-body"
-        >
-          <Markdown content={text || " "} tight />
         </div>
       </div>
     </div>

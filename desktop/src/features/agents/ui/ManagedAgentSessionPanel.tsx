@@ -21,6 +21,7 @@ import type {
   ObserverEvent,
   TranscriptItem,
 } from "./agentSessionTypes";
+import type { AgentSessionTranscriptVariant } from "./agentSessionTranscriptContext";
 import {
   deriveLatestSessionId,
   resolveDisplayEvents,
@@ -41,6 +42,7 @@ type ManagedAgentSessionPanelProps = {
   rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
   showRaw?: boolean;
+  transcriptVariant?: AgentSessionTranscriptVariant;
   profiles?: UserProfileLookup;
   rawEventsOverride?: ObserverEvent[];
   transcriptOverride?: TranscriptItem[];
@@ -55,6 +57,7 @@ export function ManagedAgentSessionPanel({
   rawLayout = "responsive",
   showHeader = true,
   showRaw = true,
+  transcriptVariant = "default",
   profiles,
   rawEventsOverride,
   transcriptOverride,
@@ -120,6 +123,7 @@ export function ManagedAgentSessionPanel({
         rawLayout={rawLayout}
         showRaw={showRaw}
         transcript={displayTranscript}
+        transcriptVariant={transcriptVariant}
       />
     </section>
   );
@@ -176,6 +180,7 @@ function SessionBody({
   rawLayout,
   showRaw,
   transcript,
+  transcriptVariant,
 }: {
   agentAvatarUrl: string | null;
   agentName: string;
@@ -192,6 +197,7 @@ function SessionBody({
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
   transcript: TranscriptItem[];
+  transcriptVariant: AgentSessionTranscriptVariant;
 }) {
   const rawRail = resolveRawRailLayout(showRaw, rawLayout);
 
@@ -236,6 +242,7 @@ function SessionBody({
             profiles={profiles}
             scrollScopeKey={`${agentPubkey}:${channelId ?? "all"}`}
             autoTail={autoTail}
+            variant={transcriptVariant}
           />
           {rawRail.mode === "side" ? <RawEventRail events={events} /> : null}
         </div>
