@@ -527,6 +527,8 @@ pub fn run() {
             get_agent_config_surface,
             get_runtime_file_config,
             put_agent_session_config,
+            get_global_agent_config,
+            set_global_agent_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,

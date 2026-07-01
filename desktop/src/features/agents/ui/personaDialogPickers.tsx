@@ -369,6 +369,9 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
  */
 export function computeLocalModeGate({
   envVars,
+  globalEnvVars = {},
+  globalProvider = "",
+  globalModel = "",
   isProviderMode,
   model,
   provider,
@@ -377,6 +380,21 @@ export function computeLocalModeGate({
   useMesh,
 }: {
   envVars: Record<string, string>;
+  /**
+   * Global agent config env vars. Required credential keys satisfied here
+   * are excluded from `missingEnvKeys` so global config silences the gate.
+   */
+  globalEnvVars?: Record<string, string>;
+  /**
+   * Global fallback provider. When the agent's own provider is empty but a
+   * global provider is set, the provider normalized-field gate is satisfied.
+   */
+  globalProvider?: string;
+  /**
+   * Global fallback model. When the agent's own model is empty but a global
+   * model is set, the model normalized-field gate is satisfied.
+   */
+  globalModel?: string;
   isProviderMode: boolean;
   model: string;
   provider: string;
@@ -407,42 +425,41 @@ export function computeLocalModeGate({
 
   const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
 
-  // A normalized field is satisfied by the runtime file config when the file
-  // provides the value (provider or model). The file layer silences the
-  // requirement; the value is not injected into the Buzz env.
+  // File-layer values for goose-style runtimes. These silence requirements
+  // when the runtime config file provides the value — the file layer is the
+  // lowest precedence fallback: env → global → file.
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const fileModel = runtimeFileConfig?.model?.trim() ?? "";
   const fileSatisfiedKeys = new Set(runtimeFileConfig?.satisfiedEnvKeys ?? []);
 
+  // Effective provider/model: agent value → global fallback → file fallback.
+  const effectiveProvider =
+    provider.trim() || (globalProvider ?? "").trim() || fileProvider;
+  const effectiveModel =
+    model.trim() || (globalModel ?? "").trim() || fileModel;
+
   const missingNormalizedFields: string[] = [];
   if (needsProviderSelection) {
-    if (provider.trim().length === 0 && fileProvider.length === 0) {
-      missingNormalizedFields.push("provider");
-    }
-    if (model.trim().length === 0 && fileModel.length === 0) {
-      missingNormalizedFields.push("model");
-    }
+    if (effectiveProvider.length === 0) missingNormalizedFields.push("provider");
+    if (effectiveModel.length === 0) missingNormalizedFields.push("model");
   }
 
   // Credential keys depend on the selected provider (empty provider → no keys
   // required beyond the normalized field gate above).
-  // Use the file provider as fallback when the env provider is empty, so
-  // credential requirements are computed correctly for file-config runtimes.
-  const effectiveProviderForKeys = needsProviderSelection
-    ? provider.trim() || fileProvider
-    : "";
-  const providerForKeys = needsProviderSelection
-    ? effectiveProviderForKeys
-    : "";
+  // Use the effective provider (env → global → file) so credential
+  // requirements are computed correctly for all config sources.
+  const providerForKeys = needsProviderSelection ? effectiveProvider : "";
   const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
 
   const missingEnvKeys: string[] = [];
   const fileSatisfiedEnvKeys: string[] = [];
   for (const key of requiredKeys) {
-    if ((envVars[key] ?? "").length > 0) {
-      // Set in Buzz env — satisfied, no action.
+    const agentValue = envVars[key] ?? "";
+    const globalValue = (globalEnvVars ?? {})[key] ?? "";
+    if (agentValue.length > 0 || globalValue.length > 0) {
+      // Set in Buzz env or global defaults — satisfied, no action.
     } else if (fileSatisfiedKeys.has(key)) {
-      // Not in Buzz env but present in the runtime config file — silenced.
+      // Not in Buzz env or global but present in the runtime config file.
       fileSatisfiedEnvKeys.push(key);
     } else {
       missingEnvKeys.push(key);

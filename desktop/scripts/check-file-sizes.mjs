@@ -60,7 +60,10 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1437],
+  // global-agent-config: build_deploy_payload threads global config fallback
+  // for provider/model/env_vars (+4 lines). cargo fmt reflowed 2 more lines.
+  // Queued to split.
+  ["src-tauri/src/commands/agents.rs", 1443],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -84,7 +87,9 @@ const overrides = new Map([
   // activity-feed threads avatar_url into build_managed_agent_summary for the
   // assistant-bubble pinned snapshot.
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
-  ["src-tauri/src/managed_agents/runtime.rs", 2208],
+  // global-agent-config: spawn_agent_child loads global config and merges as
+  // lowest env layer (+8 lines). Queued to split.
+  ["src-tauri/src/managed_agents/runtime.rs", 2216],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],

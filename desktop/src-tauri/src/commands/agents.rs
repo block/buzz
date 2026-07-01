@@ -315,14 +315,21 @@ fn build_deploy_payload(
         return Err(err);
     }
 
-    // Merge persona env_vars + agent env_vars for provider deploy. Provider
+    // Merge global + persona + agent env_vars for provider deploy. Provider
     // deploy re-reads live persona env vars so remote agents receive current
     // credentials; local spawn uses only pinned record.env_vars for determinism
-    // across restarts. Without this, provider-backed agents wouldn't receive
-    // credentials saved on the persona or the agent itself.
+    // across restarts. Global env vars are the lowest user-settable layer:
+    // global < persona < agent (last-wins on key collision).
+    let global_env = crate::managed_agents::load_global_agent_config(app)
+        .unwrap_or_default()
+        .env_vars;
     let persona_env =
         crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
-    let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+    // Merge: global < persona (persona wins over global).
+    let global_persona_merged = crate::managed_agents::merged_user_env(&global_env, &persona_env);
+    // Merge: global+persona < agent (agent wins over everything).
+    let merged_env =
+        crate::managed_agents::merged_user_env(&global_persona_merged, &record.env_vars);
 
     // Resolve the persona's structured provider/model so the remote provider
     // receives the same authoritative values that local spawn derives from
@@ -331,8 +338,9 @@ fn build_deploy_payload(
     // imported personas whose derived keys were filtered at import time).
     //
     // Precedence mirrors local spawn: persona structured model is authoritative
-    // when present; the agent record's `model` is a fallback for personas that
-    // don't specify one (or when no persona is linked).
+    // when present; the agent record's model is a fallback; global model is the
+    // last resort (when no persona or agent specifies one).
+    let global_config = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let (effective_model, effective_provider) = if let Some(pid) = record.persona_id.as_deref() {
         let personas = load_personas(app).map_err(|e| {
             format!(
@@ -343,11 +351,18 @@ fn build_deploy_payload(
             .into_iter()
             .find(|p| p.id == pid)
             .ok_or_else(|| format!("persona `{pid}` not found while building deploy payload"))?;
-        let model = persona.model.clone().or(record.model.clone());
-        let provider = persona.provider;
+        let model = persona
+            .model
+            .clone()
+            .or(record.model.clone())
+            .or(global_config.model.clone());
+        let provider = persona.provider.or(global_config.provider.clone());
         (model, provider)
     } else {
-        (record.model.clone(), None)
+        (
+            record.model.clone().or(global_config.model.clone()),
+            global_config.provider.clone(),
+        )
     };
 
     Ok(serde_json::json!({
