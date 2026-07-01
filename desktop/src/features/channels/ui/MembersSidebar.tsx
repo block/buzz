@@ -20,7 +20,9 @@ import {
   formatPubkey,
 } from "@/features/channels/lib/memberUtils";
 import {
-  useUserSearchQuery,
+  useFlattenedUserSearchResults,
+  useInfiniteUserSearchQuery,
+  useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
@@ -55,11 +57,9 @@ import {
 } from "@/shared/ui/modalSearchStyles";
 import { MembersSidebarMemberCard } from "./MembersSidebarMemberCard";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
-
 const MEMBER_ADD_RESULT_LIMIT = 50;
 const MEMBER_ROW_INSET_DIVIDER_CLASS =
   "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
-
 function formatAddCandidateName(user: UserSearchResult) {
   return (
     user.displayName?.trim() ||
@@ -67,7 +67,6 @@ function formatAddCandidateName(user: UserSearchResult) {
     formatPubkey(user.pubkey)
   );
 }
-
 function formatOwnerName(
   user: UserSearchResult,
   ownerProfiles?: Record<
@@ -78,7 +77,6 @@ function formatOwnerName(
   if (!user.ownerPubkey) {
     return null;
   }
-
   const owner = ownerProfiles?.[normalizePubkey(user.ownerPubkey)];
   return (
     owner?.displayName?.trim() ||
@@ -86,13 +84,11 @@ function formatOwnerName(
     formatPubkey(user.ownerPubkey)
   );
 }
-
 type AddMemberSearchCandidate = UserSearchResult & {
   isManagedAgent?: boolean;
   isMember?: boolean;
   personaId?: string | null;
 };
-
 function addMemberCandidatePersonaId(
   candidate: UserSearchResult,
   managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
@@ -100,14 +96,12 @@ function addMemberCandidatePersonaId(
   return managedAgentsByPubkey.get(normalizePubkey(candidate.pubkey))
     ?.personaId;
 }
-
 function addMemberCandidateIsManagedAgent(
   candidate: UserSearchResult,
   managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
 ) {
   return managedAgentsByPubkey.has(normalizePubkey(candidate.pubkey));
 }
-
 function addMemberCandidateWithAgentMetadata(
   candidate: UserSearchResult,
   managedAgentsByPubkey: ReadonlyMap<string, ManagedAgent>,
@@ -127,7 +121,6 @@ function memberModalRoleRank(member: ChannelMember) {
   if (member.role === "admin") return 1;
   return 2;
 }
-
 function compareMembersForModal(
   currentPubkey: string | undefined,
   left: ChannelMember,
@@ -260,11 +253,12 @@ export function MembersSidebar({
   const canAddMembers =
     (selfMember !== null || channel?.visibility === "open") &&
     channel?.channelType !== "dm";
-  const userSearchQuery = useUserSearchQuery(deferredSearchQuery, {
+  const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: false,
     enabled: open && canAddMembers && deferredSearchQuery.length > 0,
     limit: MEMBER_ADD_RESULT_LIMIT,
   });
+  const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const isArchivedDiscovery = useIsArchivedPredicate();
   const addSearchResults = React.useMemo(() => {
     if (!canAddMembers || normalizedDeferredSearchQuery.length === 0) {
@@ -335,7 +329,7 @@ export function MembersSidebar({
       });
     };
 
-    for (const user of userSearchQuery.data ?? []) {
+    for (const user of userSearchResults) {
       addCandidate(
         addMemberCandidateWithAgentMetadata(user, managedAgentsByPubkey),
       );
@@ -393,7 +387,7 @@ export function MembersSidebar({
     memberPubkeys,
     normalizedDeferredSearchQuery,
     relayAgentsQuery.data,
-    userSearchQuery.data,
+    userSearchResults,
     rawMembers,
   ]);
   const isAddSearchLoading =
@@ -401,6 +395,10 @@ export function MembersSidebar({
     managedAgentsQuery.isLoading ||
     relayAgentsQuery.isLoading ||
     channelsQuery.isLoading;
+  const handlePeopleSearchScroll = useUserSearchFetchMoreOnScroll(
+    userSearchQuery,
+    canAddMembers && normalizedDeferredSearchQuery.length > 0,
+  );
   const addSearchOwnerPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -685,6 +683,7 @@ export function MembersSidebar({
               <div
                 className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
                 data-testid="members-sidebar-people"
+                onScroll={handlePeopleSearchScroll}
               >
                 <SearchResultSectionTitle>
                   {normalizedSearchQuery

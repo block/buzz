@@ -229,6 +229,16 @@ fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
     }
 }
 
+fn extract_search_page(raw: &Value) -> u32 {
+    raw.get("page")
+        .or_else(|| raw.get("search_page"))
+        .or_else(|| raw.get("searchPage"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
+}
+
 fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::Uuid]) -> bool {
     match se.channel_id {
         Some(ch_id) => accessible.contains(&ch_id),
@@ -867,7 +877,7 @@ fn search_hit_accepted(
 }
 
 /// Handle search filters by routing to Postgres FTS, then fetching full events
-/// from DB. Returns first page of results (no pagination for bridge MVP).
+/// from DB. Supports a bridge-only `page` extension over the FTS result set.
 async fn handle_bridge_search(
     state: &AppState,
     raw_filters: &[Value],
@@ -893,6 +903,7 @@ async fn handle_bridge_search(
 
     for (raw, filter) in raw_filters.iter().zip(filters) {
         let search_mode = extract_search_mode(raw);
+        let search_page = extract_search_page(raw);
         let search_text = match &filter.search {
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
@@ -946,7 +957,7 @@ async fn handle_bridge_search(
             authors,
             since,
             until,
-            page: 1,
+            page: search_page,
             per_page: limit,
             mode: search_mode,
         };

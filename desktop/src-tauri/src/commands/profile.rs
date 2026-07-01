@@ -172,13 +172,22 @@ pub async fn get_user_notes(
 pub async fn search_users(
     query: String,
     limit: Option<u32>,
+    cursor: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SearchUsersResponse, String> {
     let trimmed = query.trim();
-    let max = limit.unwrap_or(8).min(50) as usize;
+    let max = limit.unwrap_or(8).min(500) as usize;
+    let page = cursor
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1);
 
     if max == 0 {
-        return Ok(SearchUsersResponse { users: Vec::new() });
+        return Ok(SearchUsersResponse {
+            users: Vec::new(),
+            next_cursor: None,
+        });
     }
 
     if trimmed.is_empty() {
@@ -187,6 +196,7 @@ pub async fn search_users(
             &[serde_json::json!({
                 "kinds": [0],
                 "limit": max,
+                "page": page,
             })],
         )
         .await?;
@@ -201,24 +211,27 @@ pub async fn search_users(
     // and scanning client-side. The old path was capped at 2000 kind:0 events
     // by the relay's HTTP bridge limit, which silently hid users on busy relays.
     //
-    // We over-fetch (limit=50, which the bridge accepts up to 500) and re-rank
+    // We fetch one bounded page (bridge accepts up to 500) and re-rank that page
     // locally because the relay scores FTS rank against the whole kind:0 JSON
     // `content` blob, where a hit in `display_name` is not weighted any higher
-    // than a substring hit in `about`. Re-ranking ≤50 results client-side is
-    // cheap and keeps display ordering predictable for autocomplete.
+    // than a substring hit in `about`. The caller can request later pages via the
+    // cursor so the UI cap is only a page size, not a terminal directory ceiling.
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "kinds": [0],
             "search": trimmed,
-            "limit": 50,
+            "limit": max,
+            "page": page,
         })],
     )
     .await?;
 
-    Ok(nostr_convert::rank_user_search_results(
-        &events, trimmed, max,
-    ))
+    let mut response = nostr_convert::rank_user_search_results(&events, trimmed, max);
+    if events.len() >= max {
+        response.next_cursor = Some((page + 1).to_string());
+    }
+    Ok(response)
 }
 
 #[tauri::command]

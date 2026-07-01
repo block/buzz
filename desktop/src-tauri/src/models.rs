@@ -48,6 +48,7 @@ pub struct UserSearchResultInfo {
 #[derive(Serialize, Deserialize)]
 pub struct SearchUsersResponse {
     pub users: Vec<UserSearchResultInfo>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -32,6 +32,7 @@ import type {
   UpdateProfileInput,
   UpdateChannelInput,
   UserProfileSummary,
+  UserSearchPage,
   UserSearchResult,
   UsersBatchResponse,
   CreateManagedAgentInput,
@@ -69,6 +70,7 @@ type RawUserSearchResult = RawUserProfileSummary & { pubkey: string };
 
 type RawSearchUsersResponse = {
   users: RawUserSearchResult[];
+  next_cursor?: string | null;
 };
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
@@ -503,12 +505,17 @@ export async function getUsersBatch(
 export async function searchUsers(
   query: string,
   limit = 8,
-): Promise<UserSearchResult[]> {
+  cursor?: string | null,
+): Promise<UserSearchPage> {
   const response = await invokeTauri<RawSearchUsersResponse>("search_users", {
     query,
     limit,
+    cursor: cursor ?? null,
   });
-  return response.users.map(fromRawUserSearchResult);
+  return {
+    users: response.users.map(fromRawUserSearchResult),
+    nextCursor: response.next_cursor ?? null,
+  };
 }
 
 export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {

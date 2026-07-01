@@ -183,6 +183,7 @@ type RawUserSearchResult = {
 
 type RawSearchUsersResponse = {
   users: RawUserSearchResult[];
+  next_cursor?: string | null;
 };
 
 type PresenceStatus = "online" | "away" | "offline";
@@ -3932,6 +3933,7 @@ async function handleSearchUsers(
   args: {
     query: string;
     limit?: number;
+    cursor?: string | null;
   },
   config: E2eConfig | undefined,
 ) {
@@ -3946,7 +3948,9 @@ async function handleSearchUsers(
   if (!identity) {
     const normalizedQuery = args.query.trim().toLowerCase();
 
-    const results = listMockProfiles()
+    const limit = args.limit ?? 8;
+    const page = Math.max(Number(args.cursor ?? 1) || 1, 1);
+    const allResults = listMockProfiles()
       .filter((profile) => {
         if (normalizedQuery.length === 0) {
           return true;
@@ -3966,8 +3970,9 @@ async function handleSearchUsers(
         const rightName =
           right.display_name ?? right.nip05_handle ?? right.pubkey;
         return leftName.localeCompare(rightName);
-      })
-      .slice(0, args.limit ?? 8)
+      });
+    const results = allResults
+      .slice((page - 1) * limit, page * limit)
       .map((profile) => ({
         pubkey: profile.pubkey,
         display_name: profile.display_name,
@@ -3979,16 +3984,18 @@ async function handleSearchUsers(
 
     return {
       users: results,
+      next_cursor: page * limit < allResults.length ? String(page + 1) : null,
     } satisfies RawSearchUsersResponse;
   }
 
   // NIP-50 search on kind:0 profiles
   const limit = args.limit ?? 8;
   const normalizedQuery = args.query.trim();
+  const page = Math.max(Number(args.cursor ?? 1) || 1, 1);
   const filter =
     normalizedQuery.length === 0
-      ? { kinds: [0], limit }
-      : { kinds: [0], search: args.query, limit };
+      ? { kinds: [0], limit, page }
+      : { kinds: [0], search: args.query, limit, page };
   const events = await relayQuery(config, [filter]);
   const users = events.map((ev) => {
     const content = JSON.parse(ev.content ?? "{}");
@@ -4009,7 +4016,10 @@ async function handleSearchUsers(
         : false,
     };
   });
-  return { users };
+  return {
+    users,
+    next_cursor: users.length >= limit ? String(page + 1) : null,
+  };
 }
 
 async function handleGetPresence(
