@@ -23,7 +23,10 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { truncatePubkey } from "@/features/profile/lib/identity";
+import {
+  ownsAuthorAgent,
+  truncatePubkey,
+} from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
@@ -230,7 +233,6 @@ export function UserProfilePopover({
   // shape as the pane/sidebar/memory fixes. Every real boundary is server-side;
   // this only decides whether to paint the "View activity log" button.
   const isOwner = useIsManagedAgent(isBotProfile ? pubkey : null);
-  const ownerPubkey = profile?.ownerPubkey ?? null;
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
   const isSelf =
@@ -240,10 +242,7 @@ export function UserProfilePopover({
   const showHumanProfileActions =
     showProfileActions && !isBotProfile && !isAgentClassificationPending;
   const selfProfileQuery = useProfileQuery(open && showProfileActions);
-  const isCurrentUserOwner =
-    currentPubkey !== undefined &&
-    ownerPubkey !== null &&
-    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
   const canViewActivity =
     isBotProfile && viewerIsOwner && Boolean(onOpenAgentSession);

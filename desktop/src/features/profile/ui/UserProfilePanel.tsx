@@ -53,6 +53,7 @@ import {
   useUserProfileQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import {
   AgentInfoFocusedView,
   AgentInstructionsFocusedView,
@@ -269,10 +270,7 @@ export function UserProfilePanel({
   // the relay routes and the client decrypts those frames with the owner's OWN
   // key, so the agent's seckey is never needed. Computed here (before the gates
   // that consume it) so visibility keys off declared ownership, not key custody.
-  const isCurrentUserOwner =
-    currentPubkey !== undefined &&
-    ownerPubkey !== null &&
-    ownerPubkey.toLowerCase() === currentPubkey.toLowerCase();
+  const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   // The viewer may see owner-scoped data if they declared-own the agent OR they
   // manage it locally (older agents may not advertise an owner pubkey). Every
   // real boundary is server-side, so this only controls what UI we paint.
