@@ -657,32 +657,21 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
   assert.equal(kids[0].value, "buzz://message?channel=c&id=m");
 });
 
-// ── computeConfigNudge render-level guard ─────────────────────────────────────
+// ── selectProseOrNudge render-level guard ─────────────────────────────────────
 //
-// `MarkdownInner` calls `computeConfigNudge(content, interactive, pubkey)`
-// inside its `useMemo` and then gates the markdown prose node behind:
+// `MarkdownInner` calls `selectProseOrNudge(configNudge, markdownNode)` —
+// the single production copy of the prose-suppression branch, exported from
+// `computeConfigNudge.ts`. These tests import and call that exact function
+// through a minimal stub so a revert that changes its behavior is caught
+// at unit-test time.
 //
-//   {configNudge === null ? markdownNode : null}
-//
-// The full `Markdown` component cannot be server-rendered in this environment
-// (emoji-mart JSON imports crash the module loader). Instead these tests verify
-// the guard at the component render seam using a minimal wrapper that reproduces
-// the exact `configNudge === null ? markdownNode : null` pattern with the real
-// `computeConfigNudge` function — the same function `MarkdownInner` calls.
-//
-// A revert that changes `computeConfigNudge` to always return null would break
-// `nudgeGuard_sentinelPresentMatchingAuthor_cardRenderedProseAbsent`.
-// A revert that changes `MarkdownInner` to pass wrong args to `computeConfigNudge`
-// would break `nudgeGuard_sentinelPresentMatchingAuthor_cardRenderedProseAbsent`
-// (the function itself would return null, no card).
-//
-// For a revert that keeps `computeConfigNudge` intact but removes the guard
-// from `MarkdownInner` (i.e., renders markdownNode unconditionally): the guard
-// can only be verified at E2E level; that regression would be caught by visual
-// inspection. The parse + render tests here cover the maximally testable seam
-// short of a full component integration environment.
+// (The full `Markdown` component cannot be rendered in this environment:
+// emoji-mart JSON imports crash the module loader before React runs.)
 
-import { computeConfigNudge } from "../lib/computeConfigNudge.ts";
+import {
+  computeConfigNudge,
+  selectProseOrNudge,
+} from "../lib/computeConfigNudge.ts";
 import { stripConfigNudgeSentinel } from "../lib/configNudge.ts";
 
 const AGENT_PUBKEY =
@@ -707,9 +696,10 @@ function nudgeBody(agentPubkey) {
   ].join("\n");
 }
 
-// Minimal wrapper that reproduces the exact guard from MarkdownInner without
-// importing any Tauri or context dependencies. Uses the real computeConfigNudge
-// so the test is pinned to the production logic.
+// Minimal wrapper that calls the real production functions from
+// `computeConfigNudge.ts` — `computeConfigNudge` to detect the payload and
+// `selectProseOrNudge` for the prose-suppression branch — without importing
+// any Tauri or context dependencies.
 function GuardStub({ content, configNudgeAuthorPubkey }) {
   const configNudge = computeConfigNudge(
     content,
@@ -726,7 +716,7 @@ function GuardStub({ content, configNudgeAuthorPubkey }) {
   return React.createElement(
     "div",
     null,
-    configNudge === null ? markdownNode : null,
+    selectProseOrNudge(configNudge, markdownNode),
     configNudge !== null
       ? React.createElement("div", { "data-config-nudge": "" })
       : null,
