@@ -44,6 +44,15 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
       <PopoverContent
         align="start"
         className="w-auto p-0 rounded-2xl overflow-hidden border-0 bg-transparent shadow-none"
+        // Prevent Radix's FocusScope from stealing focus on open — our
+        // disableSearchInputCorrections MutationObserver owns focus for
+        // the shadow-DOM search input (autoFocus path).
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        // Prevent Radix from returning focus to the trigger button on
+        // close — insertEmoji calls editor.chain().focus() before
+        // setIsEmojiPickerOpen(false), so the editor owns focus by the
+        // time the popover closes; let that stand.
+        onCloseAutoFocus={(e) => e.preventDefault()}
         side="top"
         sideOffset={10}
       >
