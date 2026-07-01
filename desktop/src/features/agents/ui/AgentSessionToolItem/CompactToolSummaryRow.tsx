@@ -3,6 +3,7 @@ import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import type { AgentActivityAction } from "../agentSessionTypes";
 import type { CompactFileEditSummary } from "../agentSessionToolSummary";
 import { isInlineImageData } from "../agentSessionUtils";
@@ -32,6 +33,8 @@ export function CompactToolSummaryRow({
   thumbnailSrc: string | null;
 }) {
   const [thumbnailFailed, setThumbnailFailed] = React.useState(false);
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
   const mutedTone = compactSummaryTone();
   const resolvedThumbnail = React.useMemo(() => {
     if (!thumbnailSrc || thumbnailFailed) return null;
@@ -53,7 +56,13 @@ export function CompactToolSummaryRow({
           verb={actionLabel.verb}
         />
       ) : (
-        <span className={cn("shrink-0 text-sm font-semibold", mutedTone)}>
+        <span
+          className={cn(
+            "shrink-0 font-semibold",
+            isCompactPreview ? "text-xs" : "text-sm",
+            mutedTone,
+          )}
+        >
           {label}
         </span>
       )}
@@ -69,7 +78,11 @@ export function CompactToolSummaryRow({
         />
       ) : !fileEditSummary && !actionLabel && preview ? (
         <span
-          className={cn("min-w-0 max-w-48 truncate text-sm", mutedTone)}
+          className={cn(
+            "min-w-0 max-w-48 truncate",
+            isCompactPreview ? "text-xs" : "text-sm",
+            mutedTone,
+          )}
           title={preview}
         >
           {preview}

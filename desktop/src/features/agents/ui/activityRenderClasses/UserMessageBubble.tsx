@@ -104,7 +104,9 @@ export function UserMessageBubble({
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
-            openProfilePanel(item.authorPubkey);
+            if (item.authorPubkey) {
+              openProfilePanel(item.authorPubkey);
+            }
           }}
           type="button"
         >

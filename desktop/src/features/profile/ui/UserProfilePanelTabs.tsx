@@ -455,9 +455,13 @@ function ProfileLiveActivityEmbed({
 
   const handleDotSelect = React.useCallback(
     (index: number) => {
-      carouselApi?.scrollTo(index);
+      const targetIndex =
+        slides.length === 2 && index === selectedIndex
+          ? (selectedIndex + 1) % slides.length
+          : index;
+      carouselApi?.scrollTo(targetIndex);
     },
-    [carouselApi],
+    [carouselApi, selectedIndex, slides.length],
   );
 
   if (slides.length === 0) {
@@ -490,8 +494,7 @@ function ProfileLiveActivityEmbed({
           transcriptVariant="compactPreview"
         />
         <div className="pointer-events-none absolute inset-0 z-20">
-          <div className="absolute inset-x-0 top-0 h-10 bg-linear-to-b from-muted/80 to-transparent" />
-          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted to-transparent px-3 pb-3 pt-10">
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted via-muted/90 to-transparent px-3 pb-3 pt-24">
             <div className="min-w-0">
               <span className="block text-base font-semibold text-muted-foreground">
                 Latest Activity
@@ -562,10 +565,9 @@ function ProfileLiveActivityEmbed({
         </CarouselContent>
       </Carousel>
       <div className="pointer-events-none absolute inset-0 z-20">
-        <div className="absolute inset-x-0 top-0 h-10 bg-linear-to-b from-muted/80 to-transparent" />
-        <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted to-transparent px-3 pb-3 pt-10">
+        <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted via-muted/80 to-transparent px-3 pb-3 pt-16">
           <div className="min-w-0">
-            <span className="block text-base font-semibold text-muted-foreground">
+            <span className="block text-sm font-semibold text-muted-foreground">
               Latest Activity
             </span>
             {activeChannelName ? (
@@ -619,12 +621,7 @@ function ActivityCarouselDots({
           <button
             aria-label={`Show #${channelName} activity`}
             aria-selected={isSelected}
-            className={cn(
-              "h-1.5 rounded-full transition-all",
-              isSelected
-                ? "w-4 bg-primary"
-                : "w-1.5 bg-muted-foreground/40 hover:bg-muted-foreground/70",
-            )}
+            className="group relative flex items-center justify-center before:absolute before:-inset-2 before:content-['']"
             data-testid={`user-profile-activity-dot-${channelId}`}
             key={channelId}
             onClick={(event) => {
@@ -633,7 +630,17 @@ function ActivityCarouselDots({
             }}
             role="tab"
             type="button"
-          />
+          >
+            <span
+              aria-hidden="true"
+              className={cn(
+                "relative z-10 block rounded-full transition-all",
+                isSelected
+                  ? "h-1.5 w-4 bg-primary"
+                  : "h-1.5 w-1.5 bg-muted-foreground/40 group-hover:bg-muted-foreground/70",
+              )}
+            />
+          </button>
         );
       })}
     </div>

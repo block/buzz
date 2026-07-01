@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 
 export type ActivityRowLabelParts = {
   verb: string;
@@ -113,6 +114,9 @@ export function ActivityRowLabel({
   stats?: ActivityRowStats | null;
   title?: string;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
+
   return (
     <span
       className={cn("inline-flex min-w-0 items-center gap-1.5", className)}
@@ -120,7 +124,8 @@ export function ActivityRowLabel({
     >
       <span
         className={cn(
-          "shrink-0 text-sm font-semibold text-muted-foreground/50",
+          "shrink-0 font-semibold text-muted-foreground/50",
+          isCompactPreview ? "text-xs" : "text-sm",
           openToneScope === "none"
             ? null
             : openToneScope === "summary"
@@ -133,7 +138,8 @@ export function ActivityRowLabel({
       {object ? (
         <span
           className={cn(
-            "min-w-0 truncate text-sm font-normal text-muted-foreground/60",
+            "min-w-0 truncate font-normal text-muted-foreground/60",
+            isCompactPreview ? "text-xs" : "text-sm",
             openToneScope === "none"
               ? null
               : openToneScope === "summary"

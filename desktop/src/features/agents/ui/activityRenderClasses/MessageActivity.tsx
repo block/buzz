@@ -57,8 +57,8 @@ function MessageItem({
       <div className="group relative flex w-full min-w-0 flex-col items-start gap-1">
         <div
           className={cn(
-            "w-full min-w-0 text-sm",
-            isCompactPreview && "text-xs leading-4",
+            "w-full min-w-0",
+            isCompactPreview ? "text-xs leading-4" : "text-sm",
           )}
           title={formatTranscriptTimestampTitle(item.timestamp)}
         >
