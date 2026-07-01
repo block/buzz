@@ -23,6 +23,7 @@
 //! - `OTEL_TRACES_SAMPLER` (default: `parentbased_always_on`)
 //! - `OTEL_TRACES_SAMPLER_ARG`
 
+use opentelemetry_otlp::ExporterBuildError;
 use opentelemetry_sdk::{resource::EnvResourceDetector, trace::SdkTracerProvider, Resource};
 
 /// Build the OTEL [`Resource`] used by the trace provider.
@@ -81,10 +82,21 @@ pub fn try_init_tracer(resource: Resource) -> TracerInit {
         return TracerInit::Disabled;
     }
 
-    match opentelemetry_otlp::SpanExporter::builder()
+    let result = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .build()
-    {
+        .build();
+    classify_exporter_result(result, resource)
+}
+
+/// Map a `Result<SpanExporter, ExporterBuildError>` to a [`TracerInit`] variant.
+///
+/// Extracted so the `Err → ExporterBuildFailed` classification can be unit-tested
+/// deterministically without relying on SDK behaviour for specific URI inputs.
+fn classify_exporter_result(
+    result: Result<opentelemetry_otlp::SpanExporter, ExporterBuildError>,
+    resource: Resource,
+) -> TracerInit {
+    match result {
         Ok(exporter) => {
             let provider = SdkTracerProvider::builder()
                 .with_resource(resource)
@@ -177,25 +189,26 @@ mod tests {
         );
     }
 
+    /// Pin the `Err(ExporterBuildError) → TracerInit::ExporterBuildFailed` mapping
+    /// deterministically by synthesising an error value directly, without relying on
+    /// SDK/tonic behaviour for a particular URI at build time.
     #[test]
-    fn test_try_init_tracer_exporter_build_failed_on_bad_endpoint() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // Set endpoint to a value that causes tonic to reject during build
-        // (invalid URI scheme forces a build-time error).
-        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "not-a-valid-uri:///bad");
-
+    fn test_classify_exporter_result_maps_err_to_exporter_build_failed() {
         let resource = Resource::builder_empty()
             .with_attribute(KeyValue::new("service.name", "test"))
             .build();
-        let result = try_init_tracer(resource);
-        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
 
-        // Either ExporterBuildFailed (build rejected the URI) or Enabled
-        // (tonic accepted it for lazy connection) — both are valid SDK
-        // behaviours.  What we assert is it is NOT Disabled.
+        // Construct a concrete ExporterBuildError variant directly.
+        // InvalidUri is available under the grpc-tonic feature we already depend on.
+        let err = ExporterBuildError::InvalidUri(
+            "bad-scheme://host".to_string(),
+            "unsupported scheme".to_string(),
+        );
+        let result = classify_exporter_result(Err(err), resource);
+
         assert!(
-            !matches!(result, TracerInit::Disabled),
-            "expected Enabled or ExporterBuildFailed when endpoint is set"
+            matches!(result, TracerInit::ExporterBuildFailed(_)),
+            "expected ExporterBuildFailed when classify_exporter_result receives an Err"
         );
     }
 }
