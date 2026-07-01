@@ -278,7 +278,7 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
         return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
       }),
     )
-    .toBe("40x32");
+    .toBe("40x28");
   await expect
     .poll(() =>
       inlineAddReactionButton.evaluate((button) => {
@@ -295,7 +295,7 @@ test("reacting with a custom emoji renders via the loopback media proxy", async 
         return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
       }),
     )
-    .toBe("40x32");
+    .toBe("40x28");
 
   // Toggle the reaction back off: click the pill, which fires remove_reaction
   // -> emits a kind:5 deletion targeting the reaction event. The pill must

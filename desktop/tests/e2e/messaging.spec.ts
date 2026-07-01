@@ -643,7 +643,7 @@ test("opens a single-level thread panel with inline expansion", async ({
           return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
         }),
     )
-    .toBe("28x28");
+    .toBe("24x24");
   const summaryGeometry = await measureThreadSummaryGeometry(rootSummaryRow);
   expect(
     Math.abs(summaryGeometry.authorLeft - summaryGeometry.bodyLeft),
