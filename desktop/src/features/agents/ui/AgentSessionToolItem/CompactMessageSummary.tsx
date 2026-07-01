@@ -64,7 +64,10 @@ export function CompactMessageSummary({
             )}
             data-testid="transcript-tool-message-preview"
           >
-            <Markdown content={preview || "Message content unavailable."} />
+            <Markdown
+              className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
+              content={preview || "Message content unavailable."}
+            />
           </div>
           <div className="inline-flex max-w-full items-center gap-1.5 px-1">
             <TranscriptTimestamp
