@@ -41,7 +41,10 @@ import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { stripConfigNudgeSentinel } from "@/shared/lib/configNudge";
-import { computeConfigNudge } from "@/shared/lib/computeConfigNudge";
+import {
+  computeConfigNudge,
+  selectProseOrNudge,
+} from "@/shared/lib/computeConfigNudge";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -2091,7 +2094,7 @@ function MarkdownInner({
       )}
     >
       <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
-        {configNudge === null ? markdownNode : null}
+        {selectProseOrNudge(configNudge, markdownNode)}
         {configNudge !== null ? (
           <AttachmentGroup
             className="max-w-full flex-wrap overflow-visible pb-0"
