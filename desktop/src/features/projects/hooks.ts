@@ -22,6 +22,7 @@ import {
   KIND_GIT_STATUS_OPEN,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
+  KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import type {
   ProjectLocalRepository,
@@ -279,7 +280,7 @@ async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
 async function fetchProjectPullRequests(
   project: Project,
 ): Promise<ProjectPullRequest[]> {
-  const [pullRequestEvents, updateEvents] = await Promise.all([
+  const [pullRequestEvents, updateEvents, commentEvents] = await Promise.all([
     relayClient.fetchEvents({
       kinds: [KIND_GIT_PULL_REQUEST],
       "#a": [project.repoAddress],
@@ -290,11 +291,55 @@ async function fetchProjectPullRequests(
       "#a": [project.repoAddress],
       limit: 500,
     }),
+    relayClient.fetchEvents({
+      kinds: [KIND_TEXT_NOTE],
+      "#a": [project.repoAddress],
+      limit: 500,
+    }),
   ]);
 
   return projectPullRequestEventsToPullRequests(
     pullRequestEvents,
     updateEvents,
+    commentEvents,
+  );
+}
+
+async function createProjectPullRequestComment({
+  content,
+  project,
+  pullRequest,
+}: {
+  content: string;
+  project: Project;
+  pullRequest: ProjectPullRequest;
+}): Promise<void> {
+  const body = content.trim();
+  if (!body) {
+    throw new Error("Comment cannot be empty.");
+  }
+
+  const recipients = new Set([
+    project.owner.toLowerCase(),
+    pullRequest.author.toLowerCase(),
+    ...pullRequest.recipients.map((recipient) => recipient.toLowerCase()),
+  ]);
+  const tags = [
+    ["e", pullRequest.id, "", "root"],
+    ["a", project.repoAddress],
+    ...[...recipients].map((recipient) => ["p", recipient]),
+  ];
+
+  const event = await signRelayEvent({
+    kind: KIND_TEXT_NOTE,
+    content: body,
+    tags,
+  });
+
+  await relayClient.publishEvent(
+    event,
+    "Timed out posting pull request comment.",
+    "Failed to post pull request comment.",
   );
 }
 
@@ -511,6 +556,30 @@ export function useProjectPullRequestsQuery(
       return fetchProjectPullRequests(project);
     },
     staleTime: 30_000,
+  });
+}
+
+export function useCreateProjectPullRequestCommentMutation(
+  project: Project | null | undefined,
+) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({
+      content,
+      pullRequest,
+    }: {
+      content: string;
+      pullRequest: ProjectPullRequest;
+    }) => {
+      if (!project) throw new Error("No project selected.");
+      return createProjectPullRequestComment({ content, project, pullRequest });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["project", project?.id ?? "none", "pull-requests"],
+      });
+    },
   });
 }
 

@@ -1,5 +1,4 @@
 import {
-  ArrowLeft,
   BookOpen,
   Braces,
   ChevronRight,
@@ -33,7 +32,6 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Button } from "@/shared/ui/button";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -622,23 +620,37 @@ function BreadcrumbButton({
 
 function FileContentPanel({
   file,
-  onBack,
+  onOpenPath,
 }: {
   file: ProjectRepoFile;
-  onBack: () => void;
+  onOpenPath: (path: string) => void;
 }) {
   const language = languageForPath(file.path);
+  const pathSegments = file.path.split("/").filter(Boolean);
+  const fileName = pathSegments[pathSegments.length - 1] ?? file.path;
+  const directorySegments = pathSegments.slice(0, -1);
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
-      <div className="flex min-h-10 items-center gap-2 border-border/50 border-b bg-muted/20 px-4">
-        <Button className="h-7 px-2" onClick={onBack} size="sm" variant="ghost">
-          <ArrowLeft className="h-3.5 w-3.5" />
-          Back
-        </Button>
+      <div className="flex min-h-10 items-center gap-1 border-border/50 border-b bg-muted/20 px-3">
+        <BreadcrumbButton onClick={() => onOpenPath("")}>
+          Files
+        </BreadcrumbButton>
+        {directorySegments.map((segment, index) => {
+          const nextPath = directorySegments.slice(0, index + 1).join("/");
+          return (
+            <React.Fragment key={nextPath}>
+              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+              <BreadcrumbButton onClick={() => onOpenPath(nextPath)}>
+                {segment}
+              </BreadcrumbButton>
+            </React.Fragment>
+          );
+        })}
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         <FileDiff className="h-4 w-4 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
-          {file.path}
+        <span className="min-w-0 flex-1 truncate px-1.5 py-1 font-mono text-xs text-foreground">
+          {fileName}
         </span>
         <div className="hidden shrink-0 items-center gap-3 text-2xs text-muted-foreground sm:flex">
           <span>Last changed {formatLastChangedAt(file.lastChangedAt)}</span>
@@ -769,7 +781,10 @@ export function RepositoryFilesPanel({
     return (
       <FileContentPanel
         file={selectedFile}
-        onBack={() => setSelectedFile(null)}
+        onOpenPath={(path) => {
+          setSelectedFile(null);
+          setCurrentPath(path);
+        }}
       />
     );
   }
@@ -848,43 +863,6 @@ export function RepositoryFilesPanel({
             </tr>
           </thead>
           <tbody>
-            {currentPath ? (
-              <tr
-                aria-label="Go to parent folder"
-                className="cursor-pointer border-border/50 border-b transition-colors hover:bg-muted/35 focus-visible:bg-muted/35 focus-visible:outline-hidden"
-                onClick={() => {
-                  const parent = currentPath.split("/").slice(0, -1).join("/");
-                  setCurrentPath(parent);
-                }}
-                onKeyDown={(event) =>
-                  handleRepositoryEntryKeyDown(event, () => {
-                    const parent = currentPath
-                      .split("/")
-                      .slice(0, -1)
-                      .join("/");
-                    setCurrentPath(parent);
-                  })
-                }
-                tabIndex={0}
-              >
-                <td className="min-w-52 p-3 align-middle">
-                  <div className="flex min-w-0 items-center gap-2">
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/15">
-                      <FolderGit2 className="h-4 w-4 fill-sky-500/25 text-sky-500" />
-                    </span>
-                    <span className="truncate font-medium text-muted-foreground">
-                      ..
-                    </span>
-                  </div>
-                </td>
-                <td className="p-3 align-middle text-muted-foreground">
-                  Parent folder
-                </td>
-                <td className="w-36 p-3 text-right align-middle text-muted-foreground">
-                  —
-                </td>
-              </tr>
-            ) : null}
             {visibleEntries.map((entry, index) => {
               const latestCommit = entry.latestCommit;
               const rowIsLast = index === visibleEntries.length - 1;

@@ -3,7 +3,6 @@ import {
   BookOpen,
   ExternalLink,
   FolderGit2,
-  GitPullRequest,
   MessageSquare,
   Users,
 } from "lucide-react";
@@ -64,11 +63,8 @@ import {
   ReadmePanel,
   RepositoryFilesPanel,
 } from "./ProjectRepositoryPanel";
-import {
-  RepositorySourceCard,
-  RepositorySourceNotice,
-  RepositorySyncStatusCard,
-} from "./ProjectRepositorySource";
+import { PullRequestsPanel } from "./ProjectPullRequestsPanel";
+import { RepositorySourceCard } from "./ProjectRepositorySource";
 import {
   ProfileAuthorName,
   ProfileIdentityButton,
@@ -349,71 +345,6 @@ function ActivityPanel({
   );
 }
 
-function PullRequestsPanel({
-  error,
-  isLoading,
-  pullRequests,
-}: {
-  error: unknown;
-  isLoading: boolean;
-  pullRequests: ProjectPullRequest[];
-}) {
-  if (isLoading) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">
-        Loading pull requests…
-      </p>
-    );
-  }
-
-  if (pullRequests.length === 0) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">
-        {error
-          ? "Could not load pull requests for this repository."
-          : "No pull requests yet."}
-      </p>
-    );
-  }
-
-  return (
-    <div className="divide-y divide-border/50">
-      {pullRequests.map((pullRequest) => (
-        <article
-          className="flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/30"
-          key={pullRequest.id}
-        >
-          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-            <GitPullRequest className="h-4 w-4" />
-          </div>
-          <div className="min-w-0 flex-1 space-y-1">
-            <p className="truncate text-sm font-medium text-foreground">
-              {pullRequest.title}
-            </p>
-            <p className="truncate text-xs text-muted-foreground">
-              {pullRequest.branchName ? `${pullRequest.branchName} · ` : ""}
-              {pullRequest.updateCount > 0
-                ? `${pluralize(pullRequest.updateCount, "update")} · `
-                : ""}
-              {compactDate(pullRequest.updatedAt)}
-            </p>
-            {pullRequest.content ? (
-              <p className="line-clamp-2 text-sm text-muted-foreground">
-                {pullRequest.content}
-              </p>
-            ) : null}
-          </div>
-          {pullRequest.commit ? (
-            <code className="shrink-0 rounded-md bg-background/55 px-2 py-1 text-xs text-muted-foreground">
-              {pullRequest.commit.slice(0, 7)}
-            </code>
-          ) : null}
-        </article>
-      ))}
-    </div>
-  );
-}
-
 function snapshotHasContent(snapshot: ProjectRepoSnapshot | null | undefined) {
   return Boolean(
     snapshot &&
@@ -509,11 +440,6 @@ function WorkspaceTabs({
         className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
         value="activity"
       >
-        {repoSource === "local" ? (
-          <div className="p-3 pb-0">
-            <RepositorySourceNotice path={localSnapshot?.path} source="local" />
-          </div>
-        ) : null}
         <ActivityPanel
           error={displayedSnapshotError}
           isLoading={displayedSnapshotLoading}
@@ -530,17 +456,13 @@ function WorkspaceTabs({
         <PullRequestsPanel
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
+          profiles={profiles}
+          project={project}
           pullRequests={pullRequests}
         />
       </TabsContent>
 
       <TabsContent className="m-0" value="files">
-        <div className="mb-3">
-          <RepositorySourceNotice
-            path={repoSource === "local" ? localSnapshot?.path : null}
-            source={repoSource}
-          />
-        </div>
         {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
           <div className="mb-3">
             <div className="rounded-xl border border-border/50 bg-card/60 p-4 text-sm text-muted-foreground">
@@ -560,23 +482,11 @@ function WorkspaceTabs({
 
       {readmeFile ? (
         <TabsContent className="m-0" value="readme">
-          <div className="mb-3">
-            <RepositorySourceNotice
-              path={repoSource === "local" ? localSnapshot?.path : null}
-              source={repoSource}
-            />
-          </div>
           <ReadmePanel file={readmeFile} />
         </TabsContent>
       ) : null}
 
       <TabsContent className="m-0" value="contributors">
-        <div className="mb-3">
-          <RepositorySourceNotice
-            path={repoSource === "local" ? localSnapshot?.path : null}
-            source={repoSource}
-          />
-        </div>
         <ContributorsPanel
           profiles={profiles}
           repoContributors={displayedContributors}
@@ -623,12 +533,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   );
   const activeBranch =
     selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
-  const displayedBranch =
-    activeBranch === "main" && branchOptions.length <= 1 && project?.dtag
-      ? project.dtag
-      : activeBranch;
-  const displayedBranchOptions =
-    displayedBranch === activeBranch ? branchOptions : [];
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
   const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
     project,
@@ -892,21 +796,12 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                         {project.description}
                       </p>
                     ) : null}
-                    <ProfileIdentityButton
-                      align="center"
-                      avatarSize="xs"
-                      avatarUrl={ownerProfile?.avatarUrl ?? null}
-                      avatarClassName="mt-0.5"
-                      isAgent={ownerProfile?.isAgent === true}
-                      label={ownerLabel}
-                      pubkey={project.owner}
-                    />
                   </div>
                 </div>
 
                 <RepositorySourceCard
-                  branch={displayedBranch ?? ""}
-                  branchOptions={displayedBranchOptions}
+                  branch={activeBranch ?? ""}
+                  branchOptions={branchOptions}
                   cloneUrls={project.cloneUrls}
                   localDisabled={
                     !repoSyncStatusQuery.data?.localPath &&
@@ -921,23 +816,24 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                         ? "Local"
                         : "Local missing"
                   }
-                  onBranchChange={setSelectedBranch}
-                  onSourceChange={setRepoSource}
-                  remoteLabel={
-                    repoSnapshotQuery.isLoading ? "Remote checking" : "Remote"
+                  localPath={
+                    repoSyncStatusQuery.data?.localPath ??
+                    localRepoSnapshotQuery.data?.path
                   }
-                  source={repoSource}
-                />
-                <RepositorySyncStatusCard
-                  isLoading={repoSyncStatusQuery.isLoading}
+                  onBranchChange={setSelectedBranch}
                   onPush={() => {
                     void handlePushLocalRepo();
                   }}
+                  onSourceChange={setRepoSource}
                   pushDisabled={
                     pushLocalRepoMutation.isPending ||
                     !repoSyncStatusQuery.data?.canPush
                   }
                   pushPending={pushLocalRepoMutation.isPending}
+                  remoteLabel={
+                    repoSnapshotQuery.isLoading ? "Remote checking" : "Remote"
+                  }
+                  source={repoSource}
                   status={repoSyncStatusQuery.data}
                 />
               </section>
@@ -959,18 +855,24 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 snapshotLoading={repoSnapshotQuery.isLoading}
               />
 
-              <section className="rounded-xl border border-border/50 bg-card/60 px-4 py-3">
-                <p className="truncate text-sm text-muted-foreground">
-                  <span className="font-medium text-foreground">Details:</span>{" "}
-                  <span>Repo: {project.repoAddress}</span>
-                  <span className="mx-2 text-border">•</span>
-                  <span>
-                    Creator:{" "}
-                    <ProfileAuthorName pubkey={project.owner}>
-                      {ownerLabel}
-                    </ProfileAuthorName>
-                  </span>
-                </p>
+              <section className="flex min-w-0 items-center gap-2 rounded-xl border border-border/50 bg-card/60 px-4 py-3 text-sm text-muted-foreground">
+                <span className="shrink-0 font-medium text-foreground">
+                  Details:
+                </span>
+                <span className="min-w-0 truncate">
+                  Repo: {project.repoAddress}
+                </span>
+                <span className="shrink-0 text-border">•</span>
+                <span className="shrink-0">Creator:</span>
+                <ProfileIdentityButton
+                  align="center"
+                  avatarClassName="mt-0.5"
+                  avatarSize="xs"
+                  avatarUrl={ownerProfile?.avatarUrl ?? null}
+                  isAgent={ownerProfile?.isAgent === true}
+                  label={ownerLabel}
+                  pubkey={project.owner}
+                />
               </section>
             </div>
           </div>

@@ -1,5 +1,6 @@
 export const KIND_DELETION = 5;
 export const KIND_REACTION = 7;
+export const KIND_TEXT_NOTE = 1;
 export const KIND_STREAM_MESSAGE = 9;
 // Buzz-native deletion. The relay soft-deletes the target and emits a
 // kind:40099 system message. Treated as a deletion marker alongside kind:5.
