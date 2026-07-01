@@ -1485,6 +1485,9 @@ pub fn spawn_agent_child(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
+    // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
+    // and for the env-var merge at spawn time.
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_command = super::record_agent_command(record, &personas);
     let agent_args = normalize_agent_args(&effective_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
@@ -1584,7 +1587,6 @@ pub fn spawn_agent_child(
             agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
         };
 
-        let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
         let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
         // Compute the optional payload before touching the command.
         let setup_payload_json =
@@ -1683,27 +1685,22 @@ pub fn spawn_agent_child(
         command.env("BUZZ_ACP_PERSONA_NAME", persona_name);
     }
 
-    // System prompt, model, and provider come from the record snapshot — the
-    // record is the authoritative spawn source. For persona-created agents the
-    // snapshot was pinned at create (see `create_managed_agent`); for others
-    // these are the user-supplied values. Reading the record (never the live
-    // persona) is what keeps a running agent pinned across restarts: a persona
-    // edit reaches the agent only via delete+respawn, which rewrites the
-    // snapshot.
-    // Prompt via the shared spawn-effective filter — the SAME function the
+    // System prompt via the shared spawn-effective filter — the SAME function the
     // config hash digests, so env write and badge cannot disagree (see
     // `effective_spawn_prompt` for the Some("")/None collapse and the
-    // team-pack suppression exception).
+    // team-pack suppression exception). Model and provider use the shared
+    // resolver: agent → persona → global → None, so a global-default-only agent
+    // spawns with the correct provider/model env.
     let effective_prompt = super::spawn_hash::effective_spawn_prompt(record);
-    let effective_model = record.model.clone();
-    let effective_provider = record.provider.clone();
+    let (effective_model, effective_provider) =
+        crate::managed_agents::resolve_effective_model_provider(record, &personas, &global);
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
-    if let Some(model) = &effective_model {
+    if let Some(model) = effective_model {
         command.env("BUZZ_ACP_MODEL", model);
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
@@ -1717,8 +1714,8 @@ pub fn spawn_agent_child(
             meta.model_env_var,
             meta.provider_env_var,
             meta.provider_locked,
-            effective_model.as_deref(),
-            effective_provider.as_deref(),
+            effective_model,
+            effective_provider,
         ) {
             command.env(key, value);
         }
@@ -1802,12 +1799,9 @@ pub fn spawn_agent_child(
     // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
     // which `merged_user_env` strips. Those carry Buzz's identity and must
     // never be GUI-overridable.
-    let global_env_for_spawn = crate::managed_agents::load_global_agent_config(app)
-        .unwrap_or_default()
-        .env_vars;
     // global < live persona < agent (last-wins on collision at each layer).
     let persona_over_global =
-        super::env_vars::merged_user_env(&global_env_for_spawn, &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()));
+        super::env_vars::merged_user_env(&global.env_vars, &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()));
     for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
         command.env(key, value);
     }

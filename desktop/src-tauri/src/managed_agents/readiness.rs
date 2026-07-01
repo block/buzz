@@ -103,31 +103,10 @@ pub(crate) fn resolve_effective_agent_env(
     // Layer 2: runtime metadata env vars (model / provider keys derived from
     // the record's structured fields, with global as fallback).
     //
-    // Structured-field fallback: effective provider/model = agent → persona → global → None.
-    // This means a global provider/model is used by readiness evaluation and spawn
-    // when neither the agent record nor the linked persona specifies one.
-    let persona_model = record.persona_id.as_deref().and_then(|pid| {
-        personas
-            .iter()
-            .find(|p| p.id == pid)
-            .and_then(|p| p.model.clone())
-    });
-    let persona_provider = record.persona_id.as_deref().and_then(|pid| {
-        personas
-            .iter()
-            .find(|p| p.id == pid)
-            .and_then(|p| p.provider.clone())
-    });
-    let effective_model = record
-        .model
-        .as_deref()
-        .or(persona_model.as_deref())
-        .or(global.model.as_deref());
-    let effective_provider = record
-        .provider
-        .as_deref()
-        .or(persona_provider.as_deref())
-        .or(global.provider.as_deref());
+    // Uses the shared resolver to guarantee readiness and spawn agree on the
+    // effective model/provider: agent → persona → global → None.
+    let (effective_model, effective_provider) =
+        super::global_config::resolve_effective_model_provider(record, personas, global);
 
     if let Some(rt) = runtime {
         for (key, value) in super::runtime::runtime_metadata_env_vars(
