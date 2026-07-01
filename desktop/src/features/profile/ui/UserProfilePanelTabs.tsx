@@ -383,7 +383,7 @@ function ProfileLiveActivityEmbed({
   return (
     <section
       aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
-      className="relative flex h-48 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
     >
       <button

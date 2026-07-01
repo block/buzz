@@ -15,6 +15,7 @@ import { PromptSectionList as PromptContextSections } from "./PromptSectionAccor
 import {
   AgentSessionTranscriptVariantProvider,
   type AgentSessionTranscriptVariant,
+  useAgentSessionTranscriptVariant,
 } from "./agentSessionTranscriptContext";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
@@ -117,6 +118,8 @@ export function AgentSessionTranscriptList({
     );
   }
 
+  const isCompactPreview = variant === "compactPreview";
+
   return (
     <div
       className={cn("w-full", autoTail ? "h-full overflow-y-auto" : null)}
@@ -126,7 +129,11 @@ export function AgentSessionTranscriptList({
       <div
         aria-label="Live ACP transcript"
         aria-live="polite"
-        className={cn("flex w-full flex-col gap-4", autoTail && "pb-4")}
+        className={cn(
+          "flex w-full flex-col",
+          isCompactPreview ? "gap-2" : "gap-4",
+          autoTail && "pb-4",
+        )}
         ref={autoTail ? contentRef : undefined}
         role="log"
       >
@@ -181,6 +188,9 @@ function TranscriptDisplayBlockView({
   block: TranscriptDisplayBlock;
   profiles?: UserProfileLookup;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
+
   if (block.kind === "single") {
     return (
       <TranscriptItemRow
@@ -195,7 +205,7 @@ function TranscriptDisplayBlockView({
 
   return (
     <div
-      className="flex flex-col gap-4"
+      className={cn("flex flex-col", isCompactPreview ? "gap-2.5" : "gap-4")}
       data-testid="transcript-turn-group"
       data-turn-id={block.turnId}
     >
