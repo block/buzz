@@ -307,10 +307,14 @@ async function fetchProjectPullRequests(
 
 async function createProjectPullRequestComment({
   content,
+  mediaTags,
+  mentionPubkeys = [],
   project,
   pullRequest,
 }: {
   content: string;
+  mediaTags?: string[][];
+  mentionPubkeys?: string[];
   project: Project;
   pullRequest: ProjectPullRequest;
 }): Promise<void> {
@@ -323,11 +327,13 @@ async function createProjectPullRequestComment({
     project.owner.toLowerCase(),
     pullRequest.author.toLowerCase(),
     ...pullRequest.recipients.map((recipient) => recipient.toLowerCase()),
+    ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
   ]);
   const tags = [
     ["e", pullRequest.id, "", "root"],
     ["a", project.repoAddress],
     ...[...recipients].map((recipient) => ["p", recipient]),
+    ...(mediaTags ?? []),
   ];
 
   const event = await signRelayEvent({
@@ -567,13 +573,23 @@ export function useCreateProjectPullRequestCommentMutation(
   return useMutation({
     mutationFn: ({
       content,
+      mediaTags,
+      mentionPubkeys,
       pullRequest,
     }: {
       content: string;
+      mediaTags?: string[][];
+      mentionPubkeys?: string[];
       pullRequest: ProjectPullRequest;
     }) => {
       if (!project) throw new Error("No project selected.");
-      return createProjectPullRequestComment({ content, project, pullRequest });
+      return createProjectPullRequestComment({
+        content,
+        mediaTags,
+        mentionPubkeys,
+        project,
+        pullRequest,
+      });
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({

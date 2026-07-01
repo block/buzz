@@ -1,13 +1,15 @@
-import { ArrowLeft, GitPullRequest, MessageSquare, Send } from "lucide-react";
+import { ArrowLeft, GitPullRequest, MessageSquare } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type Project,
   type ProjectPullRequest,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
@@ -35,6 +37,31 @@ function labelForPubkey(pubkey: string, profiles?: UserProfileLookup) {
     profile?.nip05Handle?.trim() ||
     `${pubkey.slice(0, 8)}…${pubkey.slice(-4)}`
   );
+}
+
+function pullRequestMembers(
+  project: Project,
+  pullRequest: ProjectPullRequest,
+  profiles?: UserProfileLookup,
+): ChannelMember[] {
+  return [
+    ...new Set([
+      project.owner,
+      pullRequest.author,
+      ...project.contributors,
+      ...pullRequest.recipients,
+    ]),
+  ].map((pubkey) => {
+    const profile = profileForPubkey(pubkey, profiles);
+    return {
+      pubkey,
+      role: "member" as const,
+      isAgent: profile?.isAgent === true,
+      joinedAt: new Date(0).toISOString(),
+      displayName:
+        profile?.displayName?.trim() || profile?.nip05Handle?.trim() || null,
+    };
+  });
 }
 
 function AuthorIdentity({
@@ -116,33 +143,34 @@ function PullRequestDetail({
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
-  const [comment, setComment] = React.useState("");
   const commentMutation = useCreateProjectPullRequestCommentMutation(project);
-  const canSubmit = comment.trim().length > 0 && !commentMutation.isPending;
+  const members = React.useMemo(
+    () => pullRequestMembers(project, pullRequest, profiles),
+    [profiles, project, pullRequest],
+  );
 
-  const handleSubmit = React.useCallback(
-    (event: React.FormEvent) => {
-      event.preventDefault();
-      if (!canSubmit) return;
-
-      commentMutation.mutate(
-        { content: comment, pullRequest },
-        {
-          onSuccess: () => {
-            setComment("");
-            toast.success("Comment posted.");
-          },
-          onError: (error) => {
-            toast.error(
-              error instanceof Error
-                ? error.message
-                : "Failed to post comment.",
-            );
-          },
-        },
-      );
+  const handleCommentSubmit = React.useCallback(
+    async (
+      content: string,
+      mentionPubkeys: string[],
+      mediaTags?: string[][],
+    ) => {
+      try {
+        await commentMutation.mutateAsync({
+          content,
+          mediaTags,
+          mentionPubkeys,
+          pullRequest,
+        });
+        toast.success("Comment posted.");
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to post comment.",
+        );
+        throw error;
+      }
     },
-    [canSubmit, comment, commentMutation, pullRequest],
+    [commentMutation, pullRequest],
   );
 
   return (
@@ -258,25 +286,15 @@ function PullRequestDetail({
         ) : (
           <p className="text-sm text-muted-foreground">No comments yet.</p>
         )}
-        <form className="space-y-2" onSubmit={handleSubmit}>
-          <textarea
-            className="min-h-24 w-full resize-y rounded-lg border border-border/50 bg-background/55 px-3 py-2 text-sm text-foreground outline-hidden placeholder:text-muted-foreground focus:border-ring"
-            onChange={(event) => setComment(event.target.value)}
-            placeholder="Add a comment…"
-            value={comment}
-          />
-          <div className="flex justify-end">
-            <Button
-              className="gap-1.5"
-              disabled={!canSubmit}
-              size="sm"
-              type="submit"
-            >
-              <Send className="h-3.5 w-3.5" />
-              Comment
-            </Button>
-          </div>
-        </form>
+        <ForumComposer
+          className="rounded-lg border border-border/50 bg-background/45"
+          disabled={commentMutation.isPending}
+          isSending={commentMutation.isPending}
+          members={members}
+          onSubmit={handleCommentSubmit}
+          placeholder="Add a comment…"
+          profiles={profiles}
+        />
       </section>
     </div>
   );
