@@ -22,9 +22,10 @@ use buzz_media::{BlobDescriptor, MediaError};
 
 use crate::state::AppState;
 
-/// Axum extractor that validates Blossom auth + API token scopes from headers
-/// BEFORE the request body is read. This prevents unauthenticated clients from
-/// forcing the server to buffer up to 50MB of body data.
+/// Axum extractor that validates Blossom auth, the BUD-11 hash binding, and
+/// relay membership (NIP-43, when enabled) from headers BEFORE the request
+/// body is read. This prevents unauthenticated clients from forcing the
+/// server to buffer up to 50MB of body data.
 ///
 /// Axum processes `FromRequestParts` extractors before `FromRequest` (body)
 /// extractors, so auth rejection happens before any body buffering.
