@@ -54,6 +54,7 @@ const settingsNavGroups: Array<{
       "notifications",
       "shortcuts",
       "custom-emoji",
+      "local-archive",
     ],
   },
   {

@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef } from "react";
 import {
+  Archive,
   BellRing,
   Bot,
   Check,
@@ -27,6 +28,7 @@ import type {
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
+import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
 import { cn } from "@/shared/lib/cn";
 import {
   ACCENT_COLORS,
@@ -58,6 +60,7 @@ export type SettingsSection =
   | "shortcuts"
   | "relay-members"
   | "custom-emoji"
+  | "local-archive"
   | "mobile"
   | "updates"
   | "doctor";
@@ -75,6 +78,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "shortcuts",
   "relay-members",
   "custom-emoji",
+  "local-archive",
   "mobile",
   "updates",
   "doctor",
@@ -163,6 +167,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Custom Emoji",
     icon: Smile,
     featureGate: "custom-emoji",
+  },
+  {
+    value: "local-archive",
+    label: "Local Archive",
+    icon: Archive,
   },
   {
     value: "mobile",
@@ -386,6 +395,8 @@ export function renderSettingsSection(
       return <RelayMembersSettingsCard currentPubkey={props.currentPubkey} />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
+    case "local-archive":
+      return <LocalArchiveSettingsCard />;
     case "mobile":
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":
