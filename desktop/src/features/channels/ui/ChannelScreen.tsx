@@ -73,6 +73,7 @@ import {
 } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
+import { useObserverBridgeAgents } from "./useObserverBridgeAgents";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
@@ -373,28 +374,14 @@ export function ChannelScreen({
       ),
     [activeAgentChannelTurns, activeChannelId],
   );
-  const observerBridgeAgents = React.useMemo(() => {
-    if (
-      !profilePanelPubkey ||
-      !openAgentSessionPubkey ||
-      normalizePubkey(profilePanelPubkey) !==
-        normalizePubkey(openAgentSessionPubkey) ||
-      managedAgents.some(
-        (agent) =>
-          normalizePubkey(agent.pubkey) === normalizePubkey(profilePanelPubkey),
-      )
-    ) {
-      return managedAgents;
-    }
-
-    return [
-      ...managedAgents,
-      {
-        pubkey: profilePanelPubkey,
-        status: "deployed" as const,
-      },
-    ];
-  }, [managedAgents, openAgentSessionPubkey, profilePanelPubkey]);
+  const observerBridgeAgents = useObserverBridgeAgents({
+    currentPubkey,
+    managedAgents,
+    openAgentSessionPubkey,
+    profilePanelPubkey,
+    profiles: messageProfilesQuery.data?.profiles,
+    relayAgents,
+  });
   useManagedAgentObserverBridge(observerBridgeAgents);
   useActiveAgentTurnsBridge(observerBridgeAgents);
   const messageProfiles = React.useMemo(() => {

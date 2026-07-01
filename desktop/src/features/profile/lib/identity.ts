@@ -85,6 +85,23 @@ export function resolveUserLabel(input: {
   return truncatePubkey(pubkey);
 }
 
+/**
+ * Returns true when the current user owns the agent that authored a message.
+ * Mirrors the relay's `is_agent_owner` gate: ownership is determined by the
+ * NIP-OA `ownerPubkey` field on the author's profile, NOT by the local
+ * managed-agents list (which can diverge from server-side ownership).
+ */
+export function ownsAuthorAgent(
+  profile: { ownerPubkey: string | null } | undefined,
+  currentPubkey: string | undefined,
+): boolean {
+  return (
+    !!currentPubkey &&
+    !!profile?.ownerPubkey &&
+    normalizePubkey(profile.ownerPubkey) === normalizePubkey(currentPubkey)
+  );
+}
+
 export function resolveUserSecondaryLabel(input: {
   pubkey: string;
   profiles?: UserProfileLookup;
