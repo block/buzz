@@ -492,6 +492,218 @@ async fn test_oversized_line_kills_agent() {
         .expect("agent did not exit on oversized line");
 }
 
+/// Build an Anthropic Messages API response with an optional `thinking` block
+/// followed by a `text` block. The `thinking` field is omitted when `None`.
+fn anthropic_thinking_response(thinking: Option<&str>, text: &str) -> Value {
+    let mut content: Vec<Value> = Vec::new();
+    if let Some(t) = thinking {
+        content.push(json!({ "type": "thinking", "thinking": t }));
+    }
+    content.push(json!({ "type": "text", "text": text }));
+    json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-fake",
+        "stop_reason": "end_turn",
+        "content": content,
+        "usage": { "input_tokens": 10, "output_tokens": 5 },
+    })
+}
+
+/// Build an OpenAI Responses API response with a `reasoning` output item
+/// (containing a single `summary_text` entry) followed by a message item.
+fn responses_reasoning_response(reasoning: &str, text: &str) -> Value {
+    json!({
+        "id": "resp_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{ "type": "summary_text", "text": reasoning }],
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "content": [{ "type": "output_text", "text": text }],
+            },
+        ],
+        "usage": { "input_tokens": 10 },
+    })
+}
+
+/// Drain all `session/update` notifications until the `session/prompt` reply
+/// arrives for `prompt_id`, collecting notification payloads in order.
+async fn collect_updates_until_done(h: &mut Harness, prompt_id: i64) -> Vec<Value> {
+    let mut updates = Vec::new();
+    loop {
+        let v = h.recv().await;
+        if v.get("id") == Some(&json!(prompt_id)) {
+            return updates;
+        }
+        if v.get("method") == Some(&json!("session/update")) {
+            if let Some(u) = v["params"].get("update") {
+                updates.push(u.clone());
+            }
+        }
+    }
+}
+
+/// Asserts that `agent_thought_chunk` appears in `updates` BEFORE
+/// `agent_message_chunk`, and that both are present.
+fn assert_thought_before_message(updates: &[Value]) {
+    let thought_pos = updates
+        .iter()
+        .position(|u| u["sessionUpdate"] == "agent_thought_chunk");
+    let message_pos = updates
+        .iter()
+        .position(|u| u["sessionUpdate"] == "agent_message_chunk");
+    assert!(
+        thought_pos.is_some(),
+        "expected agent_thought_chunk in updates: {updates:?}"
+    );
+    assert!(
+        message_pos.is_some(),
+        "expected agent_message_chunk in updates: {updates:?}"
+    );
+    assert!(
+        thought_pos.unwrap() < message_pos.unwrap(),
+        "agent_thought_chunk must precede agent_message_chunk, got updates: {updates:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_thought_chunk_emitted_before_message_chunk_anthropic() {
+    // Anthropic extended-thinking: the response contains a `thinking` block
+    // followed by a `text` block. We expect agent_thought_chunk to be emitted
+    // before agent_message_chunk on the wire.
+    let url = spawn_fake_llm(vec![anthropic_thinking_response(
+        Some("Let me reason about this carefully."),
+        "Here is my answer.",
+    )])
+    .await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "anthropic"),
+        ("ANTHROPIC_API_KEY", "test"),
+        ("ANTHROPIC_MODEL", "claude-fake"),
+        ("ANTHROPIC_BASE_URL", &url),
+        ("OPENAI_COMPAT_BASE_URL", ""),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "think hard" }],
+            }),
+        )
+        .await;
+
+    let updates = collect_updates_until_done(&mut h, p).await;
+    assert_thought_before_message(&updates);
+
+    let thought = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .unwrap();
+    assert_eq!(thought["content"]["text"], "Let me reason about this carefully.");
+
+    let message = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(message["content"]["text"], "Here is my answer.");
+
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_thought_chunk_emitted_before_message_chunk_responses_api() {
+    // OpenAI Responses API: reasoning item followed by message item.
+    // Setting OPENAI_COMPAT_API=responses forces the Responses API parse path.
+    let url = spawn_fake_llm(vec![responses_reasoning_response(
+        "Thinking step by step.",
+        "Final answer.",
+    )])
+    .await;
+    let mut h = Harness::spawn(&[
+        ("BUZZ_AGENT_PROVIDER", "openai"),
+        ("OPENAI_COMPAT_API_KEY", "test"),
+        ("OPENAI_COMPAT_MODEL", "fake-model"),
+        ("OPENAI_COMPAT_API", "responses"),
+        ("OPENAI_COMPAT_BASE_URL", &url),
+    ])
+    .await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "reason it out" }],
+            }),
+        )
+        .await;
+
+    let updates = collect_updates_until_done(&mut h, p).await;
+    assert_thought_before_message(&updates);
+
+    let thought = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .unwrap();
+    assert_eq!(thought["content"]["text"], "Thinking step by step.");
+
+    let message = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(message["content"]["text"], "Final answer.");
+
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_no_reasoning_no_thought_chunk() {
+    // Plain text response with no reasoning content — no agent_thought_chunk
+    // should appear on the wire. This guards against empty thought emissions.
+    let url = spawn_fake_llm(vec![openai_text("just text, no thinking")]).await;
+    let mut h = Harness::spawn(&[("OPENAI_COMPAT_BASE_URL", &url)]).await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "hi" }],
+            }),
+        )
+        .await;
+
+    let updates = collect_updates_until_done(&mut h, p).await;
+
+    let has_thought = updates
+        .iter()
+        .any(|u| u["sessionUpdate"] == "agent_thought_chunk");
+    assert!(
+        !has_thought,
+        "expected no agent_thought_chunk for a plain text response, got: {updates:?}"
+    );
+
+    let has_message = updates
+        .iter()
+        .any(|u| u["sessionUpdate"] == "agent_message_chunk");
+    assert!(has_message, "expected agent_message_chunk in updates");
+
+    h.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_cancel_notification_no_reply() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

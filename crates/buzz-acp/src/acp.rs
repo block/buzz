@@ -490,8 +490,9 @@ impl AcpClient {
     /// Most recently observed goose `_meta.goose.activeRunId` from a
     /// `session_info_update`, if any.
     ///
-    /// Goose-only: other agents leave this `None` for the lifetime of the
-    /// client. Read directly by `read_until_response_with_idle_timeout`'s
+    /// Both goose and buzz-agent emit `session_info_update`; other agents
+    /// leave this `None` for the lifetime of the client. Read directly by
+    /// `read_until_response_with_idle_timeout`'s
     /// steer arm at write time (see [`crate::pool::SteerRequest`] for
     /// why the read loop owns this); production callers do not need this
     /// accessor. Kept as `pub` so tests can introspect the field.
@@ -1266,11 +1267,11 @@ impl AcpClient {
                 false
             }
             "session_info_update" => {
-                // Goose-only as of writing: `_meta.goose.activeRunId` carries
-                // the id of the currently-active prompt run, or `null` when
-                // the run has cleared. Other agents don't emit this field;
-                // for them `active_run_id` stays `None` and steer callers
-                // will fall back to cancel+merge.
+                // Both goose and buzz-agent emit `session_info_update` with
+                // `_meta.goose.activeRunId`: the id of the currently-active
+                // prompt run, or `null` when the run has cleared. Other agents
+                // don't emit this field; for them `active_run_id` stays `None`
+                // and steer callers will fall back to cancel+merge.
                 //
                 // Per the ACP `SessionInfoUpdate` schema, `_meta` is a field
                 // on the update object itself — nested inside `update`, not

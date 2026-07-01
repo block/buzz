@@ -620,6 +620,7 @@ fn databricks_v2_path(route: DatabricksV2Route) -> &'static str {
 
 fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls = Vec::new();
     let mut saw_function_call = false;
 
@@ -663,7 +664,28 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
                     args,
                 )?);
             }
-            // Reasoning items are opaque/internal; we don't replay them.
+            Some("reasoning") => {
+                // Reasoning summary items from the Responses API. Each item has a
+                // `summary` array of `{"type": "summary_text", "text": "..."}` objects.
+                for s in item
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if matches!(
+                        s.get("type").and_then(Value::as_str),
+                        Some("summary_text" | "text")
+                    ) {
+                        if let Some(t) = s.get("text").and_then(Value::as_str) {
+                            if !reasoning.is_empty() {
+                                reasoning.push('\n');
+                            }
+                            reasoning.push_str(t);
+                        }
+                    }
+                }
+            }
             // Unknown types ignored for forward-compat.
             _ => {}
         }
@@ -691,6 +713,7 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         tool_calls,
         stop,
         input_tokens,
+        reasoning,
     })
 }
 
@@ -760,12 +783,22 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
     let stop = map_stop(v.get("stop_reason").and_then(Value::as_str));
     let mut tool_calls = Vec::new();
     let mut text = String::new();
+    let mut reasoning = String::new();
     if let Some(blocks) = v.get("content").and_then(Value::as_array) {
         for b in blocks {
             match b.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(t) = b.get("text").and_then(Value::as_str) {
                         text.push_str(t);
+                    }
+                }
+                Some("thinking") => {
+                    // Anthropic extended thinking block: `{"type": "thinking", "thinking": "..."}`
+                    if let Some(t) = b.get("thinking").and_then(Value::as_str) {
+                        if !reasoning.is_empty() {
+                            reasoning.push('\n');
+                        }
+                        reasoning.push_str(t);
                     }
                 }
                 Some("tool_use") => tool_calls.push(make_tool_call(
@@ -783,6 +816,7 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
         tool_calls,
         stop,
         input_tokens,
+        reasoning,
     })
 }
 
@@ -819,6 +853,7 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         tool_calls,
         stop,
         input_tokens,
+        reasoning: String::new(),
     })
 }
 
