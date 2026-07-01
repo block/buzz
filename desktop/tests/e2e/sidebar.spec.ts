@@ -13,10 +13,6 @@ const PRIORITY_SECTION = {
   order: 0,
 };
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
-});
-
 async function sidebarWidth(page: Page) {
   return page.getByTestId("app-sidebar").evaluate((element) => {
     return Math.round(element.getBoundingClientRect().width);
@@ -137,6 +133,7 @@ test("aligns custom section headers with the built-in sidebar sections", async (
   await seedChannelSections(page, {
     [RANDOM_CHANNEL_ID]: PRIORITY_SECTION.id,
   });
+  await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
@@ -246,6 +243,7 @@ test("aligns custom section headers with the built-in sidebar sections", async (
 
 test("custom section emoji picker scrolls", async ({ page }) => {
   await seedChannelSections(page);
+  await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
@@ -279,6 +277,7 @@ test("orders and aligns channel and direct-message context menu items", async ({
   page,
 }) => {
   await seedChannelSections(page);
+  await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
@@ -330,6 +329,7 @@ test("channel context menu move and leave actions do not freeze the app", async 
   page,
 }) => {
   await seedChannelSections(page);
+  await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
@@ -364,6 +364,7 @@ test("channel context menu move and leave actions do not freeze the app", async 
 test("resizes, persists, and snaps to the default sidebar width", async ({
   page,
 }) => {
+  await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
@@ -390,6 +391,7 @@ test("resizes, persists, and snaps to the default sidebar width", async ({
 test("shows a sidebar update card when an update is ready", async ({
   page,
 }) => {
+  await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
