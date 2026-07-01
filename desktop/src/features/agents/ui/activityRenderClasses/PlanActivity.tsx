@@ -38,7 +38,10 @@ export function PlanActivity(props: ActivityRenderClassItemProps) {
     >
       <ActivityRowLabel object="plan" openToneScope="tool" verb="Updated" />
       <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-5 text-muted-foreground">
-        <Markdown content={props.item.text.trim() || "No plan details."} />
+        <Markdown
+          className="leading-5"
+          content={props.item.text.trim() || "No plan details."}
+        />
       </ActivityRowContent>
     </ActivityRow>
   );
