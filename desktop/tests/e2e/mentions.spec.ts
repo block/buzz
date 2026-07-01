@@ -160,7 +160,7 @@ async function expectAgentProfileMessageOnly(
   ).toHaveCount(0);
 }
 
-test("@ trigger shows unified autocomplete with agents first", async ({
+test("@ trigger prioritizes channel members before runnable personas and other agents", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -205,10 +205,9 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   expect(bobIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toEqual(-1);
-  expect(fizzIndex).toBeLessThan(aliceIndex);
-  expect(fizzIndex).toBeLessThan(bobIndex);
-  expect(aliceIndex).toBeLessThan(charlieIndex);
-  expect(bobIndex).toBeLessThan(charlieIndex);
+  expect(aliceIndex).toBeLessThan(fizzIndex);
+  expect(bobIndex).toBeLessThan(fizzIndex);
+  expect(fizzIndex).toBeLessThan(charlieIndex);
 });
 
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
@@ -274,7 +273,7 @@ test("thread autocomplete keeps multiple long names readable in a narrow panel",
       row.getByTestId("mention-suggestion-avatar-fallback"),
     ).toBeVisible();
     await expect(row.getByText("agent")).toBeVisible();
-    await expect(row.getByText(/owned by npub1mock/)).toBeVisible();
+    await expect(row.getByText("owned by you")).toBeVisible();
 
     await expect(row.getByText(name)).not.toHaveCSS(
       "text-overflow",
