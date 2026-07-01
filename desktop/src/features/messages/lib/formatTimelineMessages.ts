@@ -284,12 +284,18 @@ export function formatTimelineMessages(
         (t) => t[0] === "emoji" && t[1] === shortcode && t[2],
       )?.[2];
     }
-    reactionPresence.set(`${targetId}:${actorPubkey}:${emoji}`, {
+    const key = `${targetId}:${actorPubkey}:${emoji}`;
+    const prev = reactionPresence.get(key);
+    reactionPresence.set(key, {
       targetId,
       actorPubkey,
       emoji,
       emojiUrl,
-      createdAt: event.created_at,
+      // Retain the earliest timestamp seen across duplicate deliveries so pill
+      // chronology is invariant to input-array order.
+      createdAt: prev
+        ? Math.min(prev.createdAt, event.created_at)
+        : event.created_at,
     });
   }
 

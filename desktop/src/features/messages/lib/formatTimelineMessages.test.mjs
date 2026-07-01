@@ -312,6 +312,89 @@ test("reaction pills with equal created_at tiebreak deterministically on emoji s
   );
 });
 
+test("reaction pill order is invariant to duplicate same-actor same-emoji delivery order", () => {
+  // Nostr can deliver the same reaction event twice (or relay redelivery can
+  // produce two events with the same target/actor/emoji but different ids/timestamps).
+  // The pill sort key must be the EARLIEST createdAt seen, not the last-written.
+  const MSG_ID =
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const message = {
+    id: MSG_ID,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "hello",
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+  };
+  // 🎉 first at t=1001 (the canonical earliest), then a duplicate at t=1005.
+  // 👍 arrives at t=1003 — must still be to the right of 🎉.
+  const confettiFirst = {
+    id: `c${"c".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_001,
+    content: "🎉",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+  const confettiDupe = {
+    id: `d${"d".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_005,
+    content: "🎉",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+  const thumbsUp = {
+    id: `e${"e".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_003,
+    content: "👍",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+
+  // Dupe arrives BEFORE canonical — naive last-write-wins would store t=1001
+  // (from confettiFirst which comes second), giving correct order by accident.
+  const dupeFirst = formatTimelineMessages(
+    [message, confettiDupe, confettiFirst, thumbsUp],
+    null,
+    undefined,
+    null,
+  );
+  // Dupe arrives AFTER canonical — last-write-wins stores t=1005 (the dupe),
+  // which would make 🎉's sort key t=1005 > 👍's t=1003, incorrectly reversing order.
+  const dupeLast = formatTimelineMessages(
+    [message, confettiFirst, thumbsUp, confettiDupe],
+    null,
+    undefined,
+    null,
+  );
+
+  assert.deepEqual(
+    dupeFirst[0].reactions?.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "🎉 (earliest at t=1001) must stay left of 👍 (t=1003) when dupe arrives first",
+  );
+  assert.deepEqual(
+    dupeLast[0].reactions?.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "🎉 (earliest at t=1001) must stay left of 👍 (t=1003) when dupe arrives last",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // countTopLevelTimelineRows — the unit fetch-older pages by. Must match the
 // rows `buildMainTimelineEntries` would actually render: top-level content
