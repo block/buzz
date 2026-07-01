@@ -1,10 +1,10 @@
-import { relayClient } from "@/shared/api/relayClient";
+import { relayClient as defaultRelayClient } from "@/shared/api/relayClient";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import {
-  archiveEvents,
-  listSaveSubscriptions,
-  onSubscriptionChange,
+  archiveEvents as defaultArchiveEvents,
+  listSaveSubscriptions as defaultListSaveSubscriptions,
+  onSubscriptionChange as defaultOnSubscriptionChange,
   type SaveSubscription,
   type ScopeType,
 } from "@/shared/api/tauriArchive";
@@ -13,6 +13,28 @@ import {
 
 const FLUSH_BATCH_SIZE = 25;
 const FLUSH_IDLE_MS = 2_000;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/** Dependency injection interface — production uses module singletons; tests inject fakes. */
+export interface ArchiveSyncDeps {
+  relayClient: {
+    subscribeLive: (
+      filter: RelaySubscriptionFilter,
+      onEvent: (event: RelayEvent) => void,
+    ) => Promise<() => Promise<void>>;
+  };
+  listSaveSubscriptions: () => Promise<SaveSubscription[]>;
+  archiveEvents: (
+    candidates: Array<{
+      rawEventJson: string;
+      matchedScope: { scopeType: ScopeType; scopeValue: string };
+    }>,
+  ) => Promise<unknown>;
+  onSubscriptionChange: (listener: () => void) => () => void;
+  flushBatchSize?: number;
+  flushIdleMs?: number;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -28,7 +50,18 @@ function buildFilter(sub: SaveSubscription): RelaySubscriptionFilter {
   }
 }
 
-function subKey(scopeType: ScopeType, scopeValue: string): string {
+/** Stable key encoding scope + kinds — ensures kinds changes trigger resubscribe. */
+function subKey(
+  scopeType: ScopeType,
+  scopeValue: string,
+  kinds: number[],
+): string {
+  const sortedKinds = [...kinds].sort((a, b) => a - b).join(",");
+  return `${scopeType}:${scopeValue}:${sortedKinds}`;
+}
+
+/** Scope-only key used to find and tear down a stale sub when kinds change. */
+function scopeKey(scopeType: ScopeType, scopeValue: string): string {
   return `${scopeType}:${scopeValue}`;
 }
 
@@ -41,9 +74,18 @@ function subKey(scopeType: ScopeType, scopeValue: string): string {
  * Lifecycle: created once at app-shell mount (see `useArchiveSync`), destroyed
  * on workspace switch. Resubscribes automatically when subscriptions change
  * via the module-level notifier in `tauriArchive.ts`.
+ *
+ * Accepts optional `deps` for testing — production callers pass nothing.
  */
 export class ArchiveSyncManager {
-  private unsubs = new Map<string, () => Promise<void>>();
+  private readonly deps: Required<
+    Omit<ArchiveSyncDeps, "flushBatchSize" | "flushIdleMs">
+  >;
+  private readonly flushBatchSize: number;
+  private readonly flushIdleMs: number;
+
+  // full subKey (scope+kinds) → unsub
+  private active = new Map<string, () => Promise<void>>();
   private buffer: Array<{
     rawEventJson: string;
     matchedScope: { scopeType: ScopeType; scopeValue: string };
@@ -52,9 +94,22 @@ export class ArchiveSyncManager {
   private destroyed = false;
   private offSubscriptionChange: (() => void) | null = null;
 
+  constructor(deps?: ArchiveSyncDeps) {
+    this.deps = {
+      relayClient: deps?.relayClient ?? defaultRelayClient,
+      listSaveSubscriptions:
+        deps?.listSaveSubscriptions ?? defaultListSaveSubscriptions,
+      archiveEvents: deps?.archiveEvents ?? defaultArchiveEvents,
+      onSubscriptionChange:
+        deps?.onSubscriptionChange ?? defaultOnSubscriptionChange,
+    };
+    this.flushBatchSize = deps?.flushBatchSize ?? FLUSH_BATCH_SIZE;
+    this.flushIdleMs = deps?.flushIdleMs ?? FLUSH_IDLE_MS;
+  }
+
   async start(): Promise<void> {
     await this.resubscribeAll();
-    this.offSubscriptionChange = onSubscriptionChange(() => {
+    this.offSubscriptionChange = this.deps.onSubscriptionChange(() => {
       void this.resubscribeAll();
     });
   }
@@ -70,14 +125,14 @@ export class ArchiveSyncManager {
     // Flush any buffered events before tearing down.
     if (this.buffer.length > 0) {
       const toFlush = this.buffer.splice(0);
-      void archiveEvents(toFlush).catch((err: unknown) => {
+      void this.deps.archiveEvents(toFlush).catch((err: unknown) => {
         console.warn("[archiveSyncManager] flush on destroy failed:", err);
       });
     }
-    for (const [, unsub] of this.unsubs) {
+    for (const [, unsub] of this.active) {
       void unsub();
     }
-    this.unsubs.clear();
+    this.active.clear();
   }
 
   private async resubscribeAll(): Promise<void> {
@@ -85,7 +140,7 @@ export class ArchiveSyncManager {
 
     let subs: SaveSubscription[];
     try {
-      subs = await listSaveSubscriptions();
+      subs = await this.deps.listSaveSubscriptions();
     } catch (err) {
       console.warn("[archiveSyncManager] list_save_subscriptions failed:", err);
       return;
@@ -93,21 +148,26 @@ export class ArchiveSyncManager {
 
     if (this.destroyed) return;
 
-    // Keys we want after reload.
-    const wanted = new Set(subs.map((s) => subKey(s.scopeType, s.scopeValue)));
+    // Full keys (scope+kinds) we want after reload.
+    const wanted = new Set(
+      subs.map((s) => subKey(s.scopeType, s.scopeValue, s.kinds)),
+    );
 
-    // Tear down subscriptions that are no longer needed.
-    for (const [key, unsub] of this.unsubs) {
+    // Tear down subscriptions that are no longer needed or whose kinds changed.
+    // A stale entry whose scope is still present but with different kinds will
+    // have a different full key and be absent from `wanted`, so it gets torn
+    // down here and recreated below with the new filter.
+    for (const [key, unsub] of this.active) {
       if (!wanted.has(key)) {
         void unsub();
-        this.unsubs.delete(key);
+        this.active.delete(key);
       }
     }
 
-    // Open new subscriptions for any that aren't already running.
+    // Open new subscriptions for any full key not already active.
     for (const sub of subs) {
-      const key = subKey(sub.scopeType, sub.scopeValue);
-      if (this.unsubs.has(key)) continue;
+      const key = subKey(sub.scopeType, sub.scopeValue, sub.kinds);
+      if (this.active.has(key)) continue;
 
       const scopeType = sub.scopeType;
       const scopeValue = sub.scopeValue;
@@ -116,7 +176,7 @@ export class ArchiveSyncManager {
       let unsub: (() => Promise<void>) | null = null;
       let cancelled = false;
 
-      void relayClient
+      void this.deps.relayClient
         .subscribeLive(filter, (event: RelayEvent) => {
           this.enqueue(event, scopeType, scopeValue);
         })
@@ -129,13 +189,13 @@ export class ArchiveSyncManager {
         })
         .catch((err: unknown) => {
           console.warn(
-            `[archiveSyncManager] subscribeLive failed for ${key}:`,
+            `[archiveSyncManager] subscribeLive failed for ${scopeKey(scopeType, scopeValue)}:`,
             err,
           );
         });
 
       // Store a teardown handle that works whether the promise resolved yet.
-      this.unsubs.set(key, async () => {
+      this.active.set(key, async () => {
         cancelled = true;
         if (unsub) await unsub();
       });
@@ -152,7 +212,7 @@ export class ArchiveSyncManager {
       rawEventJson: JSON.stringify(event),
       matchedScope: { scopeType, scopeValue },
     });
-    if (this.buffer.length >= FLUSH_BATCH_SIZE) {
+    if (this.buffer.length >= this.flushBatchSize) {
       this.flush();
     } else {
       this.scheduleFlush();
@@ -164,7 +224,7 @@ export class ArchiveSyncManager {
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       this.flush();
-    }, FLUSH_IDLE_MS);
+    }, this.flushIdleMs);
   }
 
   private flush(): void {
@@ -174,7 +234,7 @@ export class ArchiveSyncManager {
     }
     if (this.buffer.length === 0) return;
     const batch = this.buffer.splice(0);
-    void archiveEvents(batch).catch((err: unknown) => {
+    void this.deps.archiveEvents(batch).catch((err: unknown) => {
       console.warn("[archiveSyncManager] archive_events failed:", err);
     });
   }
