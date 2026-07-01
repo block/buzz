@@ -1176,8 +1176,11 @@ test("profile renders live activity for a viewer-owned relay agent", async ({
     `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
   );
   await expect(liveActivity).toBeVisible();
-  await expect(liveActivity).toContainText("Live activity");
-  await expect(liveActivity).toContainText("Open full activity");
+  await expect(liveActivity).toContainText("Latest Activity");
+  await expect(liveActivity).toContainText("#agents");
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
+  ).toBeVisible();
 
   await page.evaluate(
     ({ agentPubkey, channelId, turnId }) => {
@@ -1201,10 +1204,84 @@ test("profile renders live activity for a viewer-owned relay agent", async ({
   );
 
   await expect(liveActivity).toBeVisible();
-  await expect(liveActivity).toContainText("Recent activity");
+  await expect(liveActivity).toContainText("Latest Activity");
   await expect(
     page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
   ).not.toBeVisible();
+});
+
+test("profile activity carousel switches channels via progress dots", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+  await page
+    .getByTestId(`sidebar-member-open-profile-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toBeVisible();
+
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__ ===
+      "function",
+  );
+
+  await page.evaluate(
+    ({ agentPubkey, channels }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+
+      for (const [index, channelId] of channels.entries()) {
+        seedActiveTurns({
+          agentPubkey,
+          channelId,
+          turnId: `owned-relay-profile-turn-${index}`,
+        });
+      }
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channels: [AGENTS_CHANNEL_ID, GENERAL_CHANNEL_ID],
+    },
+  );
+
+  const liveActivity = page.getByTestId(
+    `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("#agents");
+
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`user-profile-activity-dot-${GENERAL_CHANNEL_ID}`),
+  ).toBeVisible();
+
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${GENERAL_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "false");
+
+  await page
+    .getByTestId(`user-profile-activity-dot-${GENERAL_CHANNEL_ID}`)
+    .click();
+
+  await expect(
+    page.getByTestId("user-profile-activity-channel-label"),
+  ).toContainText("#general");
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${GENERAL_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "true");
+  await expect(
+    page.getByTestId(`user-profile-activity-slide-${AGENTS_CHANNEL_ID}`),
+  ).toHaveAttribute("data-mounted", "true");
 });
 
 test("typing indicator shows avatars and maintains stable name order", async ({
