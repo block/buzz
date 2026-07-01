@@ -361,6 +361,110 @@ test("channel context menu move and leave actions do not freeze the app", async 
   await expectAppClickable(page);
 });
 
+test("fades the pinned sidebar chrome edges", async ({ page }) => {
+  await installMockBridge(page);
+  await page.goto("/");
+
+  const pinnedHeader = page.getByTestId("sidebar-pinned-header");
+  const footer = page.locator(
+    '[data-testid="app-sidebar"] [data-sidebar="footer"]',
+  );
+  const channelContent = page.getByTestId("sidebar-channel-content");
+  await expect(pinnedHeader).toBeVisible();
+  await expect(footer).toBeVisible();
+  await expect(channelContent).toBeVisible();
+
+  const fadeStyles = await page.evaluate(() => {
+    const header = document.querySelector<HTMLElement>(
+      '[data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"]',
+    );
+    const footerElement = document.querySelector<HTMLElement>(
+      '[data-testid="app-sidebar"] [data-sidebar="footer"]',
+    );
+    const channelElement = document.querySelector<HTMLElement>(
+      '[data-testid="sidebar-channel-content"]',
+    );
+
+    if (!header || !footerElement || !channelElement) {
+      throw new Error("Expected sidebar chrome elements to be rendered");
+    }
+
+    const headerBefore = getComputedStyle(header, "::before");
+    const headerStyle = getComputedStyle(header);
+    const sidebarElement = header.closest<HTMLElement>(
+      '[data-sidebar="sidebar"]',
+    );
+    const sidebarStyle = sidebarElement
+      ? getComputedStyle(sidebarElement)
+      : null;
+    const footerStyle = getComputedStyle(footerElement);
+    const footerBefore = getComputedStyle(footerElement, "::before");
+    const channelBefore = getComputedStyle(channelElement, "::before");
+    const channelAfter = getComputedStyle(channelElement, "::after");
+    const headerRect = header.getBoundingClientRect();
+    const footerRect = footerElement.getBoundingClientRect();
+
+    return {
+      channelAfterBackground: channelAfter.backgroundImage,
+      channelBeforeBackground: channelBefore.backgroundImage,
+      footerBackgroundColor: footerStyle.backgroundColor,
+      footerBackdropFilter: footerBefore.backdropFilter,
+      footerBackground: footerBefore.backgroundImage,
+      footerBoxShadow: footerStyle.boxShadow,
+      footerFadeBoxShadow: footerBefore.boxShadow,
+      footerFadeHeight: Number.parseFloat(footerBefore.height),
+      footerHeight: footerRect.height,
+      footerPointerEvents: footerBefore.pointerEvents,
+      footerPosition: footerBefore.position,
+      footerTopPx: Number.parseFloat(footerBefore.top),
+      footerZIndex: footerBefore.zIndex,
+      headerBackground: headerBefore.backgroundImage,
+      headerBackdropFilter: headerBefore.backdropFilter,
+      headerBackgroundColor: headerStyle.backgroundColor,
+      headerBottomPx: Number.parseFloat(headerBefore.bottom),
+      headerBoxShadow: headerStyle.boxShadow,
+      headerFadeBoxShadow: headerBefore.boxShadow,
+      headerFadeHeight: Number.parseFloat(headerBefore.height),
+      headerHeight: headerRect.height,
+      headerPointerEvents: headerBefore.pointerEvents,
+      headerPosition: headerBefore.position,
+      headerZIndex: headerBefore.zIndex,
+      sidebarBackgroundColor: sidebarStyle?.backgroundColor ?? null,
+    };
+  });
+
+  expect(fadeStyles.headerBackground).toContain("gradient");
+  expect(fadeStyles.headerBackgroundColor).toBe(
+    fadeStyles.sidebarBackgroundColor,
+  );
+  expect(fadeStyles.headerBackground).toContain("rgba");
+  expect(fadeStyles.headerBackground).toContain("0) 100%");
+  expect(fadeStyles.headerBackdropFilter).toBe("none");
+  expect(fadeStyles.headerBottomPx).toBeLessThan(0);
+  expect(fadeStyles.headerBoxShadow).toBe("none");
+  expect(fadeStyles.headerFadeBoxShadow).toBe("none");
+  expect(fadeStyles.headerFadeHeight).toBeLessThanOrEqual(10);
+  expect(fadeStyles.headerPointerEvents).toBe("none");
+  expect(fadeStyles.headerPosition).toBe("absolute");
+  expect(fadeStyles.headerZIndex).toBe("5");
+  expect(fadeStyles.footerBackground).toContain("gradient");
+  expect(fadeStyles.footerBackgroundColor).toBe(
+    fadeStyles.sidebarBackgroundColor,
+  );
+  expect(fadeStyles.footerBackground).toContain("rgba");
+  expect(fadeStyles.footerBackground).toContain("0) 100%");
+  expect(fadeStyles.footerBackdropFilter).toBe("none");
+  expect(fadeStyles.footerBoxShadow).toBe("none");
+  expect(fadeStyles.footerFadeBoxShadow).toBe("none");
+  expect(fadeStyles.footerFadeHeight).toBeLessThanOrEqual(10);
+  expect(fadeStyles.footerPointerEvents).toBe("none");
+  expect(fadeStyles.footerPosition).toBe("absolute");
+  expect(fadeStyles.footerTopPx).toBeLessThan(0);
+  expect(fadeStyles.footerZIndex).toBe("5");
+  expect(fadeStyles.channelBeforeBackground).toBe("none");
+  expect(fadeStyles.channelAfterBackground).toBe("none");
+});
+
 test("resizes, persists, and snaps to the default sidebar width", async ({
   page,
 }) => {

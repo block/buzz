@@ -95,7 +95,7 @@ type MessageThreadPanelProps = {
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
 const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";
-const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = -0.125;
+const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = 0;
 type MessageThreadPanelSkeletonProps = {
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
@@ -797,7 +797,7 @@ export function MessageThreadPanel({
   const threadFooter = (
     <>
       {!isAtBottom ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
+        <div className="pointer-events-none absolute inset-x-0 bottom-36 z-50 flex justify-center px-4">
           <Button
             className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
             data-testid="thread-scroll-to-latest"
@@ -815,7 +815,8 @@ export function MessageThreadPanel({
       ) : null}
 
       <div
-        className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
+        data-testid="thread-composer-overlay"
         ref={threadComposerWrapperRef}
       >
         <div className="pointer-events-auto">

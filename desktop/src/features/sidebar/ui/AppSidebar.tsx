@@ -780,7 +780,7 @@ export function AppSidebar({
             />
           ) : null}
 
-          <SidebarFooter className="bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+          <SidebarFooter>
             <AnimatePresence>
               {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
                 <SidebarRelayConnectionCard

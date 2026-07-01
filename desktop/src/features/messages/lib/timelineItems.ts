@@ -30,6 +30,14 @@ export type TimelineItemsResult = {
   items: TimelineItem[];
 };
 
+export type TimelineNonDayItem = Exclude<TimelineItem, { kind: "day-divider" }>;
+
+export type TimelineDayGroup = {
+  key: string;
+  headingTimestamp: number | null;
+  items: TimelineNonDayItem[];
+};
+
 /** Stable per-item key, unique across the flattened stream. */
 export function getTimelineItemKey(item: TimelineItem): string {
   return item.key;
@@ -83,4 +91,36 @@ export function buildTimelineItems(
   }
 
   return { items };
+}
+
+export function buildTimelineDayGroups(
+  items: readonly TimelineItem[],
+): TimelineDayGroup[] {
+  const groups: TimelineDayGroup[] = [];
+  let currentGroup: TimelineDayGroup | null = null;
+
+  for (const item of items) {
+    if (item.kind === "day-divider") {
+      currentGroup = {
+        key: item.key,
+        headingTimestamp: item.headingTimestamp,
+        items: [],
+      };
+      groups.push(currentGroup);
+      continue;
+    }
+
+    if (!currentGroup) {
+      currentGroup = {
+        key: "day-undated",
+        headingTimestamp: null,
+        items: [],
+      };
+      groups.push(currentGroup);
+    }
+
+    currentGroup.items.push(item);
+  }
+
+  return groups;
 }

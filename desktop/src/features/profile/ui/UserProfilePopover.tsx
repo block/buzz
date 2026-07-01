@@ -10,7 +10,11 @@ import {
   useChannelsQuery,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
-import { useProfileQuery, useUserProfileQuery } from "@/features/profile/hooks";
+import {
+  useProfileQuery,
+  useUserProfileQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   useRelayAgentsQuery,
@@ -178,6 +182,9 @@ export function UserProfilePopover({
   const openDmMutation = useOpenDmMutation();
   const { isStarting: isStartingHuddle, startHuddle } = useHuddle();
   const profileQuery = useUserProfileQuery(open ? pubkey : undefined);
+  const usersBatchQuery = useUsersBatchQuery(open ? [pubkey] : [], {
+    enabled: open,
+  });
   const relayAgentsQuery = useRelayAgentsQuery({
     enabled: open,
   });
@@ -196,12 +203,24 @@ export function UserProfilePopover({
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
   );
-  const isBotProfile = role === "bot" || Boolean(relayAgent || managedAgent);
+  const profile = profileQuery.data;
+  const normalizedPubkey = normalizePubkey(pubkey);
+  const isAgentByOaOwner = Boolean(
+    usersBatchQuery.data?.profiles[normalizedPubkey]?.isAgent,
+  );
+  const isAgentByProfileOwner = profile?.ownerPubkey != null;
+  const isBotProfile =
+    role === "bot" ||
+    Boolean(relayAgent || managedAgent) ||
+    isAgentByProfileOwner ||
+    isAgentByOaOwner;
   const isAgentClassificationPending =
     open &&
     role !== "bot" &&
-    (relayAgentsQuery.isPending || managedAgentsQuery.isPending);
-  const profile = profileQuery.data;
+    (profileQuery.isPending ||
+      relayAgentsQuery.isPending ||
+      managedAgentsQuery.isPending ||
+      usersBatchQuery.isPending);
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
@@ -217,6 +236,8 @@ export function UserProfilePopover({
     currentPubkey !== undefined &&
     currentPubkey.toLowerCase() === pubkey.toLowerCase();
   const showProfileActions = currentPubkey !== undefined && !isSelf;
+  const showHumanProfileActions =
+    showProfileActions && !isBotProfile && !isAgentClassificationPending;
   const selfProfileQuery = useProfileQuery(open && showProfileActions);
   const isCurrentUserOwner =
     currentPubkey !== undefined &&
@@ -314,9 +335,9 @@ export function UserProfilePopover({
   const handleHuddle = React.useCallback(async () => {
     if (
       !showProfileActions ||
+      !showHumanProfileActions ||
       pendingAction !== null ||
-      isStartingHuddle ||
-      isAgentClassificationPending
+      isStartingHuddle
     ) {
       return;
     }
@@ -327,7 +348,7 @@ export function UserProfilePopover({
     try {
       const dm = await openDmMutation.mutateAsync({ pubkeys: [pubkey] });
       await goChannel(dm.id);
-      await startHuddle(dm.id, isBotProfile ? [pubkey] : []);
+      await startHuddle(dm.id, []);
       await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       if (isMountedRef.current) {
         setOpen(false);
@@ -344,19 +365,24 @@ export function UserProfilePopover({
   }, [
     clearHoverTimer,
     goChannel,
-    isAgentClassificationPending,
-    isBotProfile,
     isStartingHuddle,
     openDmMutation,
     pendingAction,
     pubkey,
     queryClient,
+    showHumanProfileActions,
     showProfileActions,
     startHuddle,
   ]);
 
   const handleWave = React.useCallback(async () => {
-    if (!showProfileActions || pendingAction !== null) return;
+    if (
+      !showProfileActions ||
+      !showHumanProfileActions ||
+      pendingAction !== null
+    ) {
+      return;
+    }
 
     clearHoverTimer();
     setPendingAction("wave");
@@ -444,6 +470,7 @@ export function UserProfilePopover({
     pubkey,
     queryClient,
     selfProfileQuery.data?.displayName,
+    showHumanProfileActions,
     showProfileActions,
   ]);
 
@@ -594,34 +621,36 @@ export function UserProfilePopover({
               ) : null}
               {showProfileActions ? (
                 <div className="flex gap-2">
-                  <Button
-                    aria-label="Wave"
-                    className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
-                    data-testid={`user-profile-popover-wave-${pubkey}`}
-                    disabled={
-                      pendingAction !== null || openDmMutation.isPending
-                    }
-                    onClick={() => {
-                      void handleWave();
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {pendingAction === "wave" ? (
-                      <Spinner
-                        aria-hidden="true"
-                        className="h-3.5 w-3.5 border-2"
-                      />
-                    ) : (
-                      <span
-                        aria-hidden="true"
-                        className="buzz-wave-hand text-sm leading-none"
-                      >
-                        👋
-                      </span>
-                    )}
-                  </Button>
+                  {showHumanProfileActions ? (
+                    <Button
+                      aria-label="Wave"
+                      className="buzz-wave-hover-trigger shrink-0 px-3 transition-transform duration-100 ease-out motion-reduce:transition-none motion-safe:active:scale-[0.97]"
+                      data-testid={`user-profile-popover-wave-${pubkey}`}
+                      disabled={
+                        pendingAction !== null || openDmMutation.isPending
+                      }
+                      onClick={() => {
+                        void handleWave();
+                      }}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {pendingAction === "wave" ? (
+                        <Spinner
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5 border-2"
+                        />
+                      ) : (
+                        <span
+                          aria-hidden="true"
+                          className="buzz-wave-hand text-sm leading-none"
+                        >
+                          👋
+                        </span>
+                      )}
+                    </Button>
+                  ) : null}
                   <Button
                     className="min-w-0 flex-1"
                     data-testid={`user-profile-popover-message-${pubkey}`}
@@ -645,32 +674,33 @@ export function UserProfilePopover({
                     )}
                     Message
                   </Button>
-                  <Button
-                    className="min-w-0 flex-1"
-                    data-testid={`user-profile-popover-huddle-${pubkey}`}
-                    disabled={
-                      pendingAction !== null ||
-                      openDmMutation.isPending ||
-                      isStartingHuddle ||
-                      isAgentClassificationPending
-                    }
-                    onClick={() => {
-                      void handleHuddle();
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {pendingAction === "huddle" ? (
-                      <Spinner
-                        aria-hidden="true"
-                        className="h-3.5 w-3.5 border-2"
-                      />
-                    ) : (
-                      <Headphones />
-                    )}
-                    Huddle
-                  </Button>
+                  {showHumanProfileActions ? (
+                    <Button
+                      className="min-w-0 flex-1"
+                      data-testid={`user-profile-popover-huddle-${pubkey}`}
+                      disabled={
+                        pendingAction !== null ||
+                        openDmMutation.isPending ||
+                        isStartingHuddle
+                      }
+                      onClick={() => {
+                        void handleHuddle();
+                      }}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {pendingAction === "huddle" ? (
+                        <Spinner
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5 border-2"
+                        />
+                      ) : (
+                        <Headphones />
+                      )}
+                      Huddle
+                    </Button>
+                  ) : null}
                 </div>
               ) : null}
             </>

@@ -13,9 +13,14 @@ import {
   threadReplyLength,
   THREAD_REPLY_BODY_OFFSET_REM,
   THREAD_REPLY_LINE_WIDTH_REM,
+  THREAD_REPLY_ROW_MARGIN_INLINE_REM,
 } from "@/features/messages/lib/threadTreeLayout";
 import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+
+const THREAD_SUMMARY_CONTENT_OFFSET_REM =
+  THREAD_REPLY_BODY_OFFSET_REM - THREAD_REPLY_ROW_MARGIN_INLINE_REM;
+const THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM = 0.25;
 
 function ParticipantAvatar({
   participant,
@@ -80,8 +85,15 @@ export function MessageThreadSummaryRow({
   unreadCount?: number;
 }) {
   const indentRem = getThreadReplyIndentRem(depth);
-  const marginLeftRem =
-    indentRem + THREAD_REPLY_BODY_OFFSET_REM + summaryIndentOffsetRem;
+  const hoverLeftRem =
+    indentRem + THREAD_REPLY_ROW_MARGIN_INLINE_REM + summaryIndentOffsetRem;
+  const hoverLeft = threadReplyLength(hoverLeftRem);
+  const contentPaddingStart = threadReplyLength(
+    THREAD_SUMMARY_CONTENT_OFFSET_REM,
+  );
+  const surfaceInsetStart = `calc(${contentPaddingStart} - ${threadReplyLength(
+    THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
+  )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
   const summaryAriaLabel = summary.lastReplyAt
     ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
@@ -198,14 +210,27 @@ export function MessageThreadSummaryRow({
 
       <button
         aria-label={summaryAriaLabel}
-        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:-bottom-0.5 before:-left-0.5 before:-right-2 before:-top-0.5 before:-z-10 before:rounded-full before:content-[''] before:transition-[background-color,box-shadow] hover:text-foreground hover:opacity-90 hover:before:bg-background/95 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:bg-background/95 focus-visible:before:ring-1 focus-visible:before:ring-ring"
+        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full py-0 pr-3 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
-        style={{ marginLeft: threadReplyLength(marginLeftRem) }}
+        style={{
+          marginLeft: hoverLeft,
+          maxWidth: `calc(100% - ${hoverLeft})`,
+          paddingLeft: contentPaddingStart,
+        }}
         type="button"
       >
-        <div className="ml-0.5 flex shrink-0 items-center">
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute bottom-[-0.125rem] top-[-0.125rem] rounded-full opacity-0 ring-border/70 transition-[background-color,box-shadow,opacity] group-hover:bg-background/95 group-hover:opacity-100 group-hover:ring-1 group-focus-visible:bg-background/95 group-focus-visible:opacity-100 group-focus-visible:ring-1 group-focus-visible:ring-ring"
+          data-testid="message-thread-summary-surface"
+          style={{
+            left: surfaceInsetStart,
+            right: 0,
+          }}
+        />
+        <div className="relative z-10 flex shrink-0 items-center">
           {summary.participants.map((participant, index) => (
             <ParticipantAvatar
               index={index}
@@ -215,7 +240,7 @@ export function MessageThreadSummaryRow({
             />
           ))}
         </div>
-        <div className="min-w-0">
+        <div className="relative z-10 min-w-0">
           <div>
             <span className="font-medium transition-colors group-hover:text-foreground">
               {summary.replyCount} {replyLabel}

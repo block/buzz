@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
 const IMAGE_SHAS = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
 const SPOILER_VISIBLE_SHA = "d".repeat(64);
@@ -125,11 +126,19 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
 
   const triggers = row.getByTestId("message-image-lightbox-trigger");
   await expect(triggers).toHaveCount(3);
+  await expectCornerRadiusPx(triggers.first(), 16);
+  await expectCornerRadiusPx(triggers.first().locator("img"), 16);
+  await expectSmoothCorners(triggers.first().locator("img"));
   await triggers.first().click();
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog.locator(`img[src*="${IMAGE_SHAS[0]}"]`)).toBeVisible();
+  const lightboxSurface = page
+    .locator("[data-image-lightbox-frame] > div > div")
+    .first();
+  await expectCornerRadiusPx(lightboxSurface, 16);
+  await expectSmoothCorners(lightboxSurface);
   await expect(
     page.getByRole("button", { name: "Previous image" }),
   ).toHaveCount(0);
@@ -162,6 +171,10 @@ test("image bundle lightbox navigates as a gallery", async ({ page }) => {
   if (!closingFrameBox) {
     throw new Error("Expected lightbox frame to remain mounted while closing");
   }
+  await expectCornerRadiusPx(
+    page.locator("[data-image-lightbox-frame] > div > div").first(),
+    16,
+  );
 
   expect(Math.abs(closingFrameBox.x - currentThumbnailBox.x)).toBeLessThan(2);
   expect(Math.abs(closingFrameBox.y - currentThumbnailBox.y)).toBeLessThan(2);
