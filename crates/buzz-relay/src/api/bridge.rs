@@ -619,7 +619,7 @@ pub async fn query_events(
                 &root_bytes,
                 Some(depth),
                 limit,
-                thread_cursor.as_ref().map(|c| c.as_slice()),
+                thread_cursor.as_deref(),
             )
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
