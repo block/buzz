@@ -46,7 +46,11 @@ pub struct TokenCounts {
 }
 
 /// Why a turn ended.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// NIP-AM: consumers MUST treat unrecognized `stopReason` values as `Unknown`
+/// and keep the token counts valid. Custom deserialization maps any unrecognized
+/// string to `Unknown` instead of failing the whole payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// Model reached a natural end-of-turn.
@@ -57,8 +61,22 @@ pub enum StopReason {
     Cancelled,
     /// Turn ended with an error.
     Error,
-    /// Stop reason is unknown.
+    /// Stop reason is unknown or unrecognized.
     Unknown,
+}
+
+impl<'de> Deserialize<'de> for StopReason {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(match s.as_str() {
+            "end_turn" => StopReason::EndTurn,
+            "max_tokens" => StopReason::MaxTokens,
+            "cancelled" => StopReason::Cancelled,
+            "error" => StopReason::Error,
+            "unknown" => StopReason::Unknown,
+            _ => StopReason::Unknown,
+        })
+    }
 }
 
 /// Decrypted payload of a `kind:44200` Agent Turn Metric event.
@@ -260,5 +278,34 @@ mod tests {
         assert!(json.contains("\"outputTokens\":null"));
         let back: TokenCounts = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counts);
+    }
+
+    #[test]
+    fn unknown_stop_reason_maps_to_unknown_not_error() {
+        // NIP-AM: consumers MUST treat unrecognized stopReason values as Unknown;
+        // the token counts remain valid and the whole payload must not be rejected.
+        let json = r#"{
+            "harness": "goose",
+            "timestamp": "2026-07-01T20:11:03Z",
+            "stopReason": "tool_limit",
+            "turn": {
+                "inputTokens": 1234,
+                "outputTokens": 567,
+                "totalTokens": 1801,
+                "costUsd": null
+            }
+        }"#;
+        let payload: AgentTurnMetricPayload =
+            serde_json::from_str(json).expect("payload with future stopReason must parse");
+        assert_eq!(
+            payload.stop_reason,
+            Some(StopReason::Unknown),
+            "unrecognized stopReason must map to Unknown"
+        );
+        // Token counts must be preserved.
+        let turn = payload.turn.expect("turn must be present");
+        assert_eq!(turn.input_tokens, Some(1234));
+        assert_eq!(turn.output_tokens, Some(567));
+        assert_eq!(turn.total_tokens, Some(1801));
     }
 }

@@ -110,6 +110,15 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// a compile-time bitset or sorted array with binary search for hot-path use.
 pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
 
+/// Kinds that require a result-level read gate beyond the filter-layer
+/// `#p` check: even a reader who knows an event id MUST match the event's
+/// `#p` tag to receive the event. This closes the kindless `{ids:[…]}` read
+/// path for events whose existence must not be leaked.
+///
+/// Used by `filter_can_match_result_gated_kinds` to force the per-event
+/// fallback path in COUNT rather than the fast SQL `count_events()`.
+pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
 ///

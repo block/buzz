@@ -1069,6 +1069,15 @@ pub async fn count_events(
     for filter in &filters {
         let needs_author_only_filtering =
             crate::handlers::req::filter_can_match_author_only_kinds(filter);
+        // Same result-gated guard as the WS COUNT handler: force the per-event
+        // fallback for filters that can match 44200 or 30622 unless #p=[self]
+        // is safely pushed down (existence leak otherwise).
+        let needs_result_gated_filtering =
+            crate::handlers::req::filter_can_match_result_gated_kinds(filter)
+                && !crate::handlers::req::result_gated_count_safe_for_pushdown(
+                    filter,
+                    &authed_pubkey_hex,
+                );
 
         // If filter targets a specific channel, verify access.
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1091,6 +1100,7 @@ pub async fn count_events(
             });
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
+                && !needs_result_gated_filtering
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -1118,6 +1128,12 @@ pub async fn count_events(
                             }
                             if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
                             {
+                                continue;
+                            }
+                            if !buzz_core::filter::reader_authorized_for_event(
+                                &se.event,
+                                &authed_pubkey_hex,
+                            ) {
                                 continue;
                             }
                             total += 1;
@@ -1148,6 +1164,7 @@ pub async fn count_events(
             });
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
+                && !needs_result_gated_filtering
             {
                 query.limit = None;
                 match state.db.count_events(&query).await {
@@ -1175,6 +1192,12 @@ pub async fn count_events(
                             }
                             if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
                             {
+                                continue;
+                            }
+                            if !buzz_core::filter::reader_authorized_for_event(
+                                &se.event,
+                                &authed_pubkey_hex,
+                            ) {
                                 continue;
                             }
                             total += 1;
