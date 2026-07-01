@@ -41,6 +41,7 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  computeLocalModeGate,
   formatRuntimeOptionLabel,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
@@ -53,6 +54,7 @@ import {
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
+  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -62,6 +64,7 @@ import {
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import { RequiredFieldLabel } from "./personaProviderModelFields";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
@@ -419,6 +422,20 @@ export function PersonaDialog({
     : "";
   const providerApiKeyFieldVisible =
     llmProviderFieldVisible && providerApiKeyConfig !== null;
+  // Required credential env keys for this runtime + provider combination.
+  // Used to show required markers on the LLM provider label and amber
+  // locked rows in the env vars editor.
+  const localModeGate = computeLocalModeGate({
+    envVars,
+    isProviderMode: false,
+    model,
+    provider: trimmedProvider,
+    runtimeId: runtime,
+    useMesh: false,
+  });
+  const requiredEnvKeys = requiredCredentialEnvKeys(runtime, trimmedProvider);
+  const providerIsRequired =
+    localModeGate.missingNormalizedFields.includes("provider");
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired =
@@ -878,13 +895,17 @@ export function PersonaDialog({
 
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
+                <RequiredFieldLabel
                   htmlFor="persona-llm-provider"
+                  isRequired={providerIsRequired}
                 >
                   LLM provider
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                </label>
+                  {!providerIsRequired ? (
+                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                      Optional
+                    </span>
+                  ) : null}
+                </RequiredFieldLabel>
                 <PersonaDropdownField
                   disabled={isPending}
                   id="persona-llm-provider"
@@ -975,6 +996,7 @@ export function PersonaDialog({
                       namePoolText={namePoolText}
                       onEnvVarsChange={handleAdvancedEnvVarsChange}
                       onNamePoolTextChange={setNamePoolText}
+                      requiredEnvKeys={requiredEnvKeys}
                     />
                   </motion.div>
                 ) : null}

@@ -15,12 +15,14 @@ export function PersonaAdvancedFields({
   namePoolText,
   onEnvVarsChange,
   onNamePoolTextChange,
+  requiredEnvKeys = [],
 }: {
   disabled: boolean;
   envVars: EnvVarsValue;
   namePoolText: string;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onNamePoolTextChange: (value: string) => void;
+  requiredEnvKeys?: readonly string[];
 }) {
   return (
     <div className="space-y-5 pt-2">
@@ -58,6 +60,7 @@ export function PersonaAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         onChange={onEnvVarsChange}
+        requiredKeys={requiredEnvKeys}
         value={envVars}
       />
     </div>
