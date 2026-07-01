@@ -151,7 +151,7 @@ export function WorkspaceRail({
     <nav
       aria-label="Workspaces"
       className={cn(
-        "flex w-14 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar pb-3",
+        "flex w-12 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar pb-3",
         topPaddingClass,
       )}
       data-testid="workspace-rail"
