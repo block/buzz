@@ -3,9 +3,10 @@ import * as React from "react";
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
 import { timelineRowReserveStyle } from "@/features/messages/lib/rowHeightEstimate";
 import {
+  buildTimelineDayGroups,
   buildTimelineItems,
   getTimelineItemKey,
-  type TimelineItem,
+  type TimelineNonDayItem,
 } from "@/features/messages/lib/timelineItems";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -163,14 +164,14 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     () => buildTimelineItems(entries, firstUnreadMessageId),
     [entries, firstUnreadMessageId],
   );
+  const dayGroups = React.useMemo(
+    () => buildTimelineDayGroups(itemsResult.items),
+    [itemsResult.items],
+  );
 
   const renderItem = React.useCallback(
-    (item: TimelineItem) => {
+    (item: TimelineNonDayItem) => {
       switch (item.kind) {
-        case "day-divider":
-          // Heading is resolved at render time (not baked into the item) so
-          // "Today"/"Yesterday" track the wall clock, not build time.
-          return <DayDivider label={formatDayHeading(item.headingTimestamp)} />;
         case "unread-divider":
           return <UnreadDivider />;
         case "system":
@@ -245,14 +246,34 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 
   return (
     <div className="flex flex-col">
-      {itemsResult.items.map((item) => (
-        <div
-          className="timeline-row-cv"
-          key={getTimelineItemKey(item)}
-          style={timelineRowReserveStyle(item)}
+      {dayGroups.map((group) => (
+        <section
+          className={cn(
+            "relative flex flex-col",
+            group.headingTimestamp !== null &&
+              "before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']",
+          )}
+          data-day-label={
+            group.headingTimestamp === null
+              ? undefined
+              : formatDayHeading(group.headingTimestamp)
+          }
+          data-testid="message-timeline-day-group"
+          key={group.key}
         >
-          {renderItem(item)}
-        </div>
+          {group.headingTimestamp === null ? null : (
+            <DayDivider label={formatDayHeading(group.headingTimestamp)} />
+          )}
+          {group.items.map((item) => (
+            <div
+              className="timeline-row-cv"
+              key={getTimelineItemKey(item)}
+              style={timelineRowReserveStyle(item)}
+            >
+              {renderItem(item)}
+            </div>
+          ))}
+        </section>
       ))}
     </div>
   );
