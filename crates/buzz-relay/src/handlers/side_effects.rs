@@ -2312,16 +2312,26 @@ async fn handle_git_repo_announcement(
     // seeded empty manifest. Pointer is the commit; this event is the
     // notification that the repo exists (with empty refs) so subscribers see
     // a first signal without waiting for the first push.
-    if let Err(e) = emit_initial_ref_state(tenant, state, &owner_hex, &repo_id).await {
-        // Non-fatal: the manifest is the source of truth; this is just the
-        // derived notification. A failure here means subscribers miss the
-        // "repo now exists" event, but clone/push still works.
-        warn!(
-            repo_id = %repo_id,
-            owner = %owner_hex,
-            error = %e,
-            "failed to emit initial kind:30618 ref state (non-fatal)"
-        );
+    //
+    // Emit ONLY on a fresh `Reserved` claim. On a same-owner `AlreadyOwned`
+    // re-announce the pointer already exists (and, after the first push, holds
+    // real refs). Re-emitting the empty-refs 30618 here would publish a *newer*
+    // replaceable event that, under NIP-16 latest-wins ordering, shadows the
+    // real pushed refs — making a live repo look empty to subscribers. The
+    // initial empty signal is a one-time seeding notification, not something a
+    // re-announce should replay.
+    if reserved_by_this_attempt {
+        if let Err(e) = emit_initial_ref_state(tenant, state, &owner_hex, &repo_id).await {
+            // Non-fatal: the manifest is the source of truth; this is just the
+            // derived notification. A failure here means subscribers miss the
+            // "repo now exists" event, but clone/push still works.
+            warn!(
+                repo_id = %repo_id,
+                owner = %owner_hex,
+                error = %e,
+                "failed to emit initial kind:30618 ref state (non-fatal)"
+            );
+        }
     }
 
     Ok(())
