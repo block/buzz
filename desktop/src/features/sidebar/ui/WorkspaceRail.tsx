@@ -76,7 +76,7 @@ function WorkspaceButton({
         <button
           aria-current={isActive ? "true" : undefined}
           aria-label={tooltipLabel}
-          className="relative flex h-10 w-10 items-center justify-center outline-hidden focus:outline-none focus-visible:outline-none"
+          className="relative flex h-9 w-9 items-center justify-center outline-hidden focus:outline-none focus-visible:outline-none"
           data-testid={`workspace-rail-button-${workspace.id}`}
           onClick={onSwitch}
           type="button"
@@ -85,7 +85,7 @@ function WorkspaceButton({
           <span
             aria-hidden="true"
             className={cn(
-              "absolute left-[-4px] w-1 rounded-r-full bg-sidebar-foreground transition-all",
+              "absolute left-[-4px] w-1 rounded-r-full bg-primary transition-all",
               isActive
                 ? "h-6 opacity-100"
                 : showDot
