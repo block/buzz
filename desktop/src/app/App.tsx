@@ -7,6 +7,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -26,6 +27,7 @@ import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { listenForDeepLinks } from "@/shared/deep-link";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
+import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 
@@ -50,6 +52,31 @@ function AppLoadingGate() {
           {LOADING_TEXT}
         </span>
       </h1>
+    </div>
+  );
+}
+
+// Quiet gate for switching between already-set-up workspaces: visually empty
+// unless the switch takes long, so fast switches don't flash the boot splash.
+function WorkspaceSwitchGate() {
+  const [showSpinner, setShowSpinner] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowSpinner(true), 300);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  return (
+    <div
+      className="flex min-h-dvh items-center justify-center bg-background"
+      data-testid="workspace-switch-gate"
+      role="status"
+    >
+      <StartupWindowDragRegion />
+      <span className="sr-only">Switching workspace…</span>
+      {showSpinner ? (
+        <Spinner aria-hidden="true" className="text-muted-foreground" />
+      ) : null}
     </div>
   );
 }
@@ -155,12 +182,14 @@ function AppReady({
   canBackToWorkspaceSetup,
   isCompletingFirstRunWorkspace,
   isSharedIdentity,
+  isWorkspaceSwitch,
   onFirstRunWorkspaceSettled,
   onBackToWorkspaceSetup,
 }: {
   canBackToWorkspaceSetup: boolean;
   isCompletingFirstRunWorkspace: boolean;
   isSharedIdentity: boolean;
+  isWorkspaceSwitch: boolean;
   onFirstRunWorkspaceSettled: () => void;
   onBackToWorkspaceSetup: () => void;
 }) {
@@ -193,7 +222,7 @@ function AppReady({
       return <OnboardingLoadingGate />;
     }
 
-    return <AppLoadingGate />;
+    return isWorkspaceSwitch ? <WorkspaceSwitchGate /> : <AppLoadingGate />;
   }
 
   return <RouterProvider router={router} />;
@@ -251,6 +280,17 @@ export function App() {
   // Composite key: changes when workspace ID changes OR when
   // the active workspace's config is updated (relayUrl/token).
   const workspaceKey = `${activeWorkspace?.id ?? "none"}-${reinitKey}`;
+
+  // Latch once the workspace key deviates from its cold-boot value: from then
+  // on, loading phases are in-app switches and get the quiet gate instead of
+  // the full "Setting up your workspace" splash.
+  const initialWorkspaceKeyRef = useRef(workspaceKey);
+  const hasSwitchedWorkspaceRef = useRef(false);
+  if (workspaceKey !== initialWorkspaceKeyRef.current) {
+    hasSwitchedWorkspaceRef.current = true;
+  }
+  const isWorkspaceSwitch = hasSwitchedWorkspaceRef.current;
+
   const workspace = useWorkspaceInit(
     activeWorkspace,
     workspaceKey,
@@ -306,7 +346,7 @@ export function App() {
       return <OnboardingLoadingGate />;
     }
 
-    return <AppLoadingGate />;
+    return isWorkspaceSwitch ? <WorkspaceSwitchGate /> : <AppLoadingGate />;
   }
 
   return (
@@ -314,6 +354,7 @@ export function App() {
       <AppReady
         canBackToWorkspaceSetup={canBackToWorkspaceSetup}
         isCompletingFirstRunWorkspace={isCompletingFirstRunWorkspace}
+        isWorkspaceSwitch={isWorkspaceSwitch}
         key={workspaceKey}
         isSharedIdentity={sharedIdentity}
         onFirstRunWorkspaceSettled={handleFirstRunWorkspaceSettled}

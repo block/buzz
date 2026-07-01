@@ -111,6 +111,8 @@ type MockBridgeOptions = {
   channelsReadError?: string;
   feedReadError?: string;
   canvasReadError?: string;
+  /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
+  applyWorkspaceDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
   usersBatchDelayMs?: number;
