@@ -85,7 +85,7 @@ function WorkspaceButton({
           <span
             aria-hidden="true"
             className={cn(
-              "absolute left-[-4px] w-1 rounded-r-full bg-primary transition-all",
+              "absolute left-[-6px] w-1 rounded-r-full bg-primary transition-all",
               isActive
                 ? "h-6 opacity-100"
                 : showDot
