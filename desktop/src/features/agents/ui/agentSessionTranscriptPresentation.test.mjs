@@ -250,3 +250,57 @@ test("two-tier headline: metadata headlines when it is the only activity (sessio
     "Prompt context should headline when no spine work exists",
   );
 });
+
+// ---- acpSource discriminator (polished accordion vs raw <pre>) ----
+// Verifies which metadata items are treated as raw payloads (keep <pre>)
+// versus polished content (use PromptSectionList accordion).
+
+test("acpSource discriminator: raw_json_rpc is a raw payload", () => {
+  const rawItem = {
+    id: "meta:raw",
+    type: "metadata",
+    renderClass: "raw-rail",
+    title: "Raw ACP payload",
+    sections: [{ title: "body", body: "{}" }],
+    timestamp: baseTimestamp,
+    acpSource: "raw_json_rpc",
+  };
+  assert.equal(
+    rawItem.acpSource === "raw_json_rpc",
+    true,
+    "raw_json_rpc item uses <pre> raw treatment",
+  );
+});
+
+test("acpSource discriminator: system prompt (no acpSource) is polished content", () => {
+  const sysPrompt = {
+    id: "meta:sys",
+    type: "metadata",
+    renderClass: "raw-rail",
+    title: "System prompt",
+    sections: [{ title: "Instructions", body: "You are an agent." }],
+    timestamp: baseTimestamp,
+  };
+  assert.equal(
+    sysPrompt.acpSource === "raw_json_rpc",
+    false,
+    "system prompt uses polished accordion (acpSource is not raw_json_rpc)",
+  );
+});
+
+test("acpSource discriminator: prompt context (session/prompt:context) is polished content", () => {
+  const promptCtx = {
+    id: "meta:ctx",
+    type: "metadata",
+    renderClass: "raw-rail",
+    title: "Prompt context",
+    sections: [{ title: "Thread history", body: "..." }],
+    timestamp: baseTimestamp,
+    acpSource: "session/prompt:context",
+  };
+  assert.equal(
+    promptCtx.acpSource === "raw_json_rpc",
+    false,
+    "prompt context uses polished accordion (acpSource is not raw_json_rpc)",
+  );
+});
