@@ -443,12 +443,24 @@ export function EditAgentDialog({
   const respondToValid =
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
+  // Block save when a dialog-fixable required field is empty. Mirrors the
+  // amber "Required" badge logic in EnvVarsEditor (currentValue.length === 0).
+  // Only env keys that the dialog can actually fill are blocked here —
+  // CLI-login runtimes (claude, codex) return [] from requiredCredentialEnvKeys
+  // and are never blocked.
+  const hasRequiredEnvKeyMissing = requiredEnvKeys.some(
+    (key) => (envVars[key] ?? "").length === 0,
+  );
+
   const canSubmit =
     name.trim().length > 0 &&
     parallelismValid &&
     timeoutValid &&
     acpCommandValid &&
     respondToValid &&
+    !modelRequired &&
+    !providerRequired &&
+    !hasRequiredEnvKeyMissing &&
     !updateMutation.isPending;
 
   async function handleSubmit() {
