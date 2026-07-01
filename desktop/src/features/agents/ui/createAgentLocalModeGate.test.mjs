@@ -1,26 +1,25 @@
 /**
- * Unit tests for the CreateAgentDialog local-mode credential gate.
+ * Unit tests for the CreateAgentDialog local-mode readiness gate.
  *
  * The gate mirrors EditAgentDialog's block-save logic: when the selected
  * runtime supports LLM provider selection (buzz-agent / goose), a missing
- * required credential env key blocks the create button.
+ * required credential env key OR a missing provider/model normalized field
+ * blocks the create button.
  *
  * On Create there is no inherit checkbox, so selectedRuntimeId IS the
  * prospective runtime — no prospectiveRuntimeId hoist needed.
  *
- * Helpers under test:
- *   requiredCredentialEnvKeys  — returns the env key(s) the dialog can fill
- *   runtimeSupportsLlmProviderSelection — determines if the provider field renders
- *
- * These are the same helpers used by EditAgentDialog, tested in
- * editAgentProviderDiscovery.test.mjs. These tests specifically exercise the
- * create-path wiring (no inherit transition, selectedRuntimeId = prospective).
+ * The shared helper under test:
+ *   computeLocalModeGate — pure function used by canSubmit, field isRequired,
+ *                           and EnvVarsEditor.requiredKeys; all three share
+ *                           the same predicate.
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  computeLocalModeGate,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./personaDialogPickers.tsx";
@@ -59,209 +58,243 @@ test("localMode_custom_doesNotSupportProviderSelection", () => {
   );
 });
 
+// ── IMPORTANT 1: normalized field gate (provider + model) ─────────────────
+
+test("localMode_buzzAgent_emptyProvider_blocked", () => {
+  // Scenario: user selects buzz-agent but leaves provider empty.
+  // Rust readiness requires BUZZ_AGENT_PROVIDER — empty = NotReady.
+  // The gate must block create even though no env key is required yet.
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    result.missingNormalizedFields.includes("provider"),
+    "missing provider must be in missingNormalizedFields",
+  );
+  assert.equal(
+    result.satisfied,
+    false,
+    "empty provider must block create (Rust readiness requires BUZZ_AGENT_PROVIDER)",
+  );
+});
+
+test("localMode_buzzAgent_emptyModel_blocked", () => {
+  // Scenario: buzz-agent + anthropic + API key present, but model left empty.
+  // Rust readiness requires BUZZ_AGENT_MODEL — empty = NotReady.
+  const result = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    isProviderMode: false,
+    model: "",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    result.missingNormalizedFields.includes("model"),
+    "missing model must be in missingNormalizedFields",
+  );
+  assert.equal(
+    result.satisfied,
+    false,
+    "empty model must block create (Rust readiness requires BUZZ_AGENT_MODEL)",
+  );
+});
+
 // ── Gate: buzz-agent / anthropic with missing key → BLOCKED ───────────────
 
 test("localMode_buzzAgent_anthropic_missingKey_blocked", () => {
-  // Scenario: user selects buzz-agent as the runtime and picks anthropic as
-  // the provider, but hasn't supplied ANTHROPIC_API_KEY in env vars.
-  // The gate must block create — this is exactly the crash-loop case the
-  // guarantee closes.
-  const selectedRuntimeId = "buzz-agent";
-  const provider = "anthropic";
+  // Scenario: user selects buzz-agent/anthropic + fills model, but hasn't
+  // supplied ANTHROPIC_API_KEY — the exact crash-loop case the guarantee closes.
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
 
-  // Mirror the component's providerForRequiredKeys computation.
-  // Create: no inherit transition, selectedRuntimeId IS the prospective runtime.
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    selectedRuntimeId,
-  )
-    ? provider
-    : "";
-  const requiredKeys = requiredCredentialEnvKeys(
-    selectedRuntimeId,
-    providerForRequiredKeys,
-  );
-
-  const envVars = {}; // ANTHROPIC_API_KEY absent
-  const localCredsSatisfied = requiredKeys.every(
-    (key) => (envVars[key] ?? "").length > 0,
-  );
-
-  assert.equal(
-    providerForRequiredKeys,
-    "anthropic",
-    "providerForRequiredKeys must be the selected provider for buzz-agent",
-  );
   assert.ok(
-    requiredKeys.length > 0,
-    "buzz-agent/anthropic must require at least one env key",
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in missingEnvKeys",
   );
   assert.equal(
-    localCredsSatisfied,
+    result.satisfied,
     false,
     "missing ANTHROPIC_API_KEY must block create (crash-loop guarantee)",
   );
 });
 
-test("localMode_buzzAgent_anthropic_keyPresent_allowed", () => {
-  // Same scenario — but the user HAS supplied the key.
-  const selectedRuntimeId = "buzz-agent";
-  const provider = "anthropic";
+test("localMode_buzzAgent_anthropic_allRequired_present_allowed", () => {
+  // All three required fields present: provider, model, and credential key.
+  const result = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
 
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    selectedRuntimeId,
-  )
-    ? provider
-    : "";
-  const requiredKeys = requiredCredentialEnvKeys(
-    selectedRuntimeId,
-    providerForRequiredKeys,
+  assert.deepEqual(
+    result.missingNormalizedFields,
+    [],
+    "no missing normalized fields when provider and model are set",
   );
-
-  const envVars = { ANTHROPIC_API_KEY: "sk-ant-test" };
-  const localCredsSatisfied = requiredKeys.every(
-    (key) => (envVars[key] ?? "").length > 0,
+  assert.deepEqual(
+    result.missingEnvKeys,
+    [],
+    "no missing env keys when ANTHROPIC_API_KEY is set",
   );
-
   assert.equal(
-    localCredsSatisfied,
+    result.satisfied,
     true,
-    "supplying ANTHROPIC_API_KEY must allow create",
+    "all required fields present must allow create",
   );
 });
 
-// ── Gate: claude runtime → NEVER blocked by credential gate ───────────────
+// ── Gate: claude runtime (CLI-login) → NOT blocked ────────────────────────
 
-test("localMode_claude_noRequiredKeys_notBlocked", () => {
-  // Scenario: user selects claude as the runtime. Claude uses CLI-login
-  // (out-of-band auth), so the dialog cannot supply a credential — the gate
-  // must not block on missing keys.
-  const selectedRuntimeId = "claude";
-  const provider = ""; // no provider state rendered (llmProviderFieldVisible=false)
+test("localMode_claude_noRequiredFields_notBlocked", () => {
+  // Scenario: user selects claude. Claude uses CLI-login (out-of-band auth),
+  // runtimeSupportsLlmProviderSelection=false → no provider/model required,
+  // no credential keys required. The gate must not block.
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "claude",
+    useMesh: false,
+  });
 
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    selectedRuntimeId,
-  )
-    ? provider
-    : "";
-  const requiredKeys = requiredCredentialEnvKeys(
-    selectedRuntimeId,
-    providerForRequiredKeys,
+  assert.deepEqual(
+    result.missingNormalizedFields,
+    [],
+    "claude must have no required normalized fields",
   );
-
-  const envVars = {}; // nothing set
-  const localCredsSatisfied = requiredKeys.every(
-    (key) => (envVars[key] ?? "").length > 0,
-  );
-
-  assert.equal(
-    providerForRequiredKeys,
-    "",
-    "providerForRequiredKeys must be empty for CLI-login runtimes",
-  );
-  assert.equal(
-    requiredKeys.length,
-    0,
+  assert.deepEqual(
+    result.missingEnvKeys,
+    [],
     "claude must return no required credential keys",
   );
   assert.equal(
-    localCredsSatisfied,
+    result.satisfied,
     true,
-    "claude must NOT be blocked by the credential gate",
-  );
-});
-
-// ── Gate: provider selection drives required keys ─────────────────────────
-
-test("localMode_buzzAgent_noProvider_noRequiredKeys", () => {
-  // When the user leaves provider at default (""), requiredCredentialEnvKeys
-  // must return empty — we can't know which provider-specific key to require.
-  const selectedRuntimeId = "buzz-agent";
-  const provider = ""; // default / auto
-
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    selectedRuntimeId,
-  )
-    ? provider
-    : "";
-  const requiredKeys = requiredCredentialEnvKeys(
-    selectedRuntimeId,
-    providerForRequiredKeys,
-  );
-
-  assert.equal(
-    requiredKeys.length,
-    0,
-    "no provider selected must result in no required keys",
-  );
-});
-
-test("localMode_providerSelection_drives_requiredKey", () => {
-  // Verify that different provider selections produce different required keys
-  // so the gate is truly keyed on provider state, not hardcoded.
-  const selectedRuntimeId = "buzz-agent";
-
-  const anthropicKeys = requiredCredentialEnvKeys(
-    selectedRuntimeId,
-    "anthropic",
-  );
-  const databricksKeys = requiredCredentialEnvKeys(
-    selectedRuntimeId,
-    "databricks",
-  );
-
-  assert.ok(
-    anthropicKeys.length > 0,
-    "anthropic must require at least one credential key",
-  );
-  assert.ok(
-    databricksKeys.length > 0,
-    "databricks must require at least one credential key",
-  );
-  assert.notDeepEqual(
-    anthropicKeys,
-    databricksKeys,
-    "different providers must require different keys",
+    "claude must NOT be blocked by the local-mode gate",
   );
 });
 
 // ── Gate: isProviderMode / useMesh bypass ─────────────────────────────────
 
 test("localMode_gate_bypassed_for_providerMode", () => {
-  // In provider mode, localCredsSatisfied must always be true regardless of
-  // env vars — provider mode has its own gate (providerConfigComplete).
-  const isProviderMode = true;
-  const useMesh = false;
-  const requiredKeys = ["SOME_KEY"]; // hypothetical required key
-  const envVars = {}; // key absent
-
-  // Mirror the component's localCredsSatisfied computation:
-  //   isProviderMode || useMesh || requiredKeys.every(...)
-  const localCredsSatisfied =
-    isProviderMode ||
-    useMesh ||
-    requiredKeys.every((key) => (envVars[key] ?? "").length > 0);
+  // In provider mode, gate must be satisfied regardless of local fields.
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: true,
+    model: "",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
 
   assert.equal(
-    localCredsSatisfied,
+    result.satisfied,
     true,
-    "provider mode must bypass the local credential gate",
+    "provider mode must bypass the local-mode gate",
   );
 });
 
 test("localMode_gate_bypassed_for_meshMode", () => {
-  const isProviderMode = false;
-  const useMesh = true;
-  const requiredKeys = ["SOME_KEY"];
-  const envVars = {};
-
-  const localCredsSatisfied =
-    isProviderMode ||
-    useMesh ||
-    requiredKeys.every((key) => (envVars[key] ?? "").length > 0);
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: true,
+  });
 
   assert.equal(
-    localCredsSatisfied,
+    result.satisfied,
     true,
-    "relay-mesh mode must bypass the local credential gate",
+    "relay-mesh mode must bypass the local-mode gate",
+  );
+});
+
+// ── IMPORTANT 2: requiredEnvKeys surfaces correctly ───────────────────────
+
+test("localMode_requiredEnvKeys_surfaces_anthropicKey", () => {
+  // requiredCredentialEnvKeys returns ALL required keys for the provider
+  // (including already-satisfied ones) — what EnvVarsEditor receives for
+  // its amber locked rows. Verify the full key list, not just missing keys.
+  const allKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  assert.ok(
+    allKeys.includes("ANTHROPIC_API_KEY"),
+    "requiredCredentialEnvKeys must include ANTHROPIC_API_KEY for buzz-agent/anthropic",
+  );
+});
+
+test("localMode_requiredEnvKeys_gate_and_envVarsEditor_share_same_key_set", () => {
+  // The key the gate blocks on must equal the key EnvVarsEditor shows.
+  // computeLocalModeGate.missingEnvKeys ⊆ requiredCredentialEnvKeys output.
+  const gateResult = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+  const fullKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+
+  for (const key of gateResult.missingEnvKeys) {
+    assert.ok(
+      fullKeys.includes(key),
+      `gate-missing key ${key} must appear in requiredCredentialEnvKeys output (EnvVarsEditor source)`,
+    );
+  }
+});
+
+// ── Gate: provider selection drives required credential keys ──────────────
+
+test("localMode_providerSelection_drives_requiredKey", () => {
+  // Different provider selections must produce different required keys.
+  const anthropicGate = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+  const databricksGate = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "databricks-meta-llama",
+    provider: "databricks",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    anthropicGate.missingEnvKeys.length > 0,
+    "anthropic must require at least one credential key",
+  );
+  assert.ok(
+    databricksGate.missingEnvKeys.length > 0,
+    "databricks must require at least one credential key",
+  );
+  assert.notDeepEqual(
+    anthropicGate.missingEnvKeys,
+    databricksGate.missingEnvKeys,
+    "different providers must require different keys",
   );
 });

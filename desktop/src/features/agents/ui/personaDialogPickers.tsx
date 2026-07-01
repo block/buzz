@@ -351,3 +351,67 @@ export function getDefaultPersonaRuntime(runtimes: AcpRuntimeCatalogEntry[]) {
     null
   );
 }
+
+/**
+ * Pure local-mode readiness gate for Create (no existing agent, no config
+ * surface query). Returns the missing normalized fields (provider, model) and
+ * the missing credential env keys so the caller can derive `canSubmit`,
+ * field `isRequired`, and `EnvVarsEditor.requiredKeys` from the same source.
+ *
+ * Two classes of required field for provider-selection runtimes (buzz-agent,
+ * goose) — both required unconditionally per readiness.rs:
+ *   1. Normalized fields: provider + model (empty string = NotReady)
+ *   2. Credential env keys: provider-specific (e.g. ANTHROPIC_API_KEY)
+ *
+ * isProviderMode / useMesh modes are NOT subject to this gate — they have
+ * their own gates. Pass isProviderMode=true or useMesh=true to bypass.
+ */
+export function computeLocalModeGate({
+  envVars,
+  isProviderMode,
+  model,
+  provider,
+  runtimeId,
+  useMesh,
+}: {
+  envVars: Record<string, string>;
+  isProviderMode: boolean;
+  model: string;
+  provider: string;
+  runtimeId: string;
+  useMesh: boolean;
+}): {
+  /** Normalized field names that are required but empty ("provider", "model"). */
+  missingNormalizedFields: string[];
+  /** Credential env key names that are required but missing or empty. */
+  missingEnvKeys: string[];
+  /** True when the create button may be enabled (from this gate's perspective). */
+  satisfied: boolean;
+} {
+  if (isProviderMode || useMesh) {
+    return { missingNormalizedFields: [], missingEnvKeys: [], satisfied: true };
+  }
+
+  const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
+
+  const missingNormalizedFields: string[] = [];
+  if (needsProviderSelection) {
+    if (provider.trim().length === 0) missingNormalizedFields.push("provider");
+    if (model.trim().length === 0) missingNormalizedFields.push("model");
+  }
+
+  // Credential keys depend on the selected provider (empty provider → no keys
+  // required beyond the normalized field gate above).
+  const providerForKeys = needsProviderSelection ? provider : "";
+  const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
+  const missingEnvKeys = requiredKeys.filter(
+    (key) => (envVars[key] ?? "").length === 0,
+  );
+
+  return {
+    missingNormalizedFields,
+    missingEnvKeys,
+    satisfied:
+      missingNormalizedFields.length === 0 && missingEnvKeys.length === 0,
+  };
+}
