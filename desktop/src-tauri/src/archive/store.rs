@@ -62,8 +62,7 @@ pub fn open_archive_db(path: &Path) -> Result<Connection, String> {
             .map_err(|e| format!("failed to create archive dir: {e}"))?;
     }
 
-    let conn =
-        Connection::open(path).map_err(|e| format!("failed to open archive db: {e}"))?;
+    let conn = Connection::open(path).map_err(|e| format!("failed to open archive db: {e}"))?;
 
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("failed to set WAL mode: {e}"))?;
@@ -106,7 +105,14 @@ pub fn upsert_save_subscription(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (identity_pubkey, relay_url, scope_type, scope_value)
          DO UPDATE SET kinds = excluded.kinds",
-        params![identity_pubkey, relay_url, scope_type, scope_value, kinds_json, now],
+        params![
+            identity_pubkey,
+            relay_url,
+            scope_type,
+            scope_value,
+            kinds_json,
+            now
+        ],
     )
     .map_err(|e| format!("failed to upsert save subscription: {e}"))?;
     Ok(())
@@ -359,8 +365,7 @@ mod tests {
     fn test_delete_save_subscription_removes_row() {
         let conn = in_memory();
         upsert_save_subscription(&conn, "pk", "wss://r", "channel_h", "abc", "[1]", 1).unwrap();
-        let deleted =
-            delete_save_subscription(&conn, "pk", "wss://r", "channel_h", "abc").unwrap();
+        let deleted = delete_save_subscription(&conn, "pk", "wss://r", "channel_h", "abc").unwrap();
         assert!(deleted);
         let subs = list_save_subscriptions(&conn, "pk", "wss://r").unwrap();
         assert!(subs.is_empty());
@@ -377,8 +382,7 @@ mod tests {
     #[test]
     fn test_has_save_subscription_true_and_false() {
         let conn = in_memory();
-        upsert_save_subscription(&conn, "pk", "wss://r", "owner_p", "mypk", "[24200]", 1)
-            .unwrap();
+        upsert_save_subscription(&conn, "pk", "wss://r", "owner_p", "mypk", "[24200]", 1).unwrap();
         assert!(has_save_subscription(&conn, "pk", "wss://r", "owner_p", "mypk").unwrap());
         assert!(!has_save_subscription(&conn, "pk", "wss://r", "owner_p", "other").unwrap());
     }
@@ -426,11 +430,8 @@ mod tests {
         upsert_archived_event(&conn, "pk", "wss://r", "id1", 1, "author", 100, "{}", 200).unwrap();
         upsert_event_scope(&conn, "pk", "wss://r", "id1", "channel_h", "c1", 200).unwrap();
         // Delete the only scope row manually.
-        conn.execute(
-            "DELETE FROM archived_event_scopes WHERE id = 'id1'",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM archived_event_scopes WHERE id = 'id1'", [])
+            .unwrap();
         let removed = gc_orphaned_events(&conn, "pk", "wss://r").unwrap();
         assert_eq!(removed, 1);
         let count: i64 = conn
