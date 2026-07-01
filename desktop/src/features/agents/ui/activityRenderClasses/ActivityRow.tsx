@@ -72,7 +72,7 @@ export function ActivityRow({
     >
       <summary
         className={cn(
-          "inline-flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
+          "flex min-h-6 w-full max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
           openToneScope === "summary"
             ? "group-open/summary:text-foreground"
             : "group-open:text-foreground",
