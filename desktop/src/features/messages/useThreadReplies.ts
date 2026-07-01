@@ -34,24 +34,25 @@ export function useThreadReplies(
   openThreadRootId: string | null,
 ) {
   const queryClient = useQueryClient();
+  const activeChannelId = activeChannel?.id ?? null;
+  const activeChannelType = activeChannel?.channelType ?? null;
   // Track which roots we've already fetched per channel so re-opening a thread
   // (or a re-render) doesn't re-page the whole subtree every time.
   const fetchedRootsRef = React.useRef<Set<string>>(new Set());
   const previousChannelIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
-    const activeChannelId = activeChannel?.id ?? null;
     if (previousChannelIdRef.current === activeChannelId) {
       return;
     }
     previousChannelIdRef.current = activeChannelId;
     fetchedRootsRef.current.clear();
-  }, [activeChannel?.id]);
+  }, [activeChannelId]);
 
   React.useEffect(() => {
     if (
-      !activeChannel ||
-      activeChannel.channelType === "forum" ||
+      !activeChannelId ||
+      activeChannelType === "forum" ||
       !openThreadRootId
     ) {
       return;
@@ -61,9 +62,10 @@ export function useThreadReplies(
     }
     fetchedRootsRef.current.add(openThreadRootId);
 
-    const channelId = activeChannel.id;
+    const channelId = activeChannelId;
     const rootId = openThreadRootId;
     let isCancelled = false;
+    let completed = false;
 
     void (async () => {
       let cursor: ThreadCursor | null = null;
@@ -85,6 +87,7 @@ export function useThreadReplies(
           }
 
           if (!response.nextCursor) {
+            completed = true;
             break;
           }
           cursor = response.nextCursor;
@@ -98,6 +101,9 @@ export function useThreadReplies(
 
     return () => {
       isCancelled = true;
+      if (!completed) {
+        fetchedRootsRef.current.delete(rootId);
+      }
     };
-  }, [activeChannel, openThreadRootId, queryClient]);
+  }, [activeChannelId, activeChannelType, openThreadRootId, queryClient]);
 }

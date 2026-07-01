@@ -16,6 +16,27 @@ use crate::{
 
 // ── Reads (pure-nostr) ──────────────────────────────────────────────────────
 
+/// Timeline content kinds — the message/channel-event kinds that make up a
+/// channel timeline and a thread's replies. Used to build relay `/query`
+/// filters for the keyset readers below. None of these are in
+/// `P_GATED_KINDS`, so a filter carrying them clears the bridge p-gate
+/// (`p_gated_filters_authorized`) without a `#p` tag — load-bearing for the
+/// thread-subtree read, whose relay routing keys off `#e`+`depth_limit` (not
+/// kind) but still passes through the p-gate before it runs.
+const TIMELINE_KINDS: [u32; 11] = [
+    9,
+    40002,
+    40008,
+    40099,
+    43001,
+    43002,
+    43003,
+    43004,
+    43005,
+    43006,
+    buzz_core_pkg::kind::KIND_HUDDLE_STARTED,
+];
+
 #[tauri::command]
 pub async fn get_feed(
     since: Option<i64>,
@@ -211,7 +232,10 @@ pub async fn get_forum_thread(
 /// cache by grouping on `e`-root tags), this walks `thread_metadata` on the
 /// relay via `get_thread_replies`, so a thread renders complete even when its
 /// replies fell outside the channel cold-load window. Results are chronological
-/// (oldest first) and include the root event itself (depth 0).
+/// (oldest first) and are the *replies* under the root (depth >= 1); the root
+/// event itself is NOT returned (the relay query keys on `root_event_id`, and a
+/// root row has no `root_event_id`). Callers already hold the root — it is the
+/// open thread head — so this closes the descendant gap without re-fetching it.
 ///
 /// Paging is forward keyset on `(created_at, event_id)`: pass the `next_cursor`
 /// from a previous page back as `cursor` to fetch the next batch. The event-id
@@ -228,27 +252,13 @@ pub async fn get_thread_replies(
     state: State<'_, AppState>,
 ) -> Result<ThreadRepliesResponse, String> {
     let cap = limit.unwrap_or(200).min(500);
-    // Bridge extension filter: `#e` root + `depth_limit` routes to
-    // `get_thread_replies` in the relay; `thread_cursor`(+`_id`) pages it forward.
-    let mut filter = serde_json::Map::new();
-    filter.insert("#e".to_string(), serde_json::json!([root_event_id]));
-    // depth_limit is what activates the thread-subtree bridge path; default to
-    // a deep-but-bounded value so nested replies are not silently dropped.
-    filter.insert(
-        "depth_limit".to_string(),
-        serde_json::json!(depth_limit.unwrap_or(64)),
+    let filter = build_thread_replies_filter(
+        &root_event_id,
+        channel_id.as_deref(),
+        depth_limit.unwrap_or(64),
+        cap,
+        cursor.as_ref(),
     );
-    filter.insert("limit".to_string(), serde_json::json!(cap));
-    if let Some(cid) = channel_id.as_deref() {
-        filter.insert("#h".to_string(), serde_json::json!([cid]));
-    }
-    if let Some(c) = cursor.as_ref() {
-        filter.insert("thread_cursor".to_string(), serde_json::json!(c.created_at));
-        filter.insert(
-            "thread_cursor_id".to_string(),
-            serde_json::json!(c.event_id),
-        );
-    }
 
     let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
 
@@ -275,6 +285,48 @@ pub async fn get_thread_replies(
     })
 }
 
+/// Build the relay `/query` filter for the server-side thread-subtree read.
+///
+/// The relay routes a filter to `get_thread_replies` purely off a single `#e`
+/// (root) tag plus `depth_limit` — kind is NOT part of that routing or the
+/// underlying DB query (it keys on `root_event_id`). Yet `kinds` is still
+/// required here: the bridge runs the p-gate (`p_gated_filters_authorized`) on
+/// every filter *before* routing, and a kindless filter "could match" a p-gated
+/// kind, so the gate demands a `#p` tag we don't send -> HTTP 403
+/// `restricted: p-gated kinds require #p tag`, before the thread query ever
+/// runs. Carrying non-p-gated [`TIMELINE_KINDS`] makes the filter provably
+/// un-p-gated so it clears the gate. `build_channel_messages_before_filter` is
+/// the sibling that already does this, which is why the dense-second channel
+/// pager was never gated and this reader was. Extracted so a unit test can pin
+/// that `kinds` is present (the e2e mock does not model p-gating, so only a
+/// unit test guards this contract).
+fn build_thread_replies_filter(
+    root_event_id: &str,
+    channel_id: Option<&str>,
+    depth_limit: u32,
+    cap: u32,
+    cursor: Option<&crate::models::ThreadCursor>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert("#e".to_string(), serde_json::json!([root_event_id]));
+    filter.insert("kinds".to_string(), serde_json::json!(TIMELINE_KINDS));
+    // depth_limit is what activates the thread-subtree bridge path; the caller
+    // defaults it to a deep-but-bounded value so nested replies aren't dropped.
+    filter.insert("depth_limit".to_string(), serde_json::json!(depth_limit));
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    if let Some(cid) = channel_id {
+        filter.insert("#h".to_string(), serde_json::json!([cid]));
+    }
+    if let Some(c) = cursor {
+        filter.insert("thread_cursor".to_string(), serde_json::json!(c.created_at));
+        filter.insert(
+            "thread_cursor_id".to_string(),
+            serde_json::json!(c.event_id),
+        );
+    }
+    filter
+}
+
 /// Build the relay `/query` filter for one keyset page of top-level channel
 /// history strictly older than `(before, before_id)`. Extracted so a unit test
 /// can pin the tiebreak field: it MUST be `before_id` (what the relay's
@@ -290,22 +342,7 @@ fn build_channel_messages_before_filter(
     // the relay's thread_metadata join for this channel scope.
     let mut filter = serde_json::Map::new();
     filter.insert("#h".to_string(), serde_json::json!([channel_id]));
-    filter.insert(
-        "kinds".to_string(),
-        serde_json::json!([
-            9,
-            40002,
-            40008,
-            40099,
-            43001,
-            43002,
-            43003,
-            43004,
-            43005,
-            43006,
-            buzz_core_pkg::kind::KIND_HUDDLE_STARTED
-        ]),
-    );
+    filter.insert("kinds".to_string(), serde_json::json!(TIMELINE_KINDS));
     filter.insert("until".to_string(), serde_json::json!(before));
     filter.insert("limit".to_string(), serde_json::json!(cap));
     // `before_id` is the bridge extension field for the composite tiebreak
@@ -768,6 +805,55 @@ mod tests {
         assert!(
             !filter.contains_key("n"),
             "tiebreak must be `before_id`, not the `n` alias the relay ignores"
+        );
+    }
+
+    #[test]
+    fn thread_replies_filter_carries_non_p_gated_kinds_to_clear_the_gate() {
+        // The relay bridge p-gates EVERY filter before routing
+        // (`p_gated_filters_authorized`): a kindless filter "could match" a
+        // p-gated kind, so it demands a `#p` tag we don't send -> HTTP 403,
+        // before the thread-subtree query runs. The headline Lane-1 fix
+        // (`useThreadReplies` closing the descendant gap) then fails on every
+        // call against a real relay. So the thread filter MUST carry `kinds`,
+        // and every kind MUST be non-p-gated (else the gate still fires). The
+        // Playwright mock does not model p-gating, so this unit test is the
+        // only guard against the client/relay auth contract drifting.
+        let filter = build_thread_replies_filter("root-hex", Some("channel-1"), 64, 200, None);
+
+        let kinds = filter
+            .get("kinds")
+            .and_then(|v| v.as_array())
+            .expect("thread filter must carry `kinds` so the p-gate passes");
+        assert!(!kinds.is_empty(), "kinds must be non-empty");
+        for kind in kinds {
+            let k = kind.as_u64().expect("kind is a number") as u32;
+            assert!(
+                !buzz_core_pkg::kind::P_GATED_KINDS.contains(&k),
+                "kind {k} is p-gated; a p-gated kind in the filter re-triggers the \
+                 403 that this fix exists to prevent"
+            );
+        }
+        assert_eq!(filter["#e"], serde_json::json!(["root-hex"]));
+        assert_eq!(filter["depth_limit"], serde_json::json!(64));
+        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
+    }
+
+    #[test]
+    fn thread_replies_filter_pages_with_composite_cursor() {
+        // When a cursor is supplied, both the timestamp and the event-id
+        // tiebreak must be emitted (`thread_cursor` + `thread_cursor_id`), else
+        // paging degrades to timestamp-only and drops same-second replies.
+        let cursor = crate::models::ThreadCursor {
+            created_at: 1_700_000_000,
+            event_id: "abcd".to_string(),
+        };
+        let filter = build_thread_replies_filter("root-hex", None, 64, 200, Some(&cursor));
+        assert_eq!(filter["thread_cursor"], serde_json::json!(1_700_000_000));
+        assert_eq!(filter["thread_cursor_id"], serde_json::json!("abcd"));
+        assert!(
+            !filter.contains_key("#h"),
+            "no channel_id -> no #h scope in the filter"
         );
     }
 

@@ -182,11 +182,11 @@ pub async fn insert_thread_metadata(
                     sqlx::query(
                         r#"
                         INSERT INTO thread_metadata
-                            (event_created_at, event_id, channel_id,
+                            (community_id, event_created_at, event_id, channel_id,
                              parent_event_id, parent_event_created_at,
                              root_event_id, root_event_created_at,
                              depth, broadcast)
-                        VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, 0, false)
+                        VALUES ($1, $2, $3, $4, NULL, NULL, NULL, NULL, 0, false)
                         ON CONFLICT DO NOTHING
                         "#,
                     )
@@ -1084,6 +1084,178 @@ mod tests {
         let mut expected_sorted = expected_ids.clone();
         expected_sorted.sort();
         assert_eq!(unique, expected_sorted, "paged set != inserted tied set");
+    }
+
+    /// Nested replies (depth >= 2) must be reachable in a subtree read. Every
+    /// existing thread test uses `parent == root` (depth-1 direct replies), so
+    /// the depth>1 path — where `root_event_id != parent_event_id` and the root
+    /// stub is created by a nested reply arriving before the root has a
+    /// metadata row — was never exercised. `get_thread_replies` advertises
+    /// depth-64 subtree reads, so pin that a grandchild reply is returned and
+    /// its depth is recorded. This also exercises the root-stub INSERT branch
+    /// (`root_id != pid`) end-to-end through the production insert path.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_reaches_nested_depth_two_replies() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-nested-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Root (no metadata row on first insert — a depth-0 message).
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        // Depth-1 direct reply to the root (parent == root).
+        let child = make_stream_event(&author, "child");
+        let child_created_at = event_created_at(&child);
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &child,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: child.id.as_bytes(),
+                event_created_at: child_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert depth-1 child");
+
+        // Depth-2 grandchild: parent is the child, root is the root. This is the
+        // `root_id != parent_id` case that fires the nested root-stub branch.
+        let grandchild = make_stream_event(&author, "grandchild");
+        let grandchild_created_at = event_created_at(&grandchild);
+        insert_event_with_thread_metadata(
+            &pool,
+            community,
+            &grandchild,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: grandchild.id.as_bytes(),
+                event_created_at: grandchild_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(child.id.as_bytes()),
+                parent_event_created_at: Some(child_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 2,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert depth-2 grandchild");
+
+        // Read the whole subtree under the root.
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(64), 100, None)
+            .await
+            .expect("fetch subtree");
+
+        let by_id: std::collections::HashMap<Vec<u8>, i32> = replies
+            .iter()
+            .map(|r| (r.event_id.clone(), r.depth))
+            .collect();
+        assert_eq!(
+            replies.len(),
+            2,
+            "both the child and grandchild must be reached"
+        );
+        assert_eq!(
+            by_id.get(child.id.as_bytes().as_slice()),
+            Some(&1),
+            "depth-1 child must be present at depth 1"
+        );
+        assert_eq!(
+            by_id.get(grandchild.id.as_bytes().as_slice()),
+            Some(&2),
+            "depth-2 grandchild must be reached (subtree read must not stop at depth 1)"
+        );
+    }
+
+    /// Direct guard on [`insert_thread_metadata`]'s nested root-stub INSERT. The
+    /// column list once omitted `community_id` while still binding it, scrambling
+    /// every placeholder (the bind for `community_id` landed on `event_created_at`
+    /// etc.), so any nested reply (`root_id != parent_id`) whose root lacked a
+    /// metadata row failed the whole insert. The production ingest path uses
+    /// `insert_event_with_thread_metadata` (event.rs), whose copy was already
+    /// correct, which is why no test caught this. Pin the standalone function so
+    /// the scrambled SQL can't return.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn insert_thread_metadata_nested_reply_creates_root_stub() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-stub-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        // Insert the events themselves (no thread metadata yet) so the FK/row
+        // exists; then drive `insert_thread_metadata` directly for a depth-2
+        // reply whose root has no metadata row — the root-stub branch.
+        let root = make_stream_event(&author, "root");
+        let child = make_stream_event(&author, "child");
+        let grandchild = make_stream_event(&author, "grandchild");
+        for ev in [&root, &child, &grandchild] {
+            insert_event_with_thread_metadata(&pool, community, ev, Some(channel.id), None)
+                .await
+                .expect("insert event");
+        }
+
+        // Depth-2 reply where root_id != parent_id. Before the fix this errored
+        // inside the transaction (UUID bound to a TIMESTAMPTZ placeholder).
+        insert_thread_metadata(
+            &pool,
+            community,
+            grandchild.id.as_bytes(),
+            event_created_at(&grandchild),
+            channel.id,
+            Some(child.id.as_bytes()),
+            Some(event_created_at(&child)),
+            Some(root.id.as_bytes()),
+            Some(event_created_at(&root)),
+            2,
+            false,
+        )
+        .await
+        .expect("nested insert must succeed and create the root stub");
+
+        // The root stub must now exist and be readable.
+        let replies = get_thread_replies(&pool, community, root.id.as_bytes(), Some(64), 100, None)
+            .await
+            .expect("fetch subtree");
+        assert!(
+            replies
+                .iter()
+                .any(|r| r.event_id == grandchild.id.as_bytes()),
+            "grandchild must be reachable under the root after the nested insert"
+        );
     }
 
     /// A reply whose stored row can no longer be reconstructed into a

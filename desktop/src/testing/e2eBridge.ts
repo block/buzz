@@ -13,8 +13,12 @@ import {
   KIND_EMOJI_SET,
 } from "@/shared/api/customEmoji";
 import {
+  KIND_AGENT_OBSERVER_FRAME,
   KIND_DM_VISIBILITY,
   KIND_EVENT_REMINDER,
+  KIND_HUDDLE_STARTED,
+  KIND_MEMBER_ADDED_NOTIFICATION,
+  KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_USER_STATUS,
@@ -497,7 +501,9 @@ type MockFilter = {
   "#d"?: string[];
   "#e"?: string[];
   "#h"?: string[];
+  "#p"?: string[];
   authors?: string[];
+  ids?: string[];
   kinds?: number[];
   limit?: number;
   since?: number;
@@ -3312,7 +3318,7 @@ type RawThreadRepliesResponse = {
 
 /**
  * Mirror of the desktop `get_thread_replies` command: return the full reply
- * subtree under a root, chronological (oldest first) including the root itself,
+ * subtree under a root, chronological (oldest first), excluding the root itself,
  * with gap-free `(created_at, event_id)` keyset paging.
  *
  * The event-id tiebreak is load-bearing — same-second replies must all page
@@ -3330,7 +3336,28 @@ async function handleGetThreadReplies(
   config: E2eConfig | undefined,
 ): Promise<RawThreadRepliesResponse> {
   const cap = Math.min(args.limit ?? 200, 500);
+  const filter: MockFilter & Record<string, unknown> = {
+    "#e": [args.rootEventId],
+    depth_limit: args.depthLimit ?? 64,
+    kinds: [...TIMELINE_KINDS],
+    limit: cap,
+  };
+  if (args.channelId) {
+    filter["#h"] = [args.channelId];
+  }
+  if (args.cursor) {
+    filter.thread_cursor = args.cursor.created_at;
+    filter.thread_cursor_id = args.cursor.event_id;
+  }
   const identity = getIdentity(config);
+  if (
+    !isPGatedFilterAuthorized(
+      filter,
+      identity?.pubkey ?? getMockMemberPubkey(config),
+    )
+  ) {
+    throw new Error(P_GATED_REJECTION_MESSAGE);
+  }
 
   let subtree: RelayEvent[];
   if (!identity) {
@@ -3340,36 +3367,36 @@ async function handleGetThreadReplies(
       ? getMockMessageStore(args.channelId)
       : Array.from(mockMessages.values()).flat();
     const byId = new Map(events.map((event) => [event.id, event]));
-    const included = new Set<string>();
     const root = byId.get(args.rootEventId);
-    const collected: RelayEvent[] = root ? [root] : [];
-    if (root) {
-      included.add(root.id);
-    }
-    for (const event of events) {
-      const ref = getThreadReferenceFromTags(event.tags);
-      const belongsToThread =
-        (ref.rootEventId ?? ref.parentEventId) === args.rootEventId;
-      if (belongsToThread && !included.has(event.id)) {
-        included.add(event.id);
-        collected.push(event);
+    const collected: RelayEvent[] = [];
+    const included = new Set<string>();
+    if (!root) {
+      subtree = collected;
+    } else {
+      const frontier = new Set<string>([root.id]);
+      for (;;) {
+        let added = false;
+        for (const event of events) {
+          if (included.has(event.id)) {
+            continue;
+          }
+          const ref = getThreadReferenceFromTags(event.tags);
+          if (!ref.parentEventId || !frontier.has(ref.parentEventId)) {
+            continue;
+          }
+          included.add(event.id);
+          collected.push(event);
+          frontier.add(event.id);
+          added = true;
+        }
+        if (!added) {
+          break;
+        }
       }
+      subtree = collected;
     }
-    subtree = collected;
   } else {
     // Config mode: exercise the real bridge thread path over /query.
-    const filter: Record<string, unknown> = {
-      "#e": [args.rootEventId],
-      depth_limit: args.depthLimit ?? 64,
-      limit: cap,
-    };
-    if (args.channelId) {
-      filter["#h"] = [args.channelId];
-    }
-    if (args.cursor) {
-      filter.thread_cursor = args.cursor.created_at;
-      filter.thread_cursor_id = args.cursor.event_id;
-    }
     const events = await relayQuery(config, [filter]);
     const nextCursor =
       events.length >= cap
@@ -3413,8 +3440,67 @@ async function handleGetThreadReplies(
 }
 
 const TIMELINE_KINDS = new Set([
-  9, 40002, 40008, 40099, 43001, 43002, 43003, 43004, 43005, 43006,
+  9,
+  40002,
+  40008,
+  40099,
+  43001,
+  43002,
+  43003,
+  43004,
+  43005,
+  43006,
+  KIND_HUDDLE_STARTED,
 ]);
+
+const KIND_GIFT_WRAP = 1059;
+const P_GATED_KINDS = new Set([
+  KIND_AGENT_OBSERVER_FRAME,
+  KIND_MEMBER_ADDED_NOTIFICATION,
+  KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_GIFT_WRAP,
+  KIND_DM_VISIBILITY,
+]);
+const P_GATED_REJECTION_MESSAGE =
+  "restricted: p-gated kinds require #p tag matching your pubkey";
+
+function filterKinds(filter: { kinds?: unknown }): number[] | undefined {
+  return Array.isArray(filter.kinds)
+    ? filter.kinds.filter((kind): kind is number => typeof kind === "number")
+    : undefined;
+}
+
+function filterCanMatchPGated(filter: { kinds?: unknown }) {
+  const kinds = filterKinds(filter);
+  return !kinds || kinds.some((kind) => P_GATED_KINDS.has(kind));
+}
+
+function filterHasOwnPTag(filter: { "#p"?: unknown }, pubkey: string) {
+  const values = filter["#p"];
+  return (
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((value) => value === pubkey)
+  );
+}
+
+function isPGatedFilterAuthorized(
+  filter: { "#p"?: unknown; ids?: unknown; kinds?: unknown },
+  pubkey: string,
+) {
+  if (!filterCanMatchPGated(filter)) {
+    return true;
+  }
+
+  const kinds = filterKinds(filter);
+  const ids = filter.ids;
+  const explicitlyDmVisibility = kinds?.includes(KIND_DM_VISIBILITY);
+  if (!explicitlyDmVisibility && Array.isArray(ids) && ids.length > 0) {
+    return true;
+  }
+
+  return filterHasOwnPTag(filter, pubkey);
+}
 
 type RawChannelMessagesPageResponse = {
   events: RelayEvent[];
@@ -3766,6 +3852,14 @@ async function relayQuery(
   filters: Array<Record<string, unknown>>,
 ): Promise<RelayEvent[]> {
   const identity = getRelayIdentity(config);
+  if (
+    !filters.every((filter) =>
+      isPGatedFilterAuthorized(filter, identity.pubkey),
+    )
+  ) {
+    throw new Error(P_GATED_REJECTION_MESSAGE);
+  }
+
   const response = await fetch(`${getRelayHttpUrl(config)}/query`, {
     method: "POST",
     headers: {
@@ -6808,13 +6902,21 @@ function sendToMockSocket(args: {
 
   if (type === "REQ") {
     const subId = rest[0] as string;
+    const filters = rest.slice(1) as MockFilter[];
+    if (
+      !filters.every((filter) =>
+        isPGatedFilterAuthorized(filter, MOCK_IDENTITY_PUBKEY),
+      )
+    ) {
+      sendWsText(socket.handler, ["CLOSED", subId, P_GATED_REJECTION_MESSAGE]);
+      return;
+    }
 
     if (subId.startsWith("live-")) {
       // Collect channel IDs from all filters in the REQ
       const channelIds = new Set<string>();
       const kinds = new Set<number>();
-      for (let i = 1; i < rest.length; i++) {
-        const f = rest[i] as { "#h"?: string[]; kinds?: number[] };
+      for (const f of filters) {
         const cid = f["#h"]?.[0];
         if (cid) channelIds.add(cid);
         for (const kind of f.kinds ?? []) {

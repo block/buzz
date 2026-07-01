@@ -816,7 +816,7 @@ export type ThreadCursor = {
 };
 
 export type ThreadRepliesResponse = {
-  /** The reply subtree (chronological, oldest first), including the root at depth 0. */
+  /** The reply subtree (chronological, oldest first), depth >= 1. Excludes the root event (relay keys on `root_event_id`, which a root row lacks); the caller already holds the root. */
   events: RelayEvent[];
   /** Present only when a full page was returned — pass back to fetch the next page. */
   nextCursor: ThreadCursor | null;

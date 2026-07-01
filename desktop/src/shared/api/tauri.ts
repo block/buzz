@@ -738,7 +738,10 @@ type RawThreadRepliesResponse = {
  * Paging is forward keyset on `(createdAt, eventId)`: pass the returned
  * `nextCursor` back as `cursor` for the next page. `nextCursor` is non-null only
  * when a full page was returned. The returned `events` are raw nostr events
- * (`RelayEvent`), chronological (oldest first), including the root at depth 0.
+ * (`RelayEvent`), chronological (oldest first). These are the *replies* under
+ * the root (depth >= 1); the root event itself is NOT returned (the relay query
+ * keys on `root_event_id`, which a root row lacks). The caller already holds
+ * the root — it is the open thread head.
  */
 export async function getThreadReplies(
   rootEventId: string,

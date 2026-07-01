@@ -61,6 +61,12 @@ const overrides = new Map([
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
   ["src-tauri/src/commands/agents.rs", 1437],
+  // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
+  // const + build_thread_replies_filter helper, mirroring the channel sibling so
+  // the two p-gate filters can't drift) plus two guard unit tests. The file was
+  // already at 995; this load-bearing correctness fix crossed 1000. Not generic
+  // debt growth. Approved override; queued to split with the rest of this list.
+  ["src-tauri/src/commands/messages.rs", 1082],
   // Residual repos_dir integration in ensure_nest_at: REPOS is provisioned
   // outside NEST_DIRS (it may be a symlink), so it needs its own create +
   // chmod-only-when-real-dir handling plus integration test coverage. The
@@ -85,7 +91,10 @@ const overrides = new Map([
   // queued to split. Read-path lanes 1+2 add server-side fetch bindings
   // (getThreadReplies + getChannelMessagesBefore) and paged people-search
   // reachability — load-bearing reachability plumbing, not generic debt.
-  ["src/shared/api/tauri.ts", 1337],
+  // #1418 read-path fix: +3 doc-only lines correcting the getThreadReplies
+  // contract (replies-only, root excluded — the query keys on root_event_id,
+  // which root rows lack). Documentation accuracy, not code growth.
+  ["src/shared/api/tauri.ts", 1340],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
