@@ -88,7 +88,7 @@ function WorkspaceButton({
           <span
             aria-hidden="true"
             className={cn(
-              "absolute -left-2 w-1 rounded-r-full bg-sidebar-foreground transition-all",
+              "absolute left-[-4px] w-1 rounded-r-full bg-sidebar-foreground transition-all",
               isActive
                 ? "h-6 opacity-100"
                 : showDot
@@ -151,7 +151,7 @@ export function WorkspaceRail({
     <nav
       aria-label="Workspaces"
       className={cn(
-        "flex w-12 shrink-0 flex-col items-end gap-2 overflow-y-auto bg-sidebar pb-3",
+        "flex w-12 shrink-0 flex-col items-center gap-2 overflow-y-auto bg-sidebar pb-3",
         topPaddingClass,
       )}
       data-testid="workspace-rail"
