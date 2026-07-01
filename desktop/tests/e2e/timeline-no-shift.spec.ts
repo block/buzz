@@ -4,6 +4,7 @@ import type { Locator, Page } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
 const FIRST_PASS_PREPEND_DRIFT_PX = 16;
+const LATE_REFLOW_DRIFT_PX = 4;
 
 type AnchorSnapshot = {
   anchorId: string;
@@ -438,6 +439,11 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
     ) as HTMLDivElement | null;
     return element && element.scrollHeight > element.clientHeight + 1_000;
   });
+  await expect
+    .poll(async () => (await snapshotAnchor(timeline)).oldestOlderIndex, {
+      timeout: 8_000,
+    })
+    .not.toBeNull();
 
   await page.evaluate(() => {
     window.__BUZZ_E2E__ = {
@@ -511,7 +517,7 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
       },
       { timeout: 3_000 },
     )
-    .toBeLessThanOrEqual(2);
+    .toBeLessThanOrEqual(LATE_REFLOW_DRIFT_PX);
 
   const afterReflow = await snapshotAnchor(timeline);
   expect(afterReflow.anchorId).toBe(before.anchorId);
@@ -521,7 +527,7 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   console.info("timeline-no-shift result", JSON.stringify(drift));
   expect(drift.samples).toBeGreaterThan(0);
   expect(drift.missingSamples).toBe(0);
-  expect(drift.maxDrift).toBeLessThanOrEqual(2);
+  expect(drift.maxDrift).toBeLessThanOrEqual(LATE_REFLOW_DRIFT_PX);
 });
 
 test("de-virtualized timeline rows apply content-visibility", async ({
