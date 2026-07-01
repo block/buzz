@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
 // Exercises the generic file-attachment UI contract end-to-end through the
 // mock Tauri bridge: paperclip upload → composer chip → send → FileCard in the
@@ -38,13 +39,16 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
 
   // Send the (attachment-only) message.
   await page.getByTestId("send-message").click();
+  await expect(page.getByText("Sending")).toHaveCount(0);
 
   // A FileCard renders in the timeline: a button carrying the filename. It
   // downloads via the native `download_file` command (HTTP inside the app's
   // tunnel + save dialog), NOT a plain `<a download>` link — a bare link
   // escapes the webview to the OS browser and hits a corporate CDN page.
-  const card = page.getByTestId("file-card");
+  const card = page.getByTestId("file-card").last();
   await expect(card).toBeVisible();
+  await expectCornerRadiusPx(card, 16);
+  await expectSmoothCorners(card);
   await expect(card).toContainText("quarterly-report.pdf");
 
   await card.click();

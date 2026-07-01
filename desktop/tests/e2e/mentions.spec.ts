@@ -26,8 +26,6 @@ const CASEY_PROFILE_PUBKEY =
   "1111111111111111111111111111111111111111111111111111111111111111";
 const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
-const UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY =
-  "7777777777777777777777777777777777777777777777777777777777777777";
 const SYSTEM_MESSAGE_KIND = 40099;
 
 /** Locator scoped to the mention autocomplete dropdown inside the composer. */
@@ -63,27 +61,6 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
 
 function commandCount(commands: string[], command: string) {
   return commands.filter((entry) => entry === command).length;
-}
-
-async function readStartHuddleMemberPubkeys(
-  page: import("@playwright/test").Page,
-) {
-  const commandLog = await readCommandPayloadLog(page);
-  return commandLog.flatMap((entry) => {
-    if (entry.command !== "start_huddle") {
-      return [];
-    }
-
-    const payload =
-      entry.payload && typeof entry.payload === "object"
-        ? (entry.payload as {
-            memberPubkeys?: unknown;
-            member_pubkeys?: unknown;
-          })
-        : null;
-    const memberPubkeys = payload?.memberPubkeys ?? payload?.member_pubkeys;
-    return Array.isArray(memberPubkeys) ? memberPubkeys.map(String) : [];
-  });
 }
 
 async function emitMockMessage(
@@ -166,6 +143,21 @@ async function waitForMockLiveSubscription(
 // freshly-sent content so the assertion does not race the deferred commit.
 async function waitForTimelineSettled(page: import("@playwright/test").Page) {
   await expect(page.locator("[data-render-pending]")).toHaveCount(0);
+}
+
+async function expectAgentProfileMessageOnly(
+  profilePopover: import("@playwright/test").Locator,
+  pubkey: string,
+) {
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-message-${pubkey}`),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-wave-${pubkey}`),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(`user-profile-popover-huddle-${pubkey}`),
+  ).toHaveCount(0);
 }
 
 test("@ trigger shows unified autocomplete with agents first", async ({
@@ -916,9 +908,7 @@ test("system add and remove rows use agent mention styling for managed agents", 
   ).toHaveText("portal");
 });
 
-test("system agent profile huddle passes profile-only bot pubkey", async ({
-  page,
-}) => {
+test("system agent profile only exposes message action", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -960,18 +950,13 @@ test("system agent profile huddle passes profile-only bot pubkey", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-huddle-${PROFILE_ONLY_AGENT_PUBKEY}`)
-    .click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([PROFILE_ONLY_AGENT_PUBKEY]));
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
 });
 
-test("system agent avatar huddle passes profile-only bot pubkey", async ({
-  page,
-}) => {
+test("system agent avatar only exposes message action", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1006,13 +991,48 @@ test("system agent avatar huddle passes profile-only bot pubkey", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-huddle-${PROFILE_ONLY_AGENT_PUBKEY}`)
-    .click();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
+});
 
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([PROFILE_ONLY_AGENT_PUBKEY]));
+test("profile-only agent author popover only exposes message action", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      {
+        pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+        displayName: "mira",
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", "Mira status update.", {
+    pubkey: PROFILE_ONLY_AGENT_PUBKEY,
+  });
+  await waitForTimelineSettled(page);
+
+  const messageRow = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Mira status update." })
+    .first();
+  await messageRow.locator("button").first().hover();
+
+  const profilePopover = page.locator(
+    '[data-testid="user-profile-popover"][data-state="open"]',
+  );
+  await expect(profilePopover).toBeVisible();
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    PROFILE_ONLY_AGENT_PUBKEY,
+  );
 });
 
 test("system member-joined rows render the joined person as a mention chip", async ({
@@ -1315,7 +1335,7 @@ test("hovering avatar opens popover, clicking opens profile panel", async ({
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
 });
 
-test("bot profile huddle passes the bot pubkey", async ({ page }) => {
+test("bot profile only exposes message action", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
@@ -1331,18 +1351,13 @@ test("bot profile huddle passes the bot pubkey", async ({ page }) => {
   );
   await expect(profilePopover).toBeVisible();
   await expect(profilePopover.getByText("Codex")).toBeVisible();
-  await profilePopover
-    .getByTestId(
-      `user-profile-popover-huddle-${TEST_IDENTITIES.charlie.pubkey}`,
-    )
-    .click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    TEST_IDENTITIES.charlie.pubkey,
+  );
 });
 
-test("agent mention profile huddle passes the bot pubkey", async ({ page }) => {
+test("agent mention profile only exposes message action", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -1364,39 +1379,57 @@ test("agent mention profile huddle passes the bot pubkey", async ({ page }) => {
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(
-      `user-profile-popover-huddle-${TEST_IDENTITIES.charlie.pubkey}`,
-    )
-    .click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    TEST_IDENTITIES.charlie.pubkey,
+  );
 });
 
-test("profile popover wave sends a direct message", async ({ page }) => {
+test("profile popover wave sends a direct message for a human profile", async ({
+  page,
+}) => {
   await installMockBridge(page, { sendMessageDelayMs: 2_500 });
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
 
-  const aliceMessage = page
+  await emitMockMessage(page, "general", "Bob says hello.", {
+    pubkey: TEST_IDENTITIES.bob.pubkey,
+  });
+  await waitForTimelineSettled(page);
+
+  const bobMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Hey team — checking in." })
+    .filter({ hasText: "Bob says hello." })
     .first();
-  await aliceMessage.locator("button").first().hover();
+  await bobMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-message-${TEST_IDENTITIES.bob.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-huddle-${TEST_IDENTITIES.bob.pubkey}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-wave-${TEST_IDENTITIES.bob.pubkey}`,
+    ),
+  ).toBeVisible();
   await profilePopover
-    .getByTestId(`user-profile-popover-wave-${TEST_IDENTITIES.alice.pubkey}`)
+    .getByTestId(`user-profile-popover-wave-${TEST_IDENTITIES.bob.pubkey}`)
     .click();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(page.getByTestId("chat-title")).toHaveText("bob-tyler");
   const waveAttachment = page.getByTestId("message-wave-attachment");
   await expect(waveAttachment).toBeVisible({ timeout: 1_500 });
   await expect(page.getByText("Sending")).toHaveCount(0, { timeout: 4_000 });
@@ -1431,108 +1464,7 @@ test("profile popover wave sends a direct message", async ({ page }) => {
   );
 });
 
-test("wave attachment huddle passes the bot DM pubkey", async ({ page }) => {
-  await page.goto("/");
-  await page.getByTestId("channel-agents").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("agents");
-
-  const charlieMessage = page
-    .getByTestId("message-row")
-    .filter({ hasText: "Indexing the channel catalog now." })
-    .first();
-  await charlieMessage.locator("button").first().hover();
-
-  const profilePopover = page.locator(
-    '[data-testid="user-profile-popover"][data-state="open"]',
-  );
-  await expect(profilePopover).toBeVisible();
-  await expect(profilePopover.getByText("Codex")).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-wave-${TEST_IDENTITIES.charlie.pubkey}`)
-    .click();
-
-  await expect(page.getByTestId("message-wave-attachment")).toBeVisible();
-  await page
-    .getByTestId("message-wave-attachment")
-    .getByRole("button", { name: "Start huddle" })
-    .click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([TEST_IDENTITIES.charlie.pubkey]));
-});
-
-test("wave attachment huddle waits for placeholder profile-only bot data", async ({
-  page,
-}) => {
-  await installMockBridge(page, {
-    searchProfiles: [
-      {
-        pubkey: UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY,
-        displayName: "nova",
-        ownerPubkey: TEST_IDENTITIES.tyler.pubkey,
-        isAgent: true,
-      },
-    ],
-    usersBatchDelayMs: 2_000,
-  });
-
-  await page.goto("/");
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
-
-  await page.evaluate(
-    ({ kind, targetPubkey }) => {
-      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
-        channelName: "general",
-        content: JSON.stringify({
-          type: "member_joined",
-          actor: targetPubkey,
-          target: targetPubkey,
-        }),
-        kind,
-      });
-    },
-    {
-      kind: SYSTEM_MESSAGE_KIND,
-      targetPubkey: UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY,
-    },
-  );
-  await waitForTimelineSettled(page);
-
-  const joinedRow = page
-    .getByTestId("system-message-row")
-    .filter({ hasText: "joined the channel" });
-  const agentChip = joinedRow.locator("[data-mention]", {
-    hasText: "77777777…7777",
-  });
-  await expect(agentChip).toBeVisible({ timeout: 5_000 });
-  await agentChip.hover();
-
-  const profilePopover = page.locator(
-    '[data-testid="user-profile-popover"][data-state="open"]',
-  );
-  await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(
-      `user-profile-popover-wave-${UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY}`,
-    )
-    .click();
-
-  const startHuddleButton = page
-    .getByTestId("message-wave-attachment")
-    .getByRole("button", { name: "Start huddle" });
-  await expect(startHuddleButton).toBeDisabled();
-  await expect(startHuddleButton).toBeEnabled({ timeout: 5_000 });
-  await startHuddleButton.click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([UNSEEDED_PROFILE_ONLY_AGENT_PUBKEY]));
-});
-
-test("wave attachment huddle waits for delayed bot DM pubkey", async ({
+test("delayed agent profile keeps wave and huddle hidden while classifying", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1572,18 +1504,8 @@ test("wave attachment huddle waits for delayed bot DM pubkey", async ({
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-wave-${DELAYED_RELAY_AGENT_PUBKEY}`)
-    .click();
-
-  const startHuddleButton = page
-    .getByTestId("message-wave-attachment")
-    .getByRole("button", { name: "Start huddle" });
-  await expect(startHuddleButton).toBeDisabled();
-  await expect(startHuddleButton).toBeEnabled({ timeout: 7_000 });
-  await startHuddleButton.click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([DELAYED_RELAY_AGENT_PUBKEY]));
+  await expectAgentProfileMessageOnly(
+    profilePopover,
+    DELAYED_RELAY_AGENT_PUBKEY,
+  );
 });

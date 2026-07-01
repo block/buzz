@@ -12,6 +12,7 @@ import {
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { copyCodeBlockToClipboard } from "@/shared/lib/codeBlockClipboard";
 import { Button } from "@/shared/ui/button";
+import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import { getReactNodeText } from "./utils";
@@ -70,7 +71,9 @@ export function MarkdownCodeBlock({
   language?: string;
 }) {
   const [isCopying, setIsCopying] = React.useState(false);
+  const codeBlockRef = React.useRef<HTMLPreElement | null>(null);
   const code = React.useMemo(() => getCodeBlockText(children), [children]);
+  useSmoothCorners(codeBlockRef);
 
   const handleCopy = React.useCallback(
     async (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -93,7 +96,11 @@ export function MarkdownCodeBlock({
 
   return (
     <div className="group relative" data-code-block="">
-      <pre className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs">
+      <pre
+        ref={codeBlockRef}
+        className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-2xl border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs"
+        style={{ borderRadius: "1rem" }}
+      >
         {language && (
           <div className="mb-1 text-xs text-muted-foreground/70">
             {language}

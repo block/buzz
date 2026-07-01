@@ -83,42 +83,6 @@ async function selectHomeInboxFilter(
   await page.getByRole("menuitemradio", { name: label }).click();
 }
 
-async function readCommandPayloadLog(page: import("@playwright/test").Page) {
-  return page.evaluate(() => {
-    return (
-      (
-        window as Window & {
-          __BUZZ_E2E_COMMAND_LOG__?: Array<{
-            command: string;
-            payload: unknown;
-          }>;
-        }
-      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
-    );
-  });
-}
-
-async function readStartHuddleMemberPubkeys(
-  page: import("@playwright/test").Page,
-) {
-  const commandLog = await readCommandPayloadLog(page);
-  return commandLog.flatMap((entry) => {
-    if (entry.command !== "start_huddle") {
-      return [];
-    }
-
-    const payload =
-      entry.payload && typeof entry.payload === "object"
-        ? (entry.payload as {
-            memberPubkeys?: unknown;
-            member_pubkeys?: unknown;
-          })
-        : null;
-    const memberPubkeys = payload?.memberPubkeys ?? payload?.member_pubkeys;
-    return Array.isArray(memberPubkeys) ? memberPubkeys.map(String) : [];
-  });
-}
-
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -230,7 +194,7 @@ test("inbox feed shows channel and agent activity sections", async ({
   );
 });
 
-test("inbox agent hover huddle passes the agent pubkey", async ({ page }) => {
+test("inbox agent hover only exposes message action", async ({ page }) => {
   await page.goto("/");
 
   await selectHomeInboxFilter(page, "Agents");
@@ -244,13 +208,21 @@ test("inbox agent hover huddle passes the agent pubkey", async ({ page }) => {
     '[data-testid="user-profile-popover"][data-state="open"]',
   );
   await expect(profilePopover).toBeVisible();
-  await profilePopover
-    .getByTestId(`user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`)
-    .click();
-
-  await expect
-    .poll(() => readStartHuddleMemberPubkeys(page))
-    .toEqual(expect.arrayContaining([DEFAULT_AGENT_ACTIVITY_PUBKEY]));
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
+    ),
+  ).toBeVisible();
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
+  await expect(
+    profilePopover.getByTestId(
+      `user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
+    ),
+  ).toHaveCount(0);
 });
 
 test("opens a mocked forum activity item from the inbox feed", async ({

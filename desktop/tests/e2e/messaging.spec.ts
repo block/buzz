@@ -1,6 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
 
 async function expectThreadReplyUnobscured(row: Locator) {
@@ -176,9 +177,10 @@ test("supported link previews keep the message link visible", async ({
   await expect(
     row.getByRole("link", { exact: true, name: previewUrl }),
   ).toBeVisible();
-  await expect(
-    row.locator('[data-link-preview="github-pull-request"]'),
-  ).toBeVisible();
+  const previewCard = row.locator('[data-link-preview="github-pull-request"]');
+  await expect(previewCard).toBeVisible();
+  await expectCornerRadiusPx(previewCard, 16);
+  await expectSmoothCorners(previewCard);
 });
 
 test("send multiple messages in sequence", async ({ page }) => {
@@ -231,6 +233,8 @@ test("copy a rendered code block and paste it back as code", async ({
 
   const codeBlock = page.locator("[data-code-block]");
   await expect(codeBlock).toHaveCount(1);
+  await expectCornerRadiusPx(codeBlock.locator("pre"), 16);
+  await expectSmoothCorners(codeBlock.locator("pre"));
 
   const copyButton = page.getByLabel("Copy code block");
   await expect(copyButton).toHaveCSS("opacity", "0");

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
-import { buildTimelineItems, getTimelineItemKey } from "./timelineItems.ts";
+import {
+  buildTimelineDayGroups,
+  buildTimelineItems,
+  getTimelineItemKey,
+} from "./timelineItems.ts";
 
 function dayAt(year, month, day, hour = 12) {
   return Math.floor(
@@ -99,4 +103,43 @@ test("getTimelineItemKey: keys are unique across the stream", () => {
   const { items } = buildTimelineItems(entries, "b");
   const keys = items.map(getTimelineItemKey);
   assert.equal(new Set(keys).size, keys.length);
+});
+
+test("buildTimelineDayGroups: moves non-day rows under their day section", () => {
+  const entries = [
+    entry({ id: "d1a", createdAt: dayAt(2026, 6, 12) }),
+    entry({ id: "d1b", createdAt: dayAt(2026, 6, 12, 13) }),
+    entry({ id: "d2a", createdAt: dayAt(2026, 6, 13) }),
+    entry({ id: "d2b", createdAt: dayAt(2026, 6, 13, 13) }),
+  ];
+  const { items } = buildTimelineItems(entries, "d2b");
+
+  const groups = buildTimelineDayGroups(items);
+
+  assert.equal(groups.length, 2);
+  assert.deepEqual(
+    groups.map((group) => group.items.map((item) => item.kind)),
+    [
+      ["message", "message"],
+      ["message", "unread-divider", "message"],
+    ],
+  );
+  assert.ok(groups.every((group) => group.headingTimestamp !== null));
+});
+
+test("buildTimelineDayGroups: preserves leading rows without a day divider", () => {
+  const leadingRows = [
+    { kind: "unread-divider", key: "unread-a" },
+    { kind: "message", key: "a", entry: entry({ id: "a" }) },
+  ];
+
+  const groups = buildTimelineDayGroups(leadingRows);
+
+  assert.deepEqual(groups, [
+    {
+      key: "day-undated",
+      headingTimestamp: null,
+      items: leadingRows,
+    },
+  ]);
 });
