@@ -25,8 +25,8 @@ const MEDIA_MAX_HEIGHT = 256; // max-h-64
 const TEXT_LINE_HEIGHT = 22;
 const CODE_LINE_HEIGHT = 19;
 const CHARS_PER_LINE = 64; // rough wrap width at the timeline column
-const ROW_CHROME = 34; // author/time header + row padding
-const REACTION_ROW = 28;
+const ROW_CHROME = 26; // author/time header + denser row padding
+const REACTION_ROW = 24;
 const PREVIEW_CARD = 96;
 const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
 

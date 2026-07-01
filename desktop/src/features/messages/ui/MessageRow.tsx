@@ -380,9 +380,9 @@ export const MessageRow = React.memo(
     const actionBarNode = (
       <div
         className={cn(
-          "absolute right-2 top-1 z-10",
+          "pointer-events-none absolute right-2 top-1 z-10",
           actionBarPlacement === "floating"
-            ? "sm:top-0 sm:-translate-y-1/2"
+            ? "sm:translate-y-0"
             : "sm:top-1 sm:translate-y-0",
         )}
       >
