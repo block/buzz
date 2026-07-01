@@ -22,6 +22,7 @@ type MockFeedWindow = Window & {
     agentPubkey: string;
     channelId: string;
     turnId: string;
+    kind?: "turn_started" | "turn_completed";
   }) => void;
   __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
     category: "mention" | "needs_action" | "activity" | "agent_activity";
@@ -1192,6 +1193,33 @@ test("profile renders live activity for a viewer-owned relay agent", async ({
   await expect(liveActivity).toBeVisible();
   await expect(liveActivity).toContainText("Live activity");
   await expect(liveActivity).toContainText("Open full activity");
+
+  await page.evaluate(
+    ({ agentPubkey, channelId, turnId }) => {
+      const seedActiveTurns = (window as MockFeedWindow)
+        .__BUZZ_E2E_SEED_ACTIVE_TURNS__;
+      if (!seedActiveTurns) {
+        throw new Error("Mock active-turn helper is not installed.");
+      }
+      seedActiveTurns({
+        agentPubkey,
+        channelId,
+        turnId,
+        kind: "turn_completed",
+      });
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+      turnId: "owned-relay-profile-turn",
+    },
+  );
+
+  await expect(liveActivity).toBeVisible();
+  await expect(liveActivity).toContainText("Recent activity");
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).not.toBeVisible();
 });
 
 test("typing indicator shows avatars and maintains stable name order", async ({

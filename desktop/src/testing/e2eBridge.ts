@@ -8,7 +8,10 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
-import { injectObserverEventsForE2E } from "@/features/agents/observerRelayStore";
+import {
+  injectObserverEventsForE2E,
+  syncAgentObserverEvents,
+} from "@/features/agents/observerRelayStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -677,6 +680,7 @@ declare global {
       agentPubkey: string;
       channelId: string;
       turnId: string;
+      kind?: "turn_started" | "turn_completed";
     }) => void;
     __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
       agentPubkey: string;
@@ -7290,20 +7294,21 @@ export function maybeInstallE2eTauriMocks() {
     agentPubkey,
     channelId,
     turnId,
+    kind = "turn_started",
   }) => {
     seedTurnSeq += 1;
-    syncAgentTurnsFromEvents(agentPubkey, [
-      {
-        seq: seedTurnSeq,
-        timestamp: new Date().toISOString(),
-        kind: "turn_started",
-        agentIndex: 0,
-        channelId,
-        sessionId: null,
-        turnId,
-        payload: null,
-      },
-    ]);
+    const event = {
+      seq: seedTurnSeq,
+      timestamp: new Date().toISOString(),
+      kind,
+      agentIndex: 0,
+      channelId,
+      sessionId: null,
+      turnId,
+      payload: null,
+    };
+    syncAgentTurnsFromEvents(agentPubkey, [event]);
+    syncAgentObserverEvents(agentPubkey, [event]);
   };
   window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ = ({ agentPubkey, events }) => {
     injectObserverEventsForE2E(agentPubkey, events);
