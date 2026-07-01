@@ -36,17 +36,25 @@ async fn main() -> anyhow::Result<()> {
     // via OTEL_SERVICE_NAME) for the trace provider so that Datadog can identify
     // spans under the correct service identity.
     let resource = telemetry::service_resource();
-    let tracer_provider = telemetry::try_init_tracer(resource.clone());
-    let otel_layer = tracer_provider.as_ref().map(|p| {
-        use opentelemetry::trace::TracerProvider as _;
-        tracing_opentelemetry::layer().with_tracer(p.tracer("buzz-relay"))
-    });
+    let tracer_init = telemetry::try_init_tracer(resource.clone());
+    let otel_layer = match &tracer_init {
+        telemetry::TracerInit::Enabled(p) => {
+            use opentelemetry::trace::TracerProvider as _;
+            Some(tracing_opentelemetry::layer().with_tracer(p.tracer("buzz-relay")))
+        }
+        _ => None,
+    };
 
     tracing_subscriber::registry()
         .with(fmt::layer().json().flatten_event(true))
         .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
         .with(otel_layer)
         .init();
+
+    // Log any exporter-build failure now that the subscriber is installed.
+    if let telemetry::TracerInit::ExporterBuildFailed(ref e) = tracer_init {
+        warn!(error = %e, "Failed to build OTLP trace exporter; distributed tracing disabled");
+    }
 
     info!("Starting buzz-relay");
 
@@ -734,6 +742,7 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_db_pool_size").set(db_stats.size as f64);
                 metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
                 metrics::gauge!("buzz_db_pool_active").set(active as f64);
+                metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
 
                 let rs = pool_state.redis_pool.status();
                 metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
@@ -754,7 +763,7 @@ async fn main() -> anyhow::Result<()> {
         .await;
 
     // Flush pending OTEL spans before exit.
-    if let Some(tp) = tracer_provider {
+    if let telemetry::TracerInit::Enabled(tp) = tracer_init {
         if let Err(e) = tp.shutdown() {
             tracing::warn!(error = %e, "OTEL tracer provider shutdown error");
         }

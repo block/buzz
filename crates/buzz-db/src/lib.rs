@@ -129,6 +129,8 @@ pub async fn insert_mentions(
 #[derive(Clone, Debug)]
 pub struct Db {
     pub(crate) pool: PgPool,
+    /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
+    pub(crate) max_connections: u32,
 }
 
 /// Snapshot of Postgres connection pool utilisation.
@@ -138,6 +140,8 @@ pub struct DbPoolStats {
     pub size: u32,
     /// Connections available for immediate reuse.
     pub idle: u32,
+    /// Pool ceiling — the `max_connections` value set at construction.
+    pub max: u32,
 }
 
 /// Configuration for the Postgres connection pool.
@@ -210,12 +214,18 @@ impl Db {
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .connect(&config.database_url)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            max_connections: config.max_connections,
+        })
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            max_connections: pool.options().get_max_connections(),
+            pool,
+        }
     }
 
     /// Run pending database migrations.
@@ -232,10 +242,12 @@ impl Db {
     ///
     /// `size`  — total connections (idle + active)
     /// `idle`  — connections available for immediate reuse
+    /// `max`   — pool ceiling set at construction
     pub fn pool_stats(&self) -> DbPoolStats {
         DbPoolStats {
             size: self.pool.size(),
             idle: self.pool.num_idle() as u32,
+            max: self.max_connections,
         }
     }
 
@@ -2537,7 +2549,7 @@ mod tests {
         let pool = PgPool::connect(TEST_DB_URL)
             .await
             .expect("connect to test DB");
-        Db { pool }
+        Db::from_pool(pool)
     }
 
     async fn make_community(pool: &PgPool) -> Uuid {

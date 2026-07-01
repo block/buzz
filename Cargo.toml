@@ -71,7 +71,6 @@ tracing-opentelemetry       = { version = "0.33" }
 opentelemetry               = { version = "0.32", features = ["trace"] }
 opentelemetry_sdk           = { version = "0.32", features = ["trace", "rt-tokio"] }
 opentelemetry-otlp          = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "tls-ring"] }
-opentelemetry-semantic-conventions = { version = "0.32" }
 metrics             = "0.24"
 metrics-exporter-prometheus = "0.18"
 
