@@ -138,7 +138,11 @@ const overrides = new Map([
   // response correlation branch are all tightly coupled to the existing
   // request handler. Load-bearing logic growth, not generic debt. Queued to
   // split into a dedicated permission module in the next transcript refactor.
-  ["src/features/agents/ui/agentSessionTranscript.ts", 1039],
+  // +123: observer parity — 4 new named session/update classifier cases
+  // (current_mode_update, usage_update, available_commands_update,
+  // config_option_update) + replaceLifecycleItem helper for usage coalescing.
+  // Load-bearing feature growth; queued to split in next transcript refactor.
+  ["src/features/agents/ui/agentSessionTranscript.ts", 1162],
   // catalog module; agent_models.rs retains the thin wrapper (~50 lines).
   // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
   // fallback. Queued to split into dedicated discovery modules.

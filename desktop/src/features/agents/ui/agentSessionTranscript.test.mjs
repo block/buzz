@@ -785,3 +785,159 @@ test('buildTranscript does not collide between numeric id 1 and string id "1"', 
   assert.equal(transcriptNumeric[0].outcome, "Approved (allow_once)");
   assert.equal(transcriptString[0].outcome, "Denied (reject_once)");
 });
+
+// ─── observer parity: new session/update classifier cases ────────────────────
+
+test("buildTranscript renders current_mode_update as a lifecycle status line", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: "plan",
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Mode");
+  assert.equal(item.text, "plan");
+  assert.equal(item.acpSource, "current_mode_update");
+});
+
+test("buildTranscript suppresses current_mode_update when currentModeId is missing", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "current_mode_update" }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript renders usage_update as a lifecycle status line with tokens", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "usage_update",
+      used: 1500,
+      size: 8192,
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Usage");
+  assert.equal(item.text, "Tokens: 1500/8192");
+  assert.equal(item.acpSource, "usage_update");
+});
+
+test("buildTranscript renders usage_update with cost when present", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "usage_update",
+      used: 800,
+      size: 4096,
+      cost: { amount: 0.0025, currency: "USD" },
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].text, "Tokens: 800/4096 ($0.0025 USD)");
+});
+
+test("buildTranscript coalesces usage_update to latest-per-turn (replace, not append)", () => {
+  // Three usage frames in the same turn must produce exactly ONE lifecycle item
+  // showing the LAST value — not an accumulation of all three.
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "usage_update", used: 100, size: 8192 }),
+    acpToolUpdate(2, { sessionUpdate: "usage_update", used: 300, size: 8192 }),
+    acpToolUpdate(3, { sessionUpdate: "usage_update", used: 600, size: 8192 }),
+  ]);
+
+  const usageItems = transcript.filter((i) => i.acpSource === "usage_update");
+  assert.equal(usageItems.length, 1, "must coalesce to one item");
+  assert.equal(usageItems[0].text, "Tokens: 600/8192");
+});
+
+test("buildTranscript suppresses usage_update when used or size is missing", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "usage_update", used: 100 }), // size absent
+    acpToolUpdate(2, { sessionUpdate: "usage_update", size: 8192 }), // used absent
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript renders available_commands_update as a lifecycle status line", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "create_plan", description: "Create a plan" },
+        { name: "research_codebase", description: "Research the codebase" },
+      ],
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Commands");
+  assert.equal(item.text, "Commands available: 2");
+  assert.equal(item.acpSource, "available_commands_update");
+});
+
+test("buildTranscript renders available_commands_update with zero commands", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [],
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].text, "Commands available: 0");
+});
+
+test("buildTranscript renders config_option_update as a lifecycle status line", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        { id: "model", name: "Model", type: "select", currentValue: "gpt-4o" },
+        { id: "mode", name: "Mode", type: "select", currentValue: "auto" },
+      ],
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Config");
+  assert.equal(item.text, "Model = gpt-4o, Mode = auto");
+  assert.equal(item.acpSource, "config_option_update");
+});
+
+test("buildTranscript suppresses config_option_update when configOptions is empty", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "config_option_update",
+      configOptions: [],
+    }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript does not render keepalive (stays in else-dropped bucket)", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "keepalive" }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript does not render unknown session/update types (firehose safety net)", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "some_future_type", value: 42 }),
+  ]);
+  assert.equal(transcript.length, 0);
+});

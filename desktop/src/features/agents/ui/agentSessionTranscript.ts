@@ -439,6 +439,52 @@ function upsertLifecycleItem(
   });
 }
 
+// Like upsertLifecycleItem but REPLACES the text on update instead of
+// appending. Used for coalescing fields (e.g. usage_update) where only the
+// latest value is meaningful — repeated updates must not accumulate.
+function replaceLifecycleItem(
+  d: TranscriptDraft,
+  id: string,
+  renderClass: Extract<
+    AgentActivityRenderClass,
+    "status" | "permission" | "error"
+  >,
+  title: string,
+  text: string,
+  timestamp: string,
+  ctx: TranscriptItemContext,
+  acpSource?: string,
+) {
+  const existing = d.itemsById.get(id);
+  if (existing?.type === "lifecycle") {
+    replaceItem(d, id, {
+      ...existing,
+      renderClass,
+      title,
+      text,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
+      acpSource: acpSource ?? existing.acpSource,
+    });
+    return;
+  }
+
+  sealOpenMessages(d);
+  pushItem(d, {
+    id,
+    type: "lifecycle",
+    renderClass,
+    title,
+    text,
+    timestamp,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
+    acpSource,
+  });
+}
+
 function upsertPlan(
   d: TranscriptDraft,
   id: string,
@@ -971,6 +1017,83 @@ export function processTranscriptEvent(
           updateType,
           `plan-update:${ch}:${turnKey}:${event.seq}`,
         );
+      } else if (updateType === "current_mode_update") {
+        const mode = asString(update.currentModeId) ?? "";
+        if (mode) {
+          upsertLifecycleItem(
+            d,
+            `mode:${ch}:${turnKey}`,
+            "status",
+            "Mode",
+            mode,
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
+      } else if (updateType === "usage_update") {
+        const used = typeof update.used === "number" ? update.used : null;
+        const size = typeof update.size === "number" ? update.size : null;
+        if (used !== null && size !== null) {
+          const costRecord = asRecord(update.cost);
+          const costAmount =
+            typeof costRecord.amount === "number" ? costRecord.amount : null;
+          const costCurrency = asString(costRecord.currency);
+          const costStr =
+            costAmount !== null && costCurrency
+              ? ` ($${costAmount.toFixed(4)} ${costCurrency})`
+              : "";
+          replaceLifecycleItem(
+            d,
+            `usage:${ch}:${turnKey}`,
+            "status",
+            "Usage",
+            `Tokens: ${used}/${size}${costStr}`,
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
+      } else if (updateType === "available_commands_update") {
+        const cmds = Array.isArray(update.availableCommands)
+          ? update.availableCommands
+          : [];
+        upsertLifecycleItem(
+          d,
+          `commands:${ch}:${turnKey}`,
+          "status",
+          "Commands",
+          `Commands available: ${cmds.length}`,
+          event.timestamp,
+          ctx,
+          updateType,
+        );
+      } else if (updateType === "config_option_update") {
+        const opts = Array.isArray(update.configOptions)
+          ? (update.configOptions as Array<Record<string, unknown>>)
+          : [];
+        const optText = opts
+          .map((o) => {
+            const name = asString(o.name) ?? asString(o.id) ?? "?";
+            const val =
+              asString(o.currentValue) ??
+              (typeof o.value === "boolean" ? String(o.value) : null) ??
+              "";
+            return val ? `${name} = ${val}` : name;
+          })
+          .join(", ");
+        if (optText) {
+          upsertLifecycleItem(
+            d,
+            `config:${ch}:${turnKey}`,
+            "status",
+            "Config",
+            optText,
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
       } else {
         // Free-form observer status records are not part of the ACP session/update
         // union. Surface only explicit title/text payloads; leave all other
