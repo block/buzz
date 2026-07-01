@@ -14,7 +14,10 @@ import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Spinner } from "@/shared/ui/spinner";
-import { AgentSessionTranscriptList } from "./AgentSessionTranscriptList";
+import {
+  AgentSessionTranscriptList,
+  type AgentSessionTranscriptEmptyState,
+} from "./AgentSessionTranscriptList";
 import { RawEventRail } from "./RawEventRail";
 import type {
   ConnectionState,
@@ -39,9 +42,11 @@ type ManagedAgentSessionPanelProps = {
   channelId?: string | null;
   className?: string;
   emptyDescription?: string;
+  emptyState?: AgentSessionTranscriptEmptyState;
   rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
   showRaw?: boolean;
+  transcriptScrollContainerClassName?: string;
   transcriptVariant?: AgentSessionTranscriptVariant;
   profiles?: UserProfileLookup;
   rawEventsOverride?: ObserverEvent[];
@@ -54,9 +59,11 @@ export function ManagedAgentSessionPanel({
   channelId = null,
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
+  emptyState = "idle",
   rawLayout = "responsive",
   showHeader = true,
   showRaw = true,
+  transcriptScrollContainerClassName,
   transcriptVariant = "default",
   profiles,
   rawEventsOverride,
@@ -115,6 +122,7 @@ export function ManagedAgentSessionPanel({
         autoTail={autoTail}
         channelId={channelId}
         emptyDescription={emptyDescription}
+        emptyState={emptyState}
         errorMessage={errorMessage}
         events={displayEvents}
         hasObserver={hasObserver}
@@ -123,6 +131,7 @@ export function ManagedAgentSessionPanel({
         rawLayout={rawLayout}
         showRaw={showRaw}
         transcript={displayTranscript}
+        transcriptScrollContainerClassName={transcriptScrollContainerClassName}
         transcriptVariant={transcriptVariant}
       />
     </section>
@@ -172,6 +181,7 @@ function SessionBody({
   connectionState,
   channelId,
   emptyDescription,
+  emptyState,
   errorMessage,
   events,
   hasObserver,
@@ -180,6 +190,7 @@ function SessionBody({
   rawLayout,
   showRaw,
   transcript,
+  transcriptScrollContainerClassName,
   transcriptVariant,
 }: {
   agentAvatarUrl: string | null;
@@ -189,6 +200,7 @@ function SessionBody({
   channelId: string | null;
   connectionState: ConnectionState;
   emptyDescription: string;
+  emptyState: AgentSessionTranscriptEmptyState;
   errorMessage: string | null;
   events: ObserverEvent[];
   hasObserver: boolean;
@@ -197,6 +209,7 @@ function SessionBody({
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
   transcript: TranscriptItem[];
+  transcriptScrollContainerClassName?: string;
   transcriptVariant: AgentSessionTranscriptVariant;
 }) {
   const rawRail = resolveRawRailLayout(showRaw, rawLayout);
@@ -238,8 +251,10 @@ function SessionBody({
             agentName={agentName}
             agentPubkey={agentPubkey}
             emptyDescription={emptyDescription}
+            emptyState={emptyState}
             items={transcript}
             profiles={profiles}
+            scrollContainerClassName={transcriptScrollContainerClassName}
             scrollScopeKey={`${agentPubkey}:${channelId ?? "all"}`}
             autoTail={autoTail}
             variant={transcriptVariant}
