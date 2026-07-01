@@ -11,6 +11,10 @@ import {
 } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import {
+  type ProfileActivityFeedScope,
+  useProfileActivityFeedScope,
+} from "@/features/profile/lib/profileActivityFeedScope";
+import {
   type ProfileField,
   ProfileFieldGroup,
   ProfileFieldRows,
@@ -292,7 +296,9 @@ export function ProfileInfoTabContent({
       ]
     : agentInfoFields;
   const hasInfoFields = infoFields.length > 0;
-  const showLiveActivityEmbed = showActivityIngress && activeTurns.length > 0;
+  const feedScope = useProfileActivityFeedScope(activityAgent, activeTurns);
+  const showLiveActivityEmbed =
+    showActivityIngress && (feedScope.isLive || feedScope.hasFeedContent);
 
   if (!hasInfoFields && !showActivityIngress) {
     return null;
@@ -306,6 +312,7 @@ export function ProfileInfoTabContent({
             activeTurns={activeTurns}
             activityAgent={activityAgent}
             channelIdToName={channelIdToName}
+            feedScope={feedScope}
             onOpenActivity={onOpenActivity}
           />
         ) : (
@@ -327,35 +334,42 @@ function ProfileLiveActivityEmbed({
   activeTurns,
   activityAgent,
   channelIdToName,
+  feedScope,
   onOpenActivity,
 }: {
   activeTurns: ActiveTurnSummary[];
   activityAgent: ProfileActivityAgent;
   channelIdToName: Record<string, string>;
+  feedScope: ProfileActivityFeedScope;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
   const [selectedChannelId, setSelectedChannelId] = React.useState<
     string | null
-  >(() => activeTurns[0]?.channelId ?? null);
-  const now = useNow(1000);
+  >(() => feedScope.preferredChannelId);
+  const now = useNow(feedScope.isLive ? 1000 : 86_400_000);
+
+  const switcherChannelIds = feedScope.isLive
+    ? activeTurns.map((turn) => turn.channelId)
+    : feedScope.channelIds;
 
   React.useEffect(() => {
-    if (activeTurns.length === 0) {
-      setSelectedChannelId(null);
+    if (selectedChannelId && switcherChannelIds.includes(selectedChannelId)) {
       return;
     }
 
-    if (!activeTurns.some((turn) => turn.channelId === selectedChannelId)) {
-      setSelectedChannelId(activeTurns[0]?.channelId ?? null);
-    }
-  }, [activeTurns, selectedChannelId]);
+    setSelectedChannelId(
+      feedScope.preferredChannelId ?? switcherChannelIds[0] ?? null,
+    );
+  }, [feedScope.preferredChannelId, selectedChannelId, switcherChannelIds]);
 
-  const selectedTurn =
-    activeTurns.find((turn) => turn.channelId === selectedChannelId) ??
-    activeTurns[0] ??
-    null;
-  const activeChannelId = selectedTurn?.channelId ?? null;
-  const showSwitcher = activeTurns.length > 1;
+  const selectedTurn = feedScope.isLive
+    ? (activeTurns.find((turn) => turn.channelId === selectedChannelId) ??
+      activeTurns[0] ??
+      null)
+    : null;
+  const activeChannelId =
+    selectedChannelId ?? feedScope.preferredChannelId ?? null;
+  const showSwitcher = switcherChannelIds.length > 1;
 
   return (
     <section
@@ -368,8 +382,11 @@ function ProfileLiveActivityEmbed({
           <LiveActivityEmbedHeader
             activeChannelId={activeChannelId}
             elapsedLabel={
-              selectedTurn ? formatElapsed(now - selectedTurn.anchorAt) : null
+              feedScope.isLive && selectedTurn
+                ? formatElapsed(now - selectedTurn.anchorAt)
+                : null
             }
+            isLive={feedScope.isLive}
             onOpenActivity={onOpenActivity}
           />
           <div
@@ -377,10 +394,9 @@ function ProfileLiveActivityEmbed({
             className="mt-2 flex gap-1 overflow-x-auto pb-0.5"
             role="tablist"
           >
-            {activeTurns.map((turn) => {
-              const isSelected = turn.channelId === activeChannelId;
-              const channelName =
-                channelIdToName[turn.channelId] ?? turn.channelId;
+            {switcherChannelIds.map((channelId) => {
+              const isSelected = channelId === activeChannelId;
+              const channelName = channelIdToName[channelId] ?? channelId;
 
               return (
                 <button
@@ -391,8 +407,8 @@ function ProfileLiveActivityEmbed({
                       ? "bg-primary text-primary-foreground"
                       : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
                   )}
-                  key={turn.channelId}
-                  onClick={() => setSelectedChannelId(turn.channelId)}
+                  key={channelId}
+                  onClick={() => setSelectedChannelId(channelId)}
                   role="tab"
                   title={channelName}
                   type="button"
@@ -408,8 +424,11 @@ function ProfileLiveActivityEmbed({
           <LiveActivityEmbedHeader
             activeChannelId={activeChannelId}
             elapsedLabel={
-              selectedTurn ? formatElapsed(now - selectedTurn.anchorAt) : null
+              feedScope.isLive && selectedTurn
+                ? formatElapsed(now - selectedTurn.anchorAt)
+                : null
             }
+            isLive={feedScope.isLive}
             onOpenActivity={onOpenActivity}
           />
         </div>
@@ -431,15 +450,19 @@ function ProfileLiveActivityEmbed({
 function LiveActivityEmbedHeader({
   activeChannelId,
   elapsedLabel,
+  isLive,
   onOpenActivity,
 }: {
   activeChannelId: string | null;
   elapsedLabel: string | null;
+  isLive: boolean;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
   return (
     <div className="flex items-center justify-between gap-2 text-xs">
-      <span className="font-medium text-foreground">Live activity</span>
+      <span className="font-medium text-foreground">
+        {isLive ? "Live activity" : "Recent activity"}
+      </span>
       <div className="flex shrink-0 items-center gap-2">
         {elapsedLabel ? (
           <span className="text-muted-foreground">{elapsedLabel}</span>
