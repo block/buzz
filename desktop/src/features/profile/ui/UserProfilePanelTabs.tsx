@@ -9,6 +9,7 @@ import {
   AgentDetailsRows,
   AgentInstructionRow,
 } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import {
   type ProfileField,
   ProfileFieldGroup,
@@ -260,19 +261,19 @@ export function ProfileTabBar({
 
 export function ProfileInfoTabContent({
   activeTurns,
+  activityAgent,
   agentInfoFields,
   channelIdToName,
   isArchived,
-  managedAgent,
   onOpenActivity,
   pubkey,
   showActivityIngress,
 }: {
   activeTurns: ActiveTurnSummary[];
+  activityAgent: ProfileActivityAgent | null;
   agentInfoFields: ProfileField[];
   channelIdToName: Record<string, string>;
   isArchived: boolean;
-  managedAgent?: ManagedAgent;
   onOpenActivity: (channelId?: string | null) => void;
   pubkey: string | null;
   showActivityIngress: boolean;
@@ -299,11 +300,11 @@ export function ProfileInfoTabContent({
   return (
     <div className="space-y-2">
       {showActivityIngress ? (
-        showLiveActivityEmbed && managedAgent ? (
+        showLiveActivityEmbed && activityAgent ? (
           <ProfileLiveActivityEmbed
             activeTurns={activeTurns}
+            activityAgent={activityAgent}
             channelIdToName={channelIdToName}
-            managedAgent={managedAgent}
             onOpenActivity={onOpenActivity}
           />
         ) : (
@@ -323,13 +324,13 @@ export function ProfileInfoTabContent({
 
 function ProfileLiveActivityEmbed({
   activeTurns,
+  activityAgent,
   channelIdToName,
-  managedAgent,
   onOpenActivity,
 }: {
   activeTurns: ActiveTurnSummary[];
+  activityAgent: ProfileActivityAgent;
   channelIdToName: Record<string, string>;
-  managedAgent: ManagedAgent;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
   const [selectedChannelId, setSelectedChannelId] = React.useState<
@@ -359,7 +360,7 @@ function ProfileLiveActivityEmbed({
     <section
       aria-label="Live activity preview"
       className="flex h-48 flex-col overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left"
-      data-testid={`user-profile-live-activity-${managedAgent.pubkey}`}
+      data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
     >
       {showSwitcher ? (
         <div className="border-border/60 border-b px-3 py-2">
@@ -413,7 +414,7 @@ function ProfileLiveActivityEmbed({
         </div>
       )}
       <ManagedAgentSessionPanel
-        agent={managedAgent}
+        agent={activityAgent}
         autoTail={true}
         channelId={activeChannelId}
         className="min-h-0 flex-1 rounded-none border-0 bg-transparent p-3 shadow-none"
