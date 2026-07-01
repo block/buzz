@@ -3463,7 +3463,7 @@ async function handleGetChannelMessagesBefore(
       limit: cap,
     };
     if (args.beforeId) {
-      filter.n = args.beforeId;
+      filter.before_id = args.beforeId;
     }
     const page = await relayQuery(config, [filter]);
     const nextCursor =
