@@ -264,16 +264,38 @@ export function EditAgentDialog({
     provider,
   );
 
-  // Required credential env keys for the currently selected runtime + provider.
-  // These are surfaced as first-class required rows in the EnvVarsEditor so the
-  // user sees exactly what is missing before attempting to start the agent.
+  // The runtime id that will actually be active after submit. When inheriting,
+  // resolve from agent.agentCommand (the persona's runtime) using the same
+  // dual-match used at submit time — command path first, then id fallback for
+  // catalog entries where the adapter binary is missing (command:null). This
+  // single prospective id feeds BOTH the block-save gate (requiredEnvKeys) and
+  // the submit path so they never disagree on which runtime is being saved.
+  const prospectiveRuntimeId = React.useMemo(() => {
+    if (!inheritHarness) {
+      return selectedRuntime?.id ?? selectedRuntimeId;
+    }
+    return (
+      runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
+        ?.id ??
+      runtimes.find((r) => r.id === agent.agentCommand.trim())?.id ??
+      ""
+    );
+  }, [
+    inheritHarness,
+    runtimes,
+    agent.agentCommand,
+    selectedRuntime?.id,
+    selectedRuntimeId,
+  ]);
+
+  // Required credential env keys for the PROSPECTIVE post-submit runtime.
+  // Using the prospective id (not the current dropdown) ensures the gate
+  // validates what will actually be saved — in particular, on the inherit
+  // transition (claude→buzz-agent or buzz-agent→claude) the gate reflects
+  // the inherited runtime's requirements, not the old pin's.
   const requiredEnvKeys = React.useMemo(
-    () =>
-      requiredCredentialEnvKeys(
-        selectedRuntime?.id ?? selectedRuntimeId,
-        providerForDiscovery,
-      ),
-    [selectedRuntime?.id, selectedRuntimeId, providerForDiscovery],
+    () => requiredCredentialEnvKeys(prospectiveRuntimeId, providerForDiscovery),
+    [prospectiveRuntimeId, providerForDiscovery],
   );
 
   const {
@@ -489,21 +511,10 @@ export function EditAgentDialog({
           : undefined;
 
       // Derive the effective runtime at submit time — the one that will
-      // actually run AFTER submit. When pinned (inheritHarness=false), it's
-      // the live dropdown selection. When inheriting, match agent.agentCommand
-      // first by command (the normal path), then fall back to id-match for
-      // runtimes where the adapter is missing (command:null in the catalog).
-      // The id of a known runtime is stable even when its adapter binary is
-      // absent, so id-fallback lets us classify capability correctly without
-      // treating a "known adapter missing" as "completely unknown runtime."
-      const effectiveRuntimeIdForSubmit = inheritHarness
-        ? (runtimes.find((r) => r.command?.trim() === agent.agentCommand.trim())
-            ?.id ??
-          // Fallback: id-based match for command:null catalog entries (adapter
-          // missing but runtime is known and its capability is still static).
-          runtimes.find((r) => r.id === agent.agentCommand.trim())?.id ??
-          "")
-        : (selectedRuntime?.id ?? selectedRuntimeId);
+      // actually run AFTER submit. This is the component-scope prospectiveRuntimeId,
+      // which is shared with the block-save gate (requiredEnvKeys) so both
+      // always agree on which runtime is being saved.
+      const effectiveRuntimeIdForSubmit = prospectiveRuntimeId;
 
       // Classify the effective runtime's provider capability as a tri-state so
       // the provider submit branch can distinguish "known-locked" (clear) from
