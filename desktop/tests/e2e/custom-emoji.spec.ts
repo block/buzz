@@ -432,3 +432,35 @@ test("a system message accepts a custom-emoji reaction", async ({ page }) => {
     .locator(`img[alt=':${REACTION_SHORTCODE}:']`);
   await expect(reactionImg).toBeVisible();
 });
+
+test("emoji picker search input has spellcheck, autocorrect, and autocapitalize disabled", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the reaction picker on the seeded reactable message.
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  // Wait for the picker to be visible, then read the shadow-root input attributes.
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  const attrs = await picker.evaluate((el: Element) => {
+    const input = (
+      el as HTMLElement & { shadowRoot: ShadowRoot }
+    ).shadowRoot?.querySelector<HTMLInputElement>('input[type="search"]');
+    if (!input) throw new Error("search input not found in shadow root");
+    return {
+      spellcheck: input.spellcheck,
+      autocorrect: input.getAttribute("autocorrect"),
+      autocapitalize: input.getAttribute("autocapitalize"),
+    };
+  });
+
+  expect(attrs.spellcheck).toBe(false);
+  expect(attrs.autocorrect).toBe("off");
+  expect(attrs.autocapitalize).toBe("off");
+});
