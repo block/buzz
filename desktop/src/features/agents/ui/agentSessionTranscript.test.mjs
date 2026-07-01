@@ -941,3 +941,165 @@ test("buildTranscript does not render unknown session/update types (firehose saf
   ]);
   assert.equal(transcript.length, 0);
 });
+
+// --- system-prompt ordering ---
+
+test("buildTranscript gives system-prompt item a null turnId so it sorts before per-turn prompt-context (first turn, shared turnId)", () => {
+  // Reproduces the ordering bug: session/new and session/prompt arrive with the
+  // same turnId (as the harness emits on the first turn). Without the fix the
+  // system-prompt item lands in the same turn bucket as the prompt-context and
+  // renders AFTER it; with the fix it has turnId=null and sorts before.
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1", // same as session/prompt — the bug trigger
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt:
+            "[Base]\nYou are a helpful assistant.\n\n[System]\nObserver Agent.",
+        },
+      },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: hello`,
+            },
+            { type: "text", text: "[Thread context]\nPrior messages here." },
+          ],
+        },
+      },
+    },
+  ];
+
+  const items = buildTranscript(events);
+  const systemPromptIdx = items.findIndex((i) => i.title === "System prompt");
+  const promptContextIdx = items.findIndex((i) => i.title === "Prompt context");
+  assert.ok(systemPromptIdx !== -1, "expected a System prompt item");
+  assert.ok(promptContextIdx !== -1, "expected a Prompt context item");
+  assert.ok(
+    systemPromptIdx < promptContextIdx,
+    `expected System prompt (idx ${systemPromptIdx}) before Prompt context (idx ${promptContextIdx})`,
+  );
+  // Verify the system-prompt item has no turnId so the display grouper treats
+  // it as a standalone item, not a turn-scoped one.
+  const systemPromptItem = items[systemPromptIdx];
+  assert.equal(
+    systemPromptItem.turnId ?? null,
+    null,
+    "system-prompt item must have turnId=null to avoid turn-bucket grouping",
+  );
+});
+
+test("buildTranscript system-prompt stays before prompt-context on subsequent turns (multi-turn)", () => {
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nYou are helpful.\n\n[System]\nObserver.",
+        },
+      },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: turn 1`,
+            },
+            { type: "text", text: "[Thread context]\nEmpty." },
+          ],
+        },
+      },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:05:00.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"c".repeat(64)}\nFrom: x (hex: ${"d".repeat(64)})\nContent: turn 2`,
+            },
+            { type: "text", text: "[Thread context]\nOne prior message." },
+          ],
+        },
+      },
+    },
+  ];
+
+  const items = buildTranscript(events);
+  const systemPromptIdx = items.findIndex((i) => i.title === "System prompt");
+  // Both turns produce a Prompt context — grab the first one (turn-1).
+  const firstPromptContextIdx = items.findIndex(
+    (i) => i.title === "Prompt context",
+  );
+  assert.ok(systemPromptIdx !== -1, "expected a System prompt item");
+  assert.ok(
+    firstPromptContextIdx !== -1,
+    "expected at least one Prompt context item",
+  );
+  assert.ok(
+    systemPromptIdx < firstPromptContextIdx,
+    `expected System prompt (idx ${systemPromptIdx}) before first Prompt context (idx ${firstPromptContextIdx})`,
+  );
+  assert.equal(
+    items[systemPromptIdx].turnId ?? null,
+    null,
+    "system-prompt item must have turnId=null",
+  );
+});

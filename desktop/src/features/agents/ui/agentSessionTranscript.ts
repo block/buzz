@@ -872,6 +872,11 @@ export function processTranscriptEvent(
       // keyed per channel-session — the frame carries no session id (it predates
       // session creation), and session/new fires once per channel-session, so a
       // re-created session correctly replaces the prior item.
+      //
+      // System prompt is per-channel, not per-turn. Passing turnId: null keeps
+      // the item out of any turn bucket in the display grouping layer so it
+      // always renders before the per-turn prompt-context block, regardless of
+      // which turnId the session/new event carries on the wire.
       const params = asRecord(payload.params);
       const systemPrompt = asString(params.systemPrompt);
       if (systemPrompt) {
@@ -883,7 +888,7 @@ export function processTranscriptEvent(
             "System prompt",
             sections,
             event.timestamp,
-            ctx,
+            { ...ctx, turnId: null },
           );
         }
       }
