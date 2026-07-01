@@ -193,14 +193,16 @@ export function EnvVarsEditor({
               </div>
               {(() => {
                 const inheritedValue = inheritedFrom?.[key];
-                return inheritedValue !== undefined ? (
+                if (inheritedValue === undefined) return null;
+                const verb = currentValue ? "Overrides" : "Inherited from";
+                return (
                   <p className="ml-1 text-xs text-muted-foreground">
-                    Overrides {inheritedLabel} value{" "}
+                    {verb} {inheritedLabel} value{" "}
                     <span className="font-mono">
                       {maskInherited(inheritedValue)}
                     </span>
                   </p>
-                ) : null;
+                );
               })()}
             </div>
           );
