@@ -8,7 +8,7 @@ use crate::{
     models::{
         FeedItemInfo, FeedMeta, FeedResponse, FeedSections, ForumMessageInfo, ForumPostsResponse,
         ForumThreadReplyInfo, ForumThreadResponse, SearchResponse, SendChannelMessageResponse,
-        ThreadSummary,
+        ThreadRepliesResponse, ThreadSummary,
     },
     nostr_convert,
     relay::{query_relay, submit_event, submit_event_with_keys},
@@ -202,6 +202,76 @@ pub async fn get_forum_thread(
         replies,
         total_replies,
         next_cursor: None,
+    })
+}
+
+/// Fetch the full reply subtree under a thread root, server-side.
+///
+/// Unlike the channel timeline (which the desktop assembles from its local
+/// cache by grouping on `e`-root tags), this walks `thread_metadata` on the
+/// relay via `get_thread_replies`, so a thread renders complete even when its
+/// replies fell outside the channel cold-load window. Results are chronological
+/// (oldest first) and include the root event itself (depth 0).
+///
+/// Paging is forward keyset on `(created_at, event_id)`: pass the `next_cursor`
+/// from a previous page back as `cursor` to fetch the next batch. The event-id
+/// tiebreak is required because replies routinely share a `created_at` second;
+/// a timestamp-only cursor would skip every tied reply past the page limit.
+/// `next_cursor` is `Some` only when a full page was returned.
+#[tauri::command]
+pub async fn get_thread_replies(
+    root_event_id: String,
+    channel_id: Option<String>,
+    limit: Option<u32>,
+    depth_limit: Option<u32>,
+    cursor: Option<crate::models::ThreadCursor>,
+    state: State<'_, AppState>,
+) -> Result<ThreadRepliesResponse, String> {
+    let cap = limit.unwrap_or(200).min(500);
+    // Bridge extension filter: `#e` root + `depth_limit` routes to
+    // `get_thread_replies` in the relay; `thread_cursor`(+`_id`) pages it forward.
+    let mut filter = serde_json::Map::new();
+    filter.insert("#e".to_string(), serde_json::json!([root_event_id]));
+    // depth_limit is what activates the thread-subtree bridge path; default to
+    // a deep-but-bounded value so nested replies are not silently dropped.
+    filter.insert(
+        "depth_limit".to_string(),
+        serde_json::json!(depth_limit.unwrap_or(64)),
+    );
+    filter.insert("limit".to_string(), serde_json::json!(cap));
+    if let Some(cid) = channel_id.as_deref() {
+        filter.insert("#h".to_string(), serde_json::json!([cid]));
+    }
+    if let Some(c) = cursor.as_ref() {
+        filter.insert("thread_cursor".to_string(), serde_json::json!(c.created_at));
+        filter.insert(
+            "thread_cursor_id".to_string(),
+            serde_json::json!(c.event_id),
+        );
+    }
+
+    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+
+    // A full page implies there may be more; hand back the last event's
+    // composite key as the next cursor (the DB returns replies strictly after
+    // it, tiebroken by event_id so same-second replies are not skipped).
+    let next_cursor = if events.len() as u32 >= cap {
+        events.last().map(|ev| crate::models::ThreadCursor {
+            created_at: ev.created_at.as_secs() as i64,
+            event_id: ev.id.to_hex(),
+        })
+    } else {
+        None
+    };
+
+    let event_values: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|ev| serde_json::to_value(ev).ok())
+        .collect();
+
+    Ok(ThreadRepliesResponse {
+        events: event_values,
+        next_cursor,
     })
 }
 

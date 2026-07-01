@@ -205,6 +205,41 @@ fn extract_depth_limit(raw: &Value) -> Option<u32> {
         .and_then(|n| u32::try_from(n).ok())
 }
 
+/// Extract a thread pagination cursor from the raw filter JSON.
+///
+/// The desktop pages `get_thread_replies` forward with a keyset cursor derived
+/// transparently from the last reply it has already loaded — no server-issued
+/// token. The cursor is a composite of that reply's `created_at` (Unix seconds,
+/// field `thread_cursor`/`threadCursor`) and its hex event id (field
+/// `thread_cursor_id`/`threadCursorId`). The event id is the tiebreak that lets
+/// pagination cross replies sharing the same `created_at` second — without it,
+/// a timestamp-only cursor silently drops every tied reply past the page limit
+/// (the exact "missed messages" bug this work exists to fix).
+///
+/// Wire → DB encoding: 8-byte big-endian i64 seconds, followed by the raw
+/// event-id bytes when present. `get_thread_replies` decodes this layout back
+/// into its `(timestamp, event_id)` keyset. A bare timestamp (no id) is still
+/// accepted and paginates on time alone (unsafe across same-second ties).
+fn extract_thread_cursor(raw: &Value) -> Option<Vec<u8>> {
+    let secs = raw
+        .get("thread_cursor")
+        .or_else(|| raw.get("threadCursor"))?
+        .as_i64()?;
+    let mut bytes = secs.to_be_bytes().to_vec();
+
+    if let Some(id_hex) = raw
+        .get("thread_cursor_id")
+        .or_else(|| raw.get("threadCursorId"))
+        .and_then(Value::as_str)
+    {
+        if let Ok(id_bytes) = hex::decode(id_hex) {
+            bytes.extend_from_slice(&id_bytes);
+        }
+    }
+
+    Some(bytes)
+}
+
 fn extract_feed_types(raw: &Value) -> Option<Vec<String>> {
     let arr = raw.get("feed_types")?.as_array()?;
     let types: Vec<String> = arr
@@ -547,9 +582,16 @@ pub async fn query_events(
             .limit
             .unwrap_or(100)
             .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
+        let thread_cursor = extract_thread_cursor(raw);
         let thread_replies = state
             .db
-            .get_thread_replies(tenant.community(), &root_bytes, Some(depth), limit, None)
+            .get_thread_replies(
+                tenant.community(),
+                &root_bytes,
+                Some(depth),
+                limit,
+                thread_cursor.as_ref().map(|c| c.as_slice()),
+            )
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
@@ -1836,6 +1878,69 @@ mod tests {
     fn extract_depth_limit_valid() {
         let raw = serde_json::json!({ "depth_limit": 3 });
         assert_eq!(extract_depth_limit(&raw), Some(3));
+    }
+
+    #[test]
+    fn extract_thread_cursor_valid() {
+        // Timestamp-only cursor: 8-byte BE seconds, no tiebreak id.
+        let raw = serde_json::json!({ "thread_cursor": 1_782_866_946_i64 });
+        assert_eq!(
+            extract_thread_cursor(&raw),
+            Some(1_782_866_946_i64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn extract_thread_cursor_camel_case() {
+        let raw = serde_json::json!({ "threadCursor": 42_i64 });
+        assert_eq!(
+            extract_thread_cursor(&raw),
+            Some(42_i64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn extract_thread_cursor_composite() {
+        // Composite cursor: 8-byte BE seconds followed by the raw event-id bytes.
+        let id_hex = "aa".repeat(32);
+        let raw = serde_json::json!({
+            "thread_cursor": 1_782_866_946_i64,
+            "thread_cursor_id": id_hex,
+        });
+        let mut expected = 1_782_866_946_i64.to_be_bytes().to_vec();
+        expected.extend_from_slice(&[0xaa; 32]);
+        assert_eq!(extract_thread_cursor(&raw), Some(expected));
+    }
+
+    #[test]
+    fn extract_thread_cursor_composite_camel_case() {
+        let id_hex = "bb".repeat(32);
+        let raw = serde_json::json!({
+            "threadCursor": 7_i64,
+            "threadCursorId": id_hex,
+        });
+        let mut expected = 7_i64.to_be_bytes().to_vec();
+        expected.extend_from_slice(&[0xbb; 32]);
+        assert_eq!(extract_thread_cursor(&raw), Some(expected));
+    }
+
+    #[test]
+    fn extract_thread_cursor_ignores_bad_id_hex() {
+        // A malformed id falls back to timestamp-only rather than erroring.
+        let raw = serde_json::json!({
+            "thread_cursor": 5_i64,
+            "thread_cursor_id": "not-hex",
+        });
+        assert_eq!(
+            extract_thread_cursor(&raw),
+            Some(5_i64.to_be_bytes().to_vec())
+        );
+    }
+
+    #[test]
+    fn extract_thread_cursor_absent() {
+        let raw = serde_json::json!({ "depth_limit": 3 });
+        assert!(extract_thread_cursor(&raw).is_none());
     }
 
     #[test]

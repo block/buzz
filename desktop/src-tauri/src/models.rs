@@ -266,6 +266,33 @@ pub struct ForumThreadResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Forward keyset pagination cursor for `get_thread_replies`.
+///
+/// Thread replies routinely share a `created_at` second (bursty threads), so
+/// the cursor must carry the last reply's `event_id` as a tiebreak alongside
+/// its `created_at`. A timestamp-only cursor advances past the entire tied
+/// second after one page and silently drops every tied reply beyond the page
+/// limit — the "missed messages" bug this read-path work fixes. The relay
+/// keysets on `(event_created_at, event_id)` to match.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ThreadCursor {
+    /// `created_at` of the last reply already loaded (Unix seconds).
+    pub created_at: i64,
+    /// Hex event id of that last reply — the tiebreak within a shared second.
+    pub event_id: String,
+}
+
+/// Response for `get_thread_replies` — the full reply subtree under a root
+/// event, fetched server-side from `thread_metadata` (NOT assembled from the
+/// channel cache). `events` are raw Nostr events in chronological order;
+/// `next_cursor` is the composite `(created_at, event_id)` of the last event
+/// when a full page was returned, for forward keyset paging, else `None`.
+#[derive(Serialize, Deserialize)]
+pub struct ThreadRepliesResponse {
+    pub events: Vec<serde_json::Value>,
+    pub next_cursor: Option<ThreadCursor>,
+}
+
 fn deserialize_null_string_as_empty<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,

@@ -328,9 +328,16 @@ pub async fn decrement_reply_count(
 /// Fetch all replies under a root event, ordered chronologically.
 ///
 /// - `depth_limit` -- if `Some(n)`, only returns replies at depth <= n.
-/// - `cursor` -- if `Some(ts_bytes)`, returns replies with `event_created_at`
-///   strictly after the timestamp encoded in `ts_bytes`. The bytes must be an
-///   8-byte big-endian i64 Unix timestamp in seconds.
+/// - `cursor` -- keyset pagination cursor. The result order is
+///   `(event_created_at ASC, event_id ASC)`; the cursor is the composite key of
+///   the last row already seen and the query returns rows strictly after it. A
+///   composite `(timestamp, event_id)` tiebreak is required because thread
+///   replies routinely share a `created_at` second (bursty threads); a
+///   timestamp-only cursor silently drops every tied reply past the page limit.
+///   Wire encoding: `8-byte big-endian i64 seconds` followed by the raw
+///   `event_id` bytes (32 for a standard Nostr id). A bare 8-byte cursor is
+///   still accepted for back-compat and paginates on timestamp alone (unsafe
+///   across same-second ties) -- prefer the composite form.
 /// - `limit` -- maximum rows returned (caller should cap this).
 pub async fn get_thread_replies(
     pool: &PgPool,
@@ -340,11 +347,20 @@ pub async fn get_thread_replies(
     limit: u32,
     cursor: Option<&[u8]>,
 ) -> Result<Vec<ThreadReply>> {
-    // Decode cursor bytes -> DateTime<Utc> for the keyset condition.
-    let cursor_ts: Option<DateTime<Utc>> = match cursor {
-        Some(bytes) if bytes.len() == 8 => {
-            let secs = i64::from_be_bytes(bytes.try_into().expect("length checked"));
-            DateTime::from_timestamp(secs, 0)
+    // Decode cursor bytes -> keyset (timestamp, optional event_id) for the
+    // WHERE condition. Layout: 8-byte BE i64 seconds, then the raw event_id.
+    // An 8-byte-only cursor is legacy timestamp-only paging (no tiebreak).
+    let cursor_key: Option<(DateTime<Utc>, Option<Vec<u8>>)> = match cursor {
+        Some(bytes) if bytes.len() >= 8 => {
+            let secs = i64::from_be_bytes(bytes[..8].try_into().expect("length checked"));
+            DateTime::from_timestamp(secs, 0).map(|ts| {
+                let id = if bytes.len() > 8 {
+                    Some(bytes[8..].to_vec())
+                } else {
+                    None
+                };
+                (ts, id)
+            })
         }
         _ => None,
     };
@@ -385,13 +401,27 @@ pub async fn get_thread_replies(
         sql.push_str(&format!(" AND tm.depth <= ${param_idx}"));
         param_idx += 1;
     }
-    if cursor_ts.is_some() {
-        sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
-        param_idx += 1;
+    match &cursor_key {
+        Some((_, Some(_))) => {
+            // Composite keyset: strict row comparison with an event_id tiebreak
+            // so same-second replies paginate without gaps or duplicates.
+            let ts_idx = param_idx;
+            let id_idx = param_idx + 1;
+            sql.push_str(&format!(
+                " AND (tm.event_created_at, tm.event_id) > (${ts_idx}, ${id_idx})"
+            ));
+            param_idx += 2;
+        }
+        Some((_, None)) => {
+            // Legacy timestamp-only cursor (no tiebreak).
+            sql.push_str(&format!(" AND tm.event_created_at > ${param_idx}"));
+            param_idx += 1;
+        }
+        None => {}
     }
 
     sql.push_str(&format!(
-        " ORDER BY tm.event_created_at ASC LIMIT ${param_idx}"
+        " ORDER BY tm.event_created_at ASC, tm.event_id ASC LIMIT ${param_idx}"
     ));
 
     let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -401,8 +431,14 @@ pub async fn get_thread_replies(
     if let Some(dl) = depth_limit {
         q = q.bind(dl as i32);
     }
-    if let Some(ts) = cursor_ts {
-        q = q.bind(ts);
+    match &cursor_key {
+        Some((ts, Some(id))) => {
+            q = q.bind(*ts).bind(id.clone());
+        }
+        Some((ts, None)) => {
+            q = q.bind(*ts);
+        }
+        None => {}
     }
     q = q.bind(limit as i32);
 
@@ -934,6 +970,120 @@ mod tests {
         assert_eq!(replies[0].stored_event.event.content, "reply");
         assert_eq!(replies[0].stored_event.channel_id, Some(channel.id));
         assert_eq!(replies[0].depth, 1);
+    }
+
+    /// Replies that share the same `created_at` second (bursty threads are the
+    /// common case) must paginate without gaps or duplicates. Before the
+    /// composite `(event_created_at, event_id)` keyset, a timestamp-only cursor
+    /// advanced past the whole tied second after one page, silently dropping
+    /// every tied reply beyond the first page's limit — the "missed messages"
+    /// bug this read-path work exists to fix. This pins the tiebreak.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_pages_same_second_ties_without_loss() {
+        use nostr::Timestamp;
+
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let (channel, community) = create_test_channel(
+            &pool,
+            &format!("thread-ties-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        // Pin every reply to the SAME second so pagination must lean entirely on
+        // the event_id tiebreak. Distinct content keeps the ids distinct.
+        let tie_secs: u64 = root.created_at.as_secs() + 1;
+        let tie_ts = DateTime::from_timestamp(tie_secs as i64, 0).expect("valid timestamp");
+        let reply_count = 5usize;
+        let mut expected_ids = Vec::with_capacity(reply_count);
+        for i in 0..reply_count {
+            let reply = EventBuilder::new(Kind::Custom(9), format!("tie-{i}"))
+                .custom_created_at(Timestamp::from(tie_secs))
+                .sign_with_keys(&author)
+                .expect("sign tied reply");
+            expected_ids.push(reply.id.as_bytes().to_vec());
+            insert_event_with_thread_metadata(
+                &pool,
+                community,
+                &reply,
+                Some(channel.id),
+                Some(ThreadMetadataParams {
+                    event_id: reply.id.as_bytes(),
+                    event_created_at: tie_ts,
+                    channel_id: channel.id,
+                    parent_event_id: Some(root.id.as_bytes()),
+                    parent_event_created_at: Some(root_created_at),
+                    root_event_id: Some(root.id.as_bytes()),
+                    root_event_created_at: Some(root_created_at),
+                    depth: 1,
+                    broadcast: false,
+                }),
+            )
+            .await
+            .expect("insert tied reply");
+        }
+
+        // Page with limit=2 across 5 same-second replies. Build the next cursor
+        // from the last row's (created_at seconds, event_id) — the exact keyset
+        // the bridge derives transparently for the client.
+        let page_limit = 2u32;
+        let mut collected: Vec<Vec<u8>> = Vec::new();
+        let mut cursor: Option<Vec<u8>> = None;
+        loop {
+            let page = get_thread_replies(
+                &pool,
+                community,
+                root.id.as_bytes(),
+                Some(10),
+                page_limit,
+                cursor.as_deref(),
+            )
+            .await
+            .expect("fetch page");
+            if page.is_empty() {
+                break;
+            }
+            let last = page.last().expect("non-empty page");
+            let mut next = last.created_at.timestamp().to_be_bytes().to_vec();
+            next.extend_from_slice(&last.event_id);
+            cursor = Some(next);
+            let full = page.len() as u32 == page_limit;
+            for reply in page {
+                collected.push(reply.event_id);
+            }
+            if !full {
+                break;
+            }
+        }
+
+        // No gaps, no duplicates: the paged union equals the full tied set.
+        assert_eq!(
+            collected.len(),
+            reply_count,
+            "paged {} replies, expected all {}",
+            collected.len(),
+            reply_count
+        );
+        let mut unique = collected.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), reply_count, "paging produced duplicates");
+        let mut expected_sorted = expected_ids.clone();
+        expected_sorted.sort();
+        assert_eq!(unique, expected_sorted, "paged set != inserted tied set");
     }
 
     /// A reply whose stored row can no longer be reconstructed into a
