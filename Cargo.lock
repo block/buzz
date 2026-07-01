@@ -765,6 +765,7 @@ dependencies = [
  "deadpool-redis",
  "hex",
  "nostr",
+ "rustls",
  "serde_json",
  "sqlx",
  "tokio",
