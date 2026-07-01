@@ -77,6 +77,7 @@ export function ToolItem({
           label={compactSummary.label}
           messageLink={messageLink}
           preview={compactSummary.preview}
+          pubkey={agentPubkey}
           result={item.result}
           timestamp={item.timestamp}
         />
