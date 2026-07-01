@@ -2149,7 +2149,7 @@ fn validate_repo_id(repo_id: &str) -> bool {
 ///
 /// Security hardening:
 /// - Repo name validated: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`
-/// - Name reserved atomically (`.names/<repo_id>`), unique across owners
+/// - Name reserved atomically in Postgres (`git_repo_names`), unique per community
 /// - Per-pubkey repo count limit enforced
 async fn handle_git_repo_announcement(
     tenant: &TenantContext,
@@ -2173,123 +2173,165 @@ async fn handle_git_repo_announcement(
     // (see `api::git::hydrate`). Announce only (1) reserves the repo name and
     // (2) seeds the empty-manifest pointer that makes the repo clone-able.
     //
-    // `.names/<community>/<repo_id>` is the relay's name registry. Each
-    // reservation holds an `owner` file naming the announcer. It serves three
-    // jobs at once inside the server-resolved community boundary:
-    //   - uniqueness: `create_dir` is atomic, so concurrent kind:30617 events
-    //     for the same community/name can't both claim it (TOCTOU-free);
+    // The `git_repo_names` table (Postgres) is the relay's name registry,
+    // keyed `(community_id, repo_id)`. It serves three jobs at once inside the
+    // server-resolved community boundary:
+    //   - uniqueness: `INSERT … ON CONFLICT DO NOTHING` is atomic, so
+    //     concurrent kind:30617 events for the same community/name can't both
+    //     claim it (TOCTOU-free — the DB PK is the race guard);
     //   - idempotent re-announce: a reservation owned by the same pubkey is an
     //     update, not a collision;
-    //   - per-pubkey quota: count the reservations whose `owner` matches.
+    //   - per-pubkey quota: `COUNT` reservations owned by this pubkey.
     //
-    // This is the one local-disk simplification in v1: separate relay
-    // instances with separate disks would each grant the name, with the CAS
-    // pointer (not this registry) preventing actual ref-state corruption. A
-    // CAS-backed name index is the multi-instance follow-up.
-    let git_repo_root = &state.config.git_repo_path;
-    let names_dir = git_repo_root
-        .join(".names")
-        .join(tenant.community().to_string());
-    std::fs::create_dir_all(&names_dir)
-        .map_err(|e| anyhow::anyhow!("failed to create name reservation index: {e}"))?;
+    // This replaces the v1 local-disk `.names/` index. Moving it into Postgres
+    // (which the relay already requires) removes the last persistent local-disk
+    // state, so separate replicas no longer need a shared ReadWriteMany volume
+    // to agree on name ownership. Actual ref-state safety remains the
+    // object-store pointer CAS (`api::git::cas_publish`, `Inv_NoFork`); this
+    // registry only governs name allocation.
+    let community = tenant.community();
+    use buzz_db::git_repo::ReserveOutcome;
 
-    let reservation = names_dir.join(&repo_id);
-    let owner_marker = reservation.join("owner");
-
-    // Re-announce by the same owner is a no-op update; a name held by anyone
-    // else is a collision (the relay signs kind:30618 with d-tag = repo_name,
-    // so a shared name would let one owner overwrite another's ref state).
-    if reservation.exists() {
-        match std::fs::read_to_string(&owner_marker) {
-            Ok(existing) if existing == owner_hex => {
-                info!(
-                    repo_id = %repo_id,
-                    owner = %owner_hex,
-                    "kind:30617 repo announcement updated (name already reserved)"
-                );
-                return Ok(());
-            }
-            _ => {
+    // Classify the name first: same-owner re-announce is idempotent; a name
+    // held by anyone else is a collision (the relay signs kind:30618 with
+    // d-tag = repo_name, so a shared name would let one owner overwrite
+    // another's ref state). For a not-yet-owned name we must check quota
+    // *before* claiming, so we peek the current holder rather than inserting
+    // blindly.
+    //
+    // Crucially, we do NOT return early on a same-owner existing row: the row
+    // proves name *ownership*, not that the manifest pointer was actually
+    // seeded. A concurrent same-owner announce could hold the row while its
+    // seed is still in flight (or failed and rolled back), so trusting the row
+    // alone would let this handler "accept" an uncloneable repo. Instead we
+    // fall through to `seed_manifest_pointer`, which is idempotent under
+    // concurrency (create-only `put_pointer(IfNoneMatchStar)`; a `LostRace` on
+    // the same empty digest is success, a different non-empty pointer is a
+    // hard error). So re-announce *ensures* the pointer rather than assuming it.
+    let outcome =
+        if let Some(existing_owner) = state.db.repo_name_owner(community, &repo_id).await? {
+            if existing_owner != owner_hex {
                 return Err(anyhow::anyhow!(
                     "repo name '{repo_id}' already taken by another owner"
                 ));
             }
-        }
-    }
+            // Same owner: the reservation already exists (this attempt did not
+            // create it), so it must never be rolled back by this attempt, and the
+            // per-pubkey quota is unchanged (re-announce never grows the count).
+            ReserveOutcome::AlreadyOwned
+        } else {
+            // Not yet owned by anyone we saw: enforce the per-pubkey quota, then
+            // claim the name atomically. The `ON CONFLICT` guard resolves a
+            // concurrent announce even though the peek above missed it —
+            // `Reserved` means *this attempt* won the insert, `AlreadyOwned` means
+            // a same-owner sibling won it, `TakenByOther` is a cross-owner
+            // collision.
+            let limit = state.config.git_max_repos_per_pubkey as i64;
+            let owned = state
+                .db
+                .count_repos_for_owner(community, &owner_hex)
+                .await?;
+            if owned >= limit {
+                return Err(anyhow::anyhow!("repo limit exceeded: {owned} >= {limit}"));
+            }
+            match state
+                .db
+                .reserve_repo_name(community, &repo_id, &owner_hex)
+                .await?
+            {
+                outcome @ (ReserveOutcome::Reserved | ReserveOutcome::AlreadyOwned) => outcome,
+                ReserveOutcome::TakenByOther => {
+                    return Err(anyhow::anyhow!(
+                        "repo name '{repo_id}' already taken by another owner"
+                    ));
+                }
+            }
+        };
 
-    // Per-pubkey repo count limit: reservations owned by this pubkey.
-    let limit = state.config.git_max_repos_per_pubkey as usize;
-    let owned = std::fs::read_dir(&names_dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    std::fs::read_to_string(e.path().join("owner"))
-                        .map(|o| o == owner_hex)
-                        .unwrap_or(false)
-                })
-                .count()
-        })
-        .unwrap_or(0);
-    if owned >= limit {
-        return Err(anyhow::anyhow!("repo limit exceeded: {owned} >= {limit}"));
-    }
+    // Only a genuinely fresh claim by *this* attempt may be rolled back on a
+    // pointer failure. An `AlreadyOwned` outcome means the row is owned by some
+    // other attempt (a same-owner sibling, or a prior announce that has since
+    // pushed), and deleting it here would strand a repo whose pointer that
+    // other attempt already established.
+    let reserved_by_this_attempt = matches!(outcome, ReserveOutcome::Reserved);
 
-    // Claim the name. `create_dir` (not `create_dir_all`) fails AlreadyExists
-    // if a concurrent announce won the race, closing the TOCTOU window above.
-    match std::fs::create_dir(&reservation) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(anyhow::anyhow!(
-                "repo name '{repo_id}' already taken by another owner"
-            ));
+    // Establish/confirm the manifest pointer, keeping the invariant
+    // "repo announced ⟺ pointer exists" so the read path can rely on
+    // pointer-absent meaning never-announced (keeping `info_refs`'s fail-closed
+    // `Ok(None) → 404` unambiguous). Two distinct cases:
+    //
+    // - Fresh `Reserved` claim → `seed_manifest_pointer` (strict). This creates
+    //   the empty pointer, and correctly *fails* if a non-empty pointer already
+    //   exists for a name we just reserved — that would be a suspicious stale
+    //   pointer from a prior repo lifecycle, not a legitimate re-announce.
+    // - Same-owner `AlreadyOwned` (re-announce) → `ensure_manifest_pointer`
+    //   (tolerant). A non-empty pointer is the *normal* post-push state, so
+    //   re-announce must accept it untouched; only an absent pointer is
+    //   repaired by seeding. Using the strict seed here would wrongly reject
+    //   every re-announce after the first push.
+    let pointer_result = if reserved_by_this_attempt {
+        seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+    } else {
+        ensure_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+    };
+    if let Err(pointer_err) = pointer_result {
+        // A reserved name without a clone-able pointer is exactly the broken
+        // state this step exists to prevent — but ONLY roll back the
+        // reservation if this attempt is the one that freshly created it. A
+        // genuine failure from a fresh `Reserved` attempt means the pointer
+        // truly could not be established, so releasing our own just-inserted
+        // row is safe and correct (all-or-nothing). For an `AlreadyOwned`
+        // attempt we release nothing: the row belongs to another attempt that
+        // may have seeded (or pushed) successfully.
+        if reserved_by_this_attempt {
+            if let Err(release_err) = state
+                .db
+                .release_repo_name(community, &repo_id, &owner_hex)
+                .await
+            {
+                warn!(
+                    repo_id = %repo_id,
+                    error = %release_err,
+                    "failed to release repo name reservation after seed failure"
+                );
+            }
         }
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "failed to reserve repo name '{repo_id}': {e}"
-            ));
-        }
+        return Err(anyhow::anyhow!(
+            "failed to ensure manifest pointer: {pointer_err}"
+        ));
     }
-    if let Err(e) = std::fs::write(&owner_marker, &owner_hex) {
-        let _ = std::fs::remove_dir_all(&reservation);
-        return Err(anyhow::anyhow!("failed to record repo owner: {e}"));
-    }
-
-    // Seed the empty-manifest pointer in object storage. Establishes the
-    // invariant "repo announced ⟺ pointer exists" so the read path can rely
-    // on pointer-absent meaning never-announced (not just no-pushes-yet),
-    // keeping `info_refs`'s fail-closed `Ok(None) → 404` unambiguous.
-    // First push CASes the seeded pointer normally — no special-case branch.
-    seed_manifest_pointer(state, tenant, &owner_hex, &repo_id)
-        .await
-        .map_err(|e| {
-            // A reserved name without a clone-able pointer is exactly the
-            // broken state the seed exists to prevent. Release the reservation
-            // so the announce is either fully consummated or fully rolled back.
-            let _ = std::fs::remove_dir_all(&reservation);
-            anyhow::anyhow!("failed to seed manifest pointer: {e}")
-        })?;
 
     info!(
         repo_id = %repo_id,
         owner = %owner_hex,
-        "kind:30617 repo announced (name reserved, manifest pointer seeded)"
+        reserved = reserved_by_this_attempt,
+        "kind:30617 repo announced (name reserved, manifest pointer ensured)"
     );
 
     // Derived after the pointer commits: kind:30618 ref-state event over the
     // seeded empty manifest. Pointer is the commit; this event is the
     // notification that the repo exists (with empty refs) so subscribers see
     // a first signal without waiting for the first push.
-    if let Err(e) = emit_initial_ref_state(tenant, state, &owner_hex, &repo_id).await {
-        // Non-fatal: the manifest is the source of truth; this is just the
-        // derived notification. A failure here means subscribers miss the
-        // "repo now exists" event, but clone/push still works.
-        warn!(
-            repo_id = %repo_id,
-            owner = %owner_hex,
-            error = %e,
-            "failed to emit initial kind:30618 ref state (non-fatal)"
-        );
+    //
+    // Emit ONLY on a fresh `Reserved` claim. On a same-owner `AlreadyOwned`
+    // re-announce the pointer already exists (and, after the first push, holds
+    // real refs). Re-emitting the empty-refs 30618 here would publish a *newer*
+    // replaceable event that, under NIP-16 latest-wins ordering, shadows the
+    // real pushed refs — making a live repo look empty to subscribers. The
+    // initial empty signal is a one-time seeding notification, not something a
+    // re-announce should replay.
+    if reserved_by_this_attempt {
+        if let Err(e) = emit_initial_ref_state(tenant, state, &owner_hex, &repo_id).await {
+            // Non-fatal: the manifest is the source of truth; this is just the
+            // derived notification. A failure here means subscribers miss the
+            // "repo now exists" event, but clone/push still works.
+            warn!(
+                repo_id = %repo_id,
+                owner = %owner_hex,
+                error = %e,
+                "failed to emit initial kind:30618 ref state (non-fatal)"
+            );
+        }
     }
 
     Ok(())
@@ -2377,6 +2419,51 @@ async fn seed_manifest_pointer(
             }
             Ok(())
         }
+    }
+}
+
+/// Ensure a manifest pointer exists for an already-owned repo (same-owner
+/// re-announce path). Unlike [`seed_manifest_pointer`], which is strict for
+/// *creation* (it refuses when a non-empty pointer already exists, since a
+/// freshly-reserved name with a populated pointer is suspicious), this is the
+/// tolerant *idempotent* path for a name this owner already holds:
+///
+/// - **pointer present** (empty *or* non-empty) → success, left untouched. A
+///   non-empty pointer is the normal state after the owner has pushed; a
+///   re-announce must not fail just because the repo has commits, and must
+///   never overwrite real ref state.
+/// - **pointer absent** → seed the empty pointer (repair the "row exists but
+///   pointer missing" window, e.g. a prior announce whose seed failed after
+///   the row was inserted by a sibling attempt). This restores the
+///   "announced ⟺ pointer exists" invariant.
+///
+/// The read-then-conditional-seed is race-safe: the repair uses
+/// `seed_manifest_pointer`'s create-only `put_pointer(IfNoneMatchStar)`, so a
+/// concurrent seeder that wins is resolved by that function's `LostRace`
+/// handling (same empty digest → Ok), and a concurrent *pusher* that populates
+/// the pointer between our read and our seed loses the create race and is
+/// likewise treated as an already-present pointer, not an overwrite.
+async fn ensure_manifest_pointer(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    owner_hex: &str,
+    repo_id: &str,
+) -> anyhow::Result<()> {
+    use crate::api::git::manifest::pointer_key;
+
+    let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
+    let existing = state
+        .git_store
+        .get_pointer(&pkey)
+        .await
+        .map_err(|e| anyhow::anyhow!("get_pointer: {e}"))?;
+    match existing {
+        // Any existing pointer (empty or non-empty) is valid for a same-owner
+        // re-announce — leave it exactly as-is.
+        Some(_) => Ok(()),
+        // No pointer yet: repair by seeding the empty pointer. `LostRace` to a
+        // concurrent seeder/pusher is handled by `seed_manifest_pointer`.
+        None => seed_manifest_pointer(state, tenant, owner_hex, repo_id).await,
     }
 }
 
