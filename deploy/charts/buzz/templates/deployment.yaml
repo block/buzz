@@ -164,13 +164,13 @@ spec:
             {{- toYaml .Values.relay.resources | nindent 12 }}
 
           volumeMounts:
-            {{- if .Values.persistence.git.enabled }}
             - { name: git-repos, mountPath: {{ .Values.persistence.git.mountPath | quote }} }
-            {{- end }}
 
       volumes:
-        {{- if .Values.persistence.git.enabled }}
         - name: git-repos
+        {{- if .Values.persistence.git.enabled }}
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-git" (include "buzz.fullname" .)) .Values.persistence.git.existingClaim }}
+        {{- else }}
+          emptyDir: {}
         {{- end }}

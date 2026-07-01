@@ -101,3 +101,38 @@ tests:
             name: BUZZ_HUDDLE_AUDIO_AVAILABLE
             value: "false"
         template: templates/deployment.yaml
+
+  - it: mounts a per-pod emptyDir git scratch volume when persistence is disabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      replicaCount: 5
+      persistence.git.enabled: false
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 5
+        template: templates/deployment.yaml
+      # git-repos is still mounted (BUZZ_GIT_REPO_PATH must be a real dir)…
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: git-repos
+            mountPath: /var/lib/buzz/git
+        template: templates/deployment.yaml
+      # …but as a per-pod emptyDir, not a shared PVC (no multi-attach).
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: git-repos
+            emptyDir: {}
+        template: templates/deployment.yaml
+      # No PVC is rendered at all when persistence is disabled.
+      - hasDocuments:
+          count: 0
+        template: templates/pvc-git.yaml
