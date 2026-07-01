@@ -54,6 +54,8 @@ type MockManagedAgentSeed = {
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
+  agentType?: string;
+  capabilities?: string[];
   respondTo?: RawRelayAgent["respond_to"];
   respondToAllowlist?: string[];
   channelNames?: string[];
@@ -1511,10 +1513,10 @@ function resetMockRelayAgents(config?: E2eConfig) {
     mockRelayAgents.push({
       pubkey: seed.pubkey,
       name: seed.name,
-      agent_type: "goose",
+      agent_type: seed.agentType ?? "goose",
       channels: channels.map((channel) => channel.name),
       channel_ids: channels.map((channel) => channel.id),
-      capabilities: ["messages", "channels", "mcp"],
+      capabilities: seed.capabilities ?? ["messages", "channels", "mcp"],
       status: seed.status ?? "online",
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
@@ -2137,16 +2139,6 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     status: "away",
     respond_to: "anyone",
     respond_to_allowlist: [],
-  },
-  {
-    pubkey: OWNED_RELAY_AGENT_PUBKEY,
-    name: "nadia",
-    agent_type: "goose",
-    channels: ["agents"],
-    channel_ids: ["94a444a4-c0a3-5966-ab05-530c6ddc2301"],
-    capabilities: ["search", "summaries"],
-    status: "online",
-    respond_to: "anyone",
   },
 ];
 let mockRelayAgents: RawRelayAgent[] = defaultMockRelayAgents.map((agent) => ({

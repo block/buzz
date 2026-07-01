@@ -60,6 +60,7 @@ const AGENT_INFO_LABELS = new Set([
 ]);
 const AGENT_SETTINGS_LABELS = new Set([
   "Runtime",
+  "Agent profile",
   "Respond to",
   "ACP command",
   "MCP command",
@@ -318,6 +319,14 @@ export function buildOwnerFields({
       icon: Terminal,
       label: "Runtime",
       testId: "user-profile-runtime",
+    });
+  } else if (ownerPubkey) {
+    fields.push({
+      copyValue: ownerPubkey,
+      displayValue: "Declared owner verified",
+      icon: UserRound,
+      label: "Agent profile",
+      testId: "user-profile-agent-profile",
     });
   }
 
