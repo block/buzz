@@ -418,7 +418,9 @@ test.describe("observer feed screenshots", () => {
       .getByTestId("transcript-metadata-item")
       .getByTestId("transcript-prompt-context-sections")
       .getByRole("button");
-    for (const btn of await sectionButtons.all()) {
+    const allSectionButtons = await sectionButtons.all();
+    expect(allSectionButtons.length).toBeGreaterThan(0);
+    for (const btn of allSectionButtons) {
       await btn.click();
     }
     await settleAnimations(feedPanel);

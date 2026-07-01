@@ -36,7 +36,7 @@ test("RawRailActivity render: raw_json_rpc keeps <pre> safety net", () => {
   );
   assert.ok(html.includes("<pre"), "raw_json_rpc should render <pre>");
   assert.ok(
-    !html.includes("rounded-2xl"),
+    !html.includes("transcript-prompt-context-sections"),
     "raw_json_rpc should not render polished accordion",
   );
 });
@@ -57,7 +57,7 @@ test("RawRailActivity render: system prompt (no acpSource) uses polished accordi
     }),
   );
   assert.ok(
-    html.includes("rounded-2xl"),
+    html.includes("transcript-prompt-context-sections"),
     "system prompt should render polished accordion",
   );
   assert.ok(!html.includes("<pre"), "system prompt should not render <pre>");
@@ -80,7 +80,7 @@ test("RawRailActivity render: steer-turn prompt context uses polished accordion"
     }),
   );
   assert.ok(
-    html.includes("rounded-2xl"),
+    html.includes("transcript-prompt-context-sections"),
     "steer-turn prompt context should render polished accordion",
   );
   assert.ok(
