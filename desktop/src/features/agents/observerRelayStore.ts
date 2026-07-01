@@ -128,6 +128,16 @@ function observerTag(event: RelayEvent, tagName: string) {
   return event.tags.find((tag) => tag[0] === tagName)?.[1] ?? null;
 }
 
+function pillDiagBridgeAgents(
+  agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
+) {
+  return agents.map((agent) => ({
+    pubkey: normalizePubkey(agent.pubkey),
+    status: agent.status,
+    startsObserver: agent.status === "running" || agent.status === "deployed",
+  }));
+}
+
 function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   const key = normalizePubkey(agentPubkey);
   const current = eventsByAgent.get(key) ?? [];
@@ -389,6 +399,13 @@ export function useManagedAgentObserverBridge(
       ),
     [agents],
   );
+
+  console.log("[pill-diag] observer bridge render", {
+    subscriptionId,
+    hasActiveAgent,
+    agents: pillDiagBridgeAgents(agents),
+    at: new Date().toISOString(),
+  });
 
   const agentPubkeys = React.useMemo(
     () => agents.map((agent) => agent.pubkey),
