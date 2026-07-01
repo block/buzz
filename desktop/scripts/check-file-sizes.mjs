@@ -110,6 +110,11 @@ const overrides = new Map([
   // which root rows lack). Documentation accuracy, not code growth.
   // linux-updater isAutoUpdateSupported() binding + onboarding has_profile_event field.
   ["src/shared/api/tauri.ts", 1349],
+  // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
+  // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
+  // shows required markers and credential amber rows (parity with
+  // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1016],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
