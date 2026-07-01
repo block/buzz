@@ -139,6 +139,11 @@ export type UserSearchResult = {
   isAgent: boolean;
 };
 
+export type UserSearchPage = {
+  users: UserSearchResult[];
+  nextCursor: string | null;
+};
+
 export type UpdateProfileInput = {
   displayName?: string;
   avatarUrl?: string;
