@@ -1,8 +1,9 @@
-import type * as React from "react";
+import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 
 import { cn } from "@/shared/lib/cn";
 import { Button, type ButtonProps } from "@/shared/ui/button";
+import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 
 type AttachmentProps = React.ComponentProps<"div"> & {
   orientation?: "horizontal" | "vertical";
@@ -17,10 +18,14 @@ function Attachment({
   state = "done",
   ...props
 }: AttachmentProps) {
+  const attachmentRef = React.useRef<HTMLDivElement | null>(null);
+  useSmoothCorners(attachmentRef);
+
   return (
     <div
+      ref={attachmentRef}
       className={cn(
-        "group/attachment relative flex min-w-0 gap-3 overflow-hidden rounded-lg border border-border/70 bg-muted/30 text-left transition-colors",
+        "group/attachment relative flex min-w-0 gap-3 overflow-hidden rounded-2xl border border-border/70 bg-muted/30 text-left transition-colors",
         "hover:border-border hover:bg-muted/50 data-[state=error]:border-destructive/40 data-[state=error]:bg-destructive/10",
         "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
         orientation === "horizontal" && "items-center",
@@ -160,7 +165,7 @@ function AttachmentTrigger({
   return (
     <Comp
       className={cn(
-        "absolute inset-0 z-10 rounded-lg focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
+        "absolute inset-0 z-10 rounded-2xl focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
         className,
       )}
       data-slot="attachment-trigger"
