@@ -6,7 +6,10 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
-use buzz_core::kind::{AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_DM_VISIBILITY, P_GATED_KINDS};
+use buzz_core::kind::{
+    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC, KIND_DM_VISIBILITY,
+    P_GATED_KINDS,
+};
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
 use buzz_pubsub::EventTopic;
@@ -1015,13 +1018,18 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         // safe for kinds whose id is author-bound or whose content is encrypted.
         // KIND_DM_VISIBILITY is relay-signed (id not author-bound) and exposes
         // plaintext private hide choices, so its `#p` owner check MUST hold even
-        // when `ids` is present. Only filters that explicitly name the kind lose
-        // the exemption — a kindless `ids` lookup is unaffected.
-        let explicitly_dm_visibility = filter.kinds.as_ref().is_some_and(|ks| {
-            ks.iter()
-                .any(|kind| kind.as_u16() as u32 == KIND_DM_VISIBILITY)
+        // when `ids` is present. KIND_AGENT_TURN_METRIC events are long-lived
+        // and their cleartext envelope (pubkey, agent tag, created_at) leaks
+        // turn-activity metadata — knowing an event id is NOT authorization
+        // (NIP-AM §Relay Behavior). Only filters that explicitly name the kind
+        // lose the exemption — a kindless `ids` lookup is unaffected.
+        let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
+            ks.iter().any(|kind| {
+                let k = kind.as_u16() as u32;
+                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
+            })
         });
-        if !explicitly_dm_visibility && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+        if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
         }
 
@@ -1357,6 +1365,66 @@ mod tests {
             ))
             .id(nostr::EventId::from_hex(snapshot_id).unwrap());
         assert!(p_gated_filters_authorized(&[member_notif_ids], authed));
+    }
+
+    /// NIP-AM: kind 44200 must deny `{kinds:[44200], ids:[...]}` by non-owner.
+    /// Thufir's implementation note: the helper treats explicit-kind+ids and
+    /// kindless ids differently. Explicit `{kinds:[44200], ids:[...]}` is denied;
+    #[test]
+    fn agent_turn_metric_requires_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let event_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let metric_kind = nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16);
+
+        // Case 1: {kinds:[44200], ids:[...]} — explicit kind, should require #p owner.
+        let explicit_kind_ids_only = Filter::new()
+            .kind(metric_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap());
+        assert!(
+            !p_gated_filters_authorized(&[explicit_kind_ids_only], authed),
+            "kind:44200 + ids without matching #p must be denied"
+        );
+
+        let explicit_kind_wrong_p = Filter::new()
+            .kind(metric_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [other]);
+        assert!(
+            !p_gated_filters_authorized(&[explicit_kind_wrong_p], authed),
+            "kind:44200 + ids + wrong #p must be denied"
+        );
+
+        // Case 2: kindless {ids:[...]} — the existing ids exemption applies
+        // (consistent with other p-gated kinds like member notifications). The
+        // relay's defense-in-depth for kind:44200 is: (a) the explicit-kind+ids
+        // carve-out above, (b) NULL tsvector storage preventing search discovery,
+        // and (c) the subscription delivery layer not returning 44200 events to
+        // non-owners. A kindless ids filter is authorized here because
+        // p_gated_filters_authorized cannot know which kind the id resolves to.
+        let kindless_ids = Filter::new().id(nostr::EventId::from_hex(event_id).unwrap());
+        assert!(
+            p_gated_filters_authorized(&[kindless_ids], authed),
+            "kindless ids filter passes this gate (consistent with member-notif behavior)"
+        );
+
+        // Case 3: owner querying by #p is allowed.
+        let owner_by_p = Filter::new().kind(metric_kind).custom_tags(p_tag, [authed]);
+        assert!(
+            p_gated_filters_authorized(&[owner_by_p], authed),
+            "kind:44200 with matching #p must be allowed"
+        );
+
+        // Case 4: owner querying by #p + ids is allowed.
+        let owner_p_and_ids = Filter::new()
+            .kind(metric_kind)
+            .id(nostr::EventId::from_hex(event_id).unwrap())
+            .custom_tags(p_tag, [authed]);
+        assert!(
+            p_gated_filters_authorized(&[owner_p_and_ids], authed),
+            "kind:44200 with matching #p and ids must be allowed"
+        );
     }
 
     #[test]

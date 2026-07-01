@@ -24,6 +24,8 @@ pub mod kind;
 pub mod network;
 /// Agent observer frame helpers.
 pub mod observer;
+/// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
+pub mod agent_turn_metric;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
 /// Presence status types shared across crates.

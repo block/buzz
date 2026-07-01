@@ -131,6 +131,10 @@ pub const P_GATED_KINDS: &[u32] = &[
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
     KIND_DM_VISIBILITY,
+    // NIP-AM: agent turn metrics are encrypted to the owner and must not be
+    // readable by any unauthenticated or non-owner party, including via `ids`
+    // filters — see NIP-AM §Relay Behavior.
+    KIND_AGENT_TURN_METRIC,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -354,6 +358,15 @@ pub const KIND_MEMBER_ADDED_NOTIFICATION: u32 = 44100;
 /// Stored globally (channel_id = None) with p-tag = target, h-tag = channel UUID.
 pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 
+/// NIP-AM: Agent Turn Metric — durable per-turn token-usage record (agent-authored).
+///
+/// Regular stored event (append-only, never replaced). The agent publishes one
+/// event per completed turn, NIP-44 encrypted to its owner. Tags: exactly one `p`
+/// (owner pubkey) and one `agent` (agent pubkey == event pubkey); no `h` tag.
+/// Stored globally (channel_id = NULL); owner-scoped reads only (p-gated, NIP-42).
+/// See `docs/nips/NIP-AM.md`.
+pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -520,6 +533,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_JOB_ERROR,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
@@ -672,6 +686,11 @@ const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
+// Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
+const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
+const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
+const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
+const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
 
 #[cfg(test)]
 mod tests {
