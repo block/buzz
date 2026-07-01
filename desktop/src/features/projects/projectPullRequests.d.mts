@@ -28,6 +28,7 @@ export type ProjectPullRequest = {
   status: "Open" | "Merged" | "Closed" | "Draft";
   statusEventId: string | null;
   branchName: string | null;
+  initialCommit: string | null;
   commit: string | null;
   cloneUrls: string[];
   updateCount: number;

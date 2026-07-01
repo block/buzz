@@ -1,6 +1,7 @@
 import type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoDiff,
   ProjectRepoPushResult,
   ProjectRepoSnapshot,
   ProjectRepoSyncStatus,
@@ -81,6 +82,19 @@ type RawProjectRepoPushResult = {
   message: string;
 };
 
+type RawProjectRepoDiffFile = {
+  path: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+};
+
+type RawProjectRepoDiff = {
+  files: RawProjectRepoDiffFile[];
+  additions: number;
+  deletions: number;
+};
+
 function fromRawProjectRepoSnapshot(
   snapshot: RawProjectRepoSnapshot,
 ): ProjectRepoSnapshot {
@@ -126,6 +140,66 @@ export async function getProjectRepoSnapshot(input: {
     },
   );
   return fromRawProjectRepoSnapshot(snapshot);
+}
+
+export async function getProjectRepoDiff(input: {
+  cloneUrl: string;
+  defaultBranch?: string | null;
+  baseBranch?: string | null;
+  targetRef?: string | null;
+  targetCommit?: string | null;
+}): Promise<ProjectRepoDiff> {
+  const diff = await invokeTauri<RawProjectRepoDiff>("get_project_repo_diff", {
+    cloneUrl: input.cloneUrl,
+    defaultBranch: input.defaultBranch ?? null,
+    baseBranch: input.baseBranch ?? null,
+    targetRef: input.targetRef ?? null,
+    targetCommit: input.targetCommit ?? null,
+  });
+  return {
+    additions: diff.additions,
+    deletions: diff.deletions,
+    files: diff.files.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      patch: file.patch,
+    })),
+  };
+}
+
+export async function getProjectLocalRepoDiff(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl?: string | null;
+  defaultBranch?: string | null;
+  baseBranch?: string | null;
+  baseCommit?: string | null;
+  targetCommit?: string | null;
+}): Promise<ProjectRepoDiff | null> {
+  const diff = await invokeTauri<RawProjectRepoDiff | null>(
+    "get_project_local_repo_diff",
+    {
+      reposDir: input.reposDir ?? null,
+      projectDtag: input.projectDtag,
+      cloneUrl: input.cloneUrl ?? null,
+      defaultBranch: input.defaultBranch ?? null,
+      baseBranch: input.baseBranch ?? null,
+      baseCommit: input.baseCommit ?? null,
+      targetCommit: input.targetCommit ?? null,
+    },
+  );
+  if (!diff) return null;
+  return {
+    additions: diff.additions,
+    deletions: diff.deletions,
+    files: diff.files.map((file) => ({
+      path: file.path,
+      additions: file.additions,
+      deletions: file.deletions,
+      patch: file.patch,
+    })),
+  };
 }
 
 export async function getProjectLocalRepoSnapshot(input: {

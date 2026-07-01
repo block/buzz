@@ -4,6 +4,8 @@ import * as React from "react";
 import { relayClient } from "@/shared/api/relayClient";
 import { getIdentity, signRelayEvent } from "@/shared/api/tauri";
 import {
+  getProjectLocalRepoDiff,
+  getProjectRepoDiff,
   getProjectRepoSyncStatus,
   getProjectLocalRepoSnapshot,
   getProjectRepoSnapshot,
@@ -27,6 +29,7 @@ import {
 import type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoDiff,
   ProjectRepoPushResult,
   ProjectRepoContributor,
   ProjectRepoFile,
@@ -79,6 +82,7 @@ export type ProjectActivitySummary = {
 export type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoDiff,
   ProjectRepoPushResult,
   ProjectRepoContributor,
   ProjectRepoFile,
@@ -378,6 +382,44 @@ async function fetchProjectRepoSnapshot(
   });
 }
 
+async function fetchProjectRepoDiff(
+  project: Project,
+  branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
+): Promise<ProjectRepoDiff | null> {
+  const cloneUrl = pullRequest?.cloneUrls[0] ?? project.cloneUrls[0];
+  if (!cloneUrl) return null;
+
+  return getProjectRepoDiff({
+    cloneUrl,
+    defaultBranch: branchName ?? project.defaultBranch,
+    baseBranch: project.defaultBranch,
+    targetCommit: pullRequest?.commit ?? null,
+    targetRef: pullRequest ? `refs/nostr/${pullRequest.id}` : null,
+  });
+}
+
+async function fetchProjectLocalRepoDiff(
+  project: Project,
+  reposDir?: string | null,
+  branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
+): Promise<ProjectRepoDiff | null> {
+  return getProjectLocalRepoDiff({
+    reposDir,
+    projectDtag: project.dtag,
+    cloneUrl: project.cloneUrls[0] ?? null,
+    defaultBranch: branchName ?? project.defaultBranch,
+    baseBranch: project.defaultBranch,
+    baseCommit:
+      pullRequest?.initialCommit &&
+      pullRequest.initialCommit !== pullRequest.commit
+        ? pullRequest.initialCommit
+        : null,
+    targetCommit: pullRequest?.commit ?? null,
+  });
+}
+
 async function fetchProjectLocalRepoSnapshot(
   project: Project,
   reposDir?: string | null,
@@ -487,6 +529,67 @@ export function useProjectRepoSnapshotQuery(
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
       return fetchProjectRepoSnapshot(project, selectedBranch, pullRequest);
+    },
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useProjectRepoDiffQuery(
+  project: Project | null | undefined,
+  branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
+  enabled = true,
+) {
+  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+
+  return useQuery({
+    enabled: Boolean(enabled && project?.cloneUrls[0] && pullRequest),
+    queryKey: [
+      "project",
+      project?.id ?? "none",
+      "repo-diff",
+      selectedBranch ?? "default",
+      pullRequest?.id ?? "none",
+      pullRequest?.commit ?? "none",
+    ],
+    queryFn: () => {
+      if (!project) throw new Error("No project selected.");
+      return fetchProjectRepoDiff(project, selectedBranch, pullRequest);
+    },
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useProjectLocalRepoDiffQuery(
+  project: Project | null | undefined,
+  reposDir?: string | null,
+  branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
+  enabled = true,
+) {
+  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
+
+  return useQuery({
+    enabled: Boolean(enabled && project),
+    queryKey: [
+      "project",
+      project?.id ?? "none",
+      "local-repo-diff",
+      reposDir ?? "default",
+      selectedBranch ?? "default",
+      pullRequest?.initialCommit ?? "none",
+      pullRequest?.commit ?? "none",
+    ],
+    queryFn: () => {
+      if (!project) throw new Error("No project selected.");
+      return fetchProjectLocalRepoDiff(
+        project,
+        reposDir,
+        selectedBranch,
+        pullRequest,
+      );
     },
     staleTime: 30_000,
     retry: 1,

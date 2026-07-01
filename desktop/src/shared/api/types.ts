@@ -190,6 +190,19 @@ export type ProjectRepoSnapshot = {
   contributors: ProjectRepoContributor[];
 };
 
+export type ProjectRepoDiffFile = {
+  path: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+};
+
+export type ProjectRepoDiff = {
+  files: ProjectRepoDiffFile[];
+  additions: number;
+  deletions: number;
+};
+
 export type ProjectLocalRepoSnapshot = {
   path: string;
   snapshot: ProjectRepoSnapshot;

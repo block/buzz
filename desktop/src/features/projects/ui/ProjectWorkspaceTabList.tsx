@@ -1,10 +1,4 @@
-import {
-  BookOpen,
-  Check,
-  FileDiff,
-  FolderGit2,
-  MessageSquare,
-} from "lucide-react";
+import { BookOpen } from "lucide-react";
 
 import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
@@ -55,26 +49,22 @@ export function PullRequestTabsList({
         className={PROJECT_TAB_TRIGGER_CLASS}
         value="pr-conversation"
       >
-        <MessageSquare className="h-3.5 w-3.5" />
         Conversation
         <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
           {pullRequest.comments.length}
         </span>
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-commits">
-        <FolderGit2 className="h-3.5 w-3.5" />
         Commits
         <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
           {commitCount}
         </span>
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-checks">
-        <Check className="h-3.5 w-3.5" />
         Checks
         <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">0</span>
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="pr-files">
-        <FileDiff className="h-3.5 w-3.5" />
         Files changed
         <span className="rounded-full bg-muted px-1.5 py-0.5 text-2xs">
           {filesCount}

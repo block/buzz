@@ -83,6 +83,7 @@ export function eventToProjectPullRequest(
     pullRequest.content.split("\n")[0] ||
     "Untitled pull request";
   const latestCommit = getTag(latestUpdate ?? pullRequest, "c") ?? null;
+  const initialCommit = getTag(pullRequest, "c") ?? null;
 
   return {
     id: pullRequest.id,
@@ -96,6 +97,7 @@ export function eventToProjectPullRequest(
     status: statusFromEvent(pullRequest, latestStatus),
     statusEventId: latestStatus?.id ?? null,
     branchName: getTag(pullRequest, "branch-name") ?? null,
+    initialCommit,
     commit: latestCommit,
     cloneUrls: getCloneUrls(latestUpdate ?? pullRequest),
     updateCount: updates.length,

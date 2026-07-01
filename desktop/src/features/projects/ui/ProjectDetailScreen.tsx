@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  ChevronRight,
   ExternalLink,
   FolderGit2,
   MessageSquare,
@@ -19,9 +20,12 @@ import {
   type ProjectLocalRepoSnapshot,
   type ProjectPullRequest,
   type ProjectRepoContributor,
+  type ProjectRepoDiff,
   type ProjectRepoSnapshot,
   useProjectQuery,
+  useProjectLocalRepoDiffQuery,
   useProjectLocalRepoSnapshotQuery,
+  useProjectRepoDiffQuery,
   useProjectRepoSyncStatusQuery,
   usePushProjectLocalRepositoryMutation,
   useProjectPullRequestsQuery,
@@ -70,6 +74,7 @@ import {
   ProjectTabsList,
   PullRequestTabsList,
 } from "./ProjectWorkspaceTabList";
+import { ProjectPullRequestFilesChangedPanel } from "./ProjectPullRequestFilesChangedPanel";
 import { RepositorySourceCard } from "./ProjectRepositorySource";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
@@ -316,6 +321,9 @@ function WorkspaceTabs({
   localSnapshotError,
   localSnapshotLoading,
   project,
+  repoDiff,
+  repoDiffError,
+  repoDiffLoading,
   selectedPullRequestId,
   pullRequests,
   pullRequestsError,
@@ -333,6 +341,9 @@ function WorkspaceTabs({
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
   project: Project;
+  repoDiff: ProjectRepoDiff | null | undefined;
+  repoDiffError: unknown;
+  repoDiffLoading: boolean;
   selectedPullRequestId: string | null;
   pullRequests: ProjectPullRequest[];
   pullRequestsError: unknown;
@@ -405,7 +416,7 @@ function WorkspaceTabs({
     >
       {selectedPullRequest ? (
         <PullRequestTabsList
-          filesCount={files.length}
+          filesCount={repoDiff?.files.length ?? files.length}
           pullRequest={selectedPullRequest}
         />
       ) : (
@@ -478,13 +489,11 @@ function WorkspaceTabs({
       </TabsContent>
 
       <TabsContent className="m-0" value="pr-files">
-        <RepositoryFilesPanel
-          error={displayedSnapshotError}
-          fallbackAuthorPubkey={project.owner}
-          files={files}
-          isLoading={displayedSnapshotLoading}
-          profiles={profiles}
-          snapshot={displayedSnapshot}
+        <ProjectPullRequestFilesChangedPanel
+          diff={repoDiff}
+          error={repoDiffError}
+          isLoading={repoDiffLoading}
+          pullRequest={selectedPullRequest}
         />
       </TabsContent>
 
@@ -546,6 +555,9 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   );
   const activeBranch =
     selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
+  const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
+    string | null
+  >(null);
   const selectedBranchPullRequest = React.useMemo(
     () =>
       pullRequestsQuery.data?.find(
@@ -553,10 +565,29 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       ) ?? null,
     [activeBranch, pullRequestsQuery.data],
   );
+  const activeRepoPullRequest =
+    pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
+    selectedBranchPullRequest;
+  const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
+    "remote",
+  );
   const repoSnapshotQuery = useProjectRepoSnapshotQuery(
     project,
     activeBranch,
     selectedBranchPullRequest,
+  );
+  const repoDiffQuery = useProjectRepoDiffQuery(
+    project,
+    activeBranch,
+    activeRepoPullRequest,
+    repoSource === "remote",
+  );
+  const localRepoDiffQuery = useProjectLocalRepoDiffQuery(
+    project,
+    activeWorkspace?.reposDir,
+    activeBranch,
+    activeRepoPullRequest,
+    repoSource === "local" && Boolean(activeRepoPullRequest),
   );
   const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
     project,
@@ -577,21 +608,21 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
     localRepoSnapshotQuery.data || repoSyncStatusQuery.data?.localPath,
   );
   const hasRemoteSnapshot = snapshotHasContent(repoSnapshotQuery.data);
-  const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
-    "remote",
-  );
-  const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
-    string | null
-  >(null);
+  const displayedRepoDiff =
+    repoSource === "local" ? localRepoDiffQuery.data : repoDiffQuery.data;
+  const displayedRepoDiffError =
+    repoSource === "local" ? localRepoDiffQuery.error : repoDiffQuery.error;
+  const displayedRepoDiffLoading =
+    repoSource === "local"
+      ? localRepoDiffQuery.isLoading
+      : repoDiffQuery.isLoading;
   const isPullRequestDetailOpen = Boolean(selectedPullRequestId);
-
   React.useEffect(() => {
     if (!project) {
       setSelectedBranch(null);
       setSelectedPullRequestId(null);
       return;
     }
-
     setSelectedBranch((currentBranch) => {
       if (currentBranch && branchOptions.includes(currentBranch)) {
         return currentBranch;
@@ -599,7 +630,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       return project.defaultBranch ?? branchOptions[0] ?? null;
     });
   }, [project, branchOptions]);
-
   React.useEffect(() => {
     setRepoSource((currentSource) => {
       if (currentSource === "local" && !hasLocalCheckout) return "remote";
@@ -613,7 +643,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       return currentSource;
     });
   }, [hasLocalCheckout, hasRemoteSnapshot]);
-
   const peoplePubkeys = React.useMemo(
     () => (project ? projectPeople(project) : []),
     [project],
@@ -691,7 +720,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   if (projectQuery.isLoading) {
     return null;
   }
-
   if (projectQuery.isError) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
@@ -719,7 +747,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
       </div>
     );
   }
-
   if (!project) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
@@ -746,6 +773,9 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const repoContributors = repoSnapshotQuery.data?.contributors ?? [];
   const safeWebUrl =
     project.webUrl && isSafeUrl(project.webUrl) ? project.webUrl : null;
+  const selectedPullRequest =
+    pullRequestsQuery.data?.find((item) => item.id === selectedPullRequestId) ??
+    null;
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
@@ -763,17 +793,49 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
               className="pointer-events-auto flex min-h-[3.25rem] items-center justify-between gap-3 px-4 py-2"
               data-tauri-drag-region
             >
-              <Button
-                className="-ml-2 h-9 gap-1.5 px-2 text-muted-foreground"
-                onClick={() => {
-                  void goProjects();
-                }}
-                size="sm"
-                variant="ghost"
+              <nav
+                aria-label="Project breadcrumb"
+                className="-ml-1 flex min-w-0 items-center gap-0.5 text-xs text-muted-foreground"
               >
-                <ArrowLeft className="h-4 w-4" />
-                Back to Projects
-              </Button>
+                <button
+                  aria-label="Back to projects"
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => {
+                    void goProjects();
+                  }}
+                  type="button"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </button>
+                <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                {selectedPullRequest ? (
+                  <>
+                    <button
+                      className="min-w-0 truncate rounded-md px-0.5 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => setSelectedPullRequestId(null)}
+                      type="button"
+                    >
+                      {project.name}
+                    </button>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                    <button
+                      className="shrink-0 rounded-md px-0.5 py-1 font-medium transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      onClick={() => setSelectedPullRequestId(null)}
+                      type="button"
+                    >
+                      Pull request
+                    </button>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+                    <span className="min-w-0 truncate px-0.5 font-medium text-foreground">
+                      {selectedPullRequest.title}
+                    </span>
+                  </>
+                ) : (
+                  <span className="min-w-0 truncate px-0.5 font-medium text-foreground">
+                    {project.name}
+                  </span>
+                )}
+              </nav>
               {project.projectChannelId ? (
                 <Button
                   className="h-9 shrink-0 gap-1.5"
@@ -877,6 +939,9 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 onSelectedPullRequestIdChange={setSelectedPullRequestId}
                 profiles={profiles}
                 project={project}
+                repoDiff={displayedRepoDiff}
+                repoDiffError={displayedRepoDiffError}
+                repoDiffLoading={displayedRepoDiffLoading}
                 pullRequests={pullRequestsQuery.data ?? []}
                 pullRequestsError={pullRequestsQuery.error}
                 pullRequestsLoading={pullRequestsQuery.isLoading}
