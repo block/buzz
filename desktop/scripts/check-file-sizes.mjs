@@ -173,6 +173,11 @@ const overrides = new Map([
   // +3: provider tri-state applied in update_managed_agent handler
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   ["src-tauri/src/commands/agent_models.rs", 1071],
+  // block-save validation: prospectiveRuntimeId useMemo + providerForRequiredKeys
+  // keyed to prospective runtime (not current dropdown) to correctly gate on
+  // the runtime that will actually be saved. Load-bearing correctness fix for
+  // the inherit-transition path. Queued to split with the rest of this list.
+  ["src/features/agents/ui/EditAgentDialog.tsx", 1004],
 ]);
 
 await runFileSizeCheck({

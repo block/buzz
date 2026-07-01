@@ -1217,18 +1217,37 @@ test("blockSave_nullField_allowed", () => {
 //     → must NOT be blocked (claude has no dialog-fixable credential requirement)
 
 test("blockSave_inheritTransition_claudePin_toBuzzAgentPersona_missingKey_blocked", () => {
-  // Scenario: agent is currently pinned to claude (CLI-login, requiredKeys=[])
-  // but the user checks "Inherit runtime from persona", and the persona uses
-  // buzz-agent/anthropic. prospectiveRuntimeId resolves to "buzz-agent".
-  // The gate must use buzz-agent's required keys, not claude's empty set.
+  // Scenario: agent is currently pinned to claude (CLI-login, llmProviderFieldVisible=false
+  // so providerForDiscovery="" in the component). The user checks "Inherit runtime
+  // from persona" where the persona uses buzz-agent/anthropic.
+  // prospectiveRuntimeId resolves to "buzz-agent"; providerForRequiredKeys must
+  // use the PROSPECTIVE runtime's provider-field visibility (buzz-agent supports
+  // provider selection) rather than the current locked runtime's suppression.
   const prospectiveRuntimeId = "buzz-agent"; // resolved from persona's agentCommand
-  const provider = "anthropic"; // agent's configured provider
+  const provider = "anthropic"; // agent's configured provider (in envVars / state)
+
+  // Mirror the component's providerForRequiredKeys computation:
+  //   providerForRequiredKeys = runtimeSupportsLlmProviderSelection(prospectiveRuntimeId)
+  //                              ? provider : ""
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
   const requiredKeys = requiredCredentialEnvKeys(
     prospectiveRuntimeId,
-    provider,
+    providerForRequiredKeys,
   );
   const envVars = {}; // ANTHROPIC_API_KEY absent
 
+  // providerForRequiredKeys must be "anthropic" (buzz-agent supports selection)
+  // so requiredCredentialEnvKeys returns [ANTHROPIC_API_KEY] and save is blocked.
+  assert.equal(
+    providerForRequiredKeys,
+    "anthropic",
+    "providerForRequiredKeys must use the prospective runtime's visibility, not the locked current runtime",
+  );
   const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
   assert.equal(
     missing,
@@ -1238,17 +1257,32 @@ test("blockSave_inheritTransition_claudePin_toBuzzAgentPersona_missingKey_blocke
 });
 
 test("blockSave_inheritTransition_buzzAgentPin_toClaudePersona_notBlocked", () => {
-  // Scenario: agent is pinned to buzz-agent/anthropic (requiredKeys=[ANTHROPIC_API_KEY])
-  // but the user checks "Inherit runtime from persona", and the persona uses claude.
-  // prospectiveRuntimeId resolves to "claude". claude has no dialog-fixable requirement.
+  // Scenario: agent is pinned to buzz-agent/anthropic. The user checks
+  // "Inherit runtime from persona" where the persona uses claude.
+  // prospectiveRuntimeId resolves to "claude"; claude doesn't support provider
+  // selection, so providerForRequiredKeys="" and requiredCredentialEnvKeys returns [].
   const prospectiveRuntimeId = "claude"; // resolved from persona's agentCommand
   const provider = "anthropic"; // agent's old provider (no longer relevant for claude)
+
+  // Mirror the component's providerForRequiredKeys computation:
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
   const requiredKeys = requiredCredentialEnvKeys(
     prospectiveRuntimeId,
-    provider,
+    providerForRequiredKeys,
   );
-  const envVars = {}; // nothing set — but claude doesn't require dialog credentials
+  const envVars = {}; // nothing set — claude doesn't require dialog credentials
 
+  // providerForRequiredKeys must be "" (claude doesn't support provider selection)
+  assert.equal(
+    providerForRequiredKeys,
+    "",
+    "providerForRequiredKeys must be empty for CLI-login runtimes",
+  );
   const missing = requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
   assert.equal(
     missing,

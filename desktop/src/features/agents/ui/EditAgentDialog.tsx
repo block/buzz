@@ -288,14 +288,28 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
+  // Provider used for required-key validation — keyed off the PROSPECTIVE
+  // runtime, not the current dropdown. When the user transitions from a
+  // CLI-login pin (claude) to inherit a buzz-agent/goose persona, the current
+  // dropdown would suppress provider to "" (llmProviderFieldVisible=false),
+  // making requiredCredentialEnvKeys return [] and falsely unblocking the save.
+  // Using prospectiveRuntimeId here ensures the gate checks the credential
+  // requirements of the runtime that will actually be saved.
+  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
+    prospectiveRuntimeId,
+  )
+    ? provider
+    : "";
+
   // Required credential env keys for the PROSPECTIVE post-submit runtime.
   // Using the prospective id (not the current dropdown) ensures the gate
   // validates what will actually be saved — in particular, on the inherit
   // transition (claude→buzz-agent or buzz-agent→claude) the gate reflects
   // the inherited runtime's requirements, not the old pin's.
   const requiredEnvKeys = React.useMemo(
-    () => requiredCredentialEnvKeys(prospectiveRuntimeId, providerForDiscovery),
-    [prospectiveRuntimeId, providerForDiscovery],
+    () =>
+      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
+    [prospectiveRuntimeId, providerForRequiredKeys],
   );
 
   const {
