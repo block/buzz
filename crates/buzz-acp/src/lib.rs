@@ -4,10 +4,13 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod goose_usage;
 mod observer;
 mod pool;
 mod queue;
 mod relay;
+
+pub use goose_usage::GooseTurnUsage;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
