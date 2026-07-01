@@ -52,7 +52,7 @@ type WorkspaceSwitcherProps = {
   onRemoveWorkspace: (id: string) => void;
 };
 
-function WorkspaceEmojiIcon({ className }: { className: string }) {
+export function WorkspaceEmojiIcon({ className }: { className: string }) {
   return (
     <span aria-hidden="true" className={className}>
       <span className="-translate-y-px leading-normal">🐝</span>

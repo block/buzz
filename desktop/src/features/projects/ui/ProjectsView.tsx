@@ -31,6 +31,7 @@ import { getDiscussionLabel } from "@/features/projects/lib/projectLabels";
 import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -75,7 +76,6 @@ const PROJECTS_VIEW_MODE_STORAGE_KEY = "buzz.projects.viewMode";
 const PROJECTS_FILTER_STORAGE_KEY = "buzz.projects.filter";
 const PROJECTS_SORT_STORAGE_KEY = "buzz.projects.sort";
 const MANY_PROJECTS_THRESHOLD = 12;
-
 function readStoredViewMode(): ProjectsViewMode | null {
   try {
     const value = globalThis.localStorage?.getItem(
@@ -86,7 +86,6 @@ function readStoredViewMode(): ProjectsViewMode | null {
     return null;
   }
 }
-
 function writeStoredViewMode(viewMode: ProjectsViewMode) {
   try {
     globalThis.localStorage?.setItem(PROJECTS_VIEW_MODE_STORAGE_KEY, viewMode);
@@ -94,7 +93,6 @@ function writeStoredViewMode(viewMode: ProjectsViewMode) {
     // Persistence is best-effort; the in-memory toggle still works.
   }
 }
-
 function readStoredFilter(): ProjectsFilter {
   try {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
@@ -110,7 +108,6 @@ function readStoredFilter(): ProjectsFilter {
     return "all";
   }
 }
-
 function writeStoredFilter(filter: ProjectsFilter) {
   try {
     globalThis.localStorage?.setItem(PROJECTS_FILTER_STORAGE_KEY, filter);
@@ -118,7 +115,6 @@ function writeStoredFilter(filter: ProjectsFilter) {
     // Persistence is best-effort; the in-memory toggle still works.
   }
 }
-
 function readStoredSort(): ProjectsSort {
   try {
     const value = globalThis.localStorage?.getItem(PROJECTS_SORT_STORAGE_KEY);
@@ -127,7 +123,6 @@ function readStoredSort(): ProjectsSort {
     return "updated";
   }
 }
-
 function writeStoredSort(sort: ProjectsSort) {
   try {
     globalThis.localStorage?.setItem(PROJECTS_SORT_STORAGE_KEY, sort);
@@ -135,7 +130,6 @@ function writeStoredSort(sort: ProjectsSort) {
     // Persistence is best-effort; the in-memory toggle still works.
   }
 }
-
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
@@ -237,7 +231,6 @@ function isProjectMine(project: Project, currentPubkey: string | undefined) {
     )
   );
 }
-
 function isProjectOwnedByCurrentUser(
   project: Project,
   currentPubkey: string | undefined,
@@ -257,7 +250,6 @@ function projectHasAgent(
     (pubkey) => profiles?.[normalizePubkey(pubkey)]?.isAgent === true,
   );
 }
-
 function projectOwnerIsUser(
   project: Project,
   profiles: UserProfileLookup | undefined,
@@ -941,6 +933,16 @@ export function ProjectsView() {
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
         <div className="pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1rem)]">
+          {filter === "all" ? (
+            <ProjectsOverviewPanel
+              localRepositoryCount={localRepositoriesQuery.data?.length ?? 0}
+              onOpenProject={handleOpenProject}
+              profiles={profiles}
+              projects={projects}
+              relayName={activeWorkspace?.name || "Relay"}
+              summaries={activitySummariesQuery.data}
+            />
+          ) : null}
           {visibleProjects.length === 0 ? (
             <EmptyFilteredState />
           ) : viewMode === "grid" ? (

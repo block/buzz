@@ -64,11 +64,8 @@ import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
-import {
-  findReadmeFile,
-  ReadmePanel,
-  RepositoryFilesPanel,
-} from "./ProjectRepositoryPanel";
+import { findReadmeFile, RepositoryFilesPanel } from "./ProjectRepositoryPanel";
+import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
 import { PullRequestsPanel } from "./ProjectPullRequestsPanel";
 import {
   ProjectTabsList,
@@ -373,15 +370,7 @@ function WorkspaceTabs({
       (pullRequest) => pullRequest.id === selectedPullRequestId,
     ) ?? null;
   const isPullRequestSelected = Boolean(selectedPullRequest);
-  const [selectedTab, setSelectedTab] = React.useState("readme");
-
-  React.useEffect(() => {
-    setSelectedTab((currentTab) =>
-      currentTab === "readme" && !readmeFile && !displayedSnapshotLoading
-        ? "activity"
-        : currentTab,
-    );
-  }, [displayedSnapshotLoading, readmeFile]);
+  const [selectedTab, setSelectedTab] = React.useState("overview");
 
   React.useEffect(() => {
     if (isPullRequestSelected) {
@@ -420,8 +409,22 @@ function WorkspaceTabs({
           pullRequest={selectedPullRequest}
         />
       ) : (
-        <ProjectTabsList hasReadme={Boolean(readmeFile)} />
+        <ProjectTabsList />
       )}
+
+      <TabsContent className="m-0" value="overview">
+        <ProjectOverviewPanel
+          contributors={displayedContributors}
+          files={files}
+          onViewContributors={() => setSelectedTab("contributors")}
+          profiles={profiles}
+          project={project}
+          pullRequests={pullRequests}
+          readmeFile={readmeFile}
+          repoSource={repoSource}
+          snapshot={displayedSnapshot}
+        />
+      </TabsContent>
 
       <TabsContent
         className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
@@ -496,12 +499,6 @@ function WorkspaceTabs({
           pullRequest={selectedPullRequest}
         />
       </TabsContent>
-
-      {readmeFile ? (
-        <TabsContent className="m-0" value="readme">
-          <ReadmePanel file={readmeFile} />
-        </TabsContent>
-      ) : null}
 
       <TabsContent className="m-0" value="contributors">
         <ContributorsPanel

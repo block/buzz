@@ -1,24 +1,15 @@
-import { BookOpen } from "lucide-react";
-
 import type { ProjectPullRequest } from "@/features/projects/hooks";
 import { TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const PROJECT_TAB_TRIGGER_CLASS =
   "h-8 gap-1.5 rounded-full px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
 
-export function ProjectTabsList({ hasReadme }: { hasReadme: boolean }) {
+export function ProjectTabsList() {
   return (
     <TabsList className="h-9 w-fit justify-start gap-0.5 bg-transparent p-0">
-      {hasReadme ? (
-        <TabsTrigger
-          aria-label="README"
-          className={PROJECT_TAB_TRIGGER_CLASS}
-          title="README"
-          value="readme"
-        >
-          <BookOpen className="h-3.5 w-3.5" />
-        </TabsTrigger>
-      ) : null}
+      <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="overview">
+        Overview
+      </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
         Activity
       </TabsTrigger>
