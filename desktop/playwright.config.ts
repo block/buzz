@@ -61,6 +61,7 @@ export default defineConfig({
         "**/cold-switch-longtask.perf.ts",
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
+        "**/reaction-order.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
