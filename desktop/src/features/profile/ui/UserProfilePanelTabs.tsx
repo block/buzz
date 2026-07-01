@@ -22,6 +22,12 @@ import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtil
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
+import {
+  Carousel,
+  type CarouselApi,
+  CarouselContent,
+  CarouselItem,
+} from "@/shared/ui/carousel";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export function ProfileIngressRow({
@@ -341,36 +347,100 @@ function ProfileLiveActivityEmbed({
   feedScope: ProfileActivityFeedScope;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
-  const [selectedChannelId, setSelectedChannelId] = React.useState<
-    string | null
-  >(() => feedScope.preferredChannelId);
   const now = useNow(1000);
+  const [carouselApi, setCarouselApi] = React.useState<CarouselApi>();
+  const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [mountedChannelIds, setMountedChannelIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
 
-  const switcherChannelIds = feedScope.isLive
-    ? activeTurns.map((turn) => turn.channelId)
-    : feedScope.channelIds;
+  const slides = React.useMemo(() => {
+    const channelIds = feedScope.isLive
+      ? activeTurns.map((turn) => turn.channelId)
+      : feedScope.channelIds;
+    return [...new Set(channelIds)];
+  }, [activeTurns, feedScope.channelIds, feedScope.isLive]);
+
+  const preferredIndex = React.useMemo(() => {
+    const preferredChannelId = feedScope.preferredChannelId;
+    if (!preferredChannelId) {
+      return 0;
+    }
+    const index = slides.indexOf(preferredChannelId);
+    return index >= 0 ? index : 0;
+  }, [feedScope.preferredChannelId, slides]);
 
   React.useEffect(() => {
-    if (selectedChannelId && switcherChannelIds.includes(selectedChannelId)) {
+    if (slides.length === 0) {
+      setSelectedIndex(0);
       return;
     }
 
-    setSelectedChannelId(
-      feedScope.preferredChannelId ?? switcherChannelIds[0] ?? null,
-    );
-  }, [feedScope.preferredChannelId, selectedChannelId, switcherChannelIds]);
+    setSelectedIndex((current) => {
+      if (current < slides.length) {
+        return current;
+      }
+      return Math.max(0, slides.length - 1);
+    });
+  }, [slides.length]);
+
+  React.useEffect(() => {
+    if (!carouselApi || slides.length === 0) {
+      return;
+    }
+
+    const syncSelectedIndex = () => {
+      setSelectedIndex(carouselApi.selectedScrollSnap());
+    };
+
+    syncSelectedIndex();
+    carouselApi.on("select", syncSelectedIndex);
+    carouselApi.on("reInit", syncSelectedIndex);
+
+    return () => {
+      carouselApi.off("select", syncSelectedIndex);
+      carouselApi.off("reInit", syncSelectedIndex);
+    };
+  }, [carouselApi, slides.length]);
+
+  React.useEffect(() => {
+    if (!carouselApi || slides.length === 0) {
+      return;
+    }
+
+    const currentChannelId = slides[carouselApi.selectedScrollSnap()];
+    if (currentChannelId && slides.includes(currentChannelId)) {
+      return;
+    }
+
+    carouselApi.scrollTo(preferredIndex, true);
+  }, [carouselApi, preferredIndex, slides]);
+
+  const activeChannelId = slides[selectedIndex] ?? slides[0] ?? null;
+
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      return;
+    }
+
+    setMountedChannelIds((current) => {
+      if (current.has(activeChannelId)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(activeChannelId);
+      return next;
+    });
+  }, [activeChannelId]);
 
   const selectedTurn = feedScope.isLive
-    ? (activeTurns.find((turn) => turn.channelId === selectedChannelId) ??
+    ? (activeTurns.find((turn) => turn.channelId === activeChannelId) ??
       activeTurns[0] ??
       null)
     : null;
-  const activeChannelId =
-    selectedChannelId ?? feedScope.preferredChannelId ?? null;
   const activeChannelName = activeChannelId
     ? (channelIdToName[activeChannelId] ?? activeChannelId)
     : null;
-  const showSwitcher = switcherChannelIds.length > 1;
   const lastLiveAt =
     (activeChannelId
       ? feedScope.latestActivityAtByChannel[activeChannelId]
@@ -381,6 +451,56 @@ function ProfileLiveActivityEmbed({
   const openSelectedActivity = React.useCallback(() => {
     onOpenActivity(activeChannelId);
   }, [activeChannelId, onOpenActivity]);
+
+  const handleDotSelect = React.useCallback(
+    (index: number) => {
+      carouselApi?.scrollTo(index);
+    },
+    [carouselApi],
+  );
+
+  if (slides.length === 0) {
+    return (
+      <section
+        aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+        className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
+      >
+        <button
+          aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+          className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={openSelectedActivity}
+          type="button"
+        />
+        <LiveActivityOpenButton
+          activeChannelId={activeChannelId}
+          label={lastLiveLabel}
+          onOpenActivity={onOpenActivity}
+        />
+        <ManagedAgentSessionPanel
+          agent={activityAgent}
+          autoTail={true}
+          channelId={null}
+          className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none"
+          emptyDescription="Live activity will appear here."
+          rawLayout="responsive"
+          showHeader={false}
+          showRaw={false}
+          transcriptVariant="compactPreview"
+        />
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <div className="absolute inset-x-0 top-0 h-10 bg-linear-to-b from-muted/80 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted to-transparent px-3 pb-3 pt-10">
+            <div className="min-w-0">
+              <span className="block text-base font-semibold text-muted-foreground">
+                Latest Activity
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section
@@ -399,58 +519,50 @@ function ProfileLiveActivityEmbed({
         label={lastLiveLabel}
         onOpenActivity={onOpenActivity}
       />
-      {showSwitcher ? (
-        <div className="relative z-20 px-3 pb-2 pt-10">
-          <div
-            aria-label="Choose active channel feed"
-            className="flex gap-1 overflow-x-auto pb-0.5"
-            role="tablist"
-          >
-            {switcherChannelIds.map((channelId) => {
-              const isSelected = channelId === activeChannelId;
-              const channelName = channelIdToName[channelId] ?? channelId;
-
-              return (
-                <button
-                  aria-selected={isSelected}
-                  className={cn(
-                    "max-w-36 shrink-0 truncate rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
-                    isSelected
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                  key={channelId}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setSelectedChannelId(channelId);
-                  }}
-                  role="tab"
-                  title={channelName}
-                  type="button"
-                >
-                  #{channelName}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
-      <ManagedAgentSessionPanel
-        agent={activityAgent}
-        autoTail={true}
-        channelId={activeChannelId}
-        className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none"
-        emptyDescription="Live activity will appear here."
-        rawLayout="responsive"
-        showHeader={false}
-        showRaw={false}
-        transcriptVariant="compactPreview"
-      />
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 z-20"
+      <Carousel
+        className="relative z-0 flex min-h-0 flex-1 flex-col"
+        opts={{
+          align: "start",
+          containScroll: "trimSnaps",
+          dragFree: false,
+          watchDrag: slides.length > 1,
+        }}
+        setApi={setCarouselApi}
       >
-        <div className="absolute inset-x-0 bottom-0 flex h-36 items-end bg-linear-to-t from-muted to-transparent px-3 pb-3">
+        <CarouselContent className="ml-0 h-full flex-1">
+          {slides.map((channelId) => {
+            const isMounted = mountedChannelIds.has(channelId);
+
+            return (
+              <CarouselItem
+                className="h-full basis-full pl-0"
+                data-mounted={isMounted ? "true" : "false"}
+                data-testid={`user-profile-activity-slide-${channelId}`}
+                key={channelId}
+              >
+                {isMounted ? (
+                  <ManagedAgentSessionPanel
+                    agent={activityAgent}
+                    autoTail={true}
+                    channelId={channelId}
+                    className="h-full min-h-0 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none"
+                    emptyDescription="Live activity will appear here."
+                    rawLayout="responsive"
+                    showHeader={false}
+                    showRaw={false}
+                    transcriptVariant="compactPreview"
+                  />
+                ) : (
+                  <div aria-hidden="true" className="h-full" />
+                )}
+              </CarouselItem>
+            );
+          })}
+        </CarouselContent>
+      </Carousel>
+      <div className="pointer-events-none absolute inset-0 z-20">
+        <div className="absolute inset-x-0 top-0 h-10 bg-linear-to-b from-muted/80 to-transparent" />
+        <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted to-transparent px-3 pb-3 pt-10">
           <div className="min-w-0">
             <span className="block text-base font-semibold text-muted-foreground">
               Latest Activity
@@ -458,15 +570,72 @@ function ProfileLiveActivityEmbed({
             {activeChannelName ? (
               <span
                 className="block truncate text-sm font-medium text-muted-foreground/75"
+                data-testid="user-profile-activity-channel-label"
                 title={`#${activeChannelName}`}
               >
                 #{activeChannelName}
               </span>
             ) : null}
           </div>
+          <ActivityCarouselDots
+            channelIdToName={channelIdToName}
+            onSelect={handleDotSelect}
+            selectedIndex={selectedIndex}
+            slides={slides}
+          />
         </div>
       </div>
     </section>
+  );
+}
+
+function ActivityCarouselDots({
+  channelIdToName,
+  onSelect,
+  selectedIndex,
+  slides,
+}: {
+  channelIdToName: Record<string, string>;
+  onSelect: (index: number) => void;
+  selectedIndex: number;
+  slides: string[];
+}) {
+  if (slides.length === 0) {
+    return null;
+  }
+
+  return (
+    <div
+      aria-label="Choose active channel feed"
+      className="pointer-events-auto mt-2 flex items-center gap-1.5"
+      role="tablist"
+    >
+      {slides.map((channelId, index) => {
+        const isSelected = index === selectedIndex;
+        const channelName = channelIdToName[channelId] ?? channelId;
+
+        return (
+          <button
+            aria-label={`Show #${channelName} activity`}
+            aria-selected={isSelected}
+            className={cn(
+              "h-1.5 rounded-full transition-all",
+              isSelected
+                ? "w-4 bg-primary"
+                : "w-1.5 bg-muted-foreground/40 hover:bg-muted-foreground/70",
+            )}
+            data-testid={`user-profile-activity-dot-${channelId}`}
+            key={channelId}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(index);
+            }}
+            role="tab"
+            type="button"
+          />
+        );
+      })}
+    </div>
   );
 }
 
