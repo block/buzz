@@ -610,7 +610,10 @@ async fn test_thought_chunk_emitted_before_message_chunk_anthropic() {
         .iter()
         .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
         .unwrap();
-    assert_eq!(thought["content"]["text"], "Let me reason about this carefully.");
+    assert_eq!(
+        thought["content"]["text"],
+        "Let me reason about this carefully."
+    );
 
     let message = updates
         .iter()
@@ -664,6 +667,59 @@ async fn test_thought_chunk_emitted_before_message_chunk_responses_api() {
         .find(|u| u["sessionUpdate"] == "agent_message_chunk")
         .unwrap();
     assert_eq!(message["content"]["text"], "Final answer.");
+
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_thought_chunk_emitted_before_message_chunk_chat_completions_reasoning_content() {
+    // OpenAI chat/completions path with DeepSeek-style `reasoning_content` field
+    // on the message object. OPENAI_COMPAT_API defaults to Auto, which routes
+    // non-openai.com hosts to chat/completions — this is the live path for
+    // self-hosted reasoning models (DeepSeek, vLLM, etc.).
+    let response = json!({
+        "id": "cc-r1", "object": "chat.completion", "model": "fake-model",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "Here is the answer.",
+                "reasoning_content": "Let me think through this step by step.",
+            },
+            "finish_reason": "stop",
+        }],
+    });
+    let url = spawn_fake_llm(vec![response]).await;
+    let mut h = Harness::spawn(&[("OPENAI_COMPAT_BASE_URL", &url)]).await;
+
+    let sid = handshake(&mut h).await;
+    let p = h
+        .send(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": "solve it" }],
+            }),
+        )
+        .await;
+
+    let updates = collect_updates_until_done(&mut h, p).await;
+    assert_thought_before_message(&updates);
+
+    let thought = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_thought_chunk")
+        .unwrap();
+    assert_eq!(
+        thought["content"]["text"],
+        "Let me think through this step by step."
+    );
+
+    let message = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(message["content"]["text"], "Here is the answer.");
 
     h.shutdown().await;
 }

@@ -144,19 +144,20 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
-    /// Goose-specific: most recently observed `_meta.goose.activeRunId` from
-    /// a `session/update` notification of kind `session_info_update`.
+    /// Most recently observed `_meta.goose.activeRunId` from a
+    /// `session/update` notification of kind `session_info_update`.
     ///
-    /// Goose emits this whenever it starts or clears an active prompt run
+    /// Both goose and buzz-agent emit `session_info_update` with this field;
+    /// goose emits it whenever it starts or clears an active prompt run
     /// (`crates/goose/src/acp/server.rs:2277` `send_active_run_update`).
     /// Required as `expectedRunId` when calling the non-standard
     /// `_goose/unstable/session/steer` method to inject a message into an
     /// in-flight turn without cancelling it.
     ///
     /// `None` until the first `session_info_update` arrives, or after the
-    /// run clears (goose emits `activeRunId: null` at end of turn). Other
-    /// agents will simply never populate this — readers must treat `None`
-    /// as "no active run to steer into" and fall back to cancel+merge.
+    /// run clears (goose/buzz-agent emit `activeRunId: null` at end of turn).
+    /// Other agents may leave this unset — readers must treat `None` as
+    /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by

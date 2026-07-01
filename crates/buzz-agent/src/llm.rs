@@ -831,6 +831,18 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         .get("message")
         .ok_or_else(|| AgentError::Llm("missing message".into()))?;
     let text = str_field(msg, "content");
+    // DeepSeek and vLLM-style OpenAI-compat hosts expose reasoning tokens on the
+    // message object. Prefer `reasoning_content` (DeepSeek's field name); fall
+    // back to `reasoning` (some other providers). Both are absent for standard
+    // OpenAI responses, which leaves this empty without any special-casing.
+    let reasoning = {
+        let rc = str_field(msg, "reasoning_content");
+        if rc.is_empty() {
+            str_field(msg, "reasoning")
+        } else {
+            rc
+        }
+    };
     let mut tool_calls = Vec::new();
     if let Some(arr) = msg.get("tool_calls").and_then(Value::as_array) {
         for tc in arr {
@@ -853,7 +865,7 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
         tool_calls,
         stop,
         input_tokens,
-        reasoning: String::new(),
+        reasoning,
     })
 }
 
