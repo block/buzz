@@ -437,7 +437,7 @@ function PromptContextInline({
       >
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs font-medium text-muted-foreground/70">
-            Prompt context
+            {context.title}
           </p>
           <button
             className="text-xs text-muted-foreground/50 hover:text-muted-foreground transition-colors"
@@ -477,7 +477,7 @@ function PromptContextDialog({
       <DialogContent className="max-w-xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="px-6 pb-3 pt-5 pr-14">
-            <DialogTitle>Prompt context</DialogTitle>
+            <DialogTitle>{context.title}</DialogTitle>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6 pt-2">
             <PromptContextSections sections={context.sections} />
