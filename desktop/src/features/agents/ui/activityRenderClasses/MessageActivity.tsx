@@ -1,12 +1,19 @@
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
-import { cn } from "@/shared/lib/cn";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import type { TranscriptItem } from "../agentSessionTypes";
 import { ToolActivity } from "./ToolActivity";
 import { TranscriptTimestamp } from "./TranscriptTimestamp";
-import type { ActivityRenderClassItemProps } from "./types";
+import type {
+  ActivityRenderClassItemProps,
+  AgentTranscriptIdentityProps,
+} from "./types";
 import { UserMessageBubble } from "./UserMessageBubble";
 
 export function MessageActivity(props: ActivityRenderClassItemProps) {
@@ -17,13 +24,24 @@ export function MessageActivity(props: ActivityRenderClassItemProps) {
     return null;
   }
 
-  return <MessageItem item={props.item} profiles={props.profiles} />;
+  return (
+    <MessageItem
+      agentAvatarUrl={props.agentAvatarUrl}
+      agentName={props.agentName}
+      agentPubkey={props.agentPubkey}
+      item={props.item}
+      profiles={props.profiles}
+    />
+  );
 }
 
 function MessageItem({
+  agentAvatarUrl,
+  agentName,
+  agentPubkey,
   item,
   profiles,
-}: {
+}: AgentTranscriptIdentityProps & {
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
@@ -32,6 +50,14 @@ function MessageItem({
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
   const messageLink = getTranscriptMessageLink(item);
+  const agentProfile = profiles?.[normalizePubkey(agentPubkey)] ?? null;
+  const assistantLabel = resolveUserLabel({
+    pubkey: agentPubkey,
+    fallbackName: agentName,
+    profiles,
+    preferResolvedSelfLabel: true,
+  });
+  const assistantAvatarUrl = agentProfile?.avatarUrl ?? agentAvatarUrl;
 
   if (!isAssistant) {
     return (
@@ -48,6 +74,25 @@ function MessageItem({
     );
   }
 
+  if (isCompactPreview) {
+    return (
+      <div
+        className="flex flex-row animate-in fade-in duration-200 motion-reduce:animate-none"
+        data-role="assistant-message"
+        data-testid="transcript-assistant-message"
+      >
+        <div className="group relative flex w-full min-w-0 flex-col items-start gap-1">
+          <div
+            className="w-full min-w-0 text-xs leading-4"
+            title={formatTranscriptTimestampTitle(item.timestamp)}
+          >
+            <Markdown className="text-xs leading-4" content={text || " "} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="flex flex-row animate-in fade-in duration-200 motion-reduce:animate-none"
@@ -55,17 +100,24 @@ function MessageItem({
       data-testid="transcript-assistant-message"
     >
       <div className="group relative flex w-full min-w-0 flex-col items-start gap-1">
-        <div
-          className={cn(
-            "w-full min-w-0",
-            isCompactPreview ? "text-xs leading-4" : "text-sm",
-          )}
-          title={formatTranscriptTimestampTitle(item.timestamp)}
-        >
-          <Markdown
-            className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
-            content={text || " "}
+        <div className="mb-0.5 flex items-center gap-1.5 text-xs">
+          <UserAvatar
+            avatarUrl={assistantAvatarUrl}
+            className="shrink-0"
+            displayName={assistantLabel}
+            size="xs"
+            testId="transcript-assistant-avatar"
           />
+          <span className="text-sm font-semibold text-foreground">
+            {assistantLabel}
+          </span>
+          <TranscriptTimestamp
+            messageLink={messageLink}
+            timestamp={item.timestamp}
+          />
+        </div>
+        <div className="w-full min-w-0 text-sm">
+          <Markdown className="leading-5" content={text || " "} />
         </div>
       </div>
     </div>

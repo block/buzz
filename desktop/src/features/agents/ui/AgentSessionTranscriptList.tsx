@@ -107,45 +107,62 @@ export function AgentSessionTranscriptList({
     scrollContainerRef,
   });
 
-  React.useLayoutEffect(() => {
-    if (!autoTail || items.length === 0) {
+  const [showLoadingDelayMessage, setShowLoadingDelayMessage] =
+    React.useState(false);
+  const isCompactPreview = variant === "compactPreview";
+  const hasRenderableContent =
+    items.length > 0 && hasRenderableDisplayContent(displayBlocks, variant);
+  const isLoadingEmptyState = emptyState === "loading" && !hasRenderableContent;
+
+  React.useEffect(() => {
+    if (!isLoadingEmptyState) {
+      setShowLoadingDelayMessage(false);
       return;
     }
 
-    anchoredScroll.scrollToBottom("auto");
-  }, [anchoredScroll.scrollToBottom, autoTail, items]);
+    const timeout = window.setTimeout(() => {
+      setShowLoadingDelayMessage(true);
+    }, 4000);
+
+    return () => window.clearTimeout(timeout);
+  }, [isLoadingEmptyState]);
 
   const scrollContainerClassNames = cn(
     "w-full",
     autoTail ? "h-full overflow-y-auto" : null,
   );
 
-  if (items.length === 0) {
+  if (!hasRenderableContent) {
     const isLoading = emptyState === "loading";
 
     return (
       <div className={scrollContainerClassNames}>
         <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
           {isLoading ? (
-            <Spinner
-              aria-label="Waiting for ACP activity"
-              className="mx-auto h-4 w-4 border-2 text-muted-foreground"
-            />
+            <>
+              <Spinner
+                aria-label="Waiting for ACP activity"
+                className="mx-auto h-4 w-4 border-2 text-muted-foreground"
+              />
+              {showLoadingDelayMessage ? (
+                <p className="mt-3 text-sm font-medium text-muted-foreground">
+                  This is taking longer than normal…
+                </p>
+              ) : null}
+            </>
           ) : (
-            <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
+            <>
+              <Radio className="mx-auto h-4 w-4 text-muted-foreground" />
+              <p className="mt-3 text-sm font-medium">No ACP activity yet</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {emptyDescription}
+              </p>
+            </>
           )}
-          <p className="mt-3 text-sm font-medium">
-            {isLoading ? "Waiting for ACP activity" : "No ACP activity yet"}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {emptyDescription}
-          </p>
         </div>
       </div>
     );
   }
-
-  const isCompactPreview = variant === "compactPreview";
 
   return (
     <div
@@ -185,6 +202,40 @@ export function AgentSessionTranscriptList({
       </div>
     </div>
   );
+}
+
+function hasRenderableDisplayContent(
+  displayBlocks: TranscriptDisplayBlock[],
+  variant: AgentSessionTranscriptVariant,
+) {
+  if (variant !== "compactPreview") {
+    return displayBlocks.length > 0;
+  }
+
+  return displayBlocks.some(hasRenderableCompactBlock);
+}
+
+function hasRenderableCompactBlock(block: TranscriptDisplayBlock) {
+  if (block.kind === "single") {
+    return isRenderableCompactItem(block.item);
+  }
+
+  return block.segments.some((segment) => {
+    if (segment.kind === "item") {
+      return isRenderableCompactItem(segment.item);
+    }
+    if (segment.kind === "prompt") {
+      return true;
+    }
+    if (segment.kind === "summary") {
+      return segment.summary.items.some(isRenderableCompactItem);
+    }
+    return false;
+  });
+}
+
+function isRenderableCompactItem(item: TranscriptItem) {
+  return item.renderClass !== "raw-rail" && item.renderClass !== "suppressed";
 }
 
 function TranscriptAcpSourceBadge({ source }: { source: string }) {
