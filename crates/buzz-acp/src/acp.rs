@@ -443,6 +443,11 @@ impl AcpClient {
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
+        // Mark the usage tracker as in-flight for this turn BEFORE sending the
+        // prompt so that any setup notifications recorded earlier are not
+        // misattributed to this turn.
+        self.goose_usage.begin_turn(session_id);
+
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
         self.next_id += 1;
@@ -2949,6 +2954,8 @@ mod tests {
         let mut client = spawn_inert_client().await;
         assert!(client.take_turn_usage().is_none(), "starts empty");
 
+        // begin_turn before sending the prompt — mirrors the real call flow.
+        client.goose_usage.begin_turn("s1");
         let msg = goose_usage_update_msg("s1", 1000, 200, Some(0.01));
         client.handle_goose_usage_update(&msg);
 
@@ -2970,9 +2977,11 @@ mod tests {
     async fn goose_usage_second_turn_delta_reliable() {
         let mut client = spawn_inert_client().await;
         // Turn 1.
+        client.goose_usage.begin_turn("s2");
         client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1000, 200, None));
         let _ = client.take_turn_usage();
         // Turn 2.
+        client.goose_usage.begin_turn("s2");
         client.handle_goose_usage_update(&goose_usage_update_msg("s2", 1800, 450, None));
         let usage = client.take_turn_usage().expect("turn 2 usage");
         assert!(usage.delta_reliable);
