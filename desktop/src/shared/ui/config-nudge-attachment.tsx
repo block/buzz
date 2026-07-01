@@ -62,7 +62,7 @@ export function ConfigNudgeCard({
 
   return (
     <Attachment
-      className={cn("w-80 max-w-full shrink-0 shadow-none", className)}
+      className={cn("max-w-lg shrink-0 shadow-none", className)}
       orientation="horizontal"
       state="error"
     >
@@ -70,7 +70,7 @@ export function ConfigNudgeCard({
         <AlertTriangle aria-hidden="true" className="h-4 w-4" />
       </AttachmentMedia>
       <AttachmentContent>
-        <AttachmentTitle className="text-destructive">
+        <AttachmentTitle className="whitespace-normal text-destructive line-clamp-2">
           {nudge.agent_name} needs configuration
         </AttachmentTitle>
         <div className="mt-1 flex flex-col gap-0.5">
@@ -100,7 +100,7 @@ function RequirementRow({
   switch (requirement.surface) {
     case "env_key":
       return (
-        <div className="truncate text-xs leading-4 text-muted-foreground">
+        <div className="text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]">
           Set{" "}
           <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
             {requirement.key}
@@ -110,7 +110,7 @@ function RequirementRow({
       );
     case "normalized_field":
       return (
-        <div className="truncate text-xs leading-4 text-muted-foreground">
+        <div className="text-xs leading-4 text-muted-foreground [overflow-wrap:anywhere]">
           Set the <strong>{requirement.field}</strong> field in Edit Agent
           dropdowns
         </div>
