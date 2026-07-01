@@ -160,8 +160,8 @@ const overrides = new Map([
   ["src/features/channels/readState/readStateManager.ts", 1030],
   // Shared UI was added to this guard after splitting globals/markdown so
   // large shared renderers cannot grow further while follow-up splits land.
-  // +20 for config-nudge detect-and-render (extractConfigNudge + ConfigNudgeCard wire).
-  ["src/shared/ui/markdown.tsx", 2139],
+  // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).
+  ["src/shared/ui/markdown.tsx", 2152],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
   // permission-outcome (fix #1381 regression): pendingPermissions state map,

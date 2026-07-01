@@ -1762,7 +1762,7 @@ pub fn spawn_agent_child(
     // source and buzz-acp only transports the payload.
     //
     // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp:
-    //   { "agent_name": "...", "requirements": [{ "surface": "...", ... }] }
+    //   { "agent_name": "...", "agent_pubkey": "...", "requirements": [{ "surface": "...", ... }] }
     {
         use crate::managed_agents::{
             agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,

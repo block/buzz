@@ -39,6 +39,7 @@ export function subscribeOpenEditAgent(
   function handleEvent(event: Event) {
     const detail = (event as CustomEvent<string>).detail;
     if (detail.toLowerCase() === pubkey.toLowerCase()) {
+      pendingEditAgentPubkey = null;
       handler();
     }
   }

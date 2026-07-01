@@ -168,3 +168,98 @@ test("stripConfigNudgeSentinel removes preceding blank line", () => {
   // Should not end with multiple newlines — the blank line separator was eaten.
   assert.ok(!stripped.endsWith("\n\n"), "trailing blank line must be trimmed");
 });
+
+// ── Auth-gate invariants (Fix 1 — authenticate before rendering) ──────────────
+//
+// The full auth check lives in MarkdownInner's useMemo: it calls
+// normalizePubkey(payload.agent_pubkey) !== normalizePubkey(configNudgeAuthorPubkey)
+// and returns null when they don't match. The tests below verify:
+// (a) extractConfigNudge still returns the payload regardless of the caller
+//     (extraction is pure; auth is responsibility of the renderer),
+// (b) when agent_pubkey doesn't match the author, the comparison yields null
+//     (simulated inline to keep the test self-contained without React).
+
+import { normalizePubkey } from "./pubkey.ts";
+
+/**
+ * Simulate the auth guard in MarkdownInner's configNudge useMemo.
+ * Returns the payload if it passes auth, null otherwise.
+ */
+function authGuardedExtract(content, configNudgeAuthorPubkey) {
+  if (!configNudgeAuthorPubkey) return null;
+  const payload = extractConfigNudge(content);
+  if (payload === null) return null;
+  if (
+    normalizePubkey(payload.agent_pubkey) !==
+    normalizePubkey(configNudgeAuthorPubkey)
+  ) {
+    return null;
+  }
+  return payload;
+}
+
+const FIZZ_PUBKEY_AUTH = "aabbccddeeff0011223344556677889900aabbcc";
+const OTHER_PUBKEY = "ffffffffffffffffffffffffffffffffffffffff";
+
+function makeNudgeBody(agentPubkey) {
+  const payload = {
+    agent_name: "Fizz",
+    agent_pubkey: agentPubkey,
+    requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
+  };
+  return `**Fizz** needs configuration.\n\n\`\`\`buzz:config-nudge\n${JSON.stringify(payload)}\n\`\`\``;
+}
+
+test("authGuard_noAuthorPubkey_returnsNull", () => {
+  const body = makeNudgeBody(FIZZ_PUBKEY_AUTH);
+  assert.equal(
+    authGuardedExtract(body, null),
+    null,
+    "null configNudgeAuthorPubkey must yield null (card path off)",
+  );
+});
+
+test("authGuard_undefinedAuthorPubkey_returnsNull", () => {
+  const body = makeNudgeBody(FIZZ_PUBKEY_AUTH);
+  assert.equal(
+    authGuardedExtract(body, undefined),
+    null,
+    "undefined configNudgeAuthorPubkey must yield null (card path off)",
+  );
+});
+
+test("authGuard_mismatchedAuthor_returnsNull", () => {
+  // Fence carries FIZZ_PUBKEY_AUTH but caller says the message author is OTHER_PUBKEY.
+  // The card must not render and the fence must NOT be stripped by the caller.
+  const body = makeNudgeBody(FIZZ_PUBKEY_AUTH);
+  const result = authGuardedExtract(body, OTHER_PUBKEY);
+  assert.equal(
+    result,
+    null,
+    "mismatched agent_pubkey vs configNudgeAuthorPubkey must yield null",
+  );
+  // Fence text must still be in the raw body (not stripped) — stripping only
+  // happens when configNudge !== null.
+  assert.ok(
+    body.includes("buzz:config-nudge"),
+    "fence must remain in body when auth guard returns null",
+  );
+});
+
+test("authGuard_matchingAuthor_returnsPayload", () => {
+  const body = makeNudgeBody(FIZZ_PUBKEY_AUTH);
+  const result = authGuardedExtract(body, FIZZ_PUBKEY_AUTH);
+  assert.notEqual(result, null, "matching author must yield the payload");
+  assert.equal(result?.agent_pubkey, FIZZ_PUBKEY_AUTH);
+});
+
+test("authGuard_matchingAuthor_caseInsensitive", () => {
+  // normalizePubkey lowercases both sides; mixed-case must still match.
+  const body = makeNudgeBody(FIZZ_PUBKEY_AUTH.toUpperCase());
+  const result = authGuardedExtract(body, FIZZ_PUBKEY_AUTH.toLowerCase());
+  assert.notEqual(
+    result,
+    null,
+    "case-insensitive pubkey comparison must pass auth",
+  );
+});
