@@ -11,6 +11,23 @@ import {
 
 export type EnvVarsValue = Record<string, string>;
 
+/**
+ * Returns true when a required env key is unsatisfied — neither the agent-local
+ * value nor the inherited (global / persona) value provides it.
+ *
+ * Used by `EnvVarsEditor` to render the amber "Required" badge on unfilled rows.
+ * Exported for unit testing.
+ */
+export function isRequiredKeyMissing(
+  key: string,
+  localValue: EnvVarsValue,
+  inheritedFrom: EnvVarsValue | undefined,
+): boolean {
+  const local = localValue[key] ?? "";
+  const inherited = inheritedFrom?.[key] ?? "";
+  return local.length === 0 && inherited.length === 0;
+}
+
 type EnvVarsEditorProps = {
   /** The current key/value map. */
   value: EnvVarsValue;
@@ -119,7 +136,9 @@ export function EnvVarsEditor({
         {/* Required credential rows — shown first, key is read-only */}
         {requiredKeys.map((key) => {
           const currentValue = value[key] ?? "";
-          const isMissing = currentValue.length === 0;
+          // A required key is only "missing" if neither the agent-local value
+          // nor the inherited (global / persona) value provides it.
+          const isMissing = isRequiredKeyMissing(key, value, inheritedFrom);
           return (
             <div key={key} className="space-y-1">
               <div className="flex items-center gap-2">

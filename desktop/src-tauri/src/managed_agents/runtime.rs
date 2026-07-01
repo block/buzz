@@ -1665,6 +1665,9 @@ pub fn spawn_agent_child(
     // command, so we recompute them from the effective value rather than the
     // frozen record snapshot. Mirrors the model resolution below.
     let personas = super::load_personas(app).unwrap_or_default();
+    // Load global config once; used for runtime_metadata_env_vars (model/provider fallback)
+    // and for the env-var merge at spawn time.
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let effective_command = super::effective_agent_command(
         record.persona_id.as_deref(),
         &personas,
@@ -1768,7 +1771,6 @@ pub fn spawn_agent_child(
             agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
         };
 
-        let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
         let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
         // Compute the optional payload before touching the command.
         let setup_payload_json =
@@ -1865,23 +1867,20 @@ pub fn spawn_agent_child(
         command.env("BUZZ_ACP_PERSONA_NAME", persona_name);
     }
 
-    // System prompt, model, and provider come from the record snapshot — the
-    // record is the authoritative spawn source. For persona-created agents the
-    // snapshot was pinned at create (see `create_managed_agent`); for others
-    // these are the user-supplied values. Reading the record (never the live
-    // persona) is what keeps a running agent pinned across restarts: a persona
-    // edit reaches the agent only via delete+respawn, which rewrites the
-    // snapshot.
+    // System prompt comes from the record snapshot (pinned at create for
+    // persona-created agents, keeping a running agent stable across restarts).
+    // Model and provider use the shared resolver: agent → persona → global → None,
+    // so a global-default-only agent spawns with the correct provider/model env.
     let effective_prompt = record.system_prompt.clone();
-    let effective_model = record.model.clone();
-    let effective_provider = record.provider.clone();
+    let (effective_model, effective_provider) =
+        crate::managed_agents::resolve_effective_model_provider(record, &personas, &global);
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {
         command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
-    if let Some(model) = &effective_model {
+    if let Some(model) = effective_model {
         command.env("BUZZ_ACP_MODEL", model);
     } else {
         command.env_remove("BUZZ_ACP_MODEL");
@@ -1895,8 +1894,8 @@ pub fn spawn_agent_child(
             meta.model_env_var,
             meta.provider_env_var,
             meta.provider_locked,
-            effective_model.as_deref(),
-            effective_provider.as_deref(),
+            effective_model,
+            effective_provider,
         ) {
             command.env(key, value);
         }
@@ -1982,10 +1981,7 @@ pub fn spawn_agent_child(
     // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
     // which `merged_user_env` strips. Those carry Buzz's identity and must
     // never be GUI-overridable.
-    let global_env_for_spawn = crate::managed_agents::load_global_agent_config(app)
-        .unwrap_or_default()
-        .env_vars;
-    for (key, value) in super::env_vars::merged_user_env(&global_env_for_spawn, &record.env_vars) {
+    for (key, value) in super::env_vars::merged_user_env(&global.env_vars, &record.env_vars) {
         command.env(key, value);
     }
 
