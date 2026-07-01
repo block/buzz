@@ -424,6 +424,25 @@ export function useManagedAgentObserverBridge(
   }, [queryClient]);
 }
 
+/**
+ * E2E-only: inject synthetic observer events directly into the store, bypassing
+ * the relay-security knownAgentPubkeys filter. Exercises the real
+ * appendAgentEvent → processTranscriptEvent ingestion path so screenshot specs
+ * prove the production render, not a stub.
+ *
+ * Never call this from production code — it is intentionally not re-exported
+ * from the public agent feature barrel.
+ */
+export function injectObserverEventsForE2E(
+  agentPubkey: string,
+  events: ObserverEvent[],
+) {
+  for (const event of events) {
+    appendAgentEvent(agentPubkey, event);
+  }
+  notifyListeners();
+}
+
 export function resetAgentObserverStore() {
   generation += 1;
   const unsubscribe = unsubscribeRelay;
