@@ -44,6 +44,11 @@ dashmap = { workspace = true }
 futures-util = { workspace = true }
 deadpool-redis = { workspace = true }
 redis = { workspace = true }
+# Redis TLS (rediss://, e.g. ElastiCache) uses rustls, which needs a process
+# CryptoProvider installed at startup. Both aws-lc-rs and ring are compiled in
+# transitively, so rustls can't auto-select one — we install ring explicitly in
+# main(). Mirrors buzz-acp's rustls setup for wss://.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sqlx = { workspace = true }
 base64 = "0.22"
 buzz-sdk = { workspace = true }

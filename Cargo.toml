@@ -52,7 +52,7 @@ sqlx = { version = "0.9", features = [
 ] }
 
 # Redis
-redis        = { version = "1.0", features = ["tokio-comp", "connection-manager"] }
+redis        = { version = "1.0", features = ["tokio-comp", "connection-manager", "tokio-rustls-comp"] }
 deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
 
 # Nostr
