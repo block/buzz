@@ -607,7 +607,7 @@ export function useMentions(
         (a, b) =>
           a.groupRank - b.groupRank || a.score - b.score || a.order - b.order,
       )
-      .slice(0, MENTION_SUGGESTION_LIMIT)
+      .slice(0, Math.max(MENTION_SUGGESTION_LIMIT, mentionCandidates.length))
       .map(({ candidate, label, ownerLabel }) => ({
         pubkey: candidate.pubkey,
         personaId: candidate.personaId,

@@ -433,7 +433,10 @@ export function NewDirectMessageDialog({
       allowEmptyQuery: true,
       candidates: coalescedCandidates,
       getLabel: formatUserName,
-      limit: DIRECT_MESSAGE_RECIPIENT_LIMIT,
+      limit: Math.max(
+        DIRECT_MESSAGE_RECIPIENT_LIMIT,
+        coalescedCandidates.length,
+      ),
       query: deferredSearchQuery,
     });
   }, [
@@ -708,6 +711,7 @@ export function NewDirectMessageDialog({
           >
             <div
               className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
+              data-testid="new-dm-results"
               onScroll={handleDirectoryScroll}
             >
               {searchResults.length > 0 ? (

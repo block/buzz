@@ -1540,6 +1540,83 @@ test("members sidebar can invite and remove members", async ({ page }) => {
   await expectMembersTriggerCount(page, initialMemberCount);
 });
 
+test("members sidebar pages add-member search beyond the first 50 people", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("Alex");
+
+  const results = page.locator("[data-testid^='channel-user-search-result-']");
+  await expect(results).toHaveCount(50);
+
+  await page
+    .getByTestId("members-sidebar-people")
+    .evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(results).toHaveCount(55);
+  await expect(page.getByText("Alex 55")).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
+});
+
+test("new DM picker pages people search beyond the first 50 results", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await page.getByTestId("new-dm-trigger").click();
+  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await page.getByTestId("new-dm-search").fill("Alex");
+
+  const results = page.locator("[data-testid^='new-dm-result-']");
+  await expect(results).toHaveCount(50);
+
+  await page
+    .getByTestId("new-dm-results")
+    .evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(results).toHaveCount(55);
+  await expect(page.getByText("Alex 55")).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
+});
+
 test("members modal does not show direct pubkey entry", async ({ page }) => {
   await page.goto("/");
   await openMembersSidebar(page, "general");

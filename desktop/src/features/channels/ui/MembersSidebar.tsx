@@ -375,7 +375,7 @@ export function MembersSidebar({
     return rankUserCandidatesBySearch({
       candidates: coalescedCandidates,
       getLabel: formatAddCandidateName,
-      limit: MEMBER_ADD_RESULT_LIMIT,
+      limit: Math.max(MEMBER_ADD_RESULT_LIMIT, coalescedCandidates.length),
       query: normalizedDeferredSearchQuery,
     });
   }, [
