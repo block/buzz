@@ -486,7 +486,7 @@ function ProfileLiveActivityEmbed({
           agent={activityAgent}
           autoTail={true}
           channelId={null}
-          className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none"
+          className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-4 text-xs shadow-none **:data-message-id:pointer-events-none"
           emptyDescription="Live activity will appear here."
           rawLayout="responsive"
           showHeader={false}
@@ -549,7 +549,7 @@ function ProfileLiveActivityEmbed({
                     agent={activityAgent}
                     autoTail={true}
                     channelId={channelId}
-                    className="h-full min-h-0 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none"
+                    className="h-full min-h-0 border-0 bg-transparent px-4 py-4 text-xs shadow-none **:data-message-id:pointer-events-none"
                     emptyDescription="Live activity will appear here."
                     rawLayout="responsive"
                     showHeader={false}
@@ -603,7 +603,7 @@ function ActivityCarouselDots({
   selectedIndex: number;
   slides: string[];
 }) {
-  if (slides.length === 0) {
+  if (slides.length <= 1) {
     return null;
   }
 
