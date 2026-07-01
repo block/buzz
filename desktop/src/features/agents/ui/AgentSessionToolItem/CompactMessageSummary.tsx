@@ -2,7 +2,9 @@ import * as React from "react";
 import { CheckCheck } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
+import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import { TranscriptTimestamp } from "../activityRenderClasses/TranscriptTimestamp";
 import { compactSummaryTone } from "./CompactToolSummaryRow";
 import type { SentMessageLink } from "./messageLinks";
@@ -38,6 +40,8 @@ export function CompactMessageSummary({
   timestamp: string;
 }) {
   const [detailsOpen, setDetailsOpen] = React.useState(false);
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
   const mutedTone = compactSummaryTone();
   return (
     <>
@@ -49,19 +53,18 @@ export function CompactMessageSummary({
           size="xs"
           testId="transcript-agent-sent-avatar"
         />
-        <div className="flex max-w-[85%] min-w-0 flex-col items-start gap-1">
+        <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
           <div
             className={cn(
-              "min-w-0 rounded-2xl border px-3 py-2 text-sm leading-relaxed shadow-sm",
+              "w-full min-w-0 rounded-2xl border px-3 py-2 text-sm leading-relaxed shadow-sm",
+              isCompactPreview && "text-xs leading-4",
               isError
                 ? "border-destructive/25 bg-destructive/10 text-destructive"
                 : "border-primary/15 bg-primary/6 text-foreground",
             )}
             data-testid="transcript-tool-message-preview"
           >
-            <p className="whitespace-pre-wrap wrap-break-word">
-              {preview || "Message content unavailable."}
-            </p>
+            <Markdown content={preview || "Message content unavailable."} />
           </div>
           <div className="inline-flex max-w-full items-center gap-1.5 px-1">
             <TranscriptTimestamp
