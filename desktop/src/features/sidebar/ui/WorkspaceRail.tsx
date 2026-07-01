@@ -21,6 +21,15 @@ type WorkspaceRailProps = {
 const MAX_BADGE = 99;
 
 /**
+ * Workspace-button initials. Strips punctuation/symbols first so a name like
+ * "B (relay)" yields "BR", not "B(".
+ */
+export function workspaceInitials(name: string): string {
+  const cleaned = name.replace(/[^\p{L}\p{N}\s]/gu, " ");
+  return getInitials(cleaned);
+}
+
+/**
  * Presentation decisions for one workspace button, derived from its observed
  * unread state. Pure so it can be unit-tested without a DOM. The `state` guard
  * ensures we NEVER render a "no unread" affordance for a relay we could not
@@ -96,7 +105,7 @@ function WorkspaceButton({
               pending && "opacity-60",
             )}
           >
-            {getInitials(workspace.name) || "🐝"}
+            {workspaceInitials(workspace.name) || "🐝"}
           </span>
           {showBadge ? (
             <span

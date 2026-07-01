@@ -1,7 +1,25 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { workspaceRailIndicators } from "./WorkspaceRail.tsx";
+import {
+  workspaceInitials,
+  workspaceRailIndicators,
+} from "./WorkspaceRail.tsx";
+
+describe("workspaceInitials", () => {
+  it("filters punctuation before deriving initials", () => {
+    assert.equal(workspaceInitials("B (relay)"), "BR");
+  });
+  it("handles a leading symbol on a single word", () => {
+    assert.equal(workspaceInitials("(staging)"), "S");
+  });
+  it("still returns plain initials for normal names", () => {
+    assert.equal(workspaceInitials("Bravo Beta"), "BB");
+  });
+  it("returns empty for a symbol-only name (caller falls back)", () => {
+    assert.equal(workspaceInitials("()"), "");
+  });
+});
 
 describe("workspaceRailIndicators", () => {
   it("shows a dot for an observed workspace with unread", () => {
