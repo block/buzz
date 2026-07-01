@@ -54,6 +54,7 @@ import {
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { resolveProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import {
   AgentInfoFocusedView,
   AgentInstructionsFocusedView,
@@ -91,7 +92,6 @@ import type {
   Channel,
   CreateManagedAgentInput,
   CreatePersonaInput,
-  ManagedAgent,
   UpdatePersonaInput,
 } from "@/shared/api/types";
 import { UserProfilePanelFrame } from "@/features/profile/ui/UserProfilePanelFrame";
@@ -276,38 +276,26 @@ export function UserProfilePanel({
   // real boundary is server-side, so this only controls what UI we paint.
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
 
+  const activityAgent = React.useMemo(
+    () =>
+      resolveProfileActivityAgent({
+        effectivePubkey,
+        isBot,
+        managedAgent,
+        profile: profile ?? null,
+        relayAgent,
+        viewerIsOwner,
+      }),
+    [effectivePubkey, isBot, managedAgent, profile, relayAgent, viewerIsOwner],
+  );
+  const activityBridgeAgents = React.useMemo(
+    () => (activityAgent ? [activityAgent] : []),
+    [activityAgent],
+  );
   // Populate the active-turns store for this agent so useActiveAgentTurns works
   // even if the Agents page hasn't been visited yet.
-  const bridgeAgents = React.useMemo(
-    () =>
-      managedAgent
-        ? [{ pubkey: managedAgent.pubkey, status: managedAgent.status }]
-        : [],
-    [managedAgent],
-  );
-  // The observer bridge subscribes on the OWNER's own pubkey and decrypts the
-  // agent's telemetry with the owner's key — no agent seckey needed. It only
-  // decrypts frames whose agent pubkey is "known", and only subscribes when an
-  // agent is running/deployed. For a remote agent we own but don't manage
-  // locally, `managedAgent` is undefined, so we seed the bridge from the relay
-  // agent (treated as "deployed") when the viewer is the declared owner. This
-  // mirrors what the composer-area ingress already does in ChannelScreen.
-  const observerBridgeAgents = React.useMemo(() => {
-    if (managedAgent) {
-      return [{ pubkey: managedAgent.pubkey, status: managedAgent.status }];
-    }
-    if (viewerIsOwner && relayAgent) {
-      return [
-        {
-          pubkey: relayAgent.pubkey,
-          status: "deployed" as ManagedAgent["status"],
-        },
-      ];
-    }
-    return [];
-  }, [managedAgent, relayAgent, viewerIsOwner]);
-  useActiveAgentTurnsBridge(bridgeAgents);
-  useManagedAgentObserverBridge(observerBridgeAgents);
+  useActiveAgentTurnsBridge(activityBridgeAgents);
+  useManagedAgentObserverBridge(activityBridgeAgents);
   const canEditAgent =
     isOwner === true &&
     (managedAgent !== undefined ||
@@ -844,6 +832,7 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
+          activityAgent={activityAgent}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}

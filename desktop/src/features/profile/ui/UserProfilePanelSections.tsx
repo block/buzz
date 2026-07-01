@@ -23,6 +23,7 @@ import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
 import type {
   useFollowMutation,
   useUnfollowMutation,
@@ -64,6 +65,7 @@ export { AgentInstructionsFocusedView } from "@/features/profile/ui/UserProfileP
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
+  activityAgent: ProfileActivityAgent | null;
   canAddToChannel: boolean;
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
@@ -173,6 +175,7 @@ function RuntimeTabStatusDot({ status }: { status: RuntimeTabStatus }) {
 }
 
 export function ProfileSummaryView({
+  activityAgent,
   canAddToChannel,
   canEditAgent,
   canOpenAgentLogs,
@@ -400,10 +403,10 @@ export function ProfileSummaryView({
           {activeTab === "info" ? (
             <ProfileInfoTabContent
               activeTurns={activeTurns}
+              activityAgent={activityAgent}
               agentInfoFields={agentInfoFields}
               channelIdToName={channelIdToName}
               isArchived={isArchived}
-              managedAgent={managedAgent}
               onOpenActivity={onOpenActivity}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
