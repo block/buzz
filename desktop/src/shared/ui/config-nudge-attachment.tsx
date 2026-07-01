@@ -62,7 +62,7 @@ export function ConfigNudgeCard({
 
   return (
     <Attachment
-      className={cn("max-w-lg shrink-0 shadow-none", className)}
+      className={cn("max-w-[min(100%,32rem)] shrink-0 shadow-none", className)}
       orientation="horizontal"
       state="error"
     >
