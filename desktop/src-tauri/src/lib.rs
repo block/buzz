@@ -1,4 +1,5 @@
 mod app_state;
+mod archive;
 mod commands;
 mod deep_link;
 mod events;
@@ -608,6 +609,10 @@ pub fn run() {
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,
+            archive::archive_events,
+            archive::create_save_subscription,
+            archive::list_save_subscriptions,
+            archive::delete_save_subscription,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
