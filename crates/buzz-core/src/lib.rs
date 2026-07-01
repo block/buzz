@@ -5,6 +5,8 @@
 //! Provides [`StoredEvent`], filter matching, kind constants, and event
 //! verification. All other Buzz crates depend on this one.
 
+/// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
+pub mod agent_turn_metric;
 /// Channel and membership enums shared across crates.
 pub mod channel;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
@@ -24,8 +26,6 @@ pub mod kind;
 pub mod network;
 /// Agent observer frame helpers.
 pub mod observer;
-/// NIP-AM: Agent Turn Metric — payload type and encrypt/decrypt helpers.
-pub mod agent_turn_metric;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
 /// Presence status types shared across crates.

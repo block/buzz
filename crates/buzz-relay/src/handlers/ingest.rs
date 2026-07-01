@@ -13,9 +13,8 @@ use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY,
-    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
-    KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
+    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
+    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
@@ -1115,7 +1114,11 @@ fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), Strin
         ));
     }
     let p = p_tags[0];
-    if p.len() != 64 || !p.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if p.len() != 64
+        || !p
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         return Err("agent-turn-metric `p` tag must be 64 lowercase hex chars".to_string());
     }
 
@@ -1127,14 +1130,14 @@ fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), Strin
     }
     let agent = agent_tags[0];
     if agent.len() != 64
-        || !agent.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        || !agent
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
         return Err("agent-turn-metric `agent` tag must be 64 lowercase hex chars".to_string());
     }
     if agent != event_pubkey_hex {
-        return Err(
-            "agent-turn-metric `agent` tag must equal event pubkey".to_string(),
-        );
+        return Err("agent-turn-metric `agent` tag must equal event pubkey".to_string());
     }
 
     // Content must look like a NIP-44 v2 ciphertext (length, base64, version prefix).
@@ -3150,8 +3153,7 @@ mod tests {
     fn agent_turn_metric_envelope_rejects_missing_p() {
         let agent = nostr::Keys::generate();
         let agent_hex = agent.public_key().to_hex();
-        let ev =
-            make_agent_turn_metric(&agent, &[&["agent", &agent_hex]], &fake_nip44_v2());
+        let ev = make_agent_turn_metric(&agent, &[&["agent", &agent_hex]], &fake_nip44_v2());
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         assert!(err.contains("`p` tag"), "got: {err}");
     }
@@ -3160,8 +3162,7 @@ mod tests {
     fn agent_turn_metric_envelope_rejects_missing_agent() {
         let agent = nostr::Keys::generate();
         let owner_hex = "b".repeat(64);
-        let ev =
-            make_agent_turn_metric(&agent, &[&["p", &owner_hex]], &fake_nip44_v2());
+        let ev = make_agent_turn_metric(&agent, &[&["p", &owner_hex]], &fake_nip44_v2());
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         assert!(err.contains("`agent` tag"), "got: {err}");
     }
@@ -3177,10 +3178,7 @@ mod tests {
             &fake_nip44_v2(),
         );
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
-        assert!(
-            err.contains("equal event pubkey"),
-            "got: {err}"
-        );
+        assert!(err.contains("equal event pubkey"), "got: {err}");
     }
 
     #[test]
@@ -3195,9 +3193,6 @@ mod tests {
         );
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
-        assert!(
-            err.contains("agent-turn-metric"),
-            "got: {err}"
-        );
+        assert!(err.contains("agent-turn-metric"), "got: {err}");
     }
 }

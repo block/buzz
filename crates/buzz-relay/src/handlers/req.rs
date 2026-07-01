@@ -1138,9 +1138,10 @@ pub(crate) fn result_gated_count_safe_for_pushdown(
     authed_pubkey_hex: &str,
 ) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-    filter.generic_tags.get(&p_tag).is_some_and(|values| {
-        !values.is_empty() && values.iter().all(|v| v == authed_pubkey_hex)
-    })
+    filter
+        .generic_tags
+        .get(&p_tag)
+        .is_some_and(|values| !values.is_empty() && values.iter().all(|v| v == authed_pubkey_hex))
 }
 
 /// Returns `true` if the event is an author-only kind and the requester is NOT
@@ -1760,15 +1761,17 @@ mod tests {
 
     #[test]
     fn result_gated_explicit_44200_can_match() {
-        let f = Filter::new()
-            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16));
+        let f = Filter::new().kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_AGENT_TURN_METRIC as u16,
+        ));
         assert!(filter_can_match_result_gated_kinds(&f));
     }
 
     #[test]
     fn result_gated_explicit_30622_can_match() {
-        let f = Filter::new()
-            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_DM_VISIBILITY as u16));
+        let f = Filter::new().kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_DM_VISIBILITY as u16,
+        ));
         assert!(filter_can_match_result_gated_kinds(&f));
     }
 
@@ -1783,7 +1786,9 @@ mod tests {
         let (owner, _agent, _other) = three_pubkeys();
         let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
         let f = nostr::Filter::new()
-            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16))
+            .kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_AGENT_TURN_METRIC as u16,
+            ))
             .custom_tags(p_tag, [owner.clone()]);
         // Owner querying their own metrics — safe to push down.
         assert!(result_gated_count_safe_for_pushdown(&f, &owner));
@@ -1794,7 +1799,9 @@ mod tests {
         let (owner, _agent, other) = three_pubkeys();
         let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
         let f = nostr::Filter::new()
-            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16))
+            .kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_AGENT_TURN_METRIC as u16,
+            ))
             .custom_tags(p_tag, [other.clone()]);
         // Authenticated as owner but #p is someone else — NOT safe.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
@@ -1803,8 +1810,9 @@ mod tests {
     #[test]
     fn result_gated_safe_pushdown_rejects_when_no_p_tag() {
         let (owner, _agent, _other) = three_pubkeys();
-        let f = nostr::Filter::new()
-            .kind(nostr::Kind::Custom(buzz_core::kind::KIND_AGENT_TURN_METRIC as u16));
+        let f = nostr::Filter::new().kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_AGENT_TURN_METRIC as u16,
+        ));
         // No #p tag — fallback required.
         assert!(!result_gated_count_safe_for_pushdown(&f, &owner));
     }
