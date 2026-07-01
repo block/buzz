@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 // ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -192,6 +192,30 @@ pub fn has_save_subscription(
         )
         .map_err(|e| format!("failed to check save subscription: {e}"))?;
     Ok(count > 0)
+}
+
+/// Return the `kinds` JSON string for a matching save subscription, or `None`
+/// if no subscription exists.
+pub fn get_subscription_kinds(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+    scope_type: &str,
+    scope_value: &str,
+) -> Result<Option<String>, String> {
+    let result = conn
+        .query_row(
+            "SELECT kinds FROM save_subscriptions
+             WHERE identity_pubkey = ?1
+               AND relay_url       = ?2
+               AND scope_type      = ?3
+               AND scope_value     = ?4",
+            params![identity_pubkey, relay_url, scope_type, scope_value],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("failed to fetch subscription kinds: {e}"))?;
+    Ok(result)
 }
 
 // ── Archived events ─────────────────────────────────────────────────────────

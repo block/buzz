@@ -109,44 +109,101 @@ pub struct ArchiveBatchResult {
 /// - Persistent scopes (`channel_h`, `referenced_e`): grouped by scope, then
 ///   batch-queried against the relay; only returned events are inserted.
 /// - Ephemeral scope (`owner_p`): local validation only (no `/query`).
+///
+/// # Send-safety
+///
+/// `rusqlite::Connection` is `!Send`. All DB work is bracketed in scoped
+/// `{ let conn = open_db()?; ... }` blocks that drop the connection before any
+/// `.await`, exactly matching the pattern in `managed_agents/persona_events.rs`.
 #[tauri::command]
 pub async fn archive_events(
     state: State<'_, AppState>,
     candidates: Vec<ArchiveCandidate>,
 ) -> Result<ArchiveBatchResult, String> {
-    if candidates.is_empty() {
-        return Ok(ArchiveBatchResult {
-            persisted: 0,
-            dropped: 0,
-        });
-    }
-
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
     let now = now_secs();
+
+    // ── Phase 1: plan (sync) ─────────────────────────────────────────────────
+    // Read subscriptions and build relay filters. Connection dropped before
+    // any .await.
+    let plan = {
+        let conn = open_db()?;
+        plan_archive(candidates, &identity_pk, &relay_url, &conn)?
+        // conn drops here
+    };
+
+    // ── Phase 2: relay queries (async) ───────────────────────────────────────
+    // No Connection in scope — future is Send.
+    let state_ref: &AppState = &state;
+    let bucket_results = query_buckets(plan.buckets, state_ref).await;
+
+    // ── Phase 3: persist (sync) ──────────────────────────────────────────────
     let conn = open_db()?;
+    commit_archive(
+        bucket_results,
+        plan.ephemeral,
+        plan.pre_dropped,
+        &identity_pk,
+        &relay_url,
+        now,
+        &conn,
+    )
+}
 
-    // Parse and verify all candidates up front; split by proof path.
-    struct Parsed {
-        event: Event,
-        raw_json: String,
-        matched_scope: MatchedScope,
-    }
+// ── Archive internals ────────────────────────────────────────────────────────
 
-    let mut persistent: Vec<Parsed> = Vec::new();
+/// A parsed, sig-verified candidate ready for further processing.
+struct Parsed {
+    event: Event,
+    raw_json: String,
+    matched_scope: MatchedScope,
+}
+
+/// One scope bucket: a set of candidates that share a scope type+value,
+/// with the relay filter already built and the subscription kinds loaded.
+struct Bucket {
+    scope_type_str: String,
+    scope_value: String,
+    allowed_kinds: Vec<u64>,
+    filter: serde_json::Value,
+    group: Vec<Parsed>,
+}
+
+/// Output of the sync planning phase.
+struct ArchivePlan {
+    buckets: Vec<Bucket>,
+    ephemeral: Vec<Parsed>,
+    /// Events already accounted as dropped during planning (no subscription,
+    /// unknown scope type, parse failure, bad sig).
+    pre_dropped: u32,
+}
+
+/// Phase 1 (sync): parse all candidates, group persistent ones into per-scope
+/// buckets, and load the subscription kinds for each bucket.
+///
+/// Returns an [`ArchivePlan`] with no `&Connection` remaining — safe to hold
+/// across `.await`.
+fn plan_archive(
+    candidates: Vec<ArchiveCandidate>,
+    identity_pk: &str,
+    relay_url: &str,
+    conn: &Connection,
+) -> Result<ArchivePlan, String> {
+    let mut persistent_raw: Vec<Parsed> = Vec::new();
     let mut ephemeral: Vec<Parsed> = Vec::new();
-    let mut dropped: u32 = 0;
+    let mut pre_dropped: u32 = 0;
 
     for cand in candidates {
         let event = match Event::from_json(&cand.raw_event_json) {
             Ok(e) => e,
             Err(_) => {
-                dropped += 1;
+                pre_dropped += 1;
                 continue;
             }
         };
         if !event.verify_id() || !event.verify_signature() {
-            dropped += 1;
+            pre_dropped += 1;
             continue;
         }
 
@@ -157,7 +214,7 @@ pub async fn archive_events(
                 matched_scope: cand.matched_scope,
             });
         } else {
-            persistent.push(Parsed {
+            persistent_raw.push(Parsed {
                 event,
                 raw_json: cand.raw_event_json,
                 matched_scope: cand.matched_scope,
@@ -165,118 +222,188 @@ pub async fn archive_events(
         }
     }
 
+    // Group persistent candidates by (scope_type, scope_value).
+    use std::collections::HashMap;
+    let mut scope_groups: HashMap<(String, String), Vec<Parsed>> = HashMap::new();
+    for p in persistent_raw {
+        let key = (
+            p.matched_scope.scope_type.as_str().to_string(),
+            p.matched_scope.scope_value.clone(),
+        );
+        scope_groups.entry(key).or_default().push(p);
+    }
+
+    let mut buckets: Vec<Bucket> = Vec::with_capacity(scope_groups.len());
+    for ((scope_type_str, scope_value), mut group) in scope_groups {
+        // No subscription → drop the whole group.
+        let kinds_json = match store::get_subscription_kinds(
+            conn,
+            identity_pk,
+            relay_url,
+            &scope_type_str,
+            &scope_value,
+        )? {
+            Some(k) => k,
+            None => {
+                pre_dropped += group.len() as u32;
+                continue;
+            }
+        };
+
+        let allowed_kinds: Vec<u64> =
+            serde_json::from_str::<Vec<u64>>(&kinds_json).unwrap_or_default();
+
+        // Deduplicate by event id within the bucket.
+        let mut seen = std::collections::HashSet::new();
+        group.retain(|p| seen.insert(p.event.id.to_hex()));
+
+        let ids: Vec<String> = group.iter().map(|p| p.event.id.to_hex()).collect();
+
+        // Build a *scoped* relay filter: ids + scope tag + kinds.
+        let filter = match scope_type_str.as_str() {
+            "channel_h" => serde_json::json!({
+                "ids":   ids,
+                "#h":    [&scope_value],
+                "kinds": allowed_kinds,
+            }),
+            "referenced_e" => serde_json::json!({
+                "ids":   ids,
+                "#e":    [&scope_value],
+                "kinds": allowed_kinds,
+            }),
+            _ => {
+                pre_dropped += group.len() as u32;
+                continue;
+            }
+        };
+
+        buckets.push(Bucket {
+            scope_type_str,
+            scope_value,
+            allowed_kinds,
+            filter,
+            group,
+        });
+    }
+
+    Ok(ArchivePlan {
+        buckets,
+        ephemeral,
+        pre_dropped,
+    })
+}
+
+/// A bucket with the relay's response attached.
+struct BucketWithResult {
+    scope_type_str: String,
+    scope_value: String,
+    allowed_kinds: Vec<u64>,
+    group: Vec<Parsed>,
+    /// Event ids returned by the relay for the scoped filter.
+    returned_ids: std::collections::HashSet<String>,
+    /// True if the relay query failed (network error); entire group dropped.
+    relay_failed: bool,
+}
+
+/// Phase 2 (async): fire one relay query per bucket and collect results.
+///
+/// `state` is `&AppState` — a `Copy` reference — so no `!Send` value is held
+/// across `.await`.
+async fn query_buckets(buckets: Vec<Bucket>, state: &AppState) -> Vec<BucketWithResult> {
+    let mut results: Vec<BucketWithResult> = Vec::with_capacity(buckets.len());
+    for bucket in buckets {
+        let (returned_ids, relay_failed) = match query_relay(state, &[bucket.filter]).await {
+            Ok(evs) => (evs.iter().map(|e| e.id.to_hex()).collect(), false),
+            Err(_) => (std::collections::HashSet::new(), true),
+        };
+        results.push(BucketWithResult {
+            scope_type_str: bucket.scope_type_str,
+            scope_value: bucket.scope_value,
+            allowed_kinds: bucket.allowed_kinds,
+            group: bucket.group,
+            returned_ids,
+            relay_failed,
+        });
+    }
+    results
+}
+
+/// Phase 3 (sync): apply relay results and write accepted events to the store.
+fn commit_archive(
+    bucket_results: Vec<BucketWithResult>,
+    ephemeral: Vec<Parsed>,
+    pre_dropped: u32,
+    identity_pk: &str,
+    relay_url: &str,
+    now: i64,
+    conn: &Connection,
+) -> Result<ArchiveBatchResult, String> {
     let mut persisted: u32 = 0;
+    let mut dropped: u32 = pre_dropped;
 
     // ── Persistent path ──────────────────────────────────────────────────────
-    // Group candidates by scope to issue one /query filter per scope bucket,
-    // keeping filter sizes manageable.
-    if !persistent.is_empty() {
-        use std::collections::HashMap;
-
-        // Build a map: (scope_type_str, scope_value) → [parsed candidates]
-        let mut buckets: HashMap<(String, String), Vec<Parsed>> = HashMap::new();
-        for p in persistent {
-            let key = (
-                p.matched_scope.scope_type.as_str().to_string(),
-                p.matched_scope.scope_value.clone(),
-            );
-            buckets.entry(key).or_default().push(p);
+    for result in bucket_results {
+        if result.relay_failed {
+            dropped += result.group.len() as u32;
+            continue;
         }
 
-        for ((scope_type_str, scope_value), mut group) in buckets {
-            // Deduplicate by event id within the bucket.
-            let mut seen_ids = std::collections::HashSet::new();
-            group.retain(|p| seen_ids.insert(p.event.id.to_hex()));
+        for p in result.group {
+            let eid = p.event.id.to_hex();
 
-            let ids: Vec<String> = group.iter().map(|p| p.event.id.to_hex()).collect();
-
-            // Build a filter for the relay /query. We always include the event
-            // ids; the relay's auth gate will strip any the user can't read.
-            let filter = serde_json::json!({ "ids": ids });
-            let returned = match query_relay(&state, &[filter]).await {
-                Ok(evs) => evs,
-                Err(_) => {
-                    // Relay unreachable — drop the whole group rather than
-                    // persisting unverified.
-                    dropped += group.len() as u32;
-                    continue;
-                }
-            };
-
-            // Index returned event ids for O(1) lookup.
-            let returned_ids: std::collections::HashSet<String> =
-                returned.iter().map(|e| e.id.to_hex()).collect();
-
-            for p in group {
-                let eid = p.event.id.to_hex();
-                if !returned_ids.contains(&eid) {
-                    dropped += 1;
-                    continue;
-                }
-
-                // Re-derive the matched scope from the event itself — never
-                // trust the frontend's matched_scope blind.
-                let verified_scope = match scope_type_str.as_str() {
-                    "channel_h" => derive_channel_h_scope(&p.event),
-                    "referenced_e" => derive_referenced_e_scope(&p.event, &scope_value),
-                    _ => None,
-                };
-
-                let verified_scope_value = match verified_scope {
-                    Some(v) => v,
-                    None => {
-                        dropped += 1;
-                        continue;
-                    }
-                };
-
-                // Check a matching subscription exists.
-                let sub_ok = store::has_save_subscription(
-                    &conn,
-                    &identity_pk,
-                    &relay_url,
-                    &scope_type_str,
-                    &verified_scope_value,
-                )?;
-                if !sub_ok {
-                    dropped += 1;
-                    continue;
-                }
-
-                store::upsert_archived_event(
-                    &conn,
-                    &identity_pk,
-                    &relay_url,
-                    &eid,
-                    p.event.kind.as_u16() as i64,
-                    &p.event.pubkey.to_hex(),
-                    p.event.created_at.as_secs() as i64,
-                    &p.raw_json,
-                    now,
-                )?;
-                store::upsert_event_scope(
-                    &conn,
-                    &identity_pk,
-                    &relay_url,
-                    &eid,
-                    &scope_type_str,
-                    &verified_scope_value,
-                    now,
-                )?;
-                persisted += 1;
+            // Relay proof: event was returned for the scoped filter.
+            if !result.returned_ids.contains(&eid) {
+                dropped += 1;
+                continue;
             }
+
+            // Kind enforcement: event.kind must be in the subscription's list.
+            if !result
+                .allowed_kinds
+                .contains(&(p.event.kind.as_u16() as u64))
+            {
+                dropped += 1;
+                continue;
+            }
+
+            // The relay returning this event for {ids, #h/#e, kinds} IS the
+            // proof of scope membership. Use scope_value directly; no local
+            // tag re-derivation (which would incorrectly drop h-less events
+            // matched via the relay's StoredEvent.channel_id fallback).
+            store::upsert_archived_event(
+                conn,
+                identity_pk,
+                relay_url,
+                &eid,
+                p.event.kind.as_u16() as i64,
+                &p.event.pubkey.to_hex(),
+                p.event.created_at.as_secs() as i64,
+                &p.raw_json,
+                now,
+            )?;
+            store::upsert_event_scope(
+                conn,
+                identity_pk,
+                relay_url,
+                &eid,
+                &result.scope_type_str,
+                &result.scope_value,
+                now,
+            )?;
+            persisted += 1;
         }
     }
 
     // ── Ephemeral path (owner_p) ─────────────────────────────────────────────
+    // Fully local validation — no relay query.
     for p in ephemeral {
         match validate_ephemeral_frame(
             &p.event,
-            &identity_pk,
+            identity_pk,
             &p.matched_scope.scope_value,
-            &conn,
-            &identity_pk,
-            &relay_url,
+            conn,
+            identity_pk,
+            relay_url,
         ) {
             Ok(()) => {}
             Err(_) => {
@@ -287,9 +414,9 @@ pub async fn archive_events(
 
         let eid = p.event.id.to_hex();
         store::upsert_archived_event(
-            &conn,
-            &identity_pk,
-            &relay_url,
+            conn,
+            identity_pk,
+            relay_url,
             &eid,
             p.event.kind.as_u16() as i64,
             &p.event.pubkey.to_hex(),
@@ -298,9 +425,9 @@ pub async fn archive_events(
             now,
         )?;
         store::upsert_event_scope(
-            &conn,
-            &identity_pk,
-            &relay_url,
+            conn,
+            identity_pk,
+            relay_url,
             &eid,
             "owner_p",
             &p.matched_scope.scope_value,
@@ -320,7 +447,8 @@ pub async fn archive_events(
 /// 3. `agent` tag is present
 /// 4. `frame == "telemetry"` (control frames are not archived)
 /// 5. event author (pubkey) == agent tag value
-/// 6. A matching `owner_p` save-subscription exists for `scope_value`
+/// 6. A matching `owner_p` save-subscription exists AND its `kinds` list
+///    includes `24200` (kinds enforcement mirrors the persistent path).
 fn validate_ephemeral_frame(
     event: &Event,
     identity_pk: &str,
@@ -382,40 +510,18 @@ fn validate_ephemeral_frame(
         return Err("observer frame author does not match agent tag".into());
     }
 
-    // 6. Matching owner_p subscription exists.
-    if !store::has_save_subscription(conn, sub_identity, relay_url, "owner_p", scope_value)? {
+    // 6. Matching owner_p subscription exists AND kind 24200 is in its kinds list.
+    let kinds_json =
+        store::get_subscription_kinds(conn, sub_identity, relay_url, "owner_p", scope_value)?
+            .ok_or_else(|| format!("no owner_p subscription for scope_value={scope_value:?}"))?;
+    let allowed_kinds: Vec<u64> = serde_json::from_str::<Vec<u64>>(&kinds_json).unwrap_or_default();
+    if !allowed_kinds.contains(&(KIND_AGENT_OBSERVER_FRAME as u64)) {
         return Err(format!(
-            "no owner_p subscription for scope_value={scope_value:?}"
+            "owner_p subscription kinds {kinds_json:?} does not include {KIND_AGENT_OBSERVER_FRAME}"
         ));
     }
 
     Ok(())
-}
-
-/// Derive the `channel_h` scope value from an event: the first `h` tag value.
-fn derive_channel_h_scope(event: &Event) -> Option<String> {
-    event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        if s.len() >= 2 && s[0] == "h" && !s[1].is_empty() {
-            Some(s[1].clone())
-        } else {
-            None
-        }
-    })
-}
-
-/// Derive the `referenced_e` scope value: matches the claimed scope_value if the
-/// event contains an `e` tag pointing to it.
-fn derive_referenced_e_scope(event: &Event, claimed: &str) -> Option<String> {
-    let found = event.tags.iter().any(|t| {
-        let s = t.as_slice();
-        s.len() >= 2 && s[0] == "e" && s[1] == claimed
-    });
-    if found {
-        Some(claimed.to_string())
-    } else {
-        None
-    }
 }
 
 // ── create_save_subscription ─────────────────────────────────────────────────
@@ -587,10 +693,10 @@ pub fn delete_save_subscription(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
     use rusqlite::Connection;
 
-    // ── Helper: open an in-memory store ──────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
     fn in_memory() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -600,41 +706,92 @@ mod tests {
         conn
     }
 
-    // ── Helper: build a real signed observer frame ────────────────────────────
-
     fn make_observer_frame(owner_keys: &Keys, agent_keys: &Keys, frame_type: &str) -> Event {
         let owner_pk = owner_keys.public_key().to_hex();
         let agent_pk = agent_keys.public_key().to_hex();
-
-        // Minimal NIP-44-looking ciphertext (base64, long enough to pass heuristic).
-        let fake_ciphertext = "A".repeat(200);
-
         let tags = vec![
             Tag::parse(["p", &owner_pk]).unwrap(),
             Tag::parse(["agent", &agent_pk]).unwrap(),
             Tag::parse(["frame", frame_type]).unwrap(),
         ];
-
-        EventBuilder::new(Kind::Custom(24200), &fake_ciphertext)
+        EventBuilder::new(Kind::Custom(24200), &"A".repeat(200))
             .tags(tags)
             .sign_with_keys(agent_keys)
             .unwrap()
     }
 
-    // ── Ephemeral validator — individual condition rejection ──────────────────
-
-    fn add_owner_p_sub(conn: &Connection, identity_pk: &str, relay_url: &str, scope_value: &str) {
+    fn add_sub(
+        conn: &Connection,
+        identity_pk: &str,
+        relay_url: &str,
+        scope_type: &str,
+        scope_value: &str,
+        kinds_json: &str,
+    ) {
         store::upsert_save_subscription(
             conn,
             identity_pk,
             relay_url,
-            "owner_p",
+            scope_type,
             scope_value,
-            "[24200]",
+            kinds_json,
             0,
         )
         .unwrap();
     }
+
+    /// Run the full archive pipeline synchronously with a fake relay response.
+    ///
+    /// Calls `plan_archive` → injects fake relay events → `commit_archive`.
+    /// This mirrors `archive_events` without the async relay calls.
+    fn run_batch_sync(
+        candidates: Vec<ArchiveCandidate>,
+        identity_pk: &str,
+        relay_url: &str,
+        conn: &Connection,
+        fake_relay_events: Vec<Event>,
+    ) -> ArchiveBatchResult {
+        let plan = plan_archive(candidates, identity_pk, relay_url, conn).unwrap();
+
+        // Synthesize BucketWithResult from the fake relay response.
+        let fake_ids: std::collections::HashSet<String> =
+            fake_relay_events.iter().map(|e| e.id.to_hex()).collect();
+        let bucket_results: Vec<BucketWithResult> = plan
+            .buckets
+            .into_iter()
+            .map(|b| BucketWithResult {
+                scope_type_str: b.scope_type_str,
+                scope_value: b.scope_value,
+                allowed_kinds: b.allowed_kinds,
+                group: b.group,
+                returned_ids: fake_ids.clone(),
+                relay_failed: false,
+            })
+            .collect();
+
+        commit_archive(
+            bucket_results,
+            plan.ephemeral,
+            plan.pre_dropped,
+            identity_pk,
+            relay_url,
+            0,
+            conn,
+        )
+        .unwrap()
+    }
+
+    fn candidate(event: &Event, scope_type: ScopeType, scope_value: &str) -> ArchiveCandidate {
+        ArchiveCandidate {
+            raw_event_json: event.as_json(),
+            matched_scope: MatchedScope {
+                scope_type,
+                scope_value: scope_value.to_string(),
+            },
+        }
+    }
+
+    // ── Ephemeral validator — individual condition rejection ──────────────────
 
     #[test]
     fn test_ephemeral_validator_accepts_valid_frame() {
@@ -643,10 +800,8 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
-
-        add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
         let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
-
         assert!(
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url)
                 .is_ok()
@@ -660,9 +815,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
-        add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
-
-        // kind 1 instead of 24200
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
         let ev = EventBuilder::new(Kind::TextNote, "hello")
             .tags(vec![
                 Tag::parse(["p", &owner_pk]).unwrap(),
@@ -671,7 +824,6 @@ mod tests {
             ])
             .sign_with_keys(&agent_keys)
             .unwrap();
-
         let result =
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
@@ -685,9 +837,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
-        add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
-
-        // No `p` tag.
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
         let ev = EventBuilder::new(Kind::Custom(24200), &"A".repeat(200))
             .tags(vec![
                 Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
@@ -695,7 +845,6 @@ mod tests {
             ])
             .sign_with_keys(&agent_keys)
             .unwrap();
-
         let result =
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
@@ -709,9 +858,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
-        add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
-
-        // No `agent` tag.
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
         let ev = EventBuilder::new(Kind::Custom(24200), &"A".repeat(200))
             .tags(vec![
                 Tag::parse(["p", &owner_pk]).unwrap(),
@@ -719,7 +866,6 @@ mod tests {
             ])
             .sign_with_keys(&agent_keys)
             .unwrap();
-
         let result =
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
@@ -733,9 +879,7 @@ mod tests {
         let agent_keys = Keys::generate();
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
-        add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
-
-        // frame=control, not telemetry.
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
         let ev = make_observer_frame(&owner_keys, &agent_keys, "control");
         let result =
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
@@ -751,9 +895,7 @@ mod tests {
         let other_keys = Keys::generate();
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
-        add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
-
-        // event signed by `other_keys` but agent tag = agent_keys pubkey.
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
         let ev = EventBuilder::new(Kind::Custom(24200), &"A".repeat(200))
             .tags(vec![
                 Tag::parse(["p", &owner_pk]).unwrap(),
@@ -762,7 +904,6 @@ mod tests {
             ])
             .sign_with_keys(&other_keys) // wrong signer
             .unwrap();
-
         let result =
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
@@ -777,7 +918,6 @@ mod tests {
         let owner_pk = owner_keys.public_key().to_hex();
         let relay_url = "wss://relay.example";
         // Deliberately do NOT add a subscription.
-
         let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
         let result =
             validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
@@ -785,72 +925,266 @@ mod tests {
         assert!(result.unwrap_err().contains("owner_p subscription"));
     }
 
-    // ── Scope derivation ─────────────────────────────────────────────────────
-
     #[test]
-    fn test_derive_channel_h_scope_extracts_h_tag() {
-        let keys = Keys::generate();
-        let ev = EventBuilder::new(Kind::TextNote, "hello")
-            .tags(vec![Tag::parse(["h", "chan-uuid-123"]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        assert_eq!(
-            derive_channel_h_scope(&ev),
-            Some("chan-uuid-123".to_string())
+    fn test_ephemeral_validator_rejects_kind_not_in_subscription() {
+        // Subscription exists but kinds = [1] (not 24200) — must be rejected.
+        let conn = in_memory();
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_pk = owner_keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[1]"); // wrong kinds
+        let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("24200"),
+            "expected kind 24200 in error, got: {msg}"
         );
     }
 
+    // ── archive pipeline — persistent path ───────────────────────────────────
+
     #[test]
-    fn test_derive_channel_h_scope_returns_none_when_absent() {
+    fn test_persistent_channel_h_persists_when_relay_returns_event() {
+        let conn = in_memory();
         let keys = Keys::generate();
-        let ev = EventBuilder::new(Kind::TextNote, "hello")
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-abc";
+        add_sub(&conn, &identity_pk, relay_url, "channel_h", chan, "[9]");
+
+        let ev = EventBuilder::new(Kind::Custom(9), "msg")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
-        assert_eq!(derive_channel_h_scope(&ev), None);
+        let cands = vec![candidate(&ev, ScopeType::ChannelH, chan)];
+
+        // Fake relay returns the event (simulates relay proof).
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![ev.clone()]);
+        assert_eq!(result.persisted, 1);
+        assert_eq!(result.dropped, 0);
+
+        // Confirm the event is in the store.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let scope_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM archived_event_scopes WHERE scope_type = 'channel_h' AND scope_value = ?1", [chan], |r| r.get(0))
+            .unwrap();
+        assert_eq!(scope_count, 1);
     }
 
     #[test]
-    fn test_derive_referenced_e_scope_matches_claimed() {
+    fn test_persistent_channel_h_drops_when_relay_does_not_return_event() {
+        // Relay returns empty — event not proven accessible.
+        let conn = in_memory();
         let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-abc";
+        add_sub(&conn, &identity_pk, relay_url, "channel_h", chan, "[9]");
+
+        let ev = EventBuilder::new(Kind::Custom(9), "msg")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let cands = vec![candidate(&ev, ScopeType::ChannelH, chan)];
+
+        // Fake relay returns nothing.
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![]);
+        assert_eq!(result.persisted, 0);
+        assert_eq!(result.dropped, 1);
+    }
+
+    #[test]
+    fn test_persistent_drops_when_no_subscription() {
+        // No subscription at all — drop before even querying.
+        let conn = in_memory();
+        let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-abc";
+        // Intentionally no subscription.
+
+        let ev = EventBuilder::new(Kind::Custom(9), "msg")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let cands = vec![candidate(&ev, ScopeType::ChannelH, chan)];
+
+        // Fake relay would return the event, but no sub → dropped.
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![ev.clone()]);
+        assert_eq!(result.persisted, 0);
+        assert_eq!(result.dropped, 1);
+    }
+
+    #[test]
+    fn test_persistent_drops_kind_not_in_subscription() {
+        // Subscription is for kind 9 only; event is kind 7 (reaction).
+        let conn = in_memory();
+        let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-abc";
+        add_sub(&conn, &identity_pk, relay_url, "channel_h", chan, "[9]");
+
+        // kind 7 reaction — no `h` tag naturally, but relay-returned under scoped filter
+        let ev = EventBuilder::new(Kind::Reaction, "+")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let cands = vec![candidate(&ev, ScopeType::ChannelH, chan)];
+
+        // Fake relay returns the event (simulates relay proof via StoredEvent.channel_id),
+        // but kind 7 is not in the subscription's kinds list.
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![ev.clone()]);
+        assert_eq!(result.persisted, 0);
+        assert_eq!(result.dropped, 1);
+    }
+
+    #[test]
+    fn test_persistent_h_less_event_persists_when_relay_returns_it() {
+        // An h-less event (e.g. reaction kind:7) that the relay returns under
+        // the scoped #h filter (via StoredEvent.channel_id fallback) must be
+        // persisted. The local tag scanner would have dropped it; the scoped
+        // filter proof must not.
+        let conn = in_memory();
+        let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-abc";
+        add_sub(&conn, &identity_pk, relay_url, "channel_h", chan, "[7]");
+
+        // Build a reaction without an `h` tag — local re-derivation would drop it.
+        let ev = EventBuilder::new(Kind::Reaction, "+")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let cands = vec![candidate(&ev, ScopeType::ChannelH, chan)];
+
+        // Fake relay returns it (relay used StoredEvent.channel_id to match).
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![ev.clone()]);
+        assert_eq!(result.persisted, 1);
+        assert_eq!(result.dropped, 0);
+
+        // Scope row uses bucket's scope_value, not a local-derived value.
+        let scope_val: String = conn
+            .query_row(
+                "SELECT scope_value FROM archived_event_scopes WHERE scope_type = 'channel_h'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope_val, chan);
+    }
+
+    #[test]
+    fn test_persistent_referenced_e_persists_when_relay_returns_event() {
+        let conn = in_memory();
+        let keys = Keys::generate();
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
         let ref_id = "a".repeat(64);
-        let ev = EventBuilder::new(Kind::TextNote, "reply")
+        add_sub(
+            &conn,
+            &identity_pk,
+            relay_url,
+            "referenced_e",
+            &ref_id,
+            "[9]",
+        );
+
+        let ev = EventBuilder::new(Kind::Custom(9), "reply")
             .tags(vec![Tag::parse(["e", &ref_id]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
-        assert_eq!(
-            derive_referenced_e_scope(&ev, &ref_id),
-            Some(ref_id.clone())
-        );
+        let cands = vec![candidate(&ev, ScopeType::ReferencedE, &ref_id)];
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![ev.clone()]);
+        assert_eq!(result.persisted, 1);
+        assert_eq!(result.dropped, 0);
     }
 
     #[test]
-    fn test_derive_referenced_e_scope_rejects_wrong_claimed() {
+    fn test_mixed_batch_persisted_and_dropped_counted_exactly() {
+        // Two channel_h candidates: relay only returns one. dropped must be 1.
+        let conn = in_memory();
         let keys = Keys::generate();
-        let actual_ref = "a".repeat(64);
-        let claimed = "b".repeat(64);
-        let ev = EventBuilder::new(Kind::TextNote, "reply")
-            .tags(vec![Tag::parse(["e", &actual_ref]).unwrap()])
+        let identity_pk = keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        let chan = "chan-abc";
+        add_sub(&conn, &identity_pk, relay_url, "channel_h", chan, "[9]");
+
+        let ev1 = EventBuilder::new(Kind::Custom(9), "msg1")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
             .sign_with_keys(&keys)
             .unwrap();
-        assert_eq!(derive_referenced_e_scope(&ev, &claimed), None);
+        let ev2 = EventBuilder::new(Kind::Custom(9), "msg2")
+            .tags(vec![Tag::parse(["h", chan]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let cands = vec![
+            candidate(&ev1, ScopeType::ChannelH, chan),
+            candidate(&ev2, ScopeType::ChannelH, chan),
+        ];
+
+        // Fake relay only returns ev1.
+        let result = run_batch_sync(cands, &identity_pk, relay_url, &conn, vec![ev1.clone()]);
+        assert_eq!(result.persisted, 1);
+        assert_eq!(result.dropped, 1);
     }
 
-    // ── Dropped-vs-persisted accounting ─────────────────────────────────────
+    // ── archive pipeline — ephemeral path ────────────────────────────────────
 
     #[test]
-    fn test_dropped_counting_invalid_json() {
-        // archive_events is async and needs AppState — we test the lower-level
-        // accounting by confirming that Event::from_json fails gracefully for
-        // malformed input and increments the dropped counter.
+    fn test_ephemeral_path_persists_valid_frame() {
+        let conn = in_memory();
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_pk = owner_keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[24200]");
+
+        let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
+        let cands = vec![candidate(&ev, ScopeType::OwnerP, &owner_pk)];
+
+        // Fake relay returns nothing (not consulted for ephemeral path).
+        let result = run_batch_sync(cands, &owner_pk, relay_url, &conn, vec![]);
+        assert_eq!(result.persisted, 1);
+        assert_eq!(result.dropped, 0);
+    }
+
+    #[test]
+    fn test_ephemeral_path_drops_kind_not_in_subscription() {
+        let conn = in_memory();
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner_pk = owner_keys.public_key().to_hex();
+        let relay_url = "wss://relay.example";
+        // kinds = [1], not [24200]
+        add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[1]");
+
+        let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
+        let cands = vec![candidate(&ev, ScopeType::OwnerP, &owner_pk)];
+
+        let result = run_batch_sync(cands, &owner_pk, relay_url, &conn, vec![]);
+        assert_eq!(result.persisted, 0);
+        assert_eq!(result.dropped, 1);
+    }
+
+    // ── Invalid input dropped ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_malformed_json_is_dropped() {
         let result = Event::from_json("not json at all");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_dropped_counting_bad_signature() {
+    fn test_tampered_event_fails_verify_id() {
         let keys = Keys::generate();
-        // Build a valid event then tamper with the content to break the id
-        // (the id is a hash of the event fields including content).
         let mut ev_json: serde_json::Value = serde_json::from_str(
             &EventBuilder::new(Kind::TextNote, "ok")
                 .sign_with_keys(&keys)
@@ -861,8 +1195,6 @@ mod tests {
         ev_json["content"] = serde_json::Value::String("tampered".into());
         let tampered = ev_json.to_string();
         let ev = Event::from_json(&tampered).unwrap();
-        // After tampering the content the event id (a hash over all fields)
-        // no longer matches, so verify_id() returns false.
         assert!(!ev.verify_id());
     }
 }
