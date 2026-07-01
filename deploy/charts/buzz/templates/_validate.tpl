@@ -17,14 +17,20 @@ surface at template time regardless of which manifest helm renders first.
   {{- end -}}
 {{- end -}}
 
-{{/* replicaCount > 1 requires ReadWriteMany git storage */}}
-{{- if gt (.Values.replicaCount | int) 1 -}}
-  {{- if and .Values.persistence.git.enabled (not .Values.persistence.git.existingClaim) -}}
-    {{- if ne .Values.persistence.git.accessMode "ReadWriteMany" -}}
-      {{- fail (printf "replicaCount=%d requires persistence.git.accessMode=ReadWriteMany (got %q). The relay's git on-disk state must be shared across replicas." (.Values.replicaCount | int) .Values.persistence.git.accessMode) -}}
-    {{- end -}}
-  {{- end -}}
-{{- end -}}
+{{/* replicaCount > 1 does NOT require ReadWriteMany git storage.
+
+     Git ref/object state is object-store-backed: every read and write hydrates
+     an ephemeral bare repo from S3-compatible storage per request, and writer
+     serialization is the object-store pointer CAS
+     (docs/git-on-object-storage.md, Inv_NoFork). No persistent git state lives
+     on the PVC, so replicas do not need a shared ReadWriteMany volume to agree
+     on refs. Repo-name uniqueness — the last shared-state need — now lives in
+     Postgres (git_repo_names), not on local disk.
+
+     The prior hard-fail requiring persistence.git.accessMode=ReadWriteMany was
+     removed here: its stated reason ("git on-disk state must be shared across
+     replicas") is no longer true. Redis (validated above) remains the real
+     multi-pod requirement for buzz-pubsub. */}}
 
 {{/* Owner pubkey required when requireRelayMembership */}}
 {{- if .Values.relay.requireRelayMembership -}}

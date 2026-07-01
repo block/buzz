@@ -128,9 +128,14 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    /// Root directory for the relay's local git state. No per-repo bare repos
-    /// live here — runtime reads/writes hydrate ephemeral repos from object
-    /// storage. Holds only the name-reservation index at `{git_repo_path}/.names/`.
+    /// Root directory for the relay's local git scratch. No per-repo bare repos
+    /// or persistent git state live here — runtime reads/writes hydrate
+    /// ephemeral repos from object storage per request, and repo-name
+    /// uniqueness now lives in Postgres (`git_repo_names`), not on disk. Retained
+    /// for ephemeral working space and env compatibility; the relay no longer
+    /// depends on this path being persistent or shared across replicas, so it
+    /// needs no ReadWriteMany volume. (Removing the field entirely is a
+    /// follow-up cleanup once the deploy chart drops the git PVC mount.)
     pub git_repo_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
