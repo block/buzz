@@ -271,6 +271,16 @@ export function buildTranscriptDisplayBlocks(
     }
   }
 
+  // If system-prompt was never consumed (no session/prompt followed — e.g.
+  // session/new arrived without a subsequent turn, or the stream is still
+  // incomplete), emit it as a standalone single so it remains visible.
+  if (
+    pendingSystemPrompt &&
+    !consumedSystemPrompts.has(pendingSystemPrompt.id)
+  ) {
+    blocks.push({ kind: "single", item: pendingSystemPrompt });
+  }
+
   return blocks;
 }
 

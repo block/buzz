@@ -170,8 +170,10 @@ test.describe("observer feed screenshots", () => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
     const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
 
-    // session/new event: the system prompt that RawRailActivity renders with the
-    // real "System prompt" title (not "Captured N raw sections" as #1381 broke).
+    // session/new event without a subsequent session/prompt: the system-prompt
+    // item is never consumed by a turn bucket, so the grouper emits it as a
+    // standalone single rendered by RawRailActivity with the "System prompt"
+    // title. (This is the isolated test; see shot 11 for the full turn bundle.)
     await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
       {
         seq: 1,
@@ -613,6 +615,100 @@ test.describe("observer feed screenshots", () => {
     await settleAnimations(feedPanel);
     await feedPanel.screenshot({
       path: `${SHOTS}/10-config-option-update.png`,
+    });
+  });
+
+  test("11 — first-turn ordering: user bubble → System prompt → Prompt context", async ({
+    page,
+  }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    // Full realistic pool.rs first-turn wire sequence:
+    // turn_started → session/new → session_resolved → session/prompt
+    // Verifies the ordering fix: System prompt renders between the user message
+    // bubble and the Prompt context inline block (not after it).
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "turn_started",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: null,
+        turnId: "turn-001",
+        payload: { source: "channel", triggeringEventIds: [] },
+      },
+      {
+        seq: 2,
+        timestamp: NOW,
+        kind: "acp_write",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: null,
+        turnId: "turn-001",
+        payload: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "session/new",
+          params: {
+            systemPrompt:
+              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.",
+          },
+        },
+      },
+      {
+        seq: 3,
+        timestamp: NOW,
+        kind: "session_resolved",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-001",
+        turnId: "turn-001",
+        payload: { sessionId: "session-001", isNewSession: true },
+      },
+      {
+        seq: 4,
+        timestamp: NOW,
+        kind: "acp_write",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-001",
+        turnId: "turn-001",
+        payload: {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "session/prompt",
+          params: {
+            prompt: [
+              {
+                type: "text",
+                text: "[Buzz event: Kind 9]\nContent: @Observer Agent help me debug this",
+              },
+              {
+                type: "text",
+                text: "[Thread context]\nThis is the thread history with 3 prior messages.",
+              },
+            ],
+          },
+        },
+      },
+    ]);
+
+    // User message bubble should be visible (anchors the prompt bundle).
+    await expect(feedPanel.getByTestId("transcript-prompt-bundle")).toBeVisible(
+      { timeout: 5_000 },
+    );
+    // System prompt should appear inside the bundle, above prompt context.
+    await expect(feedPanel.getByText("System prompt")).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(feedPanel.getByText("Prompt context")).toBeVisible({
+      timeout: 5_000,
+    });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/11-first-turn-ordering.png`,
     });
   });
 });
