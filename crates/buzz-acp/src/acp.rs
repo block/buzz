@@ -13,8 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
-use crate::observer::{ObserverContext, ObserverHandle};
 use crate::goose_usage::{GooseTurnUsage, GooseUsageTracker};
+use crate::observer::{ObserverContext, ObserverHandle};
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -1884,8 +1884,7 @@ mod tests {
         );
         assert!(msg["params"]["clientCapabilities"].is_object());
         assert_eq!(
-            msg["params"]["clientCapabilities"]["_meta"]["goose"]["customNotifications"]
-                .as_bool(),
+            msg["params"]["clientCapabilities"]["_meta"]["goose"]["customNotifications"].as_bool(),
             Some(true),
             "goose customNotifications capability must be advertised"
         );
@@ -2970,7 +2969,10 @@ mod tests {
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.
-        assert!(client.take_turn_usage().is_none(), "take after drain is None");
+        assert!(
+            client.take_turn_usage().is_none(),
+            "take after drain is None"
+        );
     }
 
     #[tokio::test]

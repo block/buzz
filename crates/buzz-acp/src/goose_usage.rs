@@ -166,11 +166,7 @@ impl GooseUsageTracker {
     ///
     /// When multiple notifications arrive during the same turn, the last one
     /// wins (goose may emit several per turn; each increments `turn_seq`).
-    pub(crate) fn record(
-        &mut self,
-        session_id: &str,
-        payload: &GooseUsageUpdatePayload,
-    ) {
+    pub(crate) fn record(&mut self, session_id: &str, payload: &GooseUsageUpdatePayload) {
         let current_input = payload.accumulated_input_tokens;
         let current_output = payload.accumulated_output_tokens;
         let current_cost = payload.accumulated_cost;
@@ -295,7 +291,10 @@ mod tests {
         tracker.record("sess-setup", &payload(1200, 300, Some(0.012)));
         let usage = tracker.take().expect("second turn must have usage");
 
-        assert!(usage.delta_reliable, "baseline fed by setup: delta reliable");
+        assert!(
+            usage.delta_reliable,
+            "baseline fed by setup: delta reliable"
+        );
         assert_eq!(usage.turn_input_tokens, Some(700)); // 1200 - 500
         assert_eq!(usage.turn_output_tokens, Some(200)); // 300 - 100
         let dc = usage.turn_cost_usd.expect("cost delta present");
@@ -328,7 +327,10 @@ mod tests {
 
         assert_eq!(usage.session_id, "sess-1");
         assert_eq!(usage.turn_seq, 1);
-        assert!(!usage.delta_reliable, "first turn: delta must be unreliable");
+        assert!(
+            !usage.delta_reliable,
+            "first turn: delta must be unreliable"
+        );
         assert!(usage.turn_input_tokens.is_none());
         assert!(usage.turn_output_tokens.is_none());
         assert!(usage.turn_cost_usd.is_none());
@@ -352,7 +354,10 @@ mod tests {
         let usage = tracker.take().expect("pending");
 
         assert_eq!(usage.turn_seq, 2);
-        assert!(!usage.delta_reliable, "counter decrease: delta must be unreliable");
+        assert!(
+            !usage.delta_reliable,
+            "counter decrease: delta must be unreliable"
+        );
         assert!(usage.turn_input_tokens.is_none(), "no negative delta");
         assert!(usage.turn_output_tokens.is_none(), "no negative delta");
         assert!(usage.turn_cost_usd.is_none());
@@ -376,8 +381,14 @@ mod tests {
         let usage = tracker.take().expect("t2");
 
         assert_eq!(usage.turn_seq, 2, "turn_seq must still increment");
-        assert!(!usage.delta_reliable, "cost decrease: delta must be unreliable");
-        assert!(usage.turn_input_tokens.is_none(), "all turn fields null on unreliable");
+        assert!(
+            !usage.delta_reliable,
+            "cost decrease: delta must be unreliable"
+        );
+        assert!(
+            usage.turn_input_tokens.is_none(),
+            "all turn fields null on unreliable"
+        );
         assert!(usage.turn_output_tokens.is_none());
         assert!(usage.turn_cost_usd.is_none());
         // Cumulative values are unaffected.
@@ -399,10 +410,16 @@ mod tests {
         tracker.record("sess-nocost", &payload(1800, 450, None));
         let usage = tracker.take().expect("pending");
 
-        assert!(usage.delta_reliable, "absent cost must not make delta unreliable");
+        assert!(
+            usage.delta_reliable,
+            "absent cost must not make delta unreliable"
+        );
         assert_eq!(usage.turn_input_tokens, Some(800));
         assert_eq!(usage.turn_output_tokens, Some(250));
-        assert!(usage.turn_cost_usd.is_none(), "cost null when absent on either side");
+        assert!(
+            usage.turn_cost_usd.is_none(),
+            "cost null when absent on either side"
+        );
     }
 
     #[test]
@@ -420,7 +437,10 @@ mod tests {
 
         assert_eq!(usage.session_id, "sess-b");
         assert_eq!(usage.turn_seq, 1);
-        assert!(!usage.delta_reliable, "new session: delta must be unreliable");
+        assert!(
+            !usage.delta_reliable,
+            "new session: delta must be unreliable"
+        );
         assert!(usage.turn_input_tokens.is_none());
     }
 
