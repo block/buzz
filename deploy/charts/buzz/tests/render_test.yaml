@@ -65,7 +65,7 @@ tests:
       s3.accessKey: a
       s3.secretKey: s
       replicaCount: 3
-      persistence.git.accessMode: ReadWriteMany
+      persistence.git.accessMode: ReadWriteOnce
       relay.huddleAudioAvailable: true
     asserts:
       - contains:
@@ -75,7 +75,7 @@ tests:
             value: "true"
         template: templates/deployment.yaml
 
-  - it: renders HA cleanly with replicaCount=3 + RWX + Redis
+  - it: renders HA cleanly with replicaCount=3 + RWO git + Redis (no RWM needed)
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -85,7 +85,7 @@ tests:
       s3.accessKey: a
       s3.secretKey: s
       replicaCount: 3
-      persistence.git.accessMode: ReadWriteMany
+      persistence.git.accessMode: ReadWriteOnce
     asserts:
       - equal:
           path: spec.replicas
@@ -93,7 +93,7 @@ tests:
         template: templates/deployment.yaml
       - equal:
           path: spec.accessModes[0]
-          value: ReadWriteMany
+          value: ReadWriteOnce
         template: templates/pvc-git.yaml
       - contains:
           path: spec.template.spec.containers[0].env

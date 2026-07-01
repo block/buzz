@@ -45,8 +45,8 @@ spec:
     persistence:
       git:
         enabled: true
-        accessMode: ReadWriteMany
-        storageClass: efs-sc
+        accessMode: ReadWriteOnce      # RWO is fine at any replicaCount (object-store-backed git)
+        storageClass: ""               # any RWO class; no shared/RWX filesystem needed
         size: 50Gi
 
     ingress:
