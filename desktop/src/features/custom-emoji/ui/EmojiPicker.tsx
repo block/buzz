@@ -39,14 +39,16 @@ warmEmojiIndex();
  */
 function disableSearchInputCorrections(host: HTMLElement): () => void {
   const picker = host.querySelector("em-emoji-picker");
-  if (!picker?.shadowRoot) {
+  const shadowRoot = picker?.shadowRoot ?? null;
+  if (!shadowRoot) {
     return () => undefined;
   }
+  // shadowRoot is ShadowRoot here; capture as a typed const so the nested
+  // closure doesn't re-widen to ShadowRoot | null.
+  const root: ShadowRoot = shadowRoot;
 
   function applyAttributes() {
-    const input = picker.shadowRoot?.querySelector<HTMLInputElement>(
-      'input[type="search"]',
-    );
+    const input = root.querySelector<HTMLInputElement>('input[type="search"]');
     if (!input) return false;
     input.spellcheck = false;
     input.setAttribute("autocorrect", "off");
@@ -65,7 +67,7 @@ function disableSearchInputCorrections(host: HTMLElement): () => void {
       observer.disconnect();
     }
   });
-  observer.observe(picker.shadowRoot, { childList: true, subtree: true });
+  observer.observe(root, { childList: true, subtree: true });
   return () => observer.disconnect();
 }
 
