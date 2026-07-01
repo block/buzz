@@ -135,11 +135,13 @@ export function CompactMessageSummary({
         <div className="flex min-w-0 flex-1 flex-col items-start gap-1">
           <div
             className={cn(
-              "w-full min-w-0 rounded-2xl border px-3 py-2 text-sm leading-relaxed shadow-sm",
+              "w-full min-w-0 rounded-2xl border px-3 py-2 shadow-sm",
+              isCompactPreview
+                ? "text-xs leading-4"
+                : "text-sm leading-relaxed",
               shouldClampBubble && "relative max-h-36 overflow-hidden",
               canOpenMessage &&
                 "cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              isCompactPreview && "text-xs leading-4",
               isCompactPreview
                 ? isError
                   ? "border-destructive/25 bg-destructive/10 text-destructive"
