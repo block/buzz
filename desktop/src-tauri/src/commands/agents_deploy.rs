@@ -37,13 +37,20 @@ pub(super) fn build_deploy_payload(
         return Err(err);
     }
 
-    // Merge persona env_vars + agent env_vars for provider deploy — the same
-    // live-persona-under-overrides semantics as local spawn. Without this,
-    // provider-backed agents wouldn't receive credentials saved on the persona
-    // or the agent itself.
+    // Merge global + persona + agent env_vars for provider deploy — the same
+    // live-persona-under-overrides semantics as local spawn. Global env vars
+    // are the lowest user-settable layer: global < persona < agent (last-wins
+    // on key collision). Without this, provider-backed agents wouldn't receive
+    // credentials saved on the persona or the agent itself.
+    let global_config = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let persona_env =
         crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
-    let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+    // Merge: global < persona (persona wins over global).
+    let global_persona_merged =
+        crate::managed_agents::merged_user_env(&global_config.env_vars, &persona_env);
+    // Merge: global+persona < agent (agent wins over everything).
+    let merged_env =
+        crate::managed_agents::merged_user_env(&global_persona_merged, &record.env_vars);
 
     // Resolve the persona's structured provider/model so the remote provider
     // receives the same authoritative values that local spawn derives from
@@ -51,10 +58,9 @@ pub(super) fn build_deploy_payload(
     // stale derived env copies in `env_vars` (or have no provider at all for
     // imported personas whose derived keys were filtered at import time).
     //
-    // Precedence: persona field wins when non-blank; otherwise falls back to the
-    // record's own field (same blank-normalization as the snapshot path). This
-    // matches `persona_snapshot_with_agent_config_fallback` exactly — a blank
-    // persona field must not wipe a record value that the user configured.
+    // Precedence: persona field wins when non-blank; falls back to the record's
+    // own field (same blank-normalization as persona_snapshot_with_agent_config_fallback);
+    // global config is the last resort when neither persona nor record specifies a value.
     let (effective_model, effective_provider) = if let Some(pid) = record.persona_id.as_deref() {
         let personas = load_personas(app).map_err(|e| {
             format!(
@@ -66,11 +72,16 @@ pub(super) fn build_deploy_payload(
             .find(|p| p.id == pid)
             .ok_or_else(|| format!("persona `{pid}` not found while building deploy payload"))?;
         let fallback = crate::managed_agents::persona_events::persona_field_with_record_fallback;
-        let model = fallback(persona.model.as_deref(), record.model.as_deref()); // fallback: record.model
-        let provider = fallback(persona.provider.as_deref(), record.provider.as_deref()); // fallback: record.provider
+        let model = fallback(persona.model.as_deref(), record.model.as_deref()) // persona > record
+            .or_else(|| global_config.model.clone()); // global is last resort
+        let provider = fallback(persona.provider.as_deref(), record.provider.as_deref()) // persona > record
+            .or_else(|| global_config.provider.clone()); // global is last resort
         (model, provider)
     } else {
-        (record.model.clone(), record.provider.clone())
+        (
+            record.model.clone().or_else(|| global_config.model.clone()),
+            record.provider.clone().or_else(|| global_config.provider.clone()),
+        )
     };
 
     Ok(deploy_payload_json(

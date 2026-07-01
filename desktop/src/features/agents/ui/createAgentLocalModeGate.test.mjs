@@ -636,3 +636,72 @@ test("saveBlock_noFilterNoBaked_stillMissing", () => {
     "hasMissingRequiredEnvKey must be true when the required key is absent and not baked",
   );
 });
+
+// ── Global env vars satisfy required credential keys ─────────────────────
+
+test("localMode_globalEnvVars_satisfies_missing_env_key", () => {
+  // A required key present in globalEnvVars must not appear in missingEnvKeys.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    true,
+    "global ANTHROPIC_API_KEY must satisfy the gate",
+  );
+  assert.equal(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY in globalEnvVars must not appear in missingEnvKeys",
+  );
+});
+
+test("localMode_perAgentEnvVar_wins_over_globalEnvVars_for_gate", () => {
+  // If the per-agent envVars has the key, globalEnvVars is redundant but
+  // the gate must remain satisfied (per-agent wins, both paths satisfy).
+  const result = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-per-agent" },
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    true,
+    "per-agent key must satisfy the gate regardless of global",
+  );
+});
+
+test("localMode_globalEnvVars_empty_still_fails_gate", () => {
+  // No global and no per-agent env → gate must still surface the missing key.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "anthropic",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    false,
+    "empty global and per-agent env must leave gate unsatisfied",
+  );
+  assert.ok(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in missingEnvKeys when neither source provides it",
+  );
+});

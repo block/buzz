@@ -133,6 +133,8 @@ function provenanceSentence(
     case "acpConfigOption":
     case "acpNativeRead":
       return "From ACP session";
+    case "globalDefault":
+      return "Inherited from global defaults";
   }
 }
 

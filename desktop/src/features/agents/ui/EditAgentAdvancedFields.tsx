@@ -324,7 +324,7 @@ export function EditAgentAdvancedFields({
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}
-        inheritedLabel="template"
+        inheritedLabel="template / global defaults"
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}

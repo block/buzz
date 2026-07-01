@@ -72,7 +72,9 @@ const overrides = new Map([
   ["src-tauri/src/archive/mod_tests.rs", 1208],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
-  ["src-tauri/src/commands/agents.rs", 1295],
+  // global-agent-config: resolve_deploy_model_provider + visibility exports
+  // add ~40 lines on top of the 1A.1 ratchet. Queued to split.
+  ["src-tauri/src/commands/agents.rs", 1340],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -108,7 +110,9 @@ const overrides = new Map([
   // +1 for agent_pubkey field in setup payload (config-nudge card wire).
   // persona-blank-fallback: resolve_effective_prompt_model_provider gains a
   // record_provider param + applies persona_field_with_record_fallback. +5 lines.
-  ["src-tauri/src/managed_agents/runtime.rs", 2213],
+  // global-agent-config: spawn_agent_child loads global config and merges as
+  // lowest env layer (+8 lines). Queued to split.
+  ["src-tauri/src/managed_agents/runtime.rs", 2216],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],

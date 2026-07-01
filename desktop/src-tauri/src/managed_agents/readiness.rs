@@ -49,6 +49,7 @@ use crate::managed_agents::{
         classify_runtime, find_command, known_acp_runtime, resolve_command, KnownAcpRuntime,
     },
     env_vars::merged_user_env,
+    global_config::GlobalAgentConfig,
     types::{AcpAvailabilityStatus, ManagedAgentRecord, PersonaRecord},
 };
 
@@ -78,17 +79,21 @@ pub(crate) struct EffectiveAgentEnv {
     pub effective_command: String,
 }
 
-/// Assemble the effective agent env from a record, personas, and optional
-/// known-runtime metadata — without an `AppHandle` so it is unit-testable.
+/// Assemble the effective agent env from a record, personas, optional
+/// known-runtime metadata, and the global agent config defaults — without an
+/// `AppHandle` so it is fully unit-testable.
 ///
 /// # Arguments
 /// * `record` — the managed agent record (model/provider/env_vars/…)
 /// * `personas` — all current persona records (for persona-backed resolution)
 /// * `runtime` — the `KnownAcpRuntime` for the effective command, if any
+/// * `global` — global agent config defaults (lowest user layer; pass
+///   `&GlobalAgentConfig::default()` in tests that don't need global config)
 pub(crate) fn resolve_effective_agent_env(
     record: &ManagedAgentRecord,
     personas: &[PersonaRecord],
     runtime: Option<&KnownAcpRuntime>,
+    global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
     let effective_command = crate::managed_agents::record_agent_command(record, personas);
 
@@ -96,9 +101,34 @@ pub(crate) fn resolve_effective_agent_env(
     let mut env = baked_build_env();
 
     // Layer 2: runtime metadata env vars (model / provider keys derived from
-    // the record's structured fields).
-    let effective_model = record.model.as_deref();
-    let effective_provider = record.provider.as_deref();
+    // the record's structured fields, with global as fallback).
+    //
+    // Structured-field fallback: effective provider/model = agent → persona → global → None.
+    // This means a global provider/model is used by readiness evaluation and spawn
+    // when neither the agent record nor the linked persona specifies one.
+    let persona_model = record.persona_id.as_deref().and_then(|pid| {
+        personas
+            .iter()
+            .find(|p| p.id == pid)
+            .and_then(|p| p.model.clone())
+    });
+    let persona_provider = record.persona_id.as_deref().and_then(|pid| {
+        personas
+            .iter()
+            .find(|p| p.id == pid)
+            .and_then(|p| p.provider.clone())
+    });
+    let effective_model = record
+        .model
+        .as_deref()
+        .or(persona_model.as_deref())
+        .or(global.model.as_deref());
+    let effective_provider = record
+        .provider
+        .as_deref()
+        .or(persona_provider.as_deref())
+        .or(global.provider.as_deref());
+
     if let Some(rt) = runtime {
         for (key, value) in super::runtime::runtime_metadata_env_vars(
             rt.model_env_var,
@@ -111,7 +141,14 @@ pub(crate) fn resolve_effective_agent_env(
         }
     }
 
-    // Layer 3: merged user env — live persona env under the record's own
+    // Layer 3a: global env vars — the lowest user-settable layer.
+    // Injected before persona/agent so per-agent values win on collision.
+    // `merged_user_env` with an empty "lower" map applies reserved/malformed-key
+    // filtering to the global map for free.
+    let global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
+    env.extend(global_env);
+
+    // Layer 3b: merged user env — live persona env under the record's own
     // overrides (last-wins), after reserved/malformed-key filtering. Reading
     // the persona live is what makes persona credential edits refresh on the
     // next spawn instead of being frozen into the record.
@@ -1207,7 +1244,7 @@ mod tests {
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");
-        let effective = resolve_effective_agent_env(&record, &[], runtime);
+        let effective = resolve_effective_agent_env(&record, &[], runtime, &Default::default());
 
         // User env_vars must be present in the output (last-write-wins).
         assert_eq!(

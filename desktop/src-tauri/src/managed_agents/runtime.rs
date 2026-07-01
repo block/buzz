@@ -1584,7 +1584,8 @@ pub fn spawn_agent_child(
             agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
         };
 
-        let effective = resolve_effective_agent_env(record, &personas, runtime_meta);
+        let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+        let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
         // Compute the optional payload before touching the command.
         let setup_payload_json =
             if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
@@ -1791,18 +1792,23 @@ pub fn spawn_agent_child(
     // persona's env is read live and merged underneath (agent wins on
     // collision), so persona credential edits reach the agent on the next
     // spawn — same refresh semantics as prompt/model/provider above and the
-    // provider deploy path. `merged_user_env` also applies the reserved-key /
-    // malformed-key / NUL filtering.
+    // provider deploy path. Global env vars are the floor layer below persona.
+    // `merged_user_env` also applies the reserved-key / malformed-key / NUL
+    // filtering. Precedence: baked floor < Buzz-set env above < GLOBAL <
+    // PERSONA < per-agent.
     //
     // These writes go LAST so user-provided values win over every Buzz-set env
     // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
     // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
     // which `merged_user_env` strips. Those carry Buzz's identity and must
     // never be GUI-overridable.
-    for (key, value) in super::env_vars::merged_user_env(
-        &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
-        &record.env_vars,
-    ) {
+    let global_env_for_spawn = crate::managed_agents::load_global_agent_config(app)
+        .unwrap_or_default()
+        .env_vars;
+    // global < live persona < agent (last-wins on collision at each layer).
+    let persona_over_global =
+        super::env_vars::merged_user_env(&global_env_for_spawn, &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()));
+    for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
         command.env(key, value);
     }
 

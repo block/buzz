@@ -653,6 +653,8 @@ pub fn run() {
             get_runtime_file_config,
             get_baked_build_env_keys,
             put_agent_session_config,
+            get_global_agent_config,
+            set_global_agent_config,
             mesh_availability,
             mesh_start_node,
             mesh_ensure_client_node,

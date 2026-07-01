@@ -61,6 +61,7 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { GlobalAgentConfigSettingsCard } from "./GlobalAgentConfigSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -642,7 +643,14 @@ export function renderSettingsSection(
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
-      return <PreventSleepSettingsCard />;
+      return (
+        <>
+          <PreventSleepSettingsCard />
+          <div className="mt-6">
+            <GlobalAgentConfigSettingsCard />
+          </div>
+        </>
+      );
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":
