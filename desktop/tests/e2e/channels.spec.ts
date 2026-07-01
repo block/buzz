@@ -1195,7 +1195,7 @@ test("profile renders live activity for a viewer-owned relay agent", async ({
   await expect(liveActivity).toContainText("#agents");
   await expect(
     page.getByTestId(`user-profile-activity-dot-${AGENTS_CHANNEL_ID}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
 
   await page.evaluate(
     ({ agentPubkey, channelId, turnId }) => {
