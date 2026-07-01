@@ -385,6 +385,7 @@ export type CreateManagedAgentInput = {
   systemPrompt?: string;
   avatarUrl?: string;
   model?: string;
+  provider?: string;
   mcpToolsets?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
