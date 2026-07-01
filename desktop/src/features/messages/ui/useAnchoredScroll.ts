@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { classifyTimelineMessageDelta } from "@/features/messages/lib/timelineSnapshot";
 import type { TimelineMessage } from "@/features/messages/types";
 
 /**
@@ -165,6 +166,7 @@ export function useAnchoredScroll({
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
+  const prevMessagesRef = React.useRef<TimelineMessage[]>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
@@ -194,6 +196,7 @@ export function useAnchoredScroll({
     prevLastMessageIdRef.current = undefined;
     prevFirstMessageIdRef.current = undefined;
     prevMessageCountRef.current = 0;
+    prevMessagesRef.current = [];
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
@@ -363,6 +366,7 @@ export function useAnchoredScroll({
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
       prevFirstMessageIdRef.current = messages[0]?.id;
       prevMessageCountRef.current = messages.length;
+      prevMessagesRef.current = messages;
       return;
     }
 
@@ -370,7 +374,6 @@ export function useAnchoredScroll({
     const lastMessage = messages[messages.length - 1];
     const firstMessage = messages[0];
     const prevLastId = prevLastMessageIdRef.current;
-    const prevFirstId = prevFirstMessageIdRef.current;
     const prevCount = prevMessageCountRef.current;
     const newLatestArrived =
       lastMessage !== undefined && lastMessage.id !== prevLastId;
@@ -378,12 +381,13 @@ export function useAnchoredScroll({
     // signal. The relay can deliver a message that sorts ahead of an existing
     // same-second row, so the list grows without the *last* id changing —
     // `newLatestArrived` misses that case and the unread counter never bumps.
+    const prevMessages = prevMessagesRef.current;
     const messagesArrived = messages.length - prevCount;
-    const frontChanged =
-      firstMessage !== undefined &&
-      prevFirstId !== undefined &&
-      firstMessage.id !== prevFirstId;
-    const isPrepend = frontChanged && !newLatestArrived;
+    const isPrepend =
+      classifyTimelineMessageDelta({
+        current: messages,
+        previous: prevMessages,
+      }) === "prepend";
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -399,6 +403,7 @@ export function useAnchoredScroll({
       prevLastMessageIdRef.current = lastMessage?.id;
       prevFirstMessageIdRef.current = firstMessage?.id;
       prevMessageCountRef.current = messages.length;
+      prevMessagesRef.current = messages;
       return;
     }
 
@@ -436,6 +441,7 @@ export function useAnchoredScroll({
     prevLastMessageIdRef.current = lastMessage?.id;
     prevFirstMessageIdRef.current = firstMessage?.id;
     prevMessageCountRef.current = messages.length;
+    prevMessagesRef.current = messages;
   }, [
     isLoading,
     messages,
