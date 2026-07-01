@@ -117,9 +117,13 @@ export class ReadOnlyRelayClient {
     });
   }
 
-  private requestHistory(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
+  private requestHistory(
+    filter: RelaySubscriptionFilter,
+  ): Promise<RelayEvent[]> {
     if (this.wsId === null) {
-      return Promise.reject(new Error("Read-only relay socket is not connected."));
+      return Promise.reject(
+        new Error("Read-only relay socket is not connected."),
+      );
     }
 
     return new Promise<RelayEvent[]>((resolve, reject) => {
@@ -199,7 +203,11 @@ export class ReadOnlyRelayClient {
       typeof rest[0] === "string" &&
       typeof rest[1] === "boolean"
     ) {
-      this.handleOk(rest[0], rest[1], typeof rest[2] === "string" ? rest[2] : "");
+      this.handleOk(
+        rest[0],
+        rest[1],
+        typeof rest[2] === "string" ? rest[2] : "",
+      );
       return;
     }
     if (type === "EOSE" && typeof rest[0] === "string") {
@@ -235,7 +243,11 @@ export class ReadOnlyRelayClient {
       return;
     }
 
-    authRequest.reject(message ? new Error(message) : new Error("Observer relay authentication rejected."));
+    authRequest.reject(
+      message
+        ? new Error(message)
+        : new Error("Observer relay authentication rejected."),
+    );
     this.disconnect();
   }
 

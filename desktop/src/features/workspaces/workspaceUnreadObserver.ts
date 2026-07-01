@@ -73,25 +73,27 @@ export async function fetchWorkspaceUnread(args: {
     return { hasUnread: false, mentionCount: 0 };
   }
 
-  const [metadataEvents, visibilityEvents, readStateEvents] = await Promise.all([
-    client.fetchEvents({
-      kinds: [KIND_NIP29_GROUP_METADATA],
-      "#d": channelIds,
-      limit: METADATA_LIMIT,
-    }),
-    client.fetchEvents({
-      kinds: [KIND_DM_VISIBILITY],
-      "#p": [pubkey],
-      limit: 1,
-    }),
-    client.fetchEvents({
-      kinds: [KIND_READ_STATE],
-      authors: [pubkey],
-      "#t": ["read-state"],
-      since: nowSeconds - READ_STATE_HORIZON_SECONDS,
-      limit: READ_STATE_FETCH_LIMIT,
-    }),
-  ]);
+  const [metadataEvents, visibilityEvents, readStateEvents] = await Promise.all(
+    [
+      client.fetchEvents({
+        kinds: [KIND_NIP29_GROUP_METADATA],
+        "#d": channelIds,
+        limit: METADATA_LIMIT,
+      }),
+      client.fetchEvents({
+        kinds: [KIND_DM_VISIBILITY],
+        "#p": [pubkey],
+        limit: 1,
+      }),
+      client.fetchEvents({
+        kinds: [KIND_READ_STATE],
+        authors: [pubkey],
+        "#t": ["read-state"],
+        since: nowSeconds - READ_STATE_HORIZON_SECONDS,
+        limit: READ_STATE_FETCH_LIMIT,
+      }),
+    ],
+  );
 
   const hiddenDmIds = extractHiddenDmIds(visibilityEvents);
   const channels = resolveObservedChannels(channelIds, metadataEvents).filter(
@@ -191,7 +193,9 @@ export function resolveObservedChannels(
 export function extractHiddenDmIds(events: RelayEvent[]): Set<string> {
   const latest = events.reduce<RelayEvent | null>(
     (current, event) =>
-      current === null || event.created_at > current.created_at ? event : current,
+      current === null || event.created_at > current.created_at
+        ? event
+        : current,
     null,
   );
   return new Set(

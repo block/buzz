@@ -54,15 +54,6 @@ export function useWorkspaceUnread(
     Record<string, WorkspaceUnreadState>
   >(() => seedWorkspaceStates(workspaces, {}));
 
-  const workspacesKey = React.useMemo(
-    () =>
-      workspaces
-        .map((workspace) => `${workspace.id}:${workspace.relayUrl}`)
-        .sort()
-        .join("|"),
-    [workspaces],
-  );
-
   React.useEffect(() => {
     let cancelled = false;
     let pollTimer: number | null = null;
@@ -160,7 +151,7 @@ export function useWorkspaceUnread(
         window.clearTimeout(pollTimer);
       }
     };
-  }, [activeWorkspaceId, workspaces, workspacesKey]);
+  }, [activeWorkspaceId, workspaces]);
 
   return unreadByWorkspace;
 }

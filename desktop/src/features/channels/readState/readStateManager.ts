@@ -1,7 +1,4 @@
-import {
-  nip44EncryptToSelf,
-  signRelayEvent,
-} from "@/shared/api/tauri";
+import { nip44EncryptToSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_READ_STATE } from "@/shared/constants/kinds";

@@ -38,7 +38,12 @@ function relayFor(filters) {
 test("extractMemberChannelIds deduplicates d tags", () => {
   assert.deepEqual(
     extractMemberChannelIds([
-      event({ tags: [["d", "one"], ["d", "two"]] }),
+      event({
+        tags: [
+          ["d", "one"],
+          ["d", "two"],
+        ],
+      }),
       event({ tags: [["d", "one"]] }),
     ]),
     ["one", "two"],
@@ -50,9 +55,26 @@ test("resolveObservedChannels uses latest metadata and archived flag", () => {
     resolveObservedChannels(
       ["stream", "dm", "missing"],
       [
-        event({ created_at: 1, tags: [["d", "dm"], ["t", "stream"]] }),
-        event({ created_at: 2, tags: [["d", "dm"], ["t", "dm"]] }),
-        event({ tags: [["d", "stream"], ["archived", "true"]] }),
+        event({
+          created_at: 1,
+          tags: [
+            ["d", "dm"],
+            ["t", "stream"],
+          ],
+        }),
+        event({
+          created_at: 2,
+          tags: [
+            ["d", "dm"],
+            ["t", "dm"],
+          ],
+        }),
+        event({
+          tags: [
+            ["d", "stream"],
+            ["archived", "true"],
+          ],
+        }),
       ],
     ),
     [
@@ -67,7 +89,13 @@ test("extractHiddenDmIds reads h tags from latest visibility snapshot", () => {
   assert.deepEqual(
     extractHiddenDmIds([
       event({ created_at: 1, tags: [["h", "old"]] }),
-      event({ created_at: 2, tags: [["h", "new"], ["h", "other"]] }),
+      event({
+        created_at: 2,
+        tags: [
+          ["h", "new"],
+          ["h", "other"],
+        ],
+      }),
     ]),
     new Set(["new", "other"]),
   );
@@ -75,18 +103,39 @@ test("extractHiddenDmIds reads h tags from latest visibility snapshot", () => {
 
 test("fetchWorkspaceUnread returns dot and mention count without total unread count", async () => {
   const relay = relayFor([
-    () => [event({ tags: [["d", CHANNEL_ID], ["p", PUBKEY]] })],
-    () => [event({ tags: [["d", CHANNEL_ID], ["t", "stream"]] })],
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
     () => [],
     () => [],
     () => [
-      event({ id: "unread".padEnd(64, "0"), created_at: 20, tags: [["h", CHANNEL_ID]] }),
+      event({
+        id: "unread".padEnd(64, "0"),
+        created_at: 20,
+        tags: [["h", CHANNEL_ID]],
+      }),
     ],
     () => [
       event({
         id: "mention".padEnd(64, "0"),
         created_at: 30,
-        tags: [["h", CHANNEL_ID], ["p", PUBKEY]],
+        tags: [
+          ["h", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
       }),
     ],
   ]);
@@ -117,18 +166,38 @@ test("fetchWorkspaceUnread ignores self-authored and read thread/message events"
     id: "self".padEnd(64, "0"),
     pubkey: PUBKEY,
     created_at: 70,
-    tags: [["h", CHANNEL_ID], ["p", PUBKEY]],
+    tags: [
+      ["h", CHANNEL_ID],
+      ["p", PUBKEY],
+    ],
   });
 
   const relay = relayFor([
-    () => [event({ tags: [["d", CHANNEL_ID], ["p", PUBKEY]] })],
-    () => [event({ tags: [["d", CHANNEL_ID], ["t", "stream"]] })],
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["p", PUBKEY],
+        ],
+      }),
+    ],
+    () => [
+      event({
+        tags: [
+          ["d", CHANNEL_ID],
+          ["t", "stream"],
+        ],
+      }),
+    ],
     () => [],
     () => [
       event({
         pubkey: PUBKEY,
         created_at: 80,
-        tags: [["d", "read-state:test"], ["t", "read-state"]],
+        tags: [
+          ["d", "read-state:test"],
+          ["t", "read-state"],
+        ],
         content: JSON.stringify({
           v: 1,
           client_id: "client",

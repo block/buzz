@@ -65,9 +65,7 @@ export async function mergeReadStateEvents(
     const parsed = await parseReadStateEvent(event, pubkey, decrypt);
     if (!parsed) continue;
 
-    for (const [contextId, timestamp] of Object.entries(
-      parsed.blob.contexts,
-    )) {
+    for (const [contextId, timestamp] of Object.entries(parsed.blob.contexts)) {
       const current = contexts.get(contextId) ?? 0;
       if (timestamp > current) {
         contexts.set(contextId, timestamp);
