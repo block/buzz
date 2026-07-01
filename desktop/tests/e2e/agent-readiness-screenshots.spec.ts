@@ -96,8 +96,8 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 01: buzz-agent selected, provider empty → gate blocks submit.
-  test("01-create-buzzagent-empty-provider-blocked", async ({ page }) => {
+  // Shot 01: buzz-agent selected, provider empty → required marker shown, save allowed.
+  test("01-create-buzzagent-empty-provider-marker", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
 
@@ -106,45 +106,45 @@ test.describe("agent readiness gate screenshots", () => {
       timeout: 10_000,
     });
 
-    // Provider empty → gate blocks submit.
-    await expect(page.getByTestId("create-agent-submit")).toBeDisabled();
+    // Provider empty → required marker shown; submit is now ENABLED.
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
-      path: `${SHOTS}/01-create-buzzagent-empty-provider-blocked.png`,
+      path: `${SHOTS}/01-create-buzzagent-empty-provider-marker.png`,
     });
   });
 
-  // Shot 02: buzz-agent + anthropic selected, model empty → gate still blocks.
-  test("02-create-buzzagent-empty-model-blocked", async ({ page }) => {
+  // Shot 02: buzz-agent + anthropic selected, model empty → required marker shown, save allowed.
+  test("02-create-buzzagent-empty-model-marker", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
     await selectProvider(page, "anthropic");
 
-    // Model still empty → gate blocks submit.
-    await expect(page.getByTestId("create-agent-submit")).toBeDisabled();
+    // Model still empty → required marker shown; submit is now ENABLED.
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
-      path: `${SHOTS}/02-create-buzzagent-empty-model-blocked.png`,
+      path: `${SHOTS}/02-create-buzzagent-empty-model-marker.png`,
     });
   });
 
   // Shot 03: buzz-agent + anthropic + model set, ANTHROPIC_API_KEY missing →
-  // amber required row names the key, submit still blocked.
+  // amber required row names the key, submit ENABLED (no longer blocked).
   test("03-create-missing-credential-row", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
     await selectProvider(page, "anthropic");
     await setCustomModel(page, "claude-opus-4-5");
 
-    // Required row should name ANTHROPIC_API_KEY and submit must be blocked.
+    // Required row should name ANTHROPIC_API_KEY; submit is now ENABLED.
     await expect(page.getByTestId("env-vars-required-key")).toHaveText(
       "ANTHROPIC_API_KEY",
     );
-    await expect(page.getByTestId("create-agent-submit")).toBeDisabled();
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
 
     // Scroll the required row into view so it is visible in the screenshot.
     await page.getByTestId("env-vars-required-key").scrollIntoViewIfNeeded();
@@ -261,13 +261,13 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 08: goose runtime, provider empty → gate blocks, same as buzz-agent.
-  test("08-create-goose-empty-provider-blocked", async ({ page }) => {
+  // Shot 08: goose runtime, provider empty → required marker shown, save allowed (same as buzz-agent).
+  test("08-create-goose-empty-provider-marker", async ({ page }) => {
     await installMockBridge(page);
     await openCreateDialog(page);
 
     // Buzz-agent auto-selects first; wait for its provider field, then
-    // switch to goose to confirm its gate is identical.
+    // switch to goose to confirm its required-marker behavior is identical.
     await expect(page.locator("#agent-provider")).toBeVisible({
       timeout: 10_000,
     });
@@ -277,12 +277,13 @@ test.describe("agent readiness gate screenshots", () => {
     await expect(page.locator("#agent-provider")).toBeVisible({
       timeout: 5_000,
     });
-    await expect(page.getByTestId("create-agent-submit")).toBeDisabled();
+    // Required marker shown; submit is now ENABLED.
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
-      path: `${SHOTS}/08-create-goose-empty-provider-blocked.png`,
+      path: `${SHOTS}/08-create-goose-empty-provider-marker.png`,
     });
   });
 });

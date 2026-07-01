@@ -1795,6 +1795,7 @@ pub fn spawn_agent_child(
                     .collect();
                 let payload = serde_json::json!({
                     "agent_name": record.name,
+                    "agent_pubkey": record.pubkey,
                     "requirements": reqs,
                 });
                 match serde_json::to_string(&payload) {
