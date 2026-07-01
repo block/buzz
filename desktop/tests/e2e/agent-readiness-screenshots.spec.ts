@@ -107,7 +107,10 @@ test.describe("agent readiness gate screenshots", () => {
     });
 
     // Provider empty → required marker shown; submit is now ENABLED.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
+    // Wait up to 10 s for prereqsQuery to resolve (async even in mock env).
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
@@ -123,7 +126,9 @@ test.describe("agent readiness gate screenshots", () => {
     await selectProvider(page, "anthropic");
 
     // Model still empty → required marker shown; submit is now ENABLED.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
@@ -144,7 +149,9 @@ test.describe("agent readiness gate screenshots", () => {
     await expect(page.getByTestId("env-vars-required-key")).toHaveText(
       "ANTHROPIC_API_KEY",
     );
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
 
     // Scroll the required row into view so it is visible in the screenshot.
     await page.getByTestId("env-vars-required-key").scrollIntoViewIfNeeded();
@@ -278,7 +285,9 @@ test.describe("agent readiness gate screenshots", () => {
       timeout: 5_000,
     });
     // Required marker shown; submit is now ENABLED.
-    await expect(page.getByTestId("create-agent-submit")).toBeEnabled();
+    await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
     await settleAnimations(page);
 
     const dialog = page.getByRole("dialog");
