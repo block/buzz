@@ -45,6 +45,7 @@ export function UserMessageBubble({
       <UserAvatar
         avatarUrl={authorProfile?.avatarUrl ?? null}
         className="order-last ml-2 mt-1 shrink-0"
+        data-role="user-message-avatar"
         displayName={authorLabel}
         size="xs"
       />
@@ -53,12 +54,14 @@ export function UserMessageBubble({
           "group relative flex max-w-[85%] min-w-0 flex-col items-end gap-1",
           className,
         )}
+        data-role="user-message-shell"
       >
         <div
           className={cn(
             "w-full min-w-0 rounded-2xl bg-muted p-3 text-sm leading-relaxed text-foreground",
             bubbleClassName,
           )}
+          data-role="user-message-bubble"
         >
           <Markdown content={text || " "} mediaInset tight />
           {children}
