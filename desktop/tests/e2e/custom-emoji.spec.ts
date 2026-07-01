@@ -527,3 +527,22 @@ test("composer emoji picker search input is focused immediately on open", async 
   await picker.getByRole("button", { name: "😀" }).first().click();
   await expect(page.getByTestId("message-input")).toBeFocused();
 });
+
+test("composer emoji picker restores editor focus on Escape dismiss", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the composer emoji picker via the toolbar button.
+  await page.getByTestId("composer-emoji-button").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  // Dismiss via Escape without selecting an emoji. The onClose callback
+  // in ComposerEmojiPicker must restore focus to the editor so the user
+  // can keep typing without an extra click.
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByTestId("message-input")).toBeFocused();
+});

@@ -238,6 +238,7 @@ export const MessageComposerToolbar = React.memo(
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
+                  onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}
                   onTriggerMouseDown={onCaptureSelection}

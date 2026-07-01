@@ -8,6 +8,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 type ComposerEmojiPickerProps = {
   disabled?: boolean;
+  /** Called when the popover closes without an emoji selection (Escape,
+   *  click-outside). Use this to restore focus to the editor. */
+  onClose?: () => void;
   onEmojiSelect: (emoji: string) => void;
   onOpenChange: (open: boolean) => void;
   onTriggerMouseDown: () => void;
@@ -16,6 +19,7 @@ type ComposerEmojiPickerProps = {
 
 export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   disabled = false,
+  onClose,
   onEmojiSelect,
   onOpenChange,
   onTriggerMouseDown,
@@ -48,11 +52,15 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
         // disableSearchInputCorrections MutationObserver owns focus for
         // the shadow-DOM search input (autoFocus path).
         onOpenAutoFocus={(e) => e.preventDefault()}
-        // Prevent Radix from returning focus to the trigger button on
-        // close — insertEmoji calls editor.chain().focus() before
-        // setIsEmojiPickerOpen(false), so the editor owns focus by the
-        // time the popover closes; let that stand.
-        onCloseAutoFocus={(e) => e.preventDefault()}
+        // Suppress Radix's default trigger-return on close. On the
+        // emoji-select path, insertEmoji already called editor.chain().focus()
+        // before the popover closes, so the editor owns focus — let it stand.
+        // On Escape/click-outside, onClose() restores editor focus explicitly
+        // so the user can keep typing without an extra click.
+        onCloseAutoFocus={(e) => {
+          e.preventDefault();
+          onClose?.();
+        }}
         side="top"
         sideOffset={10}
       >
