@@ -22,6 +22,8 @@ export type ProfileActivityFeedScope = {
   hasFeedContent: boolean;
   /** True while the active-turn store reports live work for this agent. */
   isLive: boolean;
+  /** Latest observed activity timestamp, keyed by channel id. */
+  latestActivityAtByChannel: Record<string, number>;
   /** Preferred channel scope when no explicit selection exists yet. */
   preferredChannelId: string | null;
 };
@@ -53,8 +55,31 @@ function scopesEqual(
     left.hasFeedContent === right.hasFeedContent &&
     left.isLive === right.isLive &&
     left.preferredChannelId === right.preferredChannelId &&
+    latestActivityByChannelEqual(
+      left.latestActivityAtByChannel,
+      right.latestActivityAtByChannel,
+    ) &&
     channelIdsEqual(left.channelIds, right.channelIds)
   );
+}
+
+function latestActivityByChannelEqual(
+  left: Record<string, number>,
+  right: Record<string, number>,
+): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) {
+    return false;
+  }
+
+  for (const key of leftKeys) {
+    if (left[key] !== right[key]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function stableFeedScope(
@@ -109,6 +134,53 @@ function deriveLatestChannelId(
   return null;
 }
 
+function parseTimestampMillis(timestamp: string): number | null {
+  const millis = Date.parse(timestamp);
+  return Number.isNaN(millis) ? null : millis;
+}
+
+function collectLatestActivityAtByChannel({
+  activeTurns,
+  events,
+  transcript,
+}: {
+  activeTurns: readonly ActiveTurnSummary[];
+  events: readonly ObserverEvent[];
+  transcript: readonly TranscriptItem[];
+}): Record<string, number> {
+  const latestActivityAtByChannel: Record<string, number> = {};
+
+  const record = (channelId: string | null | undefined, timestamp: number) => {
+    if (!channelId) {
+      return;
+    }
+    const previous = latestActivityAtByChannel[channelId];
+    if (previous === undefined || timestamp > previous) {
+      latestActivityAtByChannel[channelId] = timestamp;
+    }
+  };
+
+  for (const turn of activeTurns) {
+    record(turn.channelId, turn.anchorAt);
+  }
+
+  for (const event of events) {
+    const timestamp = parseTimestampMillis(event.timestamp);
+    if (timestamp !== null) {
+      record(event.channelId, timestamp);
+    }
+  }
+
+  for (const item of transcript) {
+    const timestamp = parseTimestampMillis(item.timestamp);
+    if (timestamp !== null) {
+      record(item.channelId, timestamp);
+    }
+  }
+
+  return latestActivityAtByChannel;
+}
+
 export function deriveProfileActivityFeedScope({
   activeTurns,
   events,
@@ -120,6 +192,11 @@ export function deriveProfileActivityFeedScope({
 }): ProfileActivityFeedScope {
   const hasFeedContent = events.length > 0 || transcript.length > 0;
   const isLive = activeTurns.length > 0;
+  const latestActivityAtByChannel = collectLatestActivityAtByChannel({
+    activeTurns,
+    events,
+    transcript,
+  });
 
   if (isLive) {
     const channelIds = [...activeTurns]
@@ -130,6 +207,7 @@ export function deriveProfileActivityFeedScope({
       channelIds,
       hasFeedContent: true,
       isLive: true,
+      latestActivityAtByChannel,
       preferredChannelId: channelIds[0] ?? null,
     };
   }
@@ -141,6 +219,7 @@ export function deriveProfileActivityFeedScope({
     channelIds: feedChannelIds,
     hasFeedContent,
     isLive: false,
+    latestActivityAtByChannel,
     preferredChannelId: latestChannelId,
   };
 }

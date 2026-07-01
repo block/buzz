@@ -4,7 +4,6 @@ import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
 
 import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
-import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import {
   AgentDetailsRows,
   AgentInstructionRow,
@@ -346,7 +345,7 @@ function ProfileLiveActivityEmbed({
   const [selectedChannelId, setSelectedChannelId] = React.useState<
     string | null
   >(() => feedScope.preferredChannelId);
-  const now = useNow(feedScope.isLive ? 1000 : 86_400_000);
+  const now = useNow(1000);
 
   const switcherChannelIds = feedScope.isLive
     ? activeTurns.map((turn) => turn.channelId)
@@ -370,28 +369,39 @@ function ProfileLiveActivityEmbed({
   const activeChannelId =
     selectedChannelId ?? feedScope.preferredChannelId ?? null;
   const showSwitcher = switcherChannelIds.length > 1;
+  const lastLiveAt =
+    (activeChannelId
+      ? feedScope.latestActivityAtByChannel[activeChannelId]
+      : undefined) ??
+    selectedTurn?.anchorAt ??
+    null;
+  const lastLiveLabel = formatLastLiveLabel(lastLiveAt, now);
+  const openSelectedActivity = React.useCallback(() => {
+    onOpenActivity(activeChannelId);
+  }, [activeChannelId, onOpenActivity]);
 
   return (
     <section
-      aria-label="Live activity preview"
-      className="flex h-48 flex-col overflow-hidden rounded-2xl border border-border/60 bg-muted/20 text-left"
+      aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+      className="relative flex h-48 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted/40 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
     >
+      <button
+        aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={openSelectedActivity}
+        type="button"
+      />
+      <LiveActivityOpenButton
+        activeChannelId={activeChannelId}
+        label={lastLiveLabel}
+        onOpenActivity={onOpenActivity}
+      />
       {showSwitcher ? (
-        <div className="border-border/60 border-b px-3 py-2">
-          <LiveActivityEmbedHeader
-            activeChannelId={activeChannelId}
-            elapsedLabel={
-              feedScope.isLive && selectedTurn
-                ? formatElapsed(now - selectedTurn.anchorAt)
-                : null
-            }
-            isLive={feedScope.isLive}
-            onOpenActivity={onOpenActivity}
-          />
+        <div className="relative z-20 px-3 pb-2 pt-10">
           <div
             aria-label="Choose active channel feed"
-            className="mt-2 flex gap-1 overflow-x-auto pb-0.5"
+            className="flex gap-1 overflow-x-auto pb-0.5"
             role="tablist"
           >
             {switcherChannelIds.map((channelId) => {
@@ -408,7 +418,10 @@ function ProfileLiveActivityEmbed({
                       : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
                   )}
                   key={channelId}
-                  onClick={() => setSelectedChannelId(channelId)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSelectedChannelId(channelId);
+                  }}
                   role="tab"
                   title={channelName}
                   type="button"
@@ -419,25 +432,15 @@ function ProfileLiveActivityEmbed({
             })}
           </div>
         </div>
-      ) : (
-        <div className="border-border/60 border-b px-3 py-2">
-          <LiveActivityEmbedHeader
-            activeChannelId={activeChannelId}
-            elapsedLabel={
-              feedScope.isLive && selectedTurn
-                ? formatElapsed(now - selectedTurn.anchorAt)
-                : null
-            }
-            isLive={feedScope.isLive}
-            onOpenActivity={onOpenActivity}
-          />
-        </div>
-      )}
+      ) : null}
       <ManagedAgentSessionPanel
         agent={activityAgent}
         autoTail={true}
         channelId={activeChannelId}
-        className="min-h-0 flex-1 rounded-none border-0 bg-transparent p-3 shadow-none"
+        className={cn(
+          "relative z-0 min-h-0 flex-1 rounded-none border-0 bg-transparent p-3 shadow-none **:data-message-id:pointer-events-none",
+          !showSwitcher && "pt-10",
+        )}
         emptyDescription="Live activity will appear here."
         rawLayout="responsive"
         showHeader={false}
@@ -447,37 +450,60 @@ function ProfileLiveActivityEmbed({
   );
 }
 
-function LiveActivityEmbedHeader({
+function LiveActivityOpenButton({
   activeChannelId,
-  elapsedLabel,
-  isLive,
+  label,
   onOpenActivity,
 }: {
   activeChannelId: string | null;
-  elapsedLabel: string | null;
-  isLive: boolean;
+  label: string;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-2 text-xs">
-      <span className="font-medium text-foreground">
-        {isLive ? "Live activity" : "Recent activity"}
-      </span>
-      <div className="flex shrink-0 items-center gap-2">
-        {elapsedLabel ? (
-          <span className="text-muted-foreground">{elapsedLabel}</span>
-        ) : null}
-        <Button
-          className="h-6 px-2 text-2xs"
-          onClick={() => onOpenActivity(activeChannelId)}
-          type="button"
-          variant="ghost"
-        >
-          Open full activity
-        </Button>
-      </div>
-    </div>
+    <Button
+      aria-label={`Open full activity. Last live ${label}.`}
+      className="absolute right-2 top-2 z-20 h-7 rounded-full bg-accent px-3 text-2xs font-semibold text-accent-foreground shadow-none hover:bg-accent/90 hover:text-accent-foreground"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpenActivity(activeChannelId);
+      }}
+      size="xs"
+      title={`Last live ${label}`}
+      type="button"
+    >
+      {label}
+    </Button>
   );
+}
+
+function formatLastLiveLabel(timestamp: number | null, now: number): string {
+  if (timestamp === null) {
+    return "No activity yet";
+  }
+
+  const elapsedMs = Math.max(0, now - timestamp);
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  if (totalSeconds < 60) {
+    return "Just now";
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ago`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h ago`;
+  }
+
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 7) {
+    return `${totalDays}d ago`;
+  }
+
+  const totalWeeks = Math.floor(totalDays / 7);
+  return `${totalWeeks}w ago`;
 }
 
 function ArchiveStatusTooltip() {
