@@ -40,6 +40,7 @@ import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import {
+  computeLocalModeGate,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
@@ -175,16 +176,32 @@ export function CreateAgentDialog({
     selectedRuntime: selectedRuntime ?? undefined,
   });
 
-  // Required credential env keys for local mode — keyed off selectedRuntimeId
-  // (which IS the prospective runtime on create; no inherit transition).
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    selectedRuntimeId,
-  )
-    ? provider
-    : "";
+  // Local-mode readiness gate — keyed off selectedRuntimeId (which IS the
+  // prospective runtime on create; no inherit transition on Create).
+  // computeLocalModeGate returns missing normalized fields + missing env keys
+  // so canSubmit, field isRequired, and EnvVarsEditor.requiredKeys all share
+  // the same predicate.
+  const localModeGate = React.useMemo(
+    () =>
+      computeLocalModeGate({
+        envVars,
+        isProviderMode,
+        model,
+        provider,
+        runtimeId: selectedRuntimeId,
+        useMesh,
+      }),
+    [envVars, isProviderMode, model, provider, selectedRuntimeId, useMesh],
+  );
+  // Full required credential key list for EnvVarsEditor amber locked rows —
+  // includes already-satisfied keys, not just missing ones.
   const requiredEnvKeys = React.useMemo(
-    () => requiredCredentialEnvKeys(selectedRuntimeId, providerForRequiredKeys),
-    [selectedRuntimeId, providerForRequiredKeys],
+    () =>
+      requiredCredentialEnvKeys(
+        selectedRuntimeId,
+        runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
+      ),
+    [selectedRuntimeId, provider],
   );
 
   // Clear model when provider scope changes, mirroring EditAgentDialog.
@@ -454,13 +471,11 @@ export function CreateAgentDialog({
   const respondToValid =
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
-  // Block local-mode creates when a dialog-fixable required credential is
-  // missing. Mirrors the Edit gate: provider-mode and mesh paths are
-  // unaffected — they have their own gates (providerConfigComplete, meshTarget).
-  const localCredsSatisfied =
-    isProviderMode ||
-    useMesh ||
-    requiredEnvKeys.every((key) => (envVars[key] ?? "").length > 0);
+  // Block local-mode creates when a dialog-fixable required field is missing.
+  // Delegate to computeLocalModeGate (same helper tests exercise directly)
+  // so canSubmit, field isRequired, and EnvVarsEditor.requiredKeys all check
+  // the same predicate.
+  const localCredsSatisfied = localModeGate.satisfied;
 
   const canSubmit =
     name.trim().length > 0 &&
@@ -709,7 +724,7 @@ export function CreateAgentDialog({
               <AgentProviderField
                 disabled={createMutation.isPending}
                 isCustomProviderEditing={isCustomProviderEditing}
-                isRequired={false}
+                isRequired={true}
                 onProviderChange={handleProviderDropdownChange}
                 provider={provider}
                 selectedRuntime={selectedRuntime ?? undefined}
@@ -720,7 +735,7 @@ export function CreateAgentDialog({
                 disabled={createMutation.isPending}
                 discoveredModelOptions={discoveredModelOptions}
                 isCustomModelEditing={isCustomModelEditing}
-                isRequired={false}
+                isRequired={true}
                 model={model}
                 modelDiscoveryLoading={modelDiscoveryLoading}
                 modelDiscoveryStatus={modelDiscoveryStatus}
@@ -826,6 +841,7 @@ export function CreateAgentDialog({
               disabled={createMutation.isPending}
               helperText="Injected at spawn. Overrides the persona's env vars on collision."
               onChange={setEnvVars}
+              requiredKeys={requiredEnvKeys}
               value={envVars}
             />
 
