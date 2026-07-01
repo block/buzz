@@ -97,6 +97,9 @@ impl RequirementPayload {
 pub(crate) struct SetupPayload {
     /// Human-readable agent display name (for the nudge message).
     pub agent_name: String,
+    /// Hex-encoded agent pubkey. Carried so the desktop card can open
+    /// the Edit Agent dialog for this agent directly from the nudge.
+    pub agent_pubkey: String,
     /// Surface-discriminated list of missing requirements.
     pub requirements: Vec<RequirementPayload>,
 }
@@ -130,25 +133,38 @@ impl SetupPayload {
     }
 
     /// Build the nudge message body from the requirements.
+    ///
+    /// The body contains two parts separated by a blank line:
+    /// 1. Human-readable markdown (unchanged; used by CLI and non-card clients).
+    /// 2. A fenced `buzz:config-nudge` sentinel block containing the structured
+    ///    payload as JSON. The desktop client parses this block to render a
+    ///    `ConfigNudgeCard`; clients that don't understand it see a code block.
     fn nudge_body(&self) -> String {
-        if self.requirements.is_empty() {
-            return format!(
+        let prose = if self.requirements.is_empty() {
+            format!(
                 "**{}** needs configuration before it can respond. Open Edit Agent to configure it.",
                 self.agent_name,
-            );
-        }
+            )
+        } else {
+            let steps: Vec<String> = self
+                .requirements
+                .iter()
+                .map(|r| format!("- {}", r.instruction()))
+                .collect();
 
-        let steps: Vec<String> = self
-            .requirements
-            .iter()
-            .map(|r| format!("- {}", r.instruction()))
-            .collect();
+            format!(
+                "**{}** needs configuration before it can respond:\n{}\n\nOpen Edit Agent in the Buzz app to set these.",
+                self.agent_name,
+                steps.join("\n"),
+            )
+        };
 
-        format!(
-            "**{}** needs configuration before it can respond:\n{}\n\nOpen Edit Agent in the Buzz app to set these.",
-            self.agent_name,
-            steps.join("\n"),
-        )
+        // SAFETY: `self` is fully `Serialize`; this can only fail if the types
+        // contain non-string map keys, which they don't — panic is acceptable.
+        let sentinel_json =
+            serde_json::to_string(self).expect("SetupPayload must be serializable to JSON");
+
+        format!("{}\n\n```buzz:config-nudge\n{}\n```", prose, sentinel_json)
     }
 }
 
@@ -548,6 +564,7 @@ mod tests {
     fn setup_payload_deserializes_correctly() {
         let json = r#"{
             "agent_name": "Fizz",
+            "agent_pubkey": "aabbccddeeff0011",
             "requirements": [
                 {"surface": "normalized_field", "field": "provider"},
                 {"surface": "env_key", "key": "ANTHROPIC_API_KEY"}
@@ -562,6 +579,7 @@ mod tests {
     fn nudge_body_names_all_requirements() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
             requirements: vec![
                 RequirementPayload::NormalizedField {
                     field: "provider".to_string(),
@@ -587,6 +605,7 @@ mod tests {
     fn nudge_body_codex_copy_does_not_mention_openai_api_key() {
         let payload = SetupPayload {
             agent_name: "Codex".to_string(),
+            agent_pubkey: "test".to_string(),
             requirements: vec![RequirementPayload::CliLogin {
                 probe_args: vec![
                     "codex".to_string(),
@@ -611,11 +630,108 @@ mod tests {
     fn nudge_body_empty_requirements_falls_back_to_generic() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
             requirements: vec![],
         };
         let body = payload.nudge_body();
         assert!(body.contains("Fizz"));
         assert!(body.contains("needs configuration"));
+    }
+
+    // ── sentinel block tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn nudge_body_contains_sentinel_block() {
+        // The body must end with a ```buzz:config-nudge fence so the desktop
+        // can detect and strip it before rendering the ConfigNudgeCard.
+        let payload = SetupPayload {
+            agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::EnvKey {
+                key: "ANTHROPIC_API_KEY".to_string(),
+            }],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("```buzz:config-nudge\n"),
+            "body must open the sentinel fence; got: {body:?}"
+        );
+        assert!(
+            body.ends_with("```"),
+            "body must close the sentinel fence; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_sentinel_round_trips_payload() {
+        // The JSON inside the sentinel block must deserialize back to an
+        // equivalent SetupPayload (same agent_name and requirements).
+        let payload = SetupPayload {
+            agent_name: "Atlas".to_string(),
+            agent_pubkey: "ddeeff00".to_string(),
+            requirements: vec![
+                RequirementPayload::NormalizedField {
+                    field: "model".to_string(),
+                },
+                RequirementPayload::EnvKey {
+                    key: "OPENAI_API_KEY".to_string(),
+                },
+                RequirementPayload::CliLogin {
+                    probe_args: vec!["codex".to_string(), "login".to_string()],
+                    setup_copy: "run `codex login`".to_string(),
+                },
+            ],
+        };
+        let body = payload.nudge_body();
+
+        // Extract the JSON between the fence markers.
+        let fence_open = "```buzz:config-nudge\n";
+        let fence_close = "\n```";
+        let start = body
+            .rfind(fence_open)
+            .expect("sentinel open fence not found")
+            + fence_open.len();
+        let end = body[start..]
+            .rfind(fence_close)
+            .expect("sentinel close fence not found")
+            + start;
+        let json = &body[start..end];
+
+        let recovered: SetupPayload =
+            serde_json::from_str(json).expect("sentinel JSON must deserialize");
+        assert_eq!(recovered.agent_name, payload.agent_name);
+        assert_eq!(recovered.agent_pubkey, payload.agent_pubkey);
+        assert_eq!(recovered.requirements.len(), payload.requirements.len());
+    }
+
+    #[test]
+    fn nudge_body_prose_still_present_with_sentinel() {
+        // Existing prose checks must pass — the sentinel is APPENDED, not a
+        // replacement, so all prior `body.contains(...)` invariants hold.
+        let payload = SetupPayload {
+            agent_name: "Fizz".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![
+                RequirementPayload::NormalizedField {
+                    field: "provider".to_string(),
+                },
+                RequirementPayload::EnvKey {
+                    key: "ANTHROPIC_API_KEY".to_string(),
+                },
+            ],
+        };
+        let body = payload.nudge_body();
+        assert!(body.contains("provider"), "prose must name the field");
+        assert!(
+            body.contains("ANTHROPIC_API_KEY"),
+            "prose must name the key"
+        );
+        assert!(body.contains("Fizz"), "prose must name the agent");
+        // Sentinel is also present.
+        assert!(
+            body.contains("```buzz:config-nudge"),
+            "sentinel must follow"
+        );
     }
 
     // ── should_nudge_for_event gate tests ─────────────────────────────────────

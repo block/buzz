@@ -40,7 +40,6 @@ import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import {
-  computeLocalModeGate,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
@@ -176,23 +175,6 @@ export function CreateAgentDialog({
     selectedRuntime: selectedRuntime ?? undefined,
   });
 
-  // Local-mode readiness gate — keyed off selectedRuntimeId (which IS the
-  // prospective runtime on create; no inherit transition on Create).
-  // computeLocalModeGate returns missing normalized fields + missing env keys
-  // so canSubmit, field isRequired, and EnvVarsEditor.requiredKeys all share
-  // the same predicate.
-  const localModeGate = React.useMemo(
-    () =>
-      computeLocalModeGate({
-        envVars,
-        isProviderMode,
-        model,
-        provider,
-        runtimeId: selectedRuntimeId,
-        useMesh,
-      }),
-    [envVars, isProviderMode, model, provider, selectedRuntimeId, useMesh],
-  );
   // Full required credential key list for EnvVarsEditor amber locked rows —
   // includes already-satisfied keys, not just missing ones.
   const requiredEnvKeys = React.useMemo(
@@ -471,12 +453,6 @@ export function CreateAgentDialog({
   const respondToValid =
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
-  // Block local-mode creates when a dialog-fixable required field is missing.
-  // Delegate to computeLocalModeGate (same helper tests exercise directly)
-  // so canSubmit, field isRequired, and EnvVarsEditor.requiredKeys all check
-  // the same predicate.
-  const localCredsSatisfied = localModeGate.satisfied;
-
   const canSubmit =
     name.trim().length > 0 &&
     !isDiscoveryPending &&
@@ -490,7 +466,6 @@ export function CreateAgentDialog({
     // fields and config schema are only known after a successful probe.
     !(isProviderMode && !probedProvider) &&
     providerConfigComplete &&
-    localCredsSatisfied &&
     // Relay-mesh mode requires a concrete serve target, not just a model name.
     !(useMesh && (meshModelId.trim().length === 0 || meshTarget == null)) &&
     respondToValid &&

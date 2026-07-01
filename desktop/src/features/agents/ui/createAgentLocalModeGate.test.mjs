@@ -1,18 +1,19 @@
 /**
  * Unit tests for the CreateAgentDialog local-mode readiness gate.
  *
- * The gate mirrors EditAgentDialog's block-save logic: when the selected
- * runtime supports LLM provider selection (buzz-agent / goose), a missing
- * required credential env key OR a missing provider/model normalized field
- * blocks the create button.
+ * The gate computes whether required fields are present for the selected
+ * runtime: when missing, it surfaces field markers (isRequired) and env-key
+ * amber rows (EnvVarsEditor.requiredKeys), and the setup-listener nudge will
+ * fire after spawn. The gate NO LONGER blocks the create/save button —
+ * users can save with incomplete config and the nudge will guide them.
  *
  * On Create there is no inherit checkbox, so selectedRuntimeId IS the
  * prospective runtime — no prospectiveRuntimeId hoist needed.
  *
  * The shared helper under test:
- *   computeLocalModeGate — pure function used by canSubmit, field isRequired,
- *                           and EnvVarsEditor.requiredKeys; all three share
- *                           the same predicate.
+ *   computeLocalModeGate — pure function used by field isRequired and
+ *                           EnvVarsEditor.requiredKeys; canSubmit no longer
+ *                           reads gate.satisfied.
  */
 
 import { test } from "node:test";
@@ -60,10 +61,11 @@ test("localMode_custom_doesNotSupportProviderSelection", () => {
 
 // ── IMPORTANT 1: normalized field gate (provider + model) ─────────────────
 
-test("localMode_buzzAgent_emptyProvider_blocked", () => {
+test("localMode_buzzAgent_emptyProvider_notSatisfied", () => {
   // Scenario: user selects buzz-agent but leaves provider empty.
   // Rust readiness requires BUZZ_AGENT_PROVIDER — empty = NotReady.
-  // The gate must block create even though no env key is required yet.
+  // The gate must report not-satisfied and surface the missing field marker,
+  // but does NOT block the save button.
   const result = computeLocalModeGate({
     envVars: {},
     isProviderMode: false,
@@ -80,13 +82,14 @@ test("localMode_buzzAgent_emptyProvider_blocked", () => {
   assert.equal(
     result.satisfied,
     false,
-    "empty provider must block create (Rust readiness requires BUZZ_AGENT_PROVIDER)",
+    "empty provider: gate not satisfied (marker shown); save button is still enabled",
   );
 });
 
-test("localMode_buzzAgent_emptyModel_blocked", () => {
+test("localMode_buzzAgent_emptyModel_notSatisfied", () => {
   // Scenario: buzz-agent + anthropic + API key present, but model left empty.
   // Rust readiness requires BUZZ_AGENT_MODEL — empty = NotReady.
+  // The gate surfaces the missing field marker; save button is still enabled.
   const result = computeLocalModeGate({
     envVars: { ANTHROPIC_API_KEY: "sk-ant-test" },
     isProviderMode: false,
@@ -103,15 +106,16 @@ test("localMode_buzzAgent_emptyModel_blocked", () => {
   assert.equal(
     result.satisfied,
     false,
-    "empty model must block create (Rust readiness requires BUZZ_AGENT_MODEL)",
+    "empty model: gate not satisfied (marker shown); save button is still enabled",
   );
 });
 
-// ── Gate: buzz-agent / anthropic with missing key → BLOCKED ───────────────
+// ── Gate: buzz-agent / anthropic with missing key → markers shown ─────────
 
-test("localMode_buzzAgent_anthropic_missingKey_blocked", () => {
+test("localMode_buzzAgent_anthropic_missingKey_notSatisfied", () => {
   // Scenario: user selects buzz-agent/anthropic + fills model, but hasn't
-  // supplied ANTHROPIC_API_KEY — the exact crash-loop case the guarantee closes.
+  // supplied ANTHROPIC_API_KEY — the exact crash-loop case the nudge handles.
+  // Gate reports not-satisfied (required marker + env row shown); save allowed.
   const result = computeLocalModeGate({
     envVars: {},
     isProviderMode: false,
@@ -128,7 +132,7 @@ test("localMode_buzzAgent_anthropic_missingKey_blocked", () => {
   assert.equal(
     result.satisfied,
     false,
-    "missing ANTHROPIC_API_KEY must block create (crash-loop guarantee)",
+    "missing ANTHROPIC_API_KEY: gate not satisfied (marker + nudge shown); save still allowed",
   );
 });
 
