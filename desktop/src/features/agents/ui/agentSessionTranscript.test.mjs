@@ -696,7 +696,8 @@ test("buildTranscript appends Approved outcome when allow_once is selected", () 
   const item = transcript[0];
   assert.equal(item.type, "lifecycle");
   assert.equal(item.renderClass, "permission");
-  assert.match(item.text, /Approved \(allow_once\)/);
+  assert.equal(item.outcome, "Approved (allow_once)");
+  assert.doesNotMatch(item.text ?? "", /Approved/);
 });
 
 test("buildTranscript appends Denied outcome when reject_once is selected", () => {
@@ -707,7 +708,8 @@ test("buildTranscript appends Denied outcome when reject_once is selected", () =
 
   const item = transcript[0];
   assert.equal(item.type, "lifecycle");
-  assert.match(item.text, /Denied \(reject_once\)/);
+  assert.equal(item.outcome, "Denied (reject_once)");
+  assert.doesNotMatch(item.text ?? "", /Denied/);
 });
 
 test("buildTranscript appends Cancelled outcome on cancelled response", () => {
@@ -718,7 +720,8 @@ test("buildTranscript appends Cancelled outcome on cancelled response", () => {
 
   const item = transcript[0];
   assert.equal(item.type, "lifecycle");
-  assert.match(item.text, /Cancelled/);
+  assert.equal(item.outcome, "Cancelled");
+  assert.doesNotMatch(item.text ?? "", /Cancelled/);
 });
 
 test("buildTranscript no-ops on a permission response with an unmatched id", () => {
@@ -733,6 +736,7 @@ test("buildTranscript no-ops on a permission response with an unmatched id", () 
   const item = transcript[0];
   assert.equal(item.type, "lifecycle");
   assert.equal(item.renderClass, "permission");
+  assert.equal(item.outcome, undefined);
   assert.doesNotMatch(item.text ?? "", /Approved/);
   assert.doesNotMatch(item.text ?? "", /Denied/);
 });
@@ -750,7 +754,8 @@ test("buildTranscript appends Approved outcome for a numeric JSON-RPC id (select
   const item = transcript[0];
   assert.equal(item.type, "lifecycle");
   assert.equal(item.renderClass, "permission");
-  assert.match(item.text, /Approved \(allow_once\)/);
+  assert.equal(item.outcome, "Approved (allow_once)");
+  assert.doesNotMatch(item.text ?? "", /Approved/);
 });
 
 test("buildTranscript appends Cancelled outcome for a numeric JSON-RPC id (cancelled)", () => {
@@ -761,7 +766,8 @@ test("buildTranscript appends Cancelled outcome for a numeric JSON-RPC id (cance
 
   const item = transcript[0];
   assert.equal(item.type, "lifecycle");
-  assert.match(item.text, /Cancelled/);
+  assert.equal(item.outcome, "Cancelled");
+  assert.doesNotMatch(item.text ?? "", /Cancelled/);
 });
 
 test('buildTranscript does not collide between numeric id 1 and string id "1"', () => {
@@ -776,6 +782,6 @@ test('buildTranscript does not collide between numeric id 1 and string id "1"', 
     makePermissionResponse(2, "1", "selected", "reject_once"),
   ]);
 
-  assert.match(transcriptNumeric[0].text, /Approved \(allow_once\)/);
-  assert.match(transcriptString[0].text, /Denied \(reject_once\)/);
+  assert.equal(transcriptNumeric[0].outcome, "Approved (allow_once)");
+  assert.equal(transcriptString[0].outcome, "Denied (reject_once)");
 });

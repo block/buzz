@@ -320,4 +320,100 @@ test.describe("observer feed screenshots", () => {
       path: `${SHOTS}/04-permission-cancelled.png`,
     });
   });
+
+  test("05 — prompt context inline (sections expanded)", async ({ page }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "acp_write",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-001",
+        turnId: "turn-001",
+        payload: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "session/prompt",
+          params: {
+            prompt: [
+              {
+                type: "text",
+                text: "[Buzz event: Kind 9]\nContent: @Observer Agent help me debug this",
+              },
+              {
+                type: "text",
+                text: "[Thread context]\nThis is the thread history with 3 prior messages.",
+              },
+              {
+                type: "text",
+                text: "[Channel context]\nYou are in #agents, a channel for AI coordination.",
+              },
+            ],
+          },
+        },
+      },
+    ]);
+
+    await expect(
+      feedPanel.getByTestId("transcript-prompt-context-inline"),
+    ).toBeVisible({ timeout: 5_000 });
+
+    // Click each section accordion button to expand it.
+    const sectionButtons = feedPanel
+      .getByTestId("transcript-prompt-context-sections")
+      .getByRole("button");
+    for (const btn of await sectionButtons.all()) {
+      await btn.click();
+    }
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/05-prompt-context-expanded.png`,
+    });
+  });
+
+  test("06 — system prompt sections expanded", async ({ page }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "acp_write",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-001",
+        turnId: null,
+        payload: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "session/new",
+          params: {
+            systemPrompt:
+              "[Base]\nYou are a helpful AI assistant running in Buzz.\n\n[System]\nYou are Observer Agent. You coordinate multi-agent workflows in the #agents channel.",
+          },
+        },
+      },
+    ]);
+
+    await expect(feedPanel.getByText("System prompt")).toBeVisible({
+      timeout: 5_000,
+    });
+
+    // Open all native <details> elements inside the metadata item.
+    await feedPanel.getByTestId("transcript-metadata-item").evaluate((el) => {
+      if (el.tagName === "DETAILS") (el as HTMLDetailsElement).open = true;
+      for (const details of el.querySelectorAll("details")) {
+        details.open = true;
+      }
+    });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/06-system-prompt-expanded.png`,
+    });
+  });
 });

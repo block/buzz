@@ -782,7 +782,7 @@ export function processTranscriptEvent(
         if (existing?.type === "lifecycle") {
           replaceItem(d, pending.itemId, {
             ...existing,
-            text: joinLifecycleText(existing.text, outcomeText),
+            outcome: outcomeText,
           });
           // Remove from pending map — the outcome is now recorded.
           d.pendingPermissions = new Map(d.pendingPermissions);
