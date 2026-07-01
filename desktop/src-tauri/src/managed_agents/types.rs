@@ -327,6 +327,7 @@ pub struct CreateManagedAgentRequest {
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
     pub model: Option<String>,
+    pub provider: Option<String>,
     pub mcp_toolsets: Option<String>,
     /// Environment variables for this agent. Layered on top of persona env.
     #[serde(default)]
