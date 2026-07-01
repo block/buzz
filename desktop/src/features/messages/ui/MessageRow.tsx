@@ -18,6 +18,7 @@ import {
 } from "@/features/messages/lib/threadTreeLayout";
 import {
   KIND_HUDDLE_STARTED,
+  KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_DIFF,
 } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
@@ -327,9 +328,10 @@ export const MessageRow = React.memo(
               // config-nudge cards can authenticate the sender. Non-agent
               // authors get undefined, keeping the card path off by default.
               configNudgeAuthorPubkey={
-                message.pubkey &&
-                resolvedAgentPubkeys.has(normalizePubkey(message.pubkey))
-                  ? message.pubkey
+                message.kind === KIND_STREAM_MESSAGE &&
+                message.signerPubkey &&
+                resolvedAgentPubkeys.has(message.signerPubkey)
+                  ? message.signerPubkey
                   : undefined
               }
               content={message.body}

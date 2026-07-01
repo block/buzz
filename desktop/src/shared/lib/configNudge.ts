@@ -6,7 +6,7 @@
  *
  * ```
  * ```buzz:config-nudge
- * {"agent_name":"…","requirements":[…]}
+ * {"agent_name":"…","agent_pubkey":"…","requirements":[…]}
  * ```
  * ```
  *
