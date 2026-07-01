@@ -430,10 +430,13 @@ async fn dispatch_persistent_event_inner(
             return 0;
         }
     };
-    // For viewer-private snapshots (kind:30622), live fan-out must reach only the
-    // owner — a kindless `ids:[…]` subscription can otherwise match it. Pull paths
-    // (HTTP /query, WS historical) are gated separately by reader_authorized_for_event.
-    let dm_visibility_owner: Option<String> = (kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY)
+    // For viewer-private events (kind:30622 DM visibility, kind:44200 agent turn
+    // metrics), live fan-out must reach only the owner — a kindless `ids:[…]`
+    // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
+    // are gated separately by reader_authorized_for_event.
+    let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
+        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC;
+    let private_event_owner: Option<String> = owner_only_kind
         .then(|| {
             let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
             stored_event
@@ -450,7 +453,7 @@ async fn dispatch_persistent_event_inner(
     let recipients: Vec<_> = matches
         .iter()
         .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = dm_visibility_owner {
+            if let Some(ref owner_hex) = private_event_owner {
                 let is_owner = state
                     .conn_manager
                     .pubkey_for(*target_conn_id)

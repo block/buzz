@@ -1397,16 +1397,16 @@ mod tests {
         );
 
         // Case 2: kindless {ids:[...]} — the existing ids exemption applies
-        // (consistent with other p-gated kinds like member notifications). The
-        // relay's defense-in-depth for kind:44200 is: (a) the explicit-kind+ids
-        // carve-out above, (b) NULL tsvector storage preventing search discovery,
-        // and (c) the subscription delivery layer not returning 44200 events to
-        // non-owners. A kindless ids filter is authorized here because
-        // p_gated_filters_authorized cannot know which kind the id resolves to.
+        // at this filter-authorization gate (consistent with other p-gated kinds).
+        // The kindless path is closed at the result level by
+        // `reader_authorized_for_event` (buzz-core/src/filter.rs), which gates
+        // kind:44200 delivery to the #p owner across all pull paths (WS historical,
+        // HTTP bridge) and live fan-out. Pass-through here is correct; the
+        // result-level gate is the enforcement point for this path.
         let kindless_ids = Filter::new().id(nostr::EventId::from_hex(event_id).unwrap());
         assert!(
             p_gated_filters_authorized(&[kindless_ids], authed),
-            "kindless ids filter passes this gate (consistent with member-notif behavior)"
+            "kindless ids filter passes this filter gate — result-level gate closes the path"
         );
 
         // Case 3: owner querying by #p is allowed.
