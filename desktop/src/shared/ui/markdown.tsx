@@ -37,8 +37,13 @@ import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { AttachmentGroup } from "@/shared/ui/attachment";
+import { ConfigNudgeCard } from "@/shared/ui/config-nudge-attachment";
 import { LinkPreviewAttachment } from "@/shared/ui/link-preview-attachment";
 import { useSmoothCorners } from "@/shared/ui/smoothCorners";
+import {
+  extractConfigNudge,
+  stripConfigNudgeSentinel,
+} from "@/shared/lib/configNudge";
 import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
@@ -1974,6 +1979,10 @@ function MarkdownInner({
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
   );
+  const configNudge = React.useMemo(
+    () => (interactive ? extractConfigNudge(content) : null),
+    [content, interactive],
+  );
   const runtimeRef = useLatestRef<MarkdownRuntime>({
     agentMentionPubkeysByName,
     channels,
@@ -2014,11 +2023,15 @@ function MarkdownInner({
 
   let processedContent = content;
 
-  if (/^(?:\s{2}\n)+/.test(content)) {
+  if (configNudge !== null) {
+    processedContent = stripConfigNudgeSentinel(processedContent);
+  }
+
+  if (/^(?:\s{2}\n)+/.test(processedContent)) {
     processedContent = `\u200B${processedContent}`;
   }
 
-  if (/(?:\s{2}\n)+$/.test(content)) {
+  if (/(?:\s{2}\n)+$/.test(processedContent)) {
     processedContent = `${processedContent}\u200B`;
   }
 
@@ -2058,6 +2071,14 @@ function MarkdownInner({
     >
       <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
         {markdownNode}
+        {configNudge !== null ? (
+          <AttachmentGroup
+            className="max-w-full flex-wrap overflow-visible pb-0"
+            data-config-nudge=""
+          >
+            <ConfigNudgeCard nudge={configNudge} />
+          </AttachmentGroup>
+        ) : null}
         {resolvedLinkPreviews.length > 0 ? (
           <AttachmentGroup
             className="max-w-full flex-wrap overflow-visible pb-0"
