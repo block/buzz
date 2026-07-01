@@ -8,8 +8,9 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleDot,
+  Clipboard,
   Copy,
-  EllipsisVertical,
+  GripVertical,
   LogOut,
   Pencil,
   Plus,
@@ -17,7 +18,6 @@ import {
   StarOff,
   Trash2,
 } from "lucide-react";
-import { useRef, type ReactNode } from "react";
 
 import { toast } from "sonner";
 
@@ -31,13 +31,6 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -58,39 +51,16 @@ import {
 } from "@/features/sidebar/ui/sidebarSectionStyles";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
-import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { HashSearch } from "@/shared/ui/icons";
 
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
-const CUSTOM_SECTION_LABEL_BUTTON_CLASS =
-  "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-2 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
   "relative size-2.5 shrink-0 text-current opacity-0 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/section-label:opacity-100 group-focus-within/sidebar-section:opacity-100 group-focus-visible/section-label:opacity-100";
 const SECTION_LABEL_CHEVRON_ICON_CLASS =
   "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
-const CUSTOM_SECTION_ACTION_VISIBILITY_CLASS =
-  "opacity-0 transition-opacity group-hover/sidebar-section:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100";
-const SIDEBAR_CONTEXT_ICON_SLOT_CLASS =
-  "flex h-4 w-4 shrink-0 items-center justify-center";
-
-function deferContextMenuAction(action: () => void) {
-  globalThis.setTimeout(action, 0);
-}
-
-function ContextMenuIconSlot({ children }: { children?: ReactNode }) {
-  return (
-    <span
-      aria-hidden="true"
-      className={SIDEBAR_CONTEXT_ICON_SLOT_CLASS}
-      data-sidebar-context-icon-slot
-    >
-      {children}
-    </span>
-  );
-}
 
 function MoveToSectionSubmenu({
   channelId,
@@ -111,49 +81,29 @@ function MoveToSectionSubmenu({
 
   return (
     <ContextMenuSub>
-      <ContextMenuSubTrigger>
-        <ContextMenuIconSlot />
-        <span>Move to section</span>
-      </ContextMenuSubTrigger>
+      <ContextMenuSubTrigger>Move to section</ContextMenuSubTrigger>
       <ContextMenuSubContent>
         {sections.map((section) => (
           <ContextMenuItem
             key={section.id}
-            onSelect={() =>
-              deferContextMenuAction(() =>
-                onAssignChannel(channelId, section.id),
-              )
-            }
+            onClick={() => onAssignChannel(channelId, section.id)}
           >
-            <ContextMenuIconSlot>
-              {currentSectionId === section.id ? (
-                <Check className="h-4 w-4" />
-              ) : section.icon ? (
-                <StatusEmoji className="h-4 w-4" value={section.icon} />
-              ) : null}
-            </ContextMenuIconSlot>
-            <span>{section.name}</span>
+            {currentSectionId === section.id ? (
+              <Check className="h-4 w-4" />
+            ) : (
+              <span className="h-4 w-4" />
+            )}
+            {section.name}
           </ContextMenuItem>
         ))}
         {sections.length > 0 ? <ContextMenuSeparator /> : null}
-        <ContextMenuItem
-          onSelect={() =>
-            deferContextMenuAction(() => onCreateSectionForChannel(channelId))
-          }
-        >
-          <ContextMenuIconSlot>
-            <Plus className="h-4 w-4" />
-          </ContextMenuIconSlot>
-          <span>New section...</span>
+        <ContextMenuItem onClick={() => onCreateSectionForChannel(channelId)}>
+          <Plus className="h-4 w-4" />
+          New section...
         </ContextMenuItem>
         {currentSectionId ? (
-          <ContextMenuItem
-            onSelect={() =>
-              deferContextMenuAction(() => onUnassignChannel(channelId))
-            }
-          >
-            <ContextMenuIconSlot />
-            <span>Remove from section</span>
+          <ContextMenuItem onClick={() => onUnassignChannel(channelId)}>
+            Remove from section
           </ContextMenuItem>
         ) : null}
       </ContextMenuSubContent>
@@ -170,35 +120,6 @@ function copyToClipboard(text: string, successMessage: string) {
     .catch(() => {
       toast.error("Failed to copy to clipboard");
     });
-}
-
-function CopyChannelSubmenu({ channel }: { channel: Channel }) {
-  return (
-    <ContextMenuSub>
-      <ContextMenuSubTrigger>
-        <ContextMenuIconSlot>
-          <Copy className="h-4 w-4" />
-        </ContextMenuIconSlot>
-        <span>Copy</span>
-      </ContextMenuSubTrigger>
-      <ContextMenuSubContent>
-        <ContextMenuItem
-          onSelect={() =>
-            copyToClipboard(channel.name, "Channel name copied to clipboard")
-          }
-        >
-          <span>Copy channel name</span>
-        </ContextMenuItem>
-        <ContextMenuItem
-          onSelect={() =>
-            copyToClipboard(channel.id, "Channel ID copied to clipboard")
-          }
-        >
-          <span>Copy channel ID</span>
-        </ContextMenuItem>
-      </ContextMenuSubContent>
-    </ContextMenuSub>
-  );
 }
 
 export function ChannelContextMenuItems({
@@ -243,118 +164,94 @@ export function ChannelContextMenuItems({
   const showReadToggle = hasUnread
     ? Boolean(onMarkChannelRead)
     : Boolean(onMarkChannelUnread);
-  const showMuteToggle = Boolean(onMuteChannel && onUnmuteChannel);
-  const showMove = Boolean(
-    sections &&
+  return (
+    <>
+      {showStar ? (
+        isStarred ? (
+          <ContextMenuItem onClick={() => onUnstarChannel?.(channel.id)}>
+            <StarOff className="h-4 w-4" />
+            Unstar channel
+          </ContextMenuItem>
+        ) : (
+          <ContextMenuItem onClick={() => onStarChannel?.(channel.id)}>
+            <Star className="h-4 w-4" />
+            Star channel
+          </ContextMenuItem>
+        )
+      ) : null}
+      {showStar && showReadToggle ? <ContextMenuSeparator /> : null}
+      {hasUnread && onMarkChannelRead ? (
+        <ContextMenuItem
+          onClick={() => onMarkChannelRead(channel.id, channel.lastMessageAt)}
+        >
+          <CheckCircle2 className="h-4 w-4" />
+          Mark as read
+        </ContextMenuItem>
+      ) : !hasUnread && onMarkChannelUnread ? (
+        <ContextMenuItem onClick={() => onMarkChannelUnread(channel.id)}>
+          <CircleDot className="h-4 w-4" />
+          Mark unread
+        </ContextMenuItem>
+      ) : null}
+      {onMuteChannel && onUnmuteChannel ? (
+        <>
+          <ContextMenuSeparator />
+          {isMuted ? (
+            <ContextMenuItem onClick={() => onUnmuteChannel(channel.id)}>
+              <Bell className="h-4 w-4" />
+              Unmute channel
+            </ContextMenuItem>
+          ) : (
+            <ContextMenuItem onClick={() => onMuteChannel(channel.id)}>
+              <BellOff className="h-4 w-4" />
+              Mute channel
+            </ContextMenuItem>
+          )}
+        </>
+      ) : null}
+      {sections &&
       assignments &&
       onAssignChannel &&
       onUnassignChannel &&
-      onCreateSectionForChannel,
-  );
-
-  return (
-    <>
-      <CopyChannelSubmenu channel={channel} />
-      {showMove ? (
-        <MoveToSectionSubmenu
-          channelId={channel.id}
-          sections={sections ?? []}
-          assignments={assignments ?? {}}
-          onAssignChannel={onAssignChannel ?? (() => {})}
-          onUnassignChannel={onUnassignChannel ?? (() => {})}
-          onCreateSectionForChannel={onCreateSectionForChannel ?? (() => {})}
-        />
+      onCreateSectionForChannel ? (
+        <>
+          <ContextMenuSeparator />
+          <MoveToSectionSubmenu
+            channelId={channel.id}
+            sections={sections}
+            assignments={assignments}
+            onAssignChannel={onAssignChannel}
+            onUnassignChannel={onUnassignChannel}
+            onCreateSectionForChannel={onCreateSectionForChannel}
+          />
+        </>
       ) : null}
-      {showReadToggle ? <ContextMenuSeparator /> : null}
-      {hasUnread && onMarkChannelRead ? (
-        <ContextMenuItem
-          onSelect={() =>
-            deferContextMenuAction(() =>
-              onMarkChannelRead(channel.id, channel.lastMessageAt),
-            )
-          }
-        >
-          <ContextMenuIconSlot>
-            <CheckCircle2 className="h-4 w-4" />
-          </ContextMenuIconSlot>
-          <span>Mark as read</span>
-        </ContextMenuItem>
-      ) : !hasUnread && onMarkChannelUnread ? (
-        <ContextMenuItem
-          onSelect={() =>
-            deferContextMenuAction(() => onMarkChannelUnread(channel.id))
-          }
-        >
-          <ContextMenuIconSlot>
-            <CircleDot className="h-4 w-4" />
-          </ContextMenuIconSlot>
-          <span>Mark unread</span>
-        </ContextMenuItem>
-      ) : null}
-      {showMuteToggle || showStar ? <ContextMenuSeparator /> : null}
-      {showMuteToggle ? (
-        isMuted ? (
-          <ContextMenuItem
-            onSelect={() =>
-              deferContextMenuAction(() => onUnmuteChannel?.(channel.id))
-            }
-          >
-            <ContextMenuIconSlot>
-              <Bell className="h-4 w-4" />
-            </ContextMenuIconSlot>
-            <span>Unmute channel</span>
-          </ContextMenuItem>
-        ) : (
-          <ContextMenuItem
-            onSelect={() =>
-              deferContextMenuAction(() => onMuteChannel?.(channel.id))
-            }
-          >
-            <ContextMenuIconSlot>
-              <BellOff className="h-4 w-4" />
-            </ContextMenuIconSlot>
-            <span>Mute channel</span>
-          </ContextMenuItem>
-        )
-      ) : null}
-      {showStar ? (
-        isStarred ? (
-          <ContextMenuItem
-            onSelect={() =>
-              deferContextMenuAction(() => onUnstarChannel?.(channel.id))
-            }
-          >
-            <ContextMenuIconSlot>
-              <StarOff className="h-4 w-4" />
-            </ContextMenuIconSlot>
-            <span>Unstar channel</span>
-          </ContextMenuItem>
-        ) : (
-          <ContextMenuItem
-            onSelect={() =>
-              deferContextMenuAction(() => onStarChannel?.(channel.id))
-            }
-          >
-            <ContextMenuIconSlot>
-              <Star className="h-4 w-4" />
-            </ContextMenuIconSlot>
-            <span>Star channel</span>
-          </ContextMenuItem>
-        )
-      ) : null}
+      <ContextMenuSeparator />
+      <ContextMenuItem
+        onClick={() =>
+          copyToClipboard(channel.name, "Channel name copied to clipboard")
+        }
+      >
+        <Copy className="h-4 w-4" />
+        Copy channel name
+      </ContextMenuItem>
+      <ContextMenuItem
+        onClick={() =>
+          copyToClipboard(channel.id, "Channel ID copied to clipboard")
+        }
+      >
+        <Clipboard className="h-4 w-4" />
+        Copy channel ID
+      </ContextMenuItem>
       {onLeaveChannel ? (
         <>
           <ContextMenuSeparator />
           <ContextMenuItem
             className="text-destructive focus:text-destructive"
-            onSelect={() =>
-              deferContextMenuAction(() => onLeaveChannel(channel))
-            }
+            onClick={() => onLeaveChannel(channel)}
           >
-            <ContextMenuIconSlot>
-              <LogOut className="h-4 w-4" />
-            </ContextMenuIconSlot>
-            <span>Leave channel</span>
+            <LogOut className="h-4 w-4" />
+            Leave channel
           </ContextMenuItem>
         </>
       ) : null}
@@ -421,97 +318,6 @@ function SectionHeaderActions({
         </button>
       ) : null}
     </div>
-  );
-}
-
-function CustomSectionActionsMenu({
-  sectionId,
-  sectionName,
-  hasUnread,
-  isFirst,
-  isLast,
-  onMarkSectionRead,
-  onRenameSection,
-  onDeleteSection,
-  onMoveSectionUp,
-  onMoveSectionDown,
-}: {
-  sectionId: string;
-  sectionName: string;
-  hasUnread: boolean;
-  isFirst: boolean;
-  isLast: boolean;
-  onMarkSectionRead: () => void;
-  onRenameSection: () => void;
-  onDeleteSection: () => void;
-  onMoveSectionUp: () => void;
-  onMoveSectionDown: () => void;
-}) {
-  const triggerRef = useRef<HTMLButtonElement>(null);
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          aria-label={`Open actions for ${sectionName}`}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            CUSTOM_SECTION_ACTION_VISIBILITY_CLASS,
-          )}
-          data-testid={`section-actions-${sectionId}`}
-          onClick={(event) => event.stopPropagation()}
-          onPointerDown={(event) => event.stopPropagation()}
-          ref={triggerRef}
-          type="button"
-        >
-          <EllipsisVertical className="h-4 w-4" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          triggerRef.current?.blur();
-        }}
-      >
-        {hasUnread ? (
-          <DropdownMenuItem
-            onSelect={() => deferContextMenuAction(onMarkSectionRead)}
-          >
-            <CheckCheck className="h-4 w-4" />
-            <span>Mark all as read</span>
-          </DropdownMenuItem>
-        ) : null}
-        <DropdownMenuItem
-          onSelect={() => deferContextMenuAction(onRenameSection)}
-        >
-          <Pencil className="h-4 w-4" />
-          <span>Rename section</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={isFirst}
-          onSelect={() => deferContextMenuAction(onMoveSectionUp)}
-        >
-          <ArrowUp className="h-4 w-4" />
-          <span>Move up</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          disabled={isLast}
-          onSelect={() => deferContextMenuAction(onMoveSectionDown)}
-        >
-          <ArrowDown className="h-4 w-4" />
-          <span>Move down</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          className="text-destructive focus:text-destructive"
-          onSelect={() => deferContextMenuAction(onDeleteSection)}
-        >
-          <Trash2 className="h-4 w-4" />
-          <span>Delete section</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
@@ -780,111 +586,97 @@ export function CustomChannelSection({
           >
             <ContextMenu>
               <ContextMenuTrigger asChild>
-                <div
-                  className="group/section-header relative"
-                  {...dragHandleProps}
-                >
+                <div className="relative" {...dragHandleProps}>
                   <SidebarGroupLabel asChild>
                     <button
                       aria-controls={contentId}
                       aria-expanded={!isCollapsed}
-                      className={CUSTOM_SECTION_LABEL_BUTTON_CLASS}
+                      className={SECTION_LABEL_BUTTON_CLASS}
                       onClick={onToggleCollapsed}
                       type="button"
                     >
-                      {section.icon ? (
-                        <span
-                          aria-hidden="true"
-                          className="flex h-4 w-4 shrink-0 items-center justify-center"
-                          data-testid={`section-icon-${section.id}`}
-                        >
-                          <StatusEmoji
-                            className="h-4 w-4"
-                            value={section.icon}
-                          />
-                        </span>
-                      ) : null}
-                      <span
-                        className="truncate"
-                        data-testid={`section-title-${section.id}`}
-                      >
-                        {section.name}
-                      </span>
-                      <span
+                      <GripVertical
+                        className={cn(
+                          "h-4 w-4 shrink-0 text-sidebar-foreground/30",
+                          SECTION_ACTION_VISIBILITY_CLASS,
+                        )}
                         aria-hidden="true"
-                        className={SECTION_LABEL_CHEVRON_CLASS}
-                      >
-                        <ChevronDown
-                          className={cn(
-                            SECTION_LABEL_CHEVRON_ICON_CLASS,
-                            isCollapsed ? "-rotate-90" : "rotate-0",
-                          )}
-                        />
-                      </span>
+                      />
+                      <span>{section.name}</span>
+                      <ChevronDown
+                        aria-hidden="true"
+                        className={cn(
+                          SECTION_LABEL_CHEVRON_CLASS,
+                          isCollapsed ? "-rotate-90" : "rotate-0",
+                        )}
+                      />
                     </button>
                   </SidebarGroupLabel>
-                  <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
-                    <CustomSectionActionsMenu
-                      sectionId={section.id}
-                      sectionName={section.name}
-                      hasUnread={hasUnread}
-                      isFirst={isFirst}
-                      isLast={isLast}
-                      onMarkSectionRead={onMarkSectionRead}
-                      onRenameSection={onRenameSection}
-                      onDeleteSection={onDeleteSection}
-                      onMoveSectionUp={onMoveSectionUp}
-                      onMoveSectionDown={onMoveSectionDown}
-                    />
+                  <div
+                    className={cn(
+                      "absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5",
+                      SECTION_ACTION_VISIBILITY_CLASS,
+                    )}
+                  >
+                    {hasUnread ? (
+                      <button
+                        aria-label="Mark all as read"
+                        className={SECTION_ICON_BUTTON_CLASS}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMarkSectionRead();
+                        }}
+                        title="Mark all as read"
+                        type="button"
+                      >
+                        <CheckCheck className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                    <button
+                      aria-label="Rename section"
+                      className={SECTION_ICON_BUTTON_CLASS}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRenameSection();
+                      }}
+                      type="button"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    <button
+                      aria-label="Delete section"
+                      className={SECTION_ICON_BUTTON_CLASS}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteSection();
+                      }}
+                      type="button"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
                   </div>
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent>
-                {hasUnread ? (
-                  <ContextMenuItem
-                    onSelect={() => deferContextMenuAction(onMarkSectionRead)}
-                  >
-                    <ContextMenuIconSlot>
-                      <CheckCheck className="h-4 w-4" />
-                    </ContextMenuIconSlot>
-                    <span>Mark all as read</span>
-                  </ContextMenuItem>
-                ) : null}
-                <ContextMenuItem
-                  onSelect={() => deferContextMenuAction(onRenameSection)}
-                >
-                  <ContextMenuIconSlot>
-                    <Pencil className="h-4 w-4" />
-                  </ContextMenuIconSlot>
-                  <span>Rename section</span>
+                <ContextMenuItem onClick={onRenameSection}>
+                  <Pencil className="h-4 w-4" />
+                  Rename section
                 </ContextMenuItem>
-                <ContextMenuItem
-                  disabled={isFirst}
-                  onSelect={() => deferContextMenuAction(onMoveSectionUp)}
-                >
-                  <ContextMenuIconSlot>
-                    <ArrowUp className="h-4 w-4" />
-                  </ContextMenuIconSlot>
-                  <span>Move up</span>
+                <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
+                  <ArrowUp className="h-4 w-4" />
+                  Move up
                 </ContextMenuItem>
-                <ContextMenuItem
-                  disabled={isLast}
-                  onSelect={() => deferContextMenuAction(onMoveSectionDown)}
-                >
-                  <ContextMenuIconSlot>
-                    <ArrowDown className="h-4 w-4" />
-                  </ContextMenuIconSlot>
-                  <span>Move down</span>
+                <ContextMenuItem disabled={isLast} onClick={onMoveSectionDown}>
+                  <ArrowDown className="h-4 w-4" />
+                  Move down
                 </ContextMenuItem>
                 <ContextMenuSeparator />
                 <ContextMenuItem
                   className="text-destructive focus:text-destructive"
-                  onSelect={() => deferContextMenuAction(onDeleteSection)}
+                  onClick={onDeleteSection}
                 >
-                  <ContextMenuIconSlot>
-                    <Trash2 className="h-4 w-4" />
-                  </ContextMenuIconSlot>
-                  <span>Delete section</span>
+                  <Trash2 className="h-4 w-4" />
+                  Delete section
                 </ContextMenuItem>
               </ContextMenuContent>
             </ContextMenu>

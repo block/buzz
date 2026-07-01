@@ -21,8 +21,8 @@ import type {
 export function useChannelSections(pubkey: string | undefined): {
   sections: ChannelSection[];
   assignments: Record<string, string>;
-  createSection: (name: string, icon?: string) => ChannelSection | null;
-  renameSection: (sectionId: string, newName: string, icon?: string) => void;
+  createSection: (name: string) => ChannelSection | null;
+  renameSection: (sectionId: string, newName: string) => void;
   deleteSection: (sectionId: string) => void;
   moveSectionUp: (sectionId: string) => void;
   moveSectionDown: (sectionId: string) => void;
@@ -165,18 +165,16 @@ export function useChannelSections(pubkey: string | undefined): {
   );
 
   const createSection = React.useCallback(
-    (name: string, icon?: string): ChannelSection | null => {
+    (name: string): ChannelSection | null => {
       if (!pubkey) return null;
       const prev = readChannelSectionsStore(pubkey);
       const maxOrder =
         prev.sections.length > 0
           ? Math.max(...prev.sections.map((s) => s.order))
           : -1;
-      const trimmedIcon = icon?.trim();
       const section: ChannelSection = {
         id: crypto.randomUUID(),
         name,
-        ...(trimmedIcon ? { icon: trimmedIcon } : {}),
         order: maxOrder + 1,
       };
       setStore((current) => {
@@ -194,24 +192,16 @@ export function useChannelSections(pubkey: string | undefined): {
   );
 
   const renameSection = React.useCallback(
-    (sectionId: string, newName: string, icon?: string) => {
+    (sectionId: string, newName: string) => {
       if (!pubkey) {
         return;
       }
-      const trimmedIcon = icon?.trim();
       setStore((prev) => {
         const next: ChannelSectionStore = {
           ...prev,
-          sections: prev.sections.map((s) => {
-            if (s.id !== sectionId) return s;
-            const nextSection: ChannelSection = { ...s, name: newName };
-            if (trimmedIcon) {
-              nextSection.icon = trimmedIcon;
-            } else {
-              delete nextSection.icon;
-            }
-            return nextSection;
-          }),
+          sections: prev.sections.map((s) =>
+            s.id === sectionId ? { ...s, name: newName } : s,
+          ),
         };
         if (!writeChannelSectionsStore(pubkey, next)) {
           return prev;

@@ -421,8 +421,8 @@ export function AppSidebar({
   );
 
   const handleCreateSectionConfirm = React.useCallback(
-    (value: { name: string; icon?: string }) => {
-      const section = createSection(value.name, value.icon);
+    (name: string) => {
+      const section = createSection(name);
       if (!section) {
         return;
       }
@@ -877,10 +877,9 @@ export function AppSidebar({
           if (!open) setRenameSectionTarget(null);
         }}
         sectionName={renameSectionTarget?.name ?? ""}
-        sectionIcon={renameSectionTarget?.icon ?? ""}
-        onConfirm={(value) => {
+        onConfirm={(newName) => {
           if (renameSectionTarget) {
-            renameSection(renameSectionTarget.id, value.name, value.icon);
+            renameSection(renameSectionTarget.id, newName);
           }
           setRenameSectionTarget(null);
         }}

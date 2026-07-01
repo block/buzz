@@ -48,18 +48,6 @@ test("parseChannelSectionPayload: valid complete payload returns correct store",
   });
 });
 
-test("parseChannelSectionPayload: preserves optional section icons", () => {
-  const payload = {
-    version: 1,
-    sections: [{ id: "s1", name: "Work", icon: ":sparkles:", order: 0 }],
-    assignments: {},
-  };
-  const result = parseChannelSectionPayload(payload);
-  assert.deepEqual(result?.sections, [
-    { id: "s1", name: "Work", icon: ":sparkles:", order: 0 },
-  ]);
-});
-
 test("parseChannelSectionPayload: null input returns null", () => {
   assert.equal(parseChannelSectionPayload(null), null);
 });

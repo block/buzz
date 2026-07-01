@@ -1,11 +1,5 @@
 import * as React from "react";
-import {
-  AlertTriangle,
-  Brain,
-  ChevronDown,
-  Copy,
-  RefreshCw,
-} from "lucide-react";
+import { AlertTriangle, Brain, ChevronDown, RefreshCw } from "lucide-react";
 
 import { useAgentMemoryGraph } from "@/features/agent-memory/hooks";
 import type { MemoryTreeNode } from "@/features/agent-memory/lib/buildMemoryGraph";
@@ -14,7 +8,6 @@ import { cn } from "@/shared/lib/cn";
 import { Button, type ButtonProps } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { toast } from "sonner";
 
 const MEMORY_LIST_PREVIEW_LIMIT = 3;
 
@@ -268,14 +261,6 @@ function MemoryGraphView({
         </p>
       ) : null}
 
-      <div className="mb-1 flex items-center justify-end">
-        <MemoryCopyButton
-          label={`Copy all ${entries.length} memories`}
-          successMessage="Copied memories to clipboard"
-          value={formatMemoriesForClipboard(entries)}
-        />
-      </div>
-
       <div className="space-y-2" data-testid="agent-memory-list">
         {visibleEntries.map((entry) => (
           <MemoryEntryAccordion
@@ -369,66 +354,6 @@ function flattenTreeDescendants(node: MemoryTreeNode): EngramEntry[] {
     entries.push(...flattenTreeDescendants(child));
   }
   return entries;
-}
-
-function formatMemoryForClipboard(entry: EngramEntry): string {
-  return `${entry.slug}\n${entry.body}`;
-}
-
-function formatMemoriesForClipboard(entries: EngramEntry[]): string {
-  return entries.map(formatMemoryForClipboard).join("\n\n");
-}
-
-function MemoryCopyButton({
-  label,
-  successMessage,
-  value,
-}: {
-  label: string;
-  successMessage: string;
-  value: string;
-}) {
-  const [copying, setCopying] = React.useState(false);
-
-  const handleCopy = React.useCallback(
-    async (event: React.MouseEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setCopying(true);
-
-      try {
-        await navigator.clipboard.writeText(value);
-        toast.success(successMessage);
-      } catch (error) {
-        console.error("Failed to copy memory", error);
-        toast.error("Failed to copy memory");
-      } finally {
-        setCopying(false);
-      }
-    },
-    [successMessage, value],
-  );
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label={label}
-          className="h-7 w-7 text-muted-foreground hover:text-foreground"
-          data-testid="agent-memory-copy"
-          disabled={copying}
-          onClick={handleCopy}
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          <Copy className="h-4 w-4" />
-          <span className="sr-only">{label}</span>
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
 }
 
 const MEMORY_REF_PATTERN = /\[\[([^\]]+)\]\]/g;
@@ -579,33 +504,43 @@ function MemoryEntryAccordion({
   }, [open]);
 
   const content = (
-    <div className="min-w-0 flex-1">
-      <div
-        className={cn(
-          "text-sm font-semibold text-foreground",
-          !open && "line-clamp-2",
-        )}
-        ref={titleRef}
-      >
-        {hasDanglingRefs ? (
-          <AlertTriangle className="mr-1 inline-block h-4 w-4 align-[-2px] text-warning" />
-        ) : null}
-        <MemorySlugTitle slug={entry.slug} />
+    <>
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            "text-sm font-semibold text-foreground",
+            !open && "line-clamp-2",
+          )}
+          ref={titleRef}
+        >
+          {hasDanglingRefs ? (
+            <AlertTriangle className="mr-1 inline-block h-4 w-4 align-[-2px] text-warning" />
+          ) : null}
+          <MemorySlugTitle slug={entry.slug} />
+        </div>
+        <div
+          className={cn(
+            "mt-1 text-xs leading-5 text-foreground/70",
+            open ? "whitespace-pre-wrap wrap-break-word" : "line-clamp-2",
+          )}
+          ref={bodyRef}
+        >
+          {isEmpty ? (
+            <span className="italic text-foreground/50">(empty)</span>
+          ) : (
+            <MemoryBodyText body={entry.body} />
+          )}
+        </div>
       </div>
-      <div
-        className={cn(
-          "mt-1 text-xs leading-5 text-foreground/70",
-          open ? "whitespace-pre-wrap wrap-break-word" : "line-clamp-2",
-        )}
-        ref={bodyRef}
-      >
-        {isEmpty ? (
-          <span className="italic text-foreground/50">(empty)</span>
-        ) : (
-          <MemoryBodyText body={entry.body} />
-        )}
-      </div>
-    </div>
+      {canExpand ? (
+        <ChevronDown
+          className={cn(
+            "mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+            open && "rotate-180",
+          )}
+        />
+      ) : null}
+    </>
   );
 
   return (
@@ -614,49 +549,19 @@ function MemoryEntryAccordion({
       ref={articleRef}
     >
       {canExpand ? (
-        <div className="flex items-start gap-2 px-4 py-3 transition-colors hover:bg-muted/50">
-          <button
-            aria-expanded={open}
-            className="min-w-0 flex-1 text-left"
-            onClick={() => setOpen((value) => !value)}
-            type="button"
-          >
-            {content}
-            {hasDanglingRefs && open ? (
-              <MemoryDanglingRefsHint slugs={danglingRefsForEntry} />
-            ) : null}
-          </button>
-          <MemoryCopyButton
-            label={`Copy ${entry.slug} memory`}
-            successMessage="Copied memory to clipboard"
-            value={formatMemoryForClipboard(entry)}
-          />
-          <Button
-            aria-expanded={open}
-            aria-label={open ? "Collapse memory" : "Expand memory"}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
-            onClick={() => setOpen((value) => !value)}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <ChevronDown
-              className={cn(
-                "h-4 w-4 transition-transform",
-                open && "rotate-180",
-              )}
-            />
-          </Button>
-        </div>
+        <button
+          aria-expanded={open}
+          className="w-full px-4 py-3 text-left transition-colors hover:bg-muted/50"
+          onClick={() => setOpen((value) => !value)}
+          type="button"
+        >
+          <div className="flex items-start gap-3">{content}</div>
+          {hasDanglingRefs && open ? (
+            <MemoryDanglingRefsHint slugs={danglingRefsForEntry} />
+          ) : null}
+        </button>
       ) : (
-        <div className="flex items-start gap-2 px-4 py-3">
-          {content}
-          <MemoryCopyButton
-            label={`Copy ${entry.slug} memory`}
-            successMessage="Copied memory to clipboard"
-            value={formatMemoryForClipboard(entry)}
-          />
-        </div>
+        <div className="flex items-start gap-3 px-4 py-3">{content}</div>
       )}
     </article>
   );
