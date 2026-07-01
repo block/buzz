@@ -31,6 +31,10 @@ export type PageOlderResult = {
   hasOlderMessages: boolean;
 };
 
+// One paging pass per channel at a time: the background cold-load top-up and
+// a scroll-up fetch share the running pass instead of overlapping REQs.
+const inFlightPasses = new Map<string, Promise<PageOlderResult>>();
+
 /**
  * Page older history into the channel cache until the timeline has gained
  * {@link MIN_TOP_LEVEL_ROWS_PER_FETCH} visible rows, history runs out, or the
@@ -40,7 +44,26 @@ export type PageOlderResult = {
  * `shouldContinue` lets the caller bail mid-pass (e.g. channel switch). Returns
  * whether more history is believed to remain.
  */
-export async function pageOlderMessagesUntilRowFloor(
+export function pageOlderMessagesUntilRowFloor(
+  queryClient: QueryClient,
+  channelId: string,
+  shouldContinue: () => boolean,
+): Promise<PageOlderResult> {
+  const inFlight = inFlightPasses.get(channelId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const pass = runPageOlderPass(queryClient, channelId, shouldContinue).finally(
+    () => {
+      inFlightPasses.delete(channelId);
+    },
+  );
+  inFlightPasses.set(channelId, pass);
+  return pass;
+}
+
+async function runPageOlderPass(
   queryClient: QueryClient,
   channelId: string,
   shouldContinue: () => boolean,

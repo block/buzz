@@ -196,19 +196,20 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       // by `#e` in the background (it self-merges into the same cache key).
       void backfillAuxForMessages(queryClient, channel.id, history);
 
-      // Seed the cache, then — only if the cold window renders thinner than a
-      // normal scroll page — top it up to the same visible-row floor. A
-      // reply-heavy channel's 300-message cold load can be ~12 rows; a normal
-      // channel already clears the floor and skips the extra fetch entirely.
+      // Seed the cache and paint immediately; if the cold window renders
+      // thinner than a normal scroll page (reply-heavy channels), top it up
+      // in the background — it self-merges into the same cache key.
       queryClient.setQueryData<RelayEvent[]>(queryKey, mergedHistory);
       if (
         countTopLevelTimelineRows(mergedHistory) < MIN_TOP_LEVEL_ROWS_PER_FETCH
       ) {
-        await pageOlderMessagesUntilRowFloor(
+        void pageOlderMessagesUntilRowFloor(
           queryClient,
           channel.id,
           () => true,
-        );
+        ).catch((error) => {
+          console.error("Failed to top up channel history", channel.id, error);
+        });
       }
       return queryClient.getQueryData<RelayEvent[]>(queryKey) ?? mergedHistory;
     },
