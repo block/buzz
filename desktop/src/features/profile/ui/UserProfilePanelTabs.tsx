@@ -347,7 +347,6 @@ function ProfileLiveActivityEmbed({
   feedScope: ProfileActivityFeedScope;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
-  const now = useNow(1000);
   const [carouselApi, setCarouselApi] = React.useState<CarouselApi>();
   const [selectedIndex, setSelectedIndex] = React.useState(0);
   const [mountedChannelIds, setMountedChannelIds] = React.useState<Set<string>>(
@@ -447,11 +446,8 @@ function ProfileLiveActivityEmbed({
       : undefined) ??
     selectedTurn?.anchorAt ??
     null;
-  const lastLiveLabel = formatLastLiveLabel(lastLiveAt, now);
   const emptyState = feedScope.isLive ? "loading" : "idle";
-  const emptyDescription = feedScope.isLive
-    ? "Events will appear here shortly."
-    : "Live activity will appear here.";
+  const emptyDescription = "Live activity will appear here.";
   const openSelectedActivity = React.useCallback(() => {
     onOpenActivity(activeChannelId);
   }, [activeChannelId, onOpenActivity]);
@@ -470,19 +466,19 @@ function ProfileLiveActivityEmbed({
   if (slides.length === 0) {
     return (
       <section
-        aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+        aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
         className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
       >
         <button
-          aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+          aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
           className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={openSelectedActivity}
           type="button"
         />
         <LiveActivityOpenButton
           activeChannelId={activeChannelId}
-          label={lastLiveLabel}
+          lastLiveAt={lastLiveAt}
           onOpenActivity={onOpenActivity}
         />
         <ManagedAgentSessionPanel
@@ -514,19 +510,19 @@ function ProfileLiveActivityEmbed({
 
   return (
     <section
-      aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+      aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
       className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
     >
       <button
-        aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
+        aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
         className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         onClick={openSelectedActivity}
         type="button"
       />
       <LiveActivityOpenButton
         activeChannelId={activeChannelId}
-        label={lastLiveLabel}
+        lastLiveAt={lastLiveAt}
         onOpenActivity={onOpenActivity}
       />
       <Carousel
@@ -535,7 +531,7 @@ function ProfileLiveActivityEmbed({
           align: "start",
           containScroll: "trimSnaps",
           dragFree: false,
-          watchDrag: slides.length > 1,
+          watchDrag: false,
         }}
         setApi={setCarouselApi}
       >
@@ -658,13 +654,16 @@ function ActivityCarouselDots({
 
 function LiveActivityOpenButton({
   activeChannelId,
-  label,
+  lastLiveAt,
   onOpenActivity,
 }: {
   activeChannelId: string | null;
-  label: string;
+  lastLiveAt: number | null;
   onOpenActivity: (channelId?: string | null) => void;
 }) {
+  const now = useNow(15_000);
+  const label = formatLastLiveLabel(lastLiveAt, now);
+
   return (
     <Button
       aria-label={`Open full activity. Last live ${label}.`}
