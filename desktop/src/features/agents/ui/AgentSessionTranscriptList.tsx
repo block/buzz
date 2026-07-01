@@ -93,6 +93,14 @@ export function AgentSessionTranscriptList({
     scrollContainerRef,
   });
 
+  React.useLayoutEffect(() => {
+    if (!autoTail || items.length === 0) {
+      return;
+    }
+
+    anchoredScroll.scrollToBottom("auto");
+  }, [anchoredScroll.scrollToBottom, autoTail, items]);
+
   if (items.length === 0) {
     return (
       <div className="flex min-h-40 flex-col items-center justify-center px-6 py-10 text-center">
