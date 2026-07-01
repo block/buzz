@@ -201,7 +201,16 @@ pub async fn search_users(
         )
         .await?;
 
-        return Ok(nostr_convert::list_user_search_results(&events, max));
+        // Emit a real next page cursor when the relay returned a full page, so
+        // the empty-query people directory can page past its first page (the
+        // relay honors `page`→offset for this non-search kind:0 listing). The
+        // raw `events.len()` is the correct fullness signal — `list_user_search_results`
+        // dedupes/truncates, so its output length can undercount a full page.
+        let mut response = nostr_convert::list_user_search_results(&events, max);
+        if events.len() >= max {
+            response.next_cursor = Some((page + 1).to_string());
+        }
+        return Ok(response);
     }
 
     // NIP-50 full-text search on kind:0 profiles. The relay's HTTP bridge

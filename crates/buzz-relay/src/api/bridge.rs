@@ -274,6 +274,25 @@ fn extract_search_page(raw: &Value) -> u32 {
         .unwrap_or(1)
 }
 
+/// Compute the SQL `OFFSET` for a raw `page` extension on a non-search general
+/// query, or `None` if paging shouldn't apply.
+///
+/// `page` is 1-based: page 1 → offset 0 (no change), page N → `(N-1) * limit`.
+/// Returns `None` when `page` is absent or ≤ 1 (so unrelated general queries
+/// keep their default offset) and when `limit` is missing (can't size a page).
+/// This mirrors the FTS path's `page`/`per_page` for the non-search directory
+/// listing (empty-query kind:0), whose deterministic `created_at DESC, id ASC`
+/// ordering in `query_events` makes offset paging stable.
+fn extract_page_offset(raw: &Value, limit: Option<i64>) -> Option<i64> {
+    let page = raw
+        .get("page")
+        .and_then(Value::as_u64)
+        .and_then(|value| i64::try_from(value).ok())
+        .filter(|value| *value > 1)?;
+    let per_page = limit.filter(|l| *l > 0)?;
+    page.checked_sub(1)?.checked_mul(per_page)
+}
+
 fn event_in_accessible_channel(se: &buzz_core::StoredEvent, accessible: &[uuid::Uuid]) -> bool {
     match se.channel_id {
         Some(ch_id) => accessible.contains(&ch_id),
@@ -644,6 +663,18 @@ pub async fn query_events(
                 ));
             }
             query.before_id = Some(bid);
+        }
+
+        // Honor `page` on non-search general queries so offset paging works for
+        // the empty-query people directory (kind:0 listing). The FTS path
+        // (`handle_bridge_search`) has its own `page`/`per_page`; a filter with
+        // no `search` field lands here instead, where paging would otherwise be
+        // dropped and the directory would terminate at its first page. Deterministic
+        // ordering in `query_events` (`created_at DESC, id ASC`) makes offset paging
+        // stable. `page` defaults to 1 → offset 0, so unrelated general queries are
+        // unaffected.
+        if let Some(offset) = extract_page_offset(raw, query.limit) {
+            query.offset = Some(offset);
         }
 
         match state.db.query_events(&query).await {
@@ -1883,6 +1914,34 @@ mod tests {
     fn extract_before_id_non_string() {
         let raw = serde_json::json!({ "before_id": 12345 });
         assert!(extract_before_id(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_page_offset_absent_is_none() {
+        // No `page` → default offset (unrelated general queries untouched).
+        let raw = serde_json::json!({ "kinds": [0], "limit": 50 });
+        assert_eq!(extract_page_offset(&raw, Some(50)), None);
+    }
+
+    #[test]
+    fn extract_page_offset_page_one_is_none() {
+        // Page 1 is the first page → offset 0, expressed as no override.
+        let raw = serde_json::json!({ "kinds": [0], "limit": 50, "page": 1 });
+        assert_eq!(extract_page_offset(&raw, Some(50)), None);
+    }
+
+    #[test]
+    fn extract_page_offset_computes_offset_from_page_and_limit() {
+        // Empty people-directory contract: page N → (N-1) * limit.
+        let raw = serde_json::json!({ "kinds": [0], "limit": 50, "page": 3 });
+        assert_eq!(extract_page_offset(&raw, Some(50)), Some(100));
+    }
+
+    #[test]
+    fn extract_page_offset_missing_limit_is_none() {
+        // Can't size a page without a limit.
+        let raw = serde_json::json!({ "kinds": [0], "page": 2 });
+        assert_eq!(extract_page_offset(&raw, None), None);
     }
 
     #[test]
