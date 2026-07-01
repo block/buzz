@@ -62,8 +62,9 @@ const overrides = new Map([
   // branch cut; override bumped to cover the merged total. Queued to split.
   // global-agent-config: build_deploy_payload threads global config fallback
   // for provider/model/env_vars (+4 lines). cargo fmt reflowed 2 more lines.
+  // deploy-resolver: resolve_deploy_model_provider fn + doc comment (+6 lines).
   // Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1443],
+  ["src-tauri/src/commands/agents.rs", 1449],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
