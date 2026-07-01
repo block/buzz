@@ -167,19 +167,13 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             return Err(MediaError::HashMismatch);
         }
 
-        // 5. Open-relay guard. When membership is disabled but the deployment is
-        // otherwise configured for production auth, reject before body read
-        // rather than turning any valid Blossom signer into unrestricted blob
-        // storage. Community deployments should use the NIP-43 gate below.
-        enforce_media_storage_boundary(
-            state.config.require_auth_token,
-            state.config.require_relay_membership,
-        )?;
-
-        // 6. Relay membership gate (NIP-43). Blossom auth proves the signer
+        // 5. Relay membership gate (NIP-43). Blossom auth proves the signer
         // authorized this exact upload hash for this server; NIP-43 answers
-        // whether that Nostr key may use this community's media store. This path
-        // is intentionally independent of bearer-token / api_tokens storage.
+        // whether that Nostr key may use this community's media store. This is
+        // the only upload authority: independent of bearer-token / api_tokens
+        // storage and of `require_auth_token` (which governs the REST API, not
+        // media). On open relays (membership disabled) any valid Blossom signer
+        // may upload, matching the WS door's admission policy.
         let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
         crate::api::relay_members::enforce_relay_membership(
             state,
@@ -745,45 +739,11 @@ fn extract_blossom_auth(headers: &HeaderMap) -> Result<nostr::Event, MediaError>
     Ok(event)
 }
 
-/// Media storage is Nostr-authenticated, but an open relay with production auth
-/// enabled has no community boundary for blob writes. Keep that configuration
-/// fail-closed. Development/open deployments can still opt into Blossom-only
-/// uploads by setting `BUZZ_REQUIRE_AUTH_TOKEN=false`; no bearer token is ever
-/// accepted for media upload.
-fn enforce_media_storage_boundary(
-    require_auth_token: bool,
-    require_relay_membership: bool,
-) -> Result<(), MediaError> {
-    if !require_relay_membership && require_auth_token {
-        return Err(MediaError::Unauthorized);
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-
-    #[test]
-    fn closed_relay_media_boundary_is_membership_not_bearer_token() {
-        assert!(enforce_media_storage_boundary(true, true).is_ok());
-    }
-
-    #[test]
-    fn open_relay_production_media_boundary_fails_closed_without_membership() {
-        assert!(matches!(
-            enforce_media_storage_boundary(true, false),
-            Err(MediaError::Unauthorized)
-        ));
-    }
-
-    #[test]
-    fn open_relay_dev_media_boundary_allows_blossom_only_uploads() {
-        assert!(enforce_media_storage_boundary(false, false).is_ok());
-    }
 
     #[test]
     fn test_validate_media_path_bare_hash() {
