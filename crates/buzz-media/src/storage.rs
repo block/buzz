@@ -22,18 +22,43 @@ pub struct MediaStorage {
 
 impl MediaStorage {
     /// Create a new storage client from config.
+    ///
+    /// Credential selection:
+    /// - If both `s3_access_key` and `s3_secret_key` are non-empty, use them as
+    ///   static credentials (MinIO/local/dev, or any static-key deployment).
+    /// - Otherwise, fall back to the AWS default credential chain via
+    ///   [`Credentials::default`]: environment, shared profile, web-identity
+    ///   token (IRSA on EKS — `AssumeRoleWithWebIdentity`), container, and
+    ///   instance-metadata providers, in that order. This lets the relay use
+    ///   the pod's IAM role without long-lived static keys.
     pub fn new(config: &MediaConfig) -> Result<Self, MediaError> {
         let region = Region::Custom {
-            region: "us-east-1".into(),
+            region: config.s3_region.clone(),
             endpoint: config.s3_endpoint.clone(),
         };
-        let creds = Credentials::new(
-            Some(&config.s3_access_key),
-            Some(&config.s3_secret_key),
-            None,
-            None,
-            None,
-        )
+        let creds = match (
+            config.s3_access_key.is_empty(),
+            config.s3_secret_key.is_empty(),
+        ) {
+            (false, false) => Credentials::new(
+                Some(&config.s3_access_key),
+                Some(&config.s3_secret_key),
+                None,
+                None,
+                None,
+            ),
+            (true, true) => {
+                // No static keys configured: resolve from the AWS credential chain
+                // (IRSA web-identity, env, profile, instance metadata).
+                Credentials::default()
+            }
+            _ => {
+                return Err(MediaError::StorageError(
+                    "s3_access_key and s3_secret_key must be configured together, or both empty to use the AWS credential chain"
+                        .to_string(),
+                ));
+            }
+        }
         .map_err(|e| MediaError::StorageError(e.to_string()))?;
         let bucket = Bucket::new(&config.s3_bucket, region, creds)
             .map_err(|e| MediaError::StorageError(e.to_string()))?
@@ -217,6 +242,55 @@ mod tests {
             CommunityId::from_uuid(uuid::Uuid::from_u128(n)),
             "media.example",
         )
+    }
+
+    fn storage_config(access: &str, secret: &str) -> crate::config::MediaConfig {
+        crate::config::MediaConfig {
+            s3_endpoint: "http://localhost:9000".to_string(),
+            s3_access_key: access.to_string(),
+            s3_secret_key: secret.to_string(),
+            s3_bucket: "buzz-media".to_string(),
+            s3_region: "us-west-2".to_string(),
+            max_image_bytes: 50 * 1024 * 1024,
+            max_gif_bytes: 10 * 1024 * 1024,
+            max_video_bytes: 524_288_000,
+            max_file_bytes: 104_857_600,
+            public_base_url: "http://localhost:3000/media".to_string(),
+        }
+    }
+
+    /// Static keys present: builds a client without touching the AWS
+    /// credential chain (no env/metadata access), and the signing region
+    /// comes from config rather than a hardcoded "us-east-1".
+    #[test]
+    fn static_keys_build_client_with_configured_region() {
+        let storage = MediaStorage::new(&storage_config("buzz_dev", "buzz_dev_secret"))
+            .expect("static creds should build a client");
+        match storage.bucket.region {
+            Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
+            other => panic!("expected Custom region, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_static_keys_are_rejected() {
+        let err = match MediaStorage::new(&storage_config("buzz_dev", "")) {
+            Ok(_) => panic!("partial static creds must not silently use credential chain"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("must be configured together"),
+            "unexpected error: {err}"
+        );
+
+        let err = match MediaStorage::new(&storage_config("", "buzz_dev_secret")) {
+            Ok(_) => panic!("partial static creds must not silently use credential chain"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("must be configured together"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

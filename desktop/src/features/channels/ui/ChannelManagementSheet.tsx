@@ -37,8 +37,11 @@ import {
   formatTtlDuration,
   parseTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -133,9 +136,38 @@ export function ChannelManagementSheet({
   const selfMember =
     members.find((member) => member.pubkey === currentPubkey) ?? null;
   const hasResolvedMembership = membersQuery.data !== undefined;
-  const isOwner = selfMember?.role === "owner";
+
+  // Collect owner-role member pubkeys to look up their NIP-OA ownerPubkey.
+  // This is what surfaces the "you own the agent that owns this channel" path.
+  const ownerMemberPubkeys = React.useMemo(
+    () =>
+      members
+        .filter((m) => m.role === "owner" && m.pubkey !== currentPubkey)
+        .map((m) => m.pubkey),
+    [members, currentPubkey],
+  );
+  const ownerProfilesQuery = useUsersBatchQuery(ownerMemberPubkeys, {
+    enabled: open && ownerMemberPubkeys.length > 0,
+  });
+  // True when an owner-role member of this channel is an agent owned by the
+  // current user — mirrors the relay's is_agent_owner gate.
+  const canManageOwnedAgentChannel = React.useMemo(() => {
+    if (!currentPubkey || !ownerProfilesQuery.data) return false;
+    return ownerMemberPubkeys.some((pubkey) =>
+      ownsAuthorAgent(
+        ownerProfilesQuery.data?.profiles[normalizePubkey(pubkey)],
+        currentPubkey,
+      ),
+    );
+  }, [currentPubkey, ownerMemberPubkeys, ownerProfilesQuery.data]);
+
+  const isSelfOwner = selfMember?.role === "owner";
+  // Capability: may delete this channel (self-owner OR owns the agent-owner).
+  const canDeleteChannel = isSelfOwner || canManageOwnedAgentChannel;
   const canManageChannel =
-    selfMember?.role === "owner" || selfMember?.role === "admin";
+    selfMember?.role === "owner" ||
+    selfMember?.role === "admin" ||
+    canManageOwnedAgentChannel;
   const canEditNarrative =
     canManageChannel && selfMember !== null && detail?.channelType !== "dm";
   const isArchived =
@@ -353,7 +385,7 @@ export function ChannelManagementSheet({
             isArchived={isArchived}
             isDark={isDark}
             isDeleteDialogOpen={isDeleteDialogOpen}
-            isOwner={isOwner}
+            canDeleteChannel={canDeleteChannel}
             mode={auxiliaryPanelMode}
             transparentChrome={transparentChrome}
             joinChannelMutation={joinChannelMutation}
@@ -399,7 +431,7 @@ export function ChannelManagementSheet({
               isArchived={isArchived}
               isDark={isDark}
               isDeleteDialogOpen={isDeleteDialogOpen}
-              isOwner={isOwner}
+              canDeleteChannel={canDeleteChannel}
               mode={auxiliaryPanelMode}
               transparentChrome={transparentChrome}
               joinChannelMutation={joinChannelMutation}
@@ -635,7 +667,7 @@ type ChannelManagementPanelContentProps = {
   isArchived: boolean;
   isDark: boolean;
   isDeleteDialogOpen: boolean;
-  isOwner: boolean;
+  canDeleteChannel: boolean; // true when caller may delete the channel
   mode: AuxiliaryPanelMode;
   transparentChrome?: boolean;
   joinChannelMutation: ChannelMutation;
@@ -667,7 +699,7 @@ function ChannelManagementPanelContent({
   isArchived,
   isDark,
   isDeleteDialogOpen,
-  isOwner,
+  canDeleteChannel,
   mode,
   transparentChrome = false,
   joinChannelMutation,
@@ -933,7 +965,7 @@ function ChannelManagementPanelContent({
           isArchived={isArchived}
           isDark={isDark}
           isDeleteDialogOpen={isDeleteDialogOpen}
-          isOwner={isOwner}
+          canDeleteChannel={canDeleteChannel}
           resolvedChannelName={resolvedChannel.name}
           unarchiveChannelMutation={unarchiveChannelMutation}
         />

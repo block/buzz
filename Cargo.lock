@@ -1109,6 +1109,7 @@ dependencies = [
  "anyhow",
  "base64",
  "buzz-core",
+ "buzz-sdk",
  "buzz-ws-client",
  "chrono",
  "futures-util",

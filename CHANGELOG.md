@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.3.40
+
+- fix(desktop): stabilize channel-timeline scrollback with per-row height reserves ([#1413](https://github.com/block/buzz/pull/1413)) ([`4fdc68f1`](https://github.com/block/buzz/commit/4fdc68f1568364b3e44d7003c83a9a4ad961e1ee))
+- fix(sidebar): trim working badge label and name working agents in tooltip ([#1408](https://github.com/block/buzz/pull/1408)) ([`697f63dd`](https://github.com/block/buzz/commit/697f63ddcc45df71e48a0c0ac81adada67a056e1))
+- Mobile tab bar polish ([#1368](https://github.com/block/buzz/pull/1368)) ([`c444e344`](https://github.com/block/buzz/commit/c444e3445bba4967246f790a296237cc597336a9))
+- feat(desktop): let thread pane expand on ultrawide monitors ([#1407](https://github.com/block/buzz/pull/1407)) ([`f86f97bb`](https://github.com/block/buzz/commit/f86f97bbde1e3ee914ef2d6ef385482f15a43d6a))
+
+
+## v0.3.39
+
+- fix: close cross-process keychain race and namespace dev-build nest ([#1409](https://github.com/block/buzz/pull/1409)) ([`e8adc3383`](https://github.com/block/buzz/commit/e8adc3383fae3060124ed212d00538d543be0054))
+- feat(relay): allow agent owners to edit/manage agent-owned content ([#1403](https://github.com/block/buzz/pull/1403)) ([`0042c8e10`](https://github.com/block/buzz/commit/0042c8e106d952f408cf4afca052f7053a7c967e))
+- fix(media): support IRSA/credential-chain S3 auth and configurable signing region ([#1406](https://github.com/block/buzz/pull/1406)) ([`06ef533ec`](https://github.com/block/buzz/commit/06ef533ec7fec6cf7366f52d3b9fe2f83011bf24))
+- fix(desktop): fold baked build env into in-process model discovery ([#1376](https://github.com/block/buzz/pull/1376)) ([`f061ae9c8`](https://github.com/block/buzz/commit/f061ae9c879e95f650fb99347920763361d1fe22))
+- docs: link VISION_ACTIVITY from the VISION index ([#1405](https://github.com/block/buzz/pull/1405)) ([`aa1042b16`](https://github.com/block/buzz/commit/aa1042b1629466a94983d098e706a3905c645e9d))
+- test(desktop): gate keychain-write test behind --ignored ([#1404](https://github.com/block/buzz/pull/1404)) ([`36f32291e`](https://github.com/block/buzz/commit/36f32291e79fc2069b8ef4cae3c90915232f702a))
+- Refactor oversized mobile widgets ([#1401](https://github.com/block/buzz/pull/1401)) ([`71b2c41e9`](https://github.com/block/buzz/commit/71b2c41e927ca9c4aa2fd0f0c4662d4c8de6479a))
+- perf(desktop): stop beachballs on agents menu and thread open ([#1402](https://github.com/block/buzz/pull/1402)) ([`34d61acc9`](https://github.com/block/buzz/commit/34d61acc9545676bb33e1675de2ab9f226242a29))
+- feat(desktop): rebuild agent activity feed around a classifier registry and twelve render classes ([#1381](https://github.com/block/buzz/pull/1381)) ([`5cc09e698`](https://github.com/block/buzz/commit/5cc09e6989198df3918db8bc67e3bf020e6e0838))
+- fix(thread): stop mid-scroll content jump in live threads ([#1397](https://github.com/block/buzz/pull/1397)) ([`42ec17f13`](https://github.com/block/buzz/commit/42ec17f1375f8886cda817921addda2c3bf55fd9))
+- fix(ci): restore main to green — tauri fmt, personas.rs file-size split, Windows path test ([#1399](https://github.com/block/buzz/pull/1399)) ([`67c47de69`](https://github.com/block/buzz/commit/67c47de69c8a0028bcc35c1f5e9de489a8df9fb5))
+- fix(desktop): enable buzz-dev-mcp MCP server for Codex agents ([#1394](https://github.com/block/buzz/pull/1394)) ([`b74ed858f`](https://github.com/block/buzz/commit/b74ed858ff337b9db186215b9cbbe43c89d63132))
+- fix(ci): restore E2E flakiness fixes for pgschema, docker-pull, and spec timing ([#1396](https://github.com/block/buzz/pull/1396)) ([`fdf29c457`](https://github.com/block/buzz/commit/fdf29c457d0a4b10f99a703130786f71f724aa69))
+- fix(personas): persist pack-backed persona UI edits across reboot ([#1392](https://github.com/block/buzz/pull/1392)) ([`a7e1202cc`](https://github.com/block/buzz/commit/a7e1202cc545983d2fc1449dcca2d778d5c0f88d))
+- fix(buzz-acp): clear steer_rx on all run_prompt_task exit paths ([#1391](https://github.com/block/buzz/pull/1391)) ([`10aaa72f0`](https://github.com/block/buzz/commit/10aaa72f017b2d4cb1423de10c36718097fcb6c0))
+- Restore channel date divider rule ([#1395](https://github.com/block/buzz/pull/1395)) ([`0827171d5`](https://github.com/block/buzz/commit/0827171d5e1db6332bfb819fcf4d8441ac82be1e))
+- Speed up profile wave action ([#1379](https://github.com/block/buzz/pull/1379)) ([`2fc5dd35b`](https://github.com/block/buzz/commit/2fc5dd35b1cf48297613f7c7caba811f5248b431))
+- Restore visible links for rich previews ([#1378](https://github.com/block/buzz/pull/1378)) ([`8d8fc6331`](https://github.com/block/buzz/commit/8d8fc6331f11da2904c2798c56c7833c13dfa090))
+- Mobile channel list polish ([#1367](https://github.com/block/buzz/pull/1367)) ([`09d8965ab`](https://github.com/block/buzz/commit/09d8965ab686e5c910b7a04a20df58488f50a60c))
+- style(desktop): unify corner radii to rounded-2xl (16px) ([#1393](https://github.com/block/buzz/pull/1393)) ([`2f496debc`](https://github.com/block/buzz/commit/2f496debce4961c88a20d7c0b497ec99626413b2))
+- fix(desktop): skip keychain write when blob contents are unchanged ([#1377](https://github.com/block/buzz/pull/1377)) ([`5a64ee4a6`](https://github.com/block/buzz/commit/5a64ee4a69d46d9cef816a04c14b9abc9313eaa6))
+- fix(desktop): stop clipping the agent-activity row under the composer ([#1371](https://github.com/block/buzz/pull/1371)) ([`2044ad76f`](https://github.com/block/buzz/commit/2044ad76f3dfd9f260a48cef176bed3b054f637d))
+- Constrain macOS overscroll to conversations ([#1317](https://github.com/block/buzz/pull/1317)) ([`9b711f47a`](https://github.com/block/buzz/commit/9b711f47a791810a7c46069648d1a280b9739c6e))
+- Mobile appearance foundation ([#1366](https://github.com/block/buzz/pull/1366)) ([`945e9b879`](https://github.com/block/buzz/commit/945e9b879ae2935312698a1e913cfb3009f8c10d))
+
+
 ## v0.3.38
 
 - feat(desktop): provider-agnostic model selection + databricks discovery ([#1307](https://github.com/block/buzz/pull/1307)) ([`eacbbe880`](https://github.com/block/buzz/commit/eacbbe880a50acf400ff7c162b5bc8705ab0063f))

@@ -676,7 +676,8 @@ pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::Publ
     event.pubkey.to_bytes().to_vec()
 }
 
-/// Validate kind:40003 edit ownership — event.pubkey must match target's effective author.
+/// Validate kind:40003 edit ownership — event.pubkey must match target's effective author,
+/// or the actor must be the owning human of the agent that authored the target message.
 async fn validate_edit_ownership(
     community_id: CommunityId,
     event: &Event,
@@ -723,8 +724,36 @@ async fn validate_edit_ownership(
 
     let author = effective_message_author(&target_event.event, &state.relay_keypair.public_key());
     let actor = event.pubkey.to_bytes().to_vec();
-    if author != actor {
-        return Err("must be event author to edit".to_string());
+    if author == actor {
+        // Author editing their own message: re-gate on membership/open visibility so that
+        // a removed private-channel member cannot mutate old messages after access is revoked.
+        if let Some(ch_id) = target_event.channel_id {
+            let is_member = state
+                .is_member_cached(community_id, ch_id, &actor)
+                .await
+                .map_err(|e| format!("db error checking membership: {e}"))?;
+            if !is_member {
+                let is_open = state
+                    .db
+                    .get_channel(community_id, ch_id)
+                    .await
+                    .map(|ch| ch.visibility == "open")
+                    .unwrap_or(false);
+                if !is_open {
+                    return Err("restricted: not a channel member".to_string());
+                }
+            }
+        }
+    } else {
+        // Allow the owning human to edit messages authored by their agent.
+        let is_owner = state
+            .db
+            .is_agent_owner(community_id, &author, &actor)
+            .await
+            .map_err(|e| format!("db error checking agent ownership: {e}"))?;
+        if !is_owner {
+            return Err("must be event author to edit".to_string());
+        }
     }
     Ok(())
 }
@@ -1379,8 +1408,17 @@ async fn ingest_event_inner(
     if let Some(ch_id) = channel_id {
         // kind:9021 (join) doesn't require prior membership.
         // kind:9007 (create) — channel doesn't exist yet; creator becomes owner in step 16.
-        let skip_membership =
-            kind_u32 == KIND_NIP29_JOIN_REQUEST || kind_u32 == KIND_NIP29_CREATE_GROUP;
+        // kind:40003/9002/9005/9008 — per-kind validators are the authority; they
+        // individually enforce authorization and fail closed. Bypassing the generic
+        // member/open gate here lets the owning human act on private agent channels
+        // without being a member (OQ1 decision; see validate_edit_ownership /
+        // validate_admin_event for per-kind enforcement).
+        let skip_membership = kind_u32 == KIND_NIP29_JOIN_REQUEST
+            || kind_u32 == KIND_NIP29_CREATE_GROUP
+            || kind_u32 == KIND_STREAM_MESSAGE_EDIT
+            || kind_u32 == KIND_NIP29_EDIT_METADATA
+            || kind_u32 == KIND_NIP29_DELETE_EVENT
+            || kind_u32 == KIND_NIP29_DELETE_GROUP;
         if !skip_membership {
             // Spec AuthCheck (line 794): emit the verdict at the actual
             // call site. claimed_community comes from the event's h tag

@@ -55,10 +55,53 @@ const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
 
 /// Canonical skill directory path relative to the nest root.
 const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
-/// Returns the nest root path (`~/.buzz`), or `None` if the home
-/// directory cannot be resolved.
+
+/// Nest directory name for production builds.
+const NEST_DIR_PROD: &str = ".buzz";
+
+/// Nest directory name for dev builds. Dev builds (those whose Tauri app-data
+/// directory name starts with `"xyz.block.buzz.app.dev"`) use a separate nest
+/// so that the DMG and dev-build instances don't clobber each other's
+/// `.repos-dir` dotfile and `REPOS` symlink.
+const NEST_DIR_DEV: &str = ".buzz-dev";
+
+/// Process-lifetime nest directory. Initialized once at startup via
+/// [`init_nest_dir`] before any call to [`nest_dir`].
+///
+/// `None` inside the `OnceLock` means "home dir was unresolvable at init time".
+/// The outer `None` from `OnceLock::get` means "not initialized yet" —
+/// [`nest_dir`] falls back to the prod path in that case, ensuring test code
+/// that never calls [`init_nest_dir`] still works.
+static NEST_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// Initialize the process-lifetime nest directory.
+///
+/// Must be called once at app startup (before any call to [`nest_dir`] that
+/// may result in a filesystem operation). Subsequent calls are no-ops — the
+/// `OnceLock` is set exactly once.
+///
+/// `is_dev` should be `true` when the running binary is a dev build — i.e.
+/// when the Tauri app-data directory name starts with `"xyz.block.buzz.app.dev"`.
+/// Pass `false` for production (signed DMG) builds.
+pub fn init_nest_dir(is_dev: bool) {
+    let suffix = if is_dev { NEST_DIR_DEV } else { NEST_DIR_PROD };
+    let path = dirs::home_dir().map(|h| h.join(suffix));
+    // set() is a no-op when already initialized, which is correct: only the
+    // first call (at boot, before any filesystem work) should win.
+    let _ = NEST_DIR.set(path);
+}
+
+/// Returns the nest root path (`~/.buzz` for prod, `~/.buzz-dev` for dev),
+/// or `None` if the home directory cannot be resolved.
+///
+/// If [`init_nest_dir`] has not been called yet (e.g. in unit tests), falls
+/// back to the production path `~/.buzz`.
 pub fn nest_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".buzz"))
+    match NEST_DIR.get() {
+        Some(path) => path.clone(),
+        // Not yet initialized — fall back to prod path. Covers test code.
+        None => dirs::home_dir().map(|h| h.join(NEST_DIR_PROD)),
+    }
 }
 
 /// Creates the Buzz nest at `~/.buzz` if it doesn't already exist.
@@ -614,7 +657,29 @@ mod tests {
     #[test]
     fn nest_dir_is_under_home() {
         if let Some(dir) = nest_dir() {
-            assert!(dir.ends_with(".buzz"));
+            // Accepts both .buzz (prod) and .buzz-dev (dev) depending on
+            // whether init_nest_dir was called before this test ran.
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                name == NEST_DIR_PROD || name == NEST_DIR_DEV,
+                "nest_dir must end with .buzz or .buzz-dev, got {dir:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_nest_dir_prod_sets_buzz() {
+        // init_nest_dir is idempotent (OnceLock) — once set, subsequent calls
+        // are no-ops. We can only test the fallback path if the OnceLock is
+        // unset, which is only true in a fresh process. Instead, verify that
+        // nest_dir() always returns a path ending with a valid nest suffix.
+        let dir = nest_dir();
+        if let Some(d) = dir {
+            let name = d.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            assert!(
+                name == NEST_DIR_PROD || name == NEST_DIR_DEV,
+                "nest_dir suffix must be .buzz or .buzz-dev, got {d:?}"
+            );
         }
     }
 

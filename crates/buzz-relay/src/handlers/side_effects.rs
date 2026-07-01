@@ -216,6 +216,30 @@ pub async fn validate_standard_deletion_event(
     Ok(())
 }
 
+/// Returns `true` if `actor_bytes` is the NIP-OA owner of **any** active owner-role
+/// member in `members`. Used by kind:9002 and kind:9008 to authorize the owning
+/// human of a channel's agent-owner(s) even when the human is not a channel member.
+///
+/// Checking all active owners (not just the first) is correct under co-ownership:
+/// an agent may be promoted to owner later, or multiple agents may co-own a channel.
+async fn actor_owns_any_owner_agent(
+    state: &Arc<AppState>,
+    community_id: buzz_core::CommunityId,
+    members: &[buzz_db::channel::MemberRecord],
+    actor_bytes: &[u8],
+) -> anyhow::Result<bool> {
+    for owner in members.iter().filter(|m| m.role == "owner") {
+        if state
+            .db
+            .is_agent_owner(community_id, &owner.pubkey, actor_bytes)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -459,9 +483,24 @@ pub async fn validate_admin_event(
                 let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
                 match actor_member {
                     Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    _ => Err(anyhow::anyhow!(
-                        "actor not authorized for name/about/archived/visibility/ttl changes"
-                    )),
+                    _ => {
+                        // Allow the owning human of any active owner-role agent in the
+                        // channel, even when the human is not a channel member —
+                        // diverges from kind:9001 intentionally.
+                        if actor_owns_any_owner_agent(
+                            state,
+                            tenant.community(),
+                            &members,
+                            &actor_bytes,
+                        )
+                        .await?
+                        {
+                            return Ok(());
+                        }
+                        Err(anyhow::anyhow!(
+                            "actor not authorized for name/about/archived/visibility/ttl changes"
+                        ))
+                    }
                 }
             } else {
                 // topic/purpose: any member
@@ -516,26 +555,66 @@ pub async fn validate_admin_event(
             let author =
                 effective_message_author(&target_event.event, &state.relay_keypair.public_key());
             if author == actor_bytes {
-                return Ok(()); // Author can always delete their own messages
+                // Author deleting their own message: re-gate on membership/open visibility so that
+                // a removed private-channel member cannot mutate old messages after access is revoked.
+                let is_member = state
+                    .is_member_cached(tenant.community(), channel_id, &actor_bytes)
+                    .await?;
+                if is_member {
+                    return Ok(());
+                }
+                let is_open = state
+                    .db
+                    .get_channel(tenant.community(), channel_id)
+                    .await
+                    .map(|ch| ch.visibility == "open")
+                    .unwrap_or(false);
+                if is_open {
+                    return Ok(());
+                }
+                // Not a member and channel is private — fall through to owner/admin/owner-of-agent check.
             }
 
-            // Not the author — must be owner/admin.
+            // Not the author, or author who is no longer a member of a private channel —
+            // must be owner/admin or the owning human of the message's agent-author.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
             let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
             match actor_member {
                 Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                _ => Err(anyhow::anyhow!(
-                    "must be event author or channel owner/admin"
-                )),
+                _ => {
+                    // Allow the owning human of the agent that authored the target message,
+                    // even when the human is not a channel member.
+                    if state
+                        .db
+                        .is_agent_owner(tenant.community(), &author, &actor_bytes)
+                        .await?
+                    {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "must be event author or channel owner/admin"
+                        ))
+                    }
+                }
             }
         }
         9008 => {
-            // DELETE_GROUP: owner only
+            // DELETE_GROUP: owner only, or the owning human of the channel's agent-owner.
             let members = state.db.get_members(tenant.community(), channel_id).await?;
             let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
             match actor_member {
                 Some(m) if m.role == "owner" => Ok(()),
-                _ => Err(anyhow::anyhow!("only owner can delete group")),
+                _ => {
+                    // Allow the owning human of any active owner-role agent in the
+                    // channel, even when the human is not a channel member —
+                    // diverges from kind:9001 intentionally.
+                    if actor_owns_any_owner_agent(state, tenant.community(), &members, &actor_bytes)
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    Err(anyhow::anyhow!("only owner can delete group"))
+                }
             }
         }
         9022 => {

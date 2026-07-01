@@ -193,11 +193,18 @@ describe("activeAgentTurnsStore", () => {
 
       const summaries = getActiveTurnsByChannel();
       assert.deepEqual(
-        summaries.map(({ channelId, agentCount }) => ({
+        summaries.map(({ channelId, agentCount, agentPubkeys }) => ({
           channelId,
           agentCount,
+          agentPubkeys,
         })),
-        [{ channelId: "shared", agentCount: 2 }],
+        [
+          {
+            channelId: "shared",
+            agentCount: 2,
+            agentPubkeys: [AGENT, AGENT_2],
+          },
+        ],
       );
       assert.equal(
         summaries[0].anchorAt,

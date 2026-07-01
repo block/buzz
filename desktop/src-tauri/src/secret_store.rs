@@ -21,6 +21,7 @@
 //! divergent-behavior trap.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Result of probing the keyring before a migration: distinguishes "reachable
@@ -41,6 +42,176 @@ pub enum KeyringProbe {
 /// Username used for the single blob keychain entry. All secrets are stored
 /// as a JSON map under this name within the service.
 const BLOB_KEY: &str = "secrets";
+
+// ── Interprocess advisory lock ─────────────────────────────────────────────
+//
+// Two concurrent Buzz processes (e.g. the signed DMG build and an unsigned dev
+// build via `just staging`) share the same OS keychain blob because the
+// service name `"buzz-desktop"` is a constant — it does not key off the bundle
+// identifier. Each process holds its own in-memory cache, so without an
+// interprocess lock a warm-cache write in process A drops keys added by process
+// B between A's last cache-warming read and A's write.
+//
+// The fix: `mutate_blob` acquires an exclusive advisory file lock, then always
+// performs a fresh `read_blob_raw()` inside the lock, applies the mutation,
+// writes back, and releases. The cache is still updated after a successful
+// write, so same-process reads remain fast. The lock is file-based at a fixed
+// per-user path `/tmp/buzz-keychain-<uid>-<service>.lock` on Unix — a path
+// that is invariant to `$TMPDIR`/process environment, so both the GUI-launched
+// signed DMG and a terminal-launched dev build always take the same lock.
+
+/// Return the path of the advisory lockfile for `service`.
+///
+/// The path is `/tmp/buzz-keychain-<uid>-<service>.lock` on Unix — a
+/// deterministic per-user path that is invariant to `$TMPDIR`/process
+/// environment. Both a GUI-launched signed DMG (`launchd`, env-stripped) and a
+/// terminal-launched dev build resolve `/tmp` to the same inode, so they
+/// contend on the same lockfile and achieve mutual exclusion.
+///
+/// On Windows the same name used for the kernel mutex is derived from the
+/// lockfile path, so the service-keyed uniqueness is preserved.
+fn blob_lockfile_path(service: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        // Use the real UID so distinct users get distinct lockfiles.
+        // SAFETY: getuid() is always safe on Unix — it never fails.
+        let uid = unsafe { libc::getuid() };
+        PathBuf::from(format!("/tmp/buzz-keychain-{uid}-{service}.lock"))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: no lockfile used (named mutex instead); this path is only
+        // used to derive the mutex name and for test assertions.
+        std::env::temp_dir().join(format!("buzz-keychain-{service}.lock"))
+    }
+}
+
+/// Acquire an exclusive advisory file lock for the blob identified by `service`.
+///
+/// Opens (or creates) the lockfile and blocks until the lock is acquired.
+/// Returns the open `File`; the lock is released when the file is dropped.
+///
+/// On non-Unix/non-Windows platforms this is a no-op that returns a stub.
+#[cfg(feature = "system-keyring")]
+fn acquire_blob_lock(service: &str) -> Result<BlobLockGuard, String> {
+    let path = blob_lockfile_path(service);
+    BlobLockGuard::acquire(&path)
+}
+
+/// RAII guard that holds an exclusive advisory file lock.
+///
+/// On Unix, implemented via `flock(2)` on a lockfile in the system temp dir.
+/// On Windows, implemented via a named kernel mutex (cross-process, no file I/O
+/// needed). The Windows mutex handle is released on drop.
+#[cfg(feature = "system-keyring")]
+struct BlobLockGuard {
+    /// The open lockfile. Never read — held purely for RAII: closing the fd
+    /// releases the `flock(LOCK_EX)` on Unix.
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    file: std::fs::File,
+    #[cfg(windows)]
+    mutex_handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(feature = "system-keyring")]
+impl BlobLockGuard {
+    fn acquire(path: &std::path::Path) -> Result<Self, String> {
+        #[cfg(unix)]
+        {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(path)
+                .map_err(|e| format!("blob lock open {}: {e}", path.display()))?;
+            use std::os::unix::io::AsRawFd;
+            // LOCK_EX blocks until the lock is acquired (no LOCK_NB).
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if ret != 0 {
+                let err = std::io::Error::last_os_error();
+                return Err(format!("blob lock flock: {err}"));
+            }
+            return Ok(BlobLockGuard { file });
+        }
+
+        #[cfg(windows)]
+        {
+            // Named kernel mutexes are cross-process on Windows — no lockfile
+            // needed. Derive a unique mutex name from the lockfile path so
+            // distinct services get distinct mutexes.
+            let name_str = format!(
+                "Local\\BuzzKeychain-{}",
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("default")
+            );
+            // Encode as null-terminated UTF-16.
+            let name_wide: Vec<u16> = name_str
+                .encode_utf16()
+                .chain(std::iter::once(0u16))
+                .collect();
+            use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+            use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+            use windows_sys::Win32::System::Threading::{
+                CreateMutexW, WaitForSingleObject, INFINITE,
+            };
+            // CreateMutexW: lpMutexAttributes = null (default security),
+            // bInitialOwner = FALSE (0), lpName = our mutex name.
+            let handle = unsafe {
+                CreateMutexW(
+                    std::ptr::null::<SECURITY_ATTRIBUTES>(),
+                    0,
+                    name_wide.as_ptr(),
+                )
+            };
+            // HANDLE = *mut c_void; null means creation failed.
+            if handle.is_null() {
+                let err = std::io::Error::last_os_error();
+                return Err(format!("blob lock CreateMutexW: {err}"));
+            }
+            let wait_result = unsafe { WaitForSingleObject(handle, INFINITE) };
+            if wait_result != WAIT_OBJECT_0 {
+                // Also accept WAIT_ABANDONED (0x80) — previous holder crashed;
+                // the mutex is still acquired and we own it.
+                if wait_result != windows_sys::Win32::Foundation::WAIT_ABANDONED {
+                    let err = std::io::Error::last_os_error();
+                    unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+                    return Err(format!(
+                        "blob lock WaitForSingleObject: {wait_result} / {err}"
+                    ));
+                }
+            }
+            return Ok(BlobLockGuard {
+                mutex_handle: handle,
+            });
+        }
+
+        // Fallback for exotic platforms: no-op lock (only Unix/Windows ship).
+        #[allow(unreachable_code)]
+        Err("blob lock: unsupported platform".to_string())
+    }
+}
+
+#[cfg(feature = "system-keyring")]
+impl Drop for BlobLockGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            // Dropping `self.file` closes the fd, which releases flock on Unix.
+            // Nothing explicit needed.
+        }
+        #[cfg(windows)]
+        {
+            unsafe {
+                windows_sys::Win32::System::Threading::ReleaseMutex(self.mutex_handle);
+                windows_sys::Win32::Foundation::CloseHandle(self.mutex_handle);
+            }
+        }
+    }
+}
+
+// ── End interprocess advisory lock ────────────────────────────────────────
 
 /// An OS keyring, addressed by service name. All secrets are stored in a
 /// single JSON blob entry (one OS prompt per process lifetime).
@@ -195,72 +366,89 @@ impl SecretStore {
     }
 
     /// Atomically load the blob, apply `f` to a candidate map, write back if
-    /// changed, and only then advance the cache — all while holding the cache
-    /// mutex. This serializes concurrent writes so no caller can observe a
-    /// partial update.
+    /// changed, and only then advance the cache.
     ///
-    /// **Idempotent**: when `f` leaves the candidate equal to the current cached
+    /// **Cross-process safety**: acquires an exclusive advisory file lock
+    /// (`flock(2)` on Unix, `LockFileEx` on Windows) before reading, mutating,
+    /// and writing. The lock is keyed by service name and stored in the system
+    /// temp directory, making it reachable from both the signed DMG build and
+    /// unsigned dev builds. Inside the lock a fresh `read_blob_raw()` is always
+    /// performed (even when the cache is warm) so a concurrent process's write
+    /// is never silently dropped.
+    ///
+    /// **Idempotent**: when `f` leaves the candidate equal to the freshly-read
     /// map, `write_blob_raw` is skipped entirely. On macOS the legacy
     /// `SecKeychain` API treats a write as a distinct ACL operation from the
     /// "Always Allow"-ed read, so skipping no-op writes eliminates the keychain
     /// prompt that fires when saving an agent whose model changed but whose key
     /// did not.
     ///
-    /// **Copy-on-write**: the candidate `next` is a separate allocation from the
-    /// cached `current`. The cache is only replaced with `next` after
-    /// `write_blob_raw` succeeds. On write failure the cache stays at the last
-    /// known durable state — a transient ACL denial or keychain outage cannot
-    /// advance the cache past durably-written storage and silently drop a later
-    /// write attempt.
+    /// **Copy-on-write**: the candidate `next` is a separate allocation from
+    /// `current`. The cache is only replaced with `next` after `write_blob_raw`
+    /// succeeds. On write failure the cache is cleared to `None` so the next
+    /// caller re-reads from the keychain rather than building on a stale state.
     ///
     /// Deadlock-free: `read_blob_raw` and `write_blob_raw` do not acquire the
     /// cache mutex. `load_blob` does acquire it, but `mutate_blob` does not call
-    /// `load_blob` — it reads from the keyring directly when the cache is cold.
+    /// `load_blob` — it reads from the keyring directly inside the file lock.
     #[cfg(feature = "system-keyring")]
     fn mutate_blob<F>(&self, f: F) -> Result<(), String>
     where
         F: FnOnce(&mut HashMap<String, String>),
     {
-        let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Acquire the interprocess advisory lock first. All Buzz processes
+        // using the same service name contend on the same lockfile at
+        // /tmp/buzz-keychain-<uid>-<service>.lock (a deterministic per-user
+        // path invariant to $TMPDIR), so only one process performs a
+        // read-modify-write at a time.
+        let _lock = acquire_blob_lock(&self.service)?;
 
-        // If cache is cold, load from keyring now — while holding the lock so
-        // no concurrent writer can sneak in between the read and our write.
-        if guard.is_none() {
-            let raw = self.read_blob_raw()?;
-            *guard = Some(match raw {
-                None => HashMap::new(),
-                Some(bytes) => {
-                    let json = String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
-                    serde_json::from_str::<HashMap<String, String>>(&json)
-                        .map_err(|e| format!("blob json: {e}"))?
-                }
-            });
-        }
-
-        let current = guard.as_ref().expect("just initialized above");
+        // Always do a fresh read from the keychain while holding the lock —
+        // this is the critical correction over the prior warm-cache path. A
+        // stale warm cache would make us build our candidate on an outdated
+        // baseline and drop keys written by another process.
+        let raw = self.read_blob_raw()?;
+        let current: HashMap<String, String> = match raw {
+            None => HashMap::new(),
+            Some(bytes) => {
+                let json = String::from_utf8(bytes).map_err(|e| format!("blob utf8: {e}"))?;
+                serde_json::from_str::<HashMap<String, String>>(&json)
+                    .map_err(|e| format!("blob json: {e}"))?
+            }
+        };
 
         // Build the candidate state in a separate allocation so that a write
         // failure below cannot leave the cache ahead of durable storage.
-        // `HashMap` `PartialEq` compares by content (key-value pairs), not
-        // iteration order, so the equality check is order-safe.
         let mut next = current.clone();
         f(&mut next);
 
-        // Skip the keychain write when the candidate equals the current durable
-        // state — the cache already mirrors storage and no I/O is needed.
-        if next == *current {
+        // Skip the keychain write when the candidate equals the freshly-read
+        // durable state — no I/O needed and no keychain ACL prompt on macOS.
+        if next == current {
+            // Update the cache to the fresh read even on no-op so subsequent
+            // reads in this process see any keys another process may have added.
+            let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(current);
             return Ok(());
         }
 
-        // Write to keyring while still holding the lock.
+        // Write to keyring while still holding the file lock.
         let json = serde_json::to_string(&next).map_err(|e| format!("blob serialize: {e}"))?;
-        self.write_blob_raw(json.as_bytes())?;
-
-        // Advance the cache only after the durable write succeeds. On failure
-        // the early return above means we never reach this line, so the cache
-        // remains at the last known durable state.
-        *guard = Some(next);
-        Ok(())
+        match self.write_blob_raw(json.as_bytes()) {
+            Ok(()) => {
+                // Advance the cache to `next` only after the durable write succeeds.
+                let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = Some(next);
+                Ok(())
+            }
+            Err(e) => {
+                // On write failure, clear the cache so the next caller re-reads
+                // from the keychain rather than building on a stale state.
+                let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = None;
+                Err(e)
+            }
+        }
     }
 
     /// Always uses the legacy keyring crate on macOS — see `read_blob_raw`.
@@ -544,28 +732,153 @@ mod tests {
         );
     }
 
-    #[test]
-    fn mutate_blob_skips_write_when_map_unchanged() {
-        // The idempotent-write guarantee: when the closure leaves the map
-        // identical to its pre-call state, `write_blob_raw` must NOT be
-        // invoked. On an unsigned CI build (no keychain entitlement) any real
-        // write would return an error, so a successful `Ok(())` here proves
-        // the skip path fired. The service name is unique so test isolation is
-        // guaranteed even if the test runs locally on a machine with a keychain.
-        let mut map = HashMap::new();
-        map.insert("identity".to_string(), "nsec1test".to_string());
-        let store = SecretStore::with_cache("buzz-test-idempotent-skip", Some(map));
+    // ── Cross-process race tests (require real OS keychain) ────────────────
 
-        // Re-storing the exact same value must succeed without touching the
-        // keychain (which would fail on unsigned CI).
-        let result = store.store("identity", "nsec1test");
-        assert!(
-            result.is_ok(),
-            "no-op store must not reach write_blob_raw: {result:?}"
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn test_stale_warm_cache_add_observes_prior_write() {
+        // Simulates the cross-process race that stranded Will's agent keys.
+        //
+        // Setup: two SecretStore instances for the same service (= two
+        // "processes" with separate caches). Process A warms its cache to
+        // {k1}. Process B then writes {k1, k2}. Without the fix, A's next
+        // mutate_blob would build from its stale {k1} cache and write
+        // {k1, k3}, silently dropping k2. With the fix, A always re-reads
+        // from the keychain inside the lock, so the result is {k1, k2, k3}.
+        let svc = "buzz-test-race-stale-cache";
+
+        // Clean state.
+        let setup = SecretStore::keyring(svc);
+        let _ = setup.delete("k1");
+        let _ = setup.delete("k2");
+        let _ = setup.delete("k3");
+
+        // Process A: write k1, warming its cache.
+        let store_a = SecretStore::keyring(svc);
+        store_a.store("k1", "v1").unwrap();
+
+        // Process B: write k2 (separate instance = separate cache).
+        let store_b = SecretStore::keyring(svc);
+        store_b.store("k2", "v2").unwrap();
+
+        // Process A: write k3. With the fix, A re-reads inside the lock and
+        // sees {k1, k2} before appending k3 — result must be {k1, k2, k3}.
+        store_a.store("k3", "v3").unwrap();
+
+        // Verify via a third reader (clean cache).
+        let reader = SecretStore::keyring(svc);
+        assert_eq!(
+            reader.load("k1").unwrap(),
+            Some("v1".to_string()),
+            "k1 must survive"
         );
-        // A genuinely new key DOES change the map — this branch requires a
-        // real keychain and is therefore left to the #[ignore] integration
-        // tests; here we only verify the skip path.
+        assert_eq!(
+            reader.load("k2").unwrap(),
+            Some("v2".to_string()),
+            "k2 must not be dropped"
+        );
+        assert_eq!(
+            reader.load("k3").unwrap(),
+            Some("v3".to_string()),
+            "k3 must be written"
+        );
+
+        // Cleanup.
+        let _ = reader.delete("k1");
+        let _ = reader.delete("k2");
+        let _ = reader.delete("k3");
+    }
+
+    #[ignore = "requires real OS keychain (run locally)"]
+    #[test]
+    fn test_concurrent_adds_neither_key_dropped() {
+        // Two sequential stores from distinct instances (simulating two
+        // processes each adding one key) must both be durably visible.
+        let svc = "buzz-test-race-concurrent-add";
+
+        let setup = SecretStore::keyring(svc);
+        let _ = setup.delete("agent_a");
+        let _ = setup.delete("agent_b");
+
+        let store1 = SecretStore::keyring(svc);
+        store1.store("agent_a", "nsec1aaa").unwrap();
+
+        let store2 = SecretStore::keyring(svc);
+        store2.store("agent_b", "nsec1bbb").unwrap();
+
+        let reader = SecretStore::keyring(svc);
+        assert_eq!(
+            reader.load("agent_a").unwrap(),
+            Some("nsec1aaa".to_string()),
+            "agent_a must not be dropped"
+        );
+        assert_eq!(
+            reader.load("agent_b").unwrap(),
+            Some("nsec1bbb".to_string()),
+            "agent_b must not be dropped"
+        );
+
+        // Cleanup.
+        let _ = reader.delete("agent_a");
+        let _ = reader.delete("agent_b");
+    }
+
+    #[test]
+    fn test_blob_lockfile_path_is_in_tmp_with_uid() {
+        // The lockfile must be at a deterministic per-user path under /tmp —
+        // invariant to $TMPDIR — so both a GUI-launched DMG (env-stripped by
+        // launchd) and a terminal-launched dev build resolve the same inode and
+        // achieve mutual exclusion.
+        let path = blob_lockfile_path("buzz-desktop");
+        #[cfg(unix)]
+        {
+            let uid = unsafe { libc::getuid() };
+            assert!(
+                path.starts_with("/tmp"),
+                "lockfile {path:?} must start with /tmp (not $TMPDIR)"
+            );
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            assert!(
+                name.contains(&uid.to_string()),
+                "lockfile {path:?} must contain uid {uid}"
+            );
+            assert!(
+                name.contains("buzz-keychain"),
+                "lockfile name must contain 'buzz-keychain'"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.contains("buzz-keychain")),
+                "lockfile name must contain 'buzz-keychain'"
+            );
+        }
+    }
+
+    #[test]
+    fn test_blob_lock_acquire_and_release() {
+        // Verify the advisory lock can be acquired and released without errors.
+        // This exercises the real flock/mutex path on the current platform.
+        let guard = acquire_blob_lock("buzz-test-lock-smoke");
+        assert!(
+            guard.is_ok(),
+            "advisory lock acquire must succeed: {:?}",
+            guard.err()
+        );
+        // Drop the guard — lock is released. A second acquire must succeed.
+        drop(guard);
+        let guard2 = acquire_blob_lock("buzz-test-lock-smoke");
+        assert!(
+            guard2.is_ok(),
+            "advisory lock re-acquire after release must succeed: {:?}",
+            guard2.err()
+        );
     }
 
     #[ignore = "requires real OS keychain (run locally)"]

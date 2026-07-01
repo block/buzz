@@ -370,6 +370,7 @@ impl AppState {
             &config.media.s3_access_key,
             &config.media.s3_secret_key,
             &config.media.s3_bucket,
+            &config.media.s3_region,
         )
         .expect("media storage was already constructed with this S3 config");
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =

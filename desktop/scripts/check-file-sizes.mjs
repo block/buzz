@@ -67,7 +67,9 @@ const overrides = new Map([
   // self-contained repos_dir functions and their unit tests live in repos.rs;
   // this is the seam that must stay in nest.rs. Approved override; still queued
   // to split with the rest of this list.
-  ["src-tauri/src/managed_agents/nest.rs", 1450],
+  // dev-nest namespace: OnceLock<Option<PathBuf>> + init_nest_dir + constants
+  // added to plumb the dev/prod discriminator. Load-bearing for the D2 nest fix.
+  ["src-tauri/src/managed_agents/nest.rs", 1501],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -97,11 +99,7 @@ const overrides = new Map([
   ["src-tauri/src/migration_tests.rs", 1410],
   ["src-tauri/src/nostr_convert.rs", 1126],
   ["src/shared/api/relayClientSession.ts", 1022],
-  ["src-tauri/src/migration.rs", 1449],
-  // Project git workflow exploration: branch/push UI and repository status
-  // plumbing grew the panel slightly past the default ceiling. Keep this narrow
-  // while the project surface is split into smaller components.
-  ["src/features/projects/ui/ProjectRepositoryPanel.tsx", 1004],
+  ["src-tauri/src/migration.rs", 1575],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
@@ -117,6 +115,10 @@ const overrides = new Map([
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
   // 893 lines, not generic debt growth. Approved override; still queued to split.
+  // cross-process keychain race fix (D3): interprocess lock + BlobLockGuard +
+  // uid-keyed lockfile path + behavioral tests add ~303 lines. Load-bearing
+  // security fix for the lost-update race that stranded agent keys.
+  ["src-tauri/src/secret_store.rs", 1043],
   ["src-tauri/src/app_state.rs", 1033],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
