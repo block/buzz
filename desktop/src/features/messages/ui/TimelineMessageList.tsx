@@ -197,6 +197,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               highlightedMessageId={highlightedMessageId}
               huddleMemberPubkeys={huddleMemberPubkeys}
               huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+              isContinuation={item.isContinuation}
+              isFollowedByContinuation={item.isFollowedByContinuation}
               isFollowingThreadById={isFollowingThreadById}
               isUnread={isMessageUnreadById?.(item.entry.message.id)}
               onDelete={onDelete}
@@ -331,6 +333,8 @@ type MessageRowItemProps = Pick<
 > & {
   entry: MainTimelineEntry;
   footer: React.ReactNode;
+  isContinuation?: boolean;
+  isFollowedByContinuation?: boolean;
   isUnread?: boolean;
   videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
 };
@@ -345,6 +349,8 @@ function MessageRowItem({
   highlightedMessageId,
   huddleMemberPubkeys,
   huddleMemberPubkeysPending,
+  isContinuation = false,
+  isFollowedByContinuation = false,
   isFollowingThreadById,
   isUnread,
   onDelete,
@@ -393,6 +399,7 @@ function MessageRowItem({
               : undefined
           }
           isUnread={isUnread}
+          isContinuation={isContinuation}
           message={message}
           onDelete={canDelete}
           onEdit={canEdit}
@@ -430,13 +437,19 @@ function MessageRowItem({
   const isSearchActive = message.id === searchActiveMessageId;
 
   return (
-    <div className="flex flex-col gap-1 pb-2.5">
+    <div
+      className={cn(
+        "flex flex-col gap-1",
+        isFollowedByContinuation ? "pb-0" : "pb-2.5",
+      )}
+    >
       <MessageRow
         agentPubkeys={agentPubkeys}
         channelId={channelId}
         highlighted={message.id === highlightedMessageId || isSearchActive}
         huddleMemberPubkeys={huddleMemberPubkeys}
         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+        isContinuation={isContinuation}
         isUnread={isUnread}
         message={message}
         onDelete={canDelete}

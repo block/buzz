@@ -1,6 +1,6 @@
 import type * as React from "react";
 
-import { aspectRatioFromDim } from "@/shared/ui/markdown/utils";
+import { dimensionsFromDim } from "@/shared/ui/markdown/utils";
 import type { TimelineItem } from "./timelineItems";
 import type { TimelineMessage } from "../types";
 import { parseImetaTags } from "./parseImeta";
@@ -22,19 +22,31 @@ import { parseImetaTags } from "./parseImeta";
 // Visual caps mirror the inline image/markdown styles.
 const MEDIA_MAX_WIDTH = 384; // max-w-[min(24rem,100%)]
 const MEDIA_MAX_HEIGHT = 256; // max-h-64
-const TEXT_LINE_HEIGHT = 22;
+const TEXT_LINE_HEIGHT = 20;
 const CODE_LINE_HEIGHT = 19;
 const CHARS_PER_LINE = 64; // rough wrap width at the timeline column
 const ROW_CHROME = 26; // author/time header + denser row padding
+const CONTINUATION_ROW_CHROME = 8; // dense row padding only; header/avatar are hidden
+const MEDIA_BLOCK_MARGIN_TOP = 4; // image/video blocks use mt-1 in markdown
 const REACTION_ROW = 24;
-const PREVIEW_CARD = 96;
+const PREVIEW_CARD = 70;
+const MESSAGE_ITEM_BOTTOM_PADDING = 10; // TimelineMessageList pb-2.5
 const MIN_ESTIMATE = 60; // never reserve less than the old flat floor
+const CONTINUATION_MIN_ESTIMATE = 34;
 
 function mediaHeightFromDim(dim: string | undefined): number {
-  const ratio = aspectRatioFromDim(dim);
-  if (!ratio || ratio <= 0) return MEDIA_MAX_HEIGHT; // unknown shape: reserve full box
-  const widthBoundHeight = MEDIA_MAX_WIDTH / ratio;
-  return Math.round(Math.min(MEDIA_MAX_HEIGHT, widthBoundHeight));
+  const dimensions = dimensionsFromDim(dim);
+  if (!dimensions) return MEDIA_MAX_HEIGHT; // unknown shape: reserve full box
+  const scale = Math.min(
+    1,
+    MEDIA_MAX_WIDTH / dimensions.width,
+    MEDIA_MAX_HEIGHT / dimensions.height,
+  );
+  return Math.round(dimensions.height * scale);
+}
+
+function mediaReserveHeight(dim: string | undefined): number {
+  return MEDIA_BLOCK_MARGIN_TOP + mediaHeightFromDim(dim);
 }
 
 function wrappedLineCount(text: string): number {
@@ -67,6 +79,7 @@ function splitFencedCode(body: string): { prose: string; codeLines: number } {
 // Image/video file extensions the markdown renderer turns into inline media.
 const MEDIA_URL_RE =
   /https?:\/\/\S+\.(?:png|jpe?g|gif|webp|avif|svg|mp4|webm|mov)(?:\?\S*)?$/i;
+const MARKDOWN_IMAGE_LINE_RE = /^\s*!\[[^\]]*\]\([^)\s]+\)\s*$/;
 
 /**
  * URLs in the body that the markdown renderer shows as inline `<img>`/`<video>`:
@@ -85,13 +98,28 @@ function mediaUrlsInBody(body: string): string[] {
   return urls;
 }
 
-export function estimateRowHeight(message: TimelineMessage): number {
+function stripMediaOnlyLines(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      return !MARKDOWN_IMAGE_LINE_RE.test(line) && !MEDIA_URL_RE.test(trimmed);
+    })
+    .join("\n");
+}
+
+export function estimateRowHeight(
+  message: TimelineMessage,
+  { isContinuation = false }: { isContinuation?: boolean } = {},
+): number {
   const body = message.body ?? "";
   const { prose, codeLines } = splitFencedCode(body);
+  const proseForLineCount = stripMediaOnlyLines(prose);
 
-  let height = ROW_CHROME;
+  let height = isContinuation ? CONTINUATION_ROW_CHROME : ROW_CHROME;
   height +=
-    wrappedLineCount(prose.trim() === "" ? "" : prose) * TEXT_LINE_HEIGHT;
+    wrappedLineCount(proseForLineCount.trim() === "" ? "" : proseForLineCount) *
+    TEXT_LINE_HEIGHT;
   height += codeLines * CODE_LINE_HEIGHT;
 
   const imetaUrls = new Set<string>();
@@ -100,12 +128,13 @@ export function estimateRowHeight(message: TimelineMessage): number {
     for (const entry of imeta.values()) {
       if (!entry.url) continue;
       imetaUrls.add(entry.url);
-      height += mediaHeightFromDim(entry.dim);
+      height += mediaReserveHeight(entry.dim);
     }
   }
   for (const url of mediaUrlsInBody(body)) {
     if (imetaUrls.has(url)) continue; // already counted via its imeta dim
-    height += MEDIA_MAX_HEIGHT; // dim-less inline media: reserve the full box
+    // dim-less inline media reserves the fixed markdown image box plus its mt-1.
+    height += mediaReserveHeight(undefined);
   }
 
   // A bare non-media URL on its own line usually renders a link-preview card.
@@ -119,7 +148,10 @@ export function estimateRowHeight(message: TimelineMessage): number {
 
   if (message.reactions && message.reactions.length > 0) height += REACTION_ROW;
 
-  return Math.max(MIN_ESTIMATE, Math.round(height));
+  return Math.max(
+    isContinuation ? CONTINUATION_MIN_ESTIMATE : MIN_ESTIMATE,
+    Math.round(height),
+  );
 }
 
 // Dividers are short, fixed-height rows; reserving their true height keeps the
@@ -136,8 +168,12 @@ export function timelineRowReserveStyle(
   item: TimelineItem,
 ): React.CSSProperties {
   const height =
-    item.kind === "message" || item.kind === "system"
-      ? estimateRowHeight(item.entry.message)
-      : DIVIDER_HEIGHT;
+    item.kind === "message"
+      ? estimateRowHeight(item.entry.message, {
+          isContinuation: item.isContinuation,
+        }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
+      : item.kind === "system"
+        ? estimateRowHeight(item.entry.message)
+        : DIVIDER_HEIGHT;
   return { containIntrinsicSize: `auto ${height}px` };
 }

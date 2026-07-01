@@ -2,7 +2,8 @@ import * as React from "react";
 import { RefreshCcw } from "lucide-react";
 
 import { useAppShell } from "@/app/AppShellContext";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useChannelsQuery, useOpenDmMutation } from "@/features/channels/hooks";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
 import {
@@ -20,6 +21,15 @@ import {
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
+  type ProfilePanelTab,
+  type ProfilePanelView,
+  UserProfilePanel,
+} from "@/features/profile/ui/UserProfilePanel";
+import {
+  profilePanelTabFromSearch,
+  profilePanelViewFromSearch,
+} from "@/features/profile/ui/UserProfilePanelUtils";
+import {
   INBOX_COLUMN_MIN_WIDTH_PX,
   INBOX_SINGLE_COLUMN_BREAKPOINT_PX,
   useResizableInboxListWidth,
@@ -35,6 +45,7 @@ import {
   collectMessageMentionPubkeys,
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
+import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -55,9 +66,15 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
+import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { Button } from "@/shared/ui/button";
 
-const INBOX_SEARCH_KEYS = ["item"] as const;
+const INBOX_SEARCH_KEYS = [
+  "item",
+  "profile",
+  "profileTab",
+  "profileView",
+] as const;
 
 type HomeViewProps = {
   feed?: HomeFeedResponse;
@@ -102,9 +119,21 @@ export function HomeView({
   // FeedItem selection model, so reload while in Reminders mode keeps a stale
   // `?item=` unconsumed and does not snap back to a feed-item detail view.
   const urlSelectedItemId = isMessagesMode ? inboxSearchValues.item : null;
+  const profilePanelPubkey = inboxSearchValues.profile;
+  const profilePanelTab = profilePanelTabFromSearch(
+    inboxSearchValues.profileTab,
+  );
+  const profilePanelView = profilePanelViewFromSearch(
+    inboxSearchValues.profileView,
+  );
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
     urlSelectedItemId,
   );
+  const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
+    null,
+  );
+  const { goChannel } = useAppNavigation();
+  const openDmMutation = useOpenDmMutation();
   React.useEffect(() => {
     setSelectedItemId(urlSelectedItemId);
   }, [urlSelectedItemId]);
@@ -115,10 +144,48 @@ export function HomeView({
     },
     [applyInboxSearchPatch],
   );
+  const handleOpenProfilePanel = React.useCallback(
+    (pubkey: string) => {
+      setManagedChannelId(null);
+      applyInboxSearchPatch({
+        profile: pubkey,
+        profileTab: null,
+        profileView: null,
+      });
+    },
+    [applyInboxSearchPatch],
+  );
+  const handleCloseProfilePanel = React.useCallback(() => {
+    applyInboxSearchPatch({
+      profile: null,
+      profileTab: null,
+      profileView: null,
+    });
+  }, [applyInboxSearchPatch]);
+  const handleProfilePanelViewChange = React.useCallback(
+    (view: ProfilePanelView, options?: { replace?: boolean }) =>
+      applyInboxSearchPatch(
+        { profileView: view === "summary" ? null : view },
+        options,
+      ),
+    [applyInboxSearchPatch],
+  );
+  const handleProfilePanelTabChange = React.useCallback(
+    (tab: ProfilePanelTab, options?: { replace?: boolean }) =>
+      applyInboxSearchPatch(
+        { profileTab: tab === "info" ? null : tab },
+        options,
+      ),
+    [applyInboxSearchPatch],
+  );
   const [isDeletingMessage, setIsDeletingMessage] = React.useState(false);
   const [isSendingReply, setIsSendingReply] = React.useState(false);
-  const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
-    null,
+  const handleOpenDm = React.useCallback(
+    async (pubkeys: string[]) => {
+      const dm = await openDmMutation.mutateAsync({ pubkeys });
+      await goChannel(dm.id);
+    },
+    [goChannel, openDmMutation],
   );
   const { activeReminderEventIds, openReminder } = useRemindLater();
   const [localRepliesByItemId, setLocalRepliesByItemId] = React.useState<
@@ -179,8 +246,10 @@ export function HomeView({
     return channels.find((channel) => channel.id === managedChannelId) ?? null;
   }, [channels, managedChannelId]);
   const isChannelManagementOpen = managedChannel !== null;
-  const isSinglePanelChannelManagementView =
-    isChannelManagementOpen &&
+  const hasAuxiliaryPane =
+    isChannelManagementOpen || profilePanelPubkey !== null;
+  const isSinglePanelAuxiliaryView =
+    hasAuxiliaryPane &&
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
 
@@ -308,6 +377,7 @@ export function HomeView({
           resolveMentionNames(message.tags ?? [], feedProfiles) ?? [],
         reactions: message.reactions,
         tags: message.tags,
+        timeLabel: message.time,
       };
     });
   }, [
@@ -420,14 +490,13 @@ export function HomeView({
     isMessagesMode &&
     isNarrowHomeViewport &&
     selectedItemId !== null &&
-    !isSinglePanelChannelManagementView;
-  const showListPane =
-    !isSinglePanelDetailView && !isSinglePanelChannelManagementView;
+    !isSinglePanelAuxiliaryView;
+  const showListPane = !isSinglePanelDetailView && !isSinglePanelAuxiliaryView;
   const showDetailPane =
     isMessagesMode &&
-    !isSinglePanelChannelManagementView &&
+    !isSinglePanelAuxiliaryView &&
     (!isNarrowHomeViewport || isSinglePanelDetailView);
-  const channelManagementWidthPx = isSinglePanelChannelManagementView
+  const auxiliaryPaneWidthPx = isSinglePanelAuxiliaryView
     ? homeInboxWidthPx
     : threadPanelWidthPx;
   const maxEffectiveInboxListWidthPx =
@@ -436,7 +505,7 @@ export function HomeView({
           INBOX_COLUMN_MIN_WIDTH_PX,
           homeInboxWidthPx -
             INBOX_COLUMN_MIN_WIDTH_PX -
-            (isChannelManagementOpen ? channelManagementWidthPx : 0),
+            (hasAuxiliaryPane ? auxiliaryPaneWidthPx : 0),
         )
       : undefined;
   const effectiveInboxListWidthPx =
@@ -448,245 +517,280 @@ export function HomeView({
       : inboxListWidthPx;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div
-        className={cn(
-          "relative grid min-h-0 w-full flex-1",
-          isSinglePanelChannelManagementView
-            ? "grid-cols-1"
-            : showListPane && showDetailPane && isChannelManagementOpen
-              ? "grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)_var(--home-channel-management-width)]"
-              : showListPane && showDetailPane
-                ? "grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)]"
-                : isChannelManagementOpen
-                  ? "grid-cols-[minmax(0,1fr)_var(--home-channel-management-width)]"
-                  : "grid-cols-1",
-        )}
-        data-testid="home-inbox"
-        ref={homeInboxRef}
-        style={
-          {
-            "--home-channel-management-width": `${channelManagementWidthPx}px`,
-            "--home-inbox-list-width": `${effectiveInboxListWidthPx}px`,
-          } as React.CSSProperties
-        }
-      >
-        {showListPane ? (
-          <InboxListPane
-            activeReminderEventIds={activeReminderEventIds}
-            agentPubkeys={inboxAgentPubkeys}
-            doneSet={effectiveDoneSet}
-            dueReminderCount={dueReminderCount}
-            filter={filter}
-            items={filteredItems}
-            onFilterChange={setFilter}
-            onMarkRead={markItemRead}
-            onMarkUnread={markItemUnread}
-            onOpenDirect={(item) => {
-              const channelId = item.item.channelId;
-              if (!channelId) {
-                return;
-              }
-              onOpenContext(
-                channelId,
-                item.id,
-                getThreadReference(item.item.tags).rootId,
-              );
-            }}
-            onRemindLater={(item) => {
-              const channelId = item.item.channelId;
-              if (!channelId) {
-                return;
-              }
-              openReminder({
-                authorPubkey: item.item.pubkey,
-                channelId,
-                eventId: item.id,
-                preview: item.preview.slice(0, 100),
-              });
-            }}
-            onSelect={(itemId) => {
-              handleUserSelectItem(itemId);
-              markItemRead(itemId);
-            }}
-            onUnreadOnlyChange={setUnreadOnly}
-            reminderPubkey={currentPubkey}
-            selectedId={selectedItemId}
-            showRightDivider={showListPane && showDetailPane}
-            unreadOnly={unreadOnly}
-          />
-        ) : null}
-
-        <button
-          aria-label="Resize inbox list"
+    <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div
           className={cn(
-            "group absolute bottom-0 z-40 w-3 -translate-x-1/2 cursor-col-resize",
-            topChromeInset.top,
-            showListPane && showDetailPane ? "block" : "hidden",
+            "relative grid min-h-0 w-full flex-1",
+            isSinglePanelAuxiliaryView
+              ? "grid-cols-1"
+              : showListPane && showDetailPane && hasAuxiliaryPane
+                ? "grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)_var(--home-channel-management-width)]"
+                : showListPane && showDetailPane
+                  ? "grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)]"
+                  : hasAuxiliaryPane
+                    ? "grid-cols-[minmax(0,1fr)_var(--home-channel-management-width)]"
+                    : "grid-cols-1",
           )}
-          data-testid="home-inbox-list-resize-handle"
-          onDoubleClick={
-            canResetInboxListWidth ? handleInboxListWidthReset : undefined
+          data-testid="home-inbox"
+          ref={homeInboxRef}
+          style={
+            {
+              "--home-channel-management-width": `${auxiliaryPaneWidthPx}px`,
+              "--home-inbox-list-width": `${effectiveInboxListWidthPx}px`,
+            } as React.CSSProperties
           }
-          onPointerDown={handleInboxListResizeStart}
-          style={{ left: `${effectiveInboxListWidthPx}px` }}
-          title={
-            canResetInboxListWidth
-              ? "Drag to resize. Double-click to reset width."
-              : "Drag to resize."
-          }
-          type="button"
         >
-          <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
-        </button>
-
-        {showDetailPane ? (
-          <InboxDetailPane
-            agentPubkeys={inboxAgentPubkeys}
-            canDelete={canDelete}
-            canOpenChannel={Boolean(
-              selectedItem?.item.channelId &&
-                availableChannelIds.has(selectedItem.item.channelId),
-            )}
-            canReply={canReply}
-            channel={selectedChannel}
-            contextChannelName={selectedChannel?.name ?? null}
-            currentPubkey={currentPubkey}
-            disabledReplyReason={disabledReplyReason}
-            isDeletingMessage={isDeletingMessage}
-            isSendingReply={isSendingReply}
-            isSinglePanelView={isSinglePanelDetailView}
-            isThreadContextLoading={threadContext.isLoading}
-            item={selectedItem}
-            messages={contextMessages}
-            onBack={
-              isSinglePanelDetailView
-                ? () => {
-                    handleUserSelectItem(null);
-                  }
-                : undefined
-            }
-            onDelete={() => {
-              if (!selectedItem || !canDelete) {
-                return;
-              }
-              const channelId = selectedItem.item.channelId;
-              if (!channelId) {
-                return;
-              }
-
-              setIsDeletingMessage(true);
-              void deleteMessage(channelId, selectedItem.id)
-                .then(() => {
-                  onRefresh();
-                })
-                .finally(() => {
-                  setIsDeletingMessage(false);
-                });
-            }}
-            onOpenChannel={setManagedChannelId}
-            onSendReply={async ({
-              content,
-              mediaTags,
-              mentionPubkeys,
-              parentEventId,
-            }) => {
-              const channelId = selectedItem?.item.channelId;
-              if (!selectedItem || !channelId || !canReply) {
-                throw new Error("Replies are not available for this item.");
-              }
-
-              const itemToReply = selectedItem;
-              setIsSendingReply(true);
-              try {
-                const {
-                  mediaTags: imetaTags,
-                  emojiTags,
-                  mentionTags,
-                } = splitOutgoingTags(mediaTags);
-                const result = await sendChannelMessage(
+          {showListPane ? (
+            <InboxListPane
+              activeReminderEventIds={activeReminderEventIds}
+              agentPubkeys={inboxAgentPubkeys}
+              doneSet={effectiveDoneSet}
+              dueReminderCount={dueReminderCount}
+              filter={filter}
+              items={filteredItems}
+              onFilterChange={setFilter}
+              onMarkRead={markItemRead}
+              onMarkUnread={markItemUnread}
+              onOpenDirect={(item) => {
+                const channelId = item.item.channelId;
+                if (!channelId) {
+                  return;
+                }
+                onOpenContext(
                   channelId,
-                  content,
-                  parentEventId,
-                  imetaTags,
-                  mentionPubkeys,
-                  undefined,
-                  emojiTags,
-                  mentionTags,
+                  item.id,
+                  getThreadReference(item.item.tags).rootId,
                 );
-                const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
-                const reply: InboxReply = {
-                  authorLabel: currentPubkey
-                    ? resolveUserLabel({
-                        currentPubkey,
-                        profiles: feedProfiles,
-                        pubkey: authorPubkey,
-                      })
-                    : "You",
-                  authorPubkey,
-                  avatarUrl:
-                    currentPubkey && feedProfiles
-                      ? (feedProfiles[currentPubkey.trim().toLowerCase()]
-                          ?.avatarUrl ?? null)
-                      : null,
-                  content,
-                  depth: result.depth,
-                  fullTimestampLabel: formatInboxFullTimestamp(
-                    result.createdAt,
-                  ),
-                  id: result.eventId,
-                  parentId: result.parentEventId,
-                  rootId: result.rootEventId,
-                  tags: emojiTags,
-                };
-                setLocalRepliesByItemId((current) => ({
-                  ...current,
-                  [itemToReply.id]: [...(current[itemToReply.id] ?? []), reply],
-                }));
-                onRefresh();
-              } finally {
-                setIsSendingReply(false);
-              }
-            }}
-            onToggleReaction={
-              canReact
-                ? async (message, emoji, remove) => {
-                    await toggleReactionMutation.mutateAsync({
-                      emoji,
-                      eventId: message.id,
-                      remove,
-                    });
-                    await channelMessagesQuery.refetch();
-                    onRefresh();
-                  }
-                : undefined
+              }}
+              onRemindLater={(item) => {
+                const channelId = item.item.channelId;
+                if (!channelId) {
+                  return;
+                }
+                openReminder({
+                  authorPubkey: item.item.pubkey,
+                  channelId,
+                  eventId: item.id,
+                  preview: item.preview.slice(0, 100),
+                });
+              }}
+              onSelect={(itemId) => {
+                handleUserSelectItem(itemId);
+                markItemRead(itemId);
+              }}
+              onUnreadOnlyChange={setUnreadOnly}
+              reminderPubkey={currentPubkey}
+              selectedId={selectedItemId}
+              showRightDivider={showListPane && showDetailPane}
+              unreadOnly={unreadOnly}
+            />
+          ) : null}
+
+          <button
+            aria-label="Resize inbox list"
+            className={cn(
+              "group absolute bottom-0 z-40 w-3 -translate-x-1/2 cursor-col-resize",
+              topChromeInset.top,
+              showListPane && showDetailPane ? "block" : "hidden",
+            )}
+            data-testid="home-inbox-list-resize-handle"
+            onDoubleClick={
+              canResetInboxListWidth ? handleInboxListWidthReset : undefined
             }
-            replies={selectedItemReplies}
-          />
-        ) : null}
-        {isChannelManagementOpen ? (
-          <RightAuxiliaryPane
-            canResetWidth={canResetThreadPanelWidth}
-            constrainToAvailableSpace={false}
-            onResetWidth={handleThreadPanelWidthReset}
-            onResizeStart={handleThreadPanelResizeStart}
-            testId="home-channel-management-auxiliary-pane"
-            widthPx={channelManagementWidthPx}
+            onPointerDown={handleInboxListResizeStart}
+            style={{ left: `${effectiveInboxListWidthPx}px` }}
+            title={
+              canResetInboxListWidth
+                ? "Drag to resize. Double-click to reset width."
+                : "Drag to resize."
+            }
+            type="button"
           >
-            <ChannelManagementSheet
-              channel={managedChannel}
+            <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
+          </button>
+
+          {showDetailPane ? (
+            <InboxDetailPane
+              agentPubkeys={inboxAgentPubkeys}
+              canDelete={canDelete}
+              canOpenChannel={Boolean(
+                selectedItem?.item.channelId &&
+                  availableChannelIds.has(selectedItem.item.channelId),
+              )}
+              canReply={canReply}
+              channel={selectedChannel}
+              contextChannelName={selectedChannel?.name ?? null}
               currentPubkey={currentPubkey}
-              layout="split"
-              onOpenChange={(nextOpen) => {
-                if (!nextOpen) {
-                  setManagedChannelId(null);
+              disabledReplyReason={disabledReplyReason}
+              isDeletingMessage={isDeletingMessage}
+              isSendingReply={isSendingReply}
+              isSinglePanelView={isSinglePanelDetailView}
+              isThreadContextLoading={threadContext.isLoading}
+              item={selectedItem}
+              messages={contextMessages}
+              onBack={
+                isSinglePanelDetailView
+                  ? () => {
+                      handleUserSelectItem(null);
+                    }
+                  : undefined
+              }
+              onDelete={() => {
+                if (!selectedItem || !canDelete) {
+                  return;
+                }
+                const channelId = selectedItem.item.channelId;
+                if (!channelId) {
+                  return;
+                }
+
+                setIsDeletingMessage(true);
+                void deleteMessage(channelId, selectedItem.id)
+                  .then(() => {
+                    onRefresh();
+                  })
+                  .finally(() => {
+                    setIsDeletingMessage(false);
+                  });
+              }}
+              onOpenChannel={(channelId) => {
+                handleCloseProfilePanel();
+                setManagedChannelId(channelId);
+              }}
+              onSendReply={async ({
+                content,
+                mediaTags,
+                mentionPubkeys,
+                parentEventId,
+              }) => {
+                const channelId = selectedItem?.item.channelId;
+                if (!selectedItem || !channelId || !canReply) {
+                  throw new Error("Replies are not available for this item.");
+                }
+
+                const itemToReply = selectedItem;
+                setIsSendingReply(true);
+                try {
+                  const {
+                    mediaTags: imetaTags,
+                    emojiTags,
+                    mentionTags,
+                  } = splitOutgoingTags(mediaTags);
+                  const result = await sendChannelMessage(
+                    channelId,
+                    content,
+                    parentEventId,
+                    imetaTags,
+                    mentionPubkeys,
+                    undefined,
+                    emojiTags,
+                    mentionTags,
+                  );
+                  const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
+                  const reply: InboxReply = {
+                    authorLabel: currentPubkey
+                      ? resolveUserLabel({
+                          currentPubkey,
+                          profiles: feedProfiles,
+                          pubkey: authorPubkey,
+                        })
+                      : "You",
+                    authorPubkey,
+                    avatarUrl:
+                      currentPubkey && feedProfiles
+                        ? (feedProfiles[currentPubkey.trim().toLowerCase()]
+                            ?.avatarUrl ?? null)
+                        : null,
+                    content,
+                    depth: result.depth,
+                    fullTimestampLabel: formatInboxFullTimestamp(
+                      result.createdAt,
+                    ),
+                    id: result.eventId,
+                    parentId: result.parentEventId,
+                    rootId: result.rootEventId,
+                    tags: emojiTags,
+                    timeLabel: formatTime(result.createdAt),
+                  };
+                  setLocalRepliesByItemId((current) => ({
+                    ...current,
+                    [itemToReply.id]: [
+                      ...(current[itemToReply.id] ?? []),
+                      reply,
+                    ],
+                  }));
+                  onRefresh();
+                } finally {
+                  setIsSendingReply(false);
                 }
               }}
-              open={true}
+              onToggleReaction={
+                canReact
+                  ? async (message, emoji, remove) => {
+                      await toggleReactionMutation.mutateAsync({
+                        emoji,
+                        eventId: message.id,
+                        remove,
+                      });
+                      await channelMessagesQuery.refetch();
+                      onRefresh();
+                    }
+                  : undefined
+              }
+              replies={selectedItemReplies}
             />
-          </RightAuxiliaryPane>
-        ) : null}
+          ) : null}
+          {profilePanelPubkey ? (
+            <RightAuxiliaryPane
+              canResetWidth={canResetThreadPanelWidth}
+              constrainToAvailableSpace={false}
+              onResetWidth={handleThreadPanelWidthReset}
+              onResizeStart={handleThreadPanelResizeStart}
+              testId="home-user-profile-panel"
+              widthPx={auxiliaryPaneWidthPx}
+            >
+              <UserProfilePanel
+                currentPubkey={currentPubkey}
+                isSinglePanelView={isSinglePanelAuxiliaryView}
+                layout="split"
+                onClose={handleCloseProfilePanel}
+                onOpenDm={handleOpenDm}
+                onOpenProfile={handleOpenProfilePanel}
+                onTabChange={handleProfilePanelTabChange}
+                onViewChange={handleProfilePanelViewChange}
+                pubkey={profilePanelPubkey}
+                splitPaneClamp
+                tab={profilePanelTab}
+                transparentChrome
+                view={profilePanelView}
+                widthPx={auxiliaryPaneWidthPx}
+              />
+            </RightAuxiliaryPane>
+          ) : isChannelManagementOpen ? (
+            <RightAuxiliaryPane
+              canResetWidth={canResetThreadPanelWidth}
+              constrainToAvailableSpace={false}
+              onResetWidth={handleThreadPanelWidthReset}
+              onResizeStart={handleThreadPanelResizeStart}
+              testId="home-channel-management-auxiliary-pane"
+              widthPx={auxiliaryPaneWidthPx}
+            >
+              <ChannelManagementSheet
+                channel={managedChannel}
+                currentPubkey={currentPubkey}
+                layout="split"
+                onOpenChange={(nextOpen) => {
+                  if (!nextOpen) {
+                    setManagedChannelId(null);
+                  }
+                }}
+                open={true}
+              />
+            </RightAuxiliaryPane>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </ProfilePanelProvider>
   );
 }

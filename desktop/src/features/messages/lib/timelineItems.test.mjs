@@ -90,6 +90,62 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
+test("buildTimelineItems: consecutive messages from the same author are grouped", () => {
+  const entries = [
+    entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
+    entry({ id: "b", pubkey: "AUTHOR-A", createdAt: dayAt(2026, 6, 14, 13) }),
+    entry({ id: "c", pubkey: "author-b", createdAt: dayAt(2026, 6, 14, 14) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, false],
+  );
+});
+
+test("buildTimelineItems: dividers break grouping while thread summaries do not", () => {
+  const sameAuthor = "author-a";
+  const entries = [
+    entry({ id: "a", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14) }),
+    {
+      ...entry({
+        id: "b",
+        pubkey: sameAuthor,
+        createdAt: dayAt(2026, 6, 14, 13),
+      }),
+      summary: {
+        threadHeadId: "b",
+        replyCount: 1,
+        lastReplyAt: dayAt(2026, 6, 14, 13),
+        participants: [],
+      },
+    },
+    entry({ id: "c", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14, 14) }),
+    entry({ id: "d", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 15) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, "c").items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, false, false],
+  );
+});
+
 test("buildTimelineItems: empty entries produce no items", () => {
   const { items } = buildTimelineItems([], null);
   assert.equal(items.length, 0);

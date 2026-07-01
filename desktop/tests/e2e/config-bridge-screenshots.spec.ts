@@ -273,9 +273,10 @@ test.describe("config bridge screenshots", () => {
     await page.getByTestId("channel-agents").click();
     await expect(page.getByTestId("chat-title")).toHaveText("agents");
 
-    // Click the agent avatar in the message row to open the profile side panel.
+    // Click an agent avatar in a full message row to open the profile side panel.
     await page
       .getByTestId("message-row")
+      .filter({ has: page.locator('[data-testid^="message-avatar-"]') })
       .last()
       .getByRole("button")
       .first()

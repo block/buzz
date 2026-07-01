@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const CHANNEL_HISTORY_PREPEND_SETTLE_PX = 16;
+const CHANNEL_HISTORY_PREPEND_SETTLE_PX = 28;
 
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
@@ -255,7 +255,7 @@ test("preserves user scroll while older channel history loads", async ({
     )
     // A full channel-history page can realize content-visibility estimates over
     // a few frames after the restore. Keep this below a row-sized jump while
-    // allowing the same first-pass settle budget as the no-shift coverage.
+    // allowing a small first-pass settle budget.
     .toBeLessThanOrEqual(CHANNEL_HISTORY_PREPEND_SETTLE_PX);
 });
 

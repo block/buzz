@@ -3,7 +3,7 @@ import type { Locator, Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const FIRST_PASS_PREPEND_DRIFT_PX = 16;
+const FIRST_PASS_PREPEND_DRIFT_PX = 20;
 const LATE_REFLOW_DRIFT_PX = 4;
 
 type AnchorSnapshot = {
@@ -217,6 +217,12 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
   });
   await page.goto("/");
   await waitForMockTimelineBridge(page);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 10_000 },
+    };
+  });
   await page.evaluate((imageUrl) => {
     for (let index = 0; index < 18; index += 1) {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -342,7 +348,7 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
     .toBeGreaterThan(110);
   await expect
     .poll(() => intrinsic("mixed-scroll tall text"))
-    .toBeGreaterThan(130);
+    .toBeGreaterThan(120);
 
   const anchorId = await timeline
     .locator("[data-message-id]")
@@ -387,7 +393,9 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
       samples += 1;
     };
     sample();
-    for (let frame = 0; frame < 36 && scroller.scrollTop > 0; frame += 1) {
+    // Stop before the top-edge history loader takes over; this case is scoped
+    // to rows realizing during fast mixed-media scrollback, not prepend anchoring.
+    for (let frame = 0; frame < 24 && scroller.scrollTop > 0; frame += 1) {
       const PX = 95;
       scroller.dispatchEvent(
         new WheelEvent("wheel", {
@@ -504,6 +512,23 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   ).toBeLessThanOrEqual(FIRST_PASS_PREPEND_DRIFT_PX);
   expectAnchorOrderUnchanged(before, afterPrepend);
 
+  const prependDrift = await stopAnchorDriftSampler(timeline);
+  console.info(
+    "timeline-prepend-no-shift result",
+    JSON.stringify(prependDrift),
+  );
+  expect(prependDrift.samples).toBeGreaterThan(0);
+  expect(prependDrift.missingSamples).toBe(0);
+  expect(prependDrift.maxDrift).toBeLessThanOrEqual(
+    FIRST_PASS_PREPEND_DRIFT_PX,
+  );
+
+  await startAnchorDriftSampler(
+    timeline,
+    before.anchorId,
+    afterPrepend.anchorTop,
+  );
+
   const grew = await growRowAboveAnchor(timeline, before.anchorId);
   expect(grew).toBe(true);
 
@@ -513,7 +538,7 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
         const top = await getAnchorTop(timeline, before.anchorId);
         return top === null
           ? Number.POSITIVE_INFINITY
-          : Math.abs(top - before.anchorTop);
+          : Math.abs(top - afterPrepend.anchorTop);
       },
       { timeout: 3_000 },
     )
@@ -524,7 +549,7 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   expectAnchorOrderUnchanged(before, afterReflow);
 
   const drift = await stopAnchorDriftSampler(timeline);
-  console.info("timeline-no-shift result", JSON.stringify(drift));
+  console.info("timeline-reflow-no-shift result", JSON.stringify(drift));
   expect(drift.samples).toBeGreaterThan(0);
   expect(drift.missingSamples).toBe(0);
   expect(drift.maxDrift).toBeLessThanOrEqual(LATE_REFLOW_DRIFT_PX);

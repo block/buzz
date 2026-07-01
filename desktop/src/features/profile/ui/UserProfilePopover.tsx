@@ -39,6 +39,7 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { sendChannelMessage } from "@/shared/api/tauri";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { KIND_STREAM_MESSAGE } from "@/shared/constants/kinds";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
@@ -484,6 +485,42 @@ export function UserProfilePopover({
   }, [clearHoverTimer]);
 
   const TriggerElement = triggerElement;
+  const profileHeaderContent = (
+    <>
+      <ProfileAvatarWithStatus
+        avatarClassName="text-xs"
+        avatarUrl={profile?.avatarUrl ?? null}
+        className="h-10 w-10"
+        iconClassName="h-5 w-5"
+        label={displayName}
+        size={40}
+        status={presenceStatus ?? "offline"}
+        statusTestId="user-profile-popover-presence-badge"
+        testId="user-profile-popover-avatar"
+      />
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
+          {isBotProfile && botIdenticonValue ? (
+            <BotIdenticon
+              value={botIdenticonValue}
+              size={20}
+              className="shrink-0 rounded"
+            />
+          ) : null}
+        </div>
+        {profileSubheader ? (
+          <p
+            className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
+            data-testid="user-profile-description"
+          >
+            {profileSubheader}
+          </p>
+        ) : null}
+      </div>
+    </>
+  );
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
@@ -507,7 +544,10 @@ export function UserProfilePopover({
           }}
           onMouseEnter={handleTriggerMouseEnter}
           onMouseLeave={handleMouseLeave}
-          className="inline-flex"
+          className={cn(
+            "inline-flex",
+            canOpenProfilePanel && "cursor-pointer [&_*]:cursor-pointer",
+          )}
         >
           {children}
         </TriggerElement>
@@ -522,40 +562,19 @@ export function UserProfilePopover({
         sideOffset={8}
       >
         <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
-            <ProfileAvatarWithStatus
-              avatarClassName="text-xs"
-              avatarUrl={profile?.avatarUrl ?? null}
-              className="h-10 w-10"
-              iconClassName="h-5 w-5"
-              label={displayName}
-              size={40}
-              status={presenceStatus ?? "offline"}
-              statusTestId="user-profile-popover-presence-badge"
-              testId="user-profile-popover-avatar"
-            />
-
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-1.5">
-                <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
-                {isBotProfile && botIdenticonValue ? (
-                  <BotIdenticon
-                    value={botIdenticonValue}
-                    size={20}
-                    className="shrink-0 rounded"
-                  />
-                ) : null}
-              </div>
-              {profileSubheader ? (
-                <p
-                  className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
-                  data-testid="user-profile-description"
-                >
-                  {profileSubheader}
-                </p>
-              ) : null}
+          {canOpenProfilePanel ? (
+            <button
+              className="flex w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring [&_*]:cursor-pointer"
+              onClick={handleTriggerClick}
+              type="button"
+            >
+              {profileHeaderContent}
+            </button>
+          ) : (
+            <div className="flex w-full min-w-0 items-center gap-3 text-left text-foreground">
+              {profileHeaderContent}
             </div>
-          </div>
+          )}
 
           {isBotProfile && (managedAgent || relayAgent) ? (
             <div className="flex flex-wrap gap-1.5">

@@ -6,6 +6,7 @@ import {
   hasNestedThreadBranches,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
+import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -481,6 +482,7 @@ export function MessageThreadPanel({
     const ancestorStack: { index: number; message: TimelineMessage }[] = [
       { index: -1, message: threadHead },
     ];
+    let previousGroupMessage: TimelineMessage | null = threadHead;
 
     return deferredThreadReplies.map((entry, index) => {
       while (
@@ -518,10 +520,18 @@ export function MessageThreadPanel({
       const nextEntry = deferredThreadReplies[index + 1];
       const connectsToVisibleChild =
         nextEntry != null && nextEntry.message.depth > entry.message.depth;
+      const startsUnreadSection =
+        index > 0 && entry.message.id === firstUnreadReplyId;
+      const isContinuation =
+        !startsUnreadSection &&
+        entry.summary === null &&
+        hasSameMessageAuthor(previousGroupMessage, entry.message);
 
       if (connectsToVisibleChild && !entry.summary) {
         ancestorStack.push({ index, message: entry.message });
       }
+
+      previousGroupMessage = entry.summary !== null ? null : entry.message;
 
       return {
         collapseDepthGuideActions,
@@ -529,9 +539,15 @@ export function MessageThreadPanel({
         continuationDepths,
         entry,
         index,
+        isContinuation,
       };
     });
-  }, [deferredThreadReplies, hoveredCollapseBranchId, threadHead]);
+  }, [
+    deferredThreadReplies,
+    firstUnreadReplyId,
+    hoveredCollapseBranchId,
+    threadHead,
+  ]);
 
   const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
     useAnchoredScroll({
@@ -641,6 +657,7 @@ export function MessageThreadPanel({
                     continuationDepths,
                     entry,
                     index,
+                    isContinuation,
                   } = item;
                   const showUnreadDivider =
                     index > 0 && entry.message.id === firstUnreadReplyId;
@@ -698,6 +715,7 @@ export function MessageThreadPanel({
                         hoverBackground={!entry.summary}
                         huddleMemberPubkeys={huddleMemberPubkeys}
                         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                        isContinuation={isContinuation}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}
