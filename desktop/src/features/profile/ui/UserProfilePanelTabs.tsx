@@ -492,10 +492,11 @@ function ProfileLiveActivityEmbed({
           className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
           emptyDescription={emptyDescription}
           emptyState={emptyState}
+          panelPadding={false}
           rawLayout="responsive"
           showHeader={false}
           showRaw={false}
-          transcriptScrollContainerClassName="py-4"
+          transcriptContentClassName="py-4"
           transcriptVariant="compactPreview"
         />
         <div className="pointer-events-none absolute inset-0 z-20">
@@ -557,10 +558,11 @@ function ProfileLiveActivityEmbed({
                     className="h-full min-h-0 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
                     emptyDescription={emptyDescription}
                     emptyState={emptyState}
+                    panelPadding={false}
                     rawLayout="responsive"
                     showHeader={false}
                     showRaw={false}
-                    transcriptScrollContainerClassName="py-4"
+                    transcriptContentClassName="py-4"
                     transcriptVariant="compactPreview"
                   />
                 ) : (

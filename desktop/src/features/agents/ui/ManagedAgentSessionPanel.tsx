@@ -43,10 +43,11 @@ type ManagedAgentSessionPanelProps = {
   className?: string;
   emptyDescription?: string;
   emptyState?: AgentSessionTranscriptEmptyState;
+  panelPadding?: boolean;
   rawLayout?: "responsive" | "exclusive";
   showHeader?: boolean;
   showRaw?: boolean;
-  transcriptScrollContainerClassName?: string;
+  transcriptContentClassName?: string;
   transcriptVariant?: AgentSessionTranscriptVariant;
   profiles?: UserProfileLookup;
   rawEventsOverride?: ObserverEvent[];
@@ -60,10 +61,11 @@ export function ManagedAgentSessionPanel({
   className,
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
   emptyState = "idle",
+  panelPadding = true,
   rawLayout = "responsive",
   showHeader = true,
   showRaw = true,
-  transcriptScrollContainerClassName,
+  transcriptContentClassName,
   transcriptVariant = "default",
   profiles,
   rawEventsOverride,
@@ -100,7 +102,8 @@ export function ManagedAgentSessionPanel({
   return (
     <section
       className={cn(
-        "rounded-lg border border-border/70 bg-background/80 p-4 shadow-xs",
+        "rounded-lg border border-border/70 bg-background/80 shadow-xs",
+        panelPadding && "p-4",
         autoTail && "flex flex-col overflow-hidden",
         className,
       )}
@@ -131,7 +134,7 @@ export function ManagedAgentSessionPanel({
         rawLayout={rawLayout}
         showRaw={showRaw}
         transcript={displayTranscript}
-        transcriptScrollContainerClassName={transcriptScrollContainerClassName}
+        transcriptContentClassName={transcriptContentClassName}
         transcriptVariant={transcriptVariant}
       />
     </section>
@@ -190,7 +193,7 @@ function SessionBody({
   rawLayout,
   showRaw,
   transcript,
-  transcriptScrollContainerClassName,
+  transcriptContentClassName,
   transcriptVariant,
 }: {
   agentAvatarUrl: string | null;
@@ -209,7 +212,7 @@ function SessionBody({
   rawLayout: "responsive" | "exclusive";
   showRaw: boolean;
   transcript: TranscriptItem[];
-  transcriptScrollContainerClassName?: string;
+  transcriptContentClassName?: string;
   transcriptVariant: AgentSessionTranscriptVariant;
 }) {
   const rawRail = resolveRawRailLayout(showRaw, rawLayout);
@@ -254,7 +257,7 @@ function SessionBody({
             emptyState={emptyState}
             items={transcript}
             profiles={profiles}
-            scrollContainerClassName={transcriptScrollContainerClassName}
+            contentContainerClassName={transcriptContentClassName}
             scrollScopeKey={`${agentPubkey}:${channelId ?? "all"}`}
             autoTail={autoTail}
             variant={transcriptVariant}
