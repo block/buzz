@@ -2248,27 +2248,41 @@ async fn handle_git_repo_announcement(
             }
         };
 
-    // Only a genuinely fresh claim by *this* attempt may be rolled back on seed
-    // failure. An `AlreadyOwned` outcome means the row is owned by some other
-    // attempt (a same-owner sibling, or a prior announce), and deleting it here
-    // would strand a repo whose pointer that other attempt already established.
+    // Only a genuinely fresh claim by *this* attempt may be rolled back on a
+    // pointer failure. An `AlreadyOwned` outcome means the row is owned by some
+    // other attempt (a same-owner sibling, or a prior announce that has since
+    // pushed), and deleting it here would strand a repo whose pointer that
+    // other attempt already established.
     let reserved_by_this_attempt = matches!(outcome, ReserveOutcome::Reserved);
 
-    // Seed the empty-manifest pointer in object storage. Establishes the
-    // invariant "repo announced ⟺ pointer exists" so the read path can rely
-    // on pointer-absent meaning never-announced (not just no-pushes-yet),
-    // keeping `info_refs`'s fail-closed `Ok(None) → 404` unambiguous.
-    // First push CASes the seeded pointer normally — no special-case branch.
-    if let Err(seed_err) = seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await {
+    // Establish/confirm the manifest pointer, keeping the invariant
+    // "repo announced ⟺ pointer exists" so the read path can rely on
+    // pointer-absent meaning never-announced (keeping `info_refs`'s fail-closed
+    // `Ok(None) → 404` unambiguous). Two distinct cases:
+    //
+    // - Fresh `Reserved` claim → `seed_manifest_pointer` (strict). This creates
+    //   the empty pointer, and correctly *fails* if a non-empty pointer already
+    //   exists for a name we just reserved — that would be a suspicious stale
+    //   pointer from a prior repo lifecycle, not a legitimate re-announce.
+    // - Same-owner `AlreadyOwned` (re-announce) → `ensure_manifest_pointer`
+    //   (tolerant). A non-empty pointer is the *normal* post-push state, so
+    //   re-announce must accept it untouched; only an absent pointer is
+    //   repaired by seeding. Using the strict seed here would wrongly reject
+    //   every re-announce after the first push.
+    let pointer_result = if reserved_by_this_attempt {
+        seed_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+    } else {
+        ensure_manifest_pointer(state, tenant, &owner_hex, &repo_id).await
+    };
+    if let Err(pointer_err) = pointer_result {
         // A reserved name without a clone-able pointer is exactly the broken
-        // state the seed exists to prevent — but ONLY roll back the reservation
-        // if this attempt is the one that freshly created it. Because
-        // `seed_manifest_pointer` treats a concurrent same-owner seed as
-        // success (`LostRace` → same empty digest → Ok), a genuine error from a
-        // fresh `Reserved` attempt means the pointer truly does not exist, so
-        // releasing our own just-inserted row is safe and correct
-        // (all-or-nothing). For an `AlreadyOwned` attempt we release nothing:
-        // the row belongs to another attempt that may have seeded successfully.
+        // state this step exists to prevent — but ONLY roll back the
+        // reservation if this attempt is the one that freshly created it. A
+        // genuine failure from a fresh `Reserved` attempt means the pointer
+        // truly could not be established, so releasing our own just-inserted
+        // row is safe and correct (all-or-nothing). For an `AlreadyOwned`
+        // attempt we release nothing: the row belongs to another attempt that
+        // may have seeded (or pushed) successfully.
         if reserved_by_this_attempt {
             if let Err(release_err) = state
                 .db
@@ -2283,7 +2297,7 @@ async fn handle_git_repo_announcement(
             }
         }
         return Err(anyhow::anyhow!(
-            "failed to seed manifest pointer: {seed_err}"
+            "failed to ensure manifest pointer: {pointer_err}"
         ));
     }
 
@@ -2395,6 +2409,51 @@ async fn seed_manifest_pointer(
             }
             Ok(())
         }
+    }
+}
+
+/// Ensure a manifest pointer exists for an already-owned repo (same-owner
+/// re-announce path). Unlike [`seed_manifest_pointer`], which is strict for
+/// *creation* (it refuses when a non-empty pointer already exists, since a
+/// freshly-reserved name with a populated pointer is suspicious), this is the
+/// tolerant *idempotent* path for a name this owner already holds:
+///
+/// - **pointer present** (empty *or* non-empty) → success, left untouched. A
+///   non-empty pointer is the normal state after the owner has pushed; a
+///   re-announce must not fail just because the repo has commits, and must
+///   never overwrite real ref state.
+/// - **pointer absent** → seed the empty pointer (repair the "row exists but
+///   pointer missing" window, e.g. a prior announce whose seed failed after
+///   the row was inserted by a sibling attempt). This restores the
+///   "announced ⟺ pointer exists" invariant.
+///
+/// The read-then-conditional-seed is race-safe: the repair uses
+/// `seed_manifest_pointer`'s create-only `put_pointer(IfNoneMatchStar)`, so a
+/// concurrent seeder that wins is resolved by that function's `LostRace`
+/// handling (same empty digest → Ok), and a concurrent *pusher* that populates
+/// the pointer between our read and our seed loses the create race and is
+/// likewise treated as an already-present pointer, not an overwrite.
+async fn ensure_manifest_pointer(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    owner_hex: &str,
+    repo_id: &str,
+) -> anyhow::Result<()> {
+    use crate::api::git::manifest::pointer_key;
+
+    let pkey = pointer_key(tenant.community(), owner_hex, repo_id);
+    let existing = state
+        .git_store
+        .get_pointer(&pkey)
+        .await
+        .map_err(|e| anyhow::anyhow!("get_pointer: {e}"))?;
+    match existing {
+        // Any existing pointer (empty or non-empty) is valid for a same-owner
+        // re-announce — leave it exactly as-is.
+        Some(_) => Ok(()),
+        // No pointer yet: repair by seeding the empty pointer. `LostRace` to a
+        // concurrent seeder/pusher is handled by `seed_manifest_pointer`.
+        None => seed_manifest_pointer(state, tenant, owner_hex, repo_id).await,
     }
 }
 
