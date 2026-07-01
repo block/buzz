@@ -91,6 +91,7 @@ export function ManagedAgentSessionPanel({
     <section
       className={cn(
         "rounded-lg border border-border/70 bg-background/80 p-4 shadow-xs",
+        autoTail && "flex flex-col overflow-hidden",
         className,
       )}
     >
@@ -223,6 +224,7 @@ function SessionBody({
             rawRail.mode === "side"
               ? "mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]"
               : "mt-0",
+            autoTail && "min-h-0 flex-1 overflow-hidden",
           )}
         >
           <AgentSessionTranscriptList

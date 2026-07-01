@@ -120,7 +120,7 @@ export function AgentSessionTranscriptList({
       <div
         aria-label="Live ACP transcript"
         aria-live="polite"
-        className="flex w-full flex-col gap-2.5"
+        className={cn("flex w-full flex-col gap-2.5", autoTail && "pb-4")}
         ref={autoTail ? contentRef : undefined}
         role="log"
       >

@@ -382,7 +382,7 @@ function ProfileLiveActivityEmbed({
   return (
     <section
       aria-label={`Open activity feed. Last live ${lastLiveLabel}.`}
-      className="relative flex h-48 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted/40 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="relative flex h-48 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
     >
       <button
@@ -436,15 +436,23 @@ function ProfileLiveActivityEmbed({
         agent={activityAgent}
         autoTail={true}
         channelId={activeChannelId}
-        className={cn(
-          "relative z-0 min-h-0 flex-1 rounded-none border-0 bg-transparent p-3 shadow-none **:data-message-id:pointer-events-none",
-          !showSwitcher && "pt-10",
-        )}
+        className="relative z-0 min-h-0 flex-1 border-0 bg-transparent px-4 py-0 text-xs shadow-none **:data-message-id:pointer-events-none **:data-[role=assistant-message-body]:max-w-full! **:data-[role=assistant-message-shell]:max-w-full! **:data-[role=user-message]:justify-start! **:data-[role=user-message-avatar]:hidden **:data-[role=user-message-bubble]:rounded-none! **:data-[role=user-message-bubble]:bg-transparent! **:data-[role=user-message-bubble]:p-0! **:data-[role=user-message-shell]:max-w-full! **:data-[role=user-message-shell]:items-start! [&_[data-role=assistant-message]_*]:text-xs [&_[data-role=assistant-message]_*]:leading-4 [&_[data-role=user-message]_*]:text-xs [&_[data-role=user-message]_*]:leading-4"
         emptyDescription="Live activity will appear here."
         rawLayout="responsive"
         showHeader={false}
         showRaw={false}
       />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-20"
+      >
+        <div className="absolute inset-x-0 top-0 h-12 bg-linear-to-b from-muted from-10% to-transparent" />
+        <div className="absolute inset-x-0 bottom-0 flex h-12 items-end bg-linear-to-t from-muted from-10% to-transparent px-3 pb-3">
+          <span className="text-xs font-semibold text-muted-foreground">
+            Latest Activity
+          </span>
+        </div>
+      </div>
     </section>
   );
 }
@@ -461,7 +469,7 @@ function LiveActivityOpenButton({
   return (
     <Button
       aria-label={`Open full activity. Last live ${label}.`}
-      className="absolute right-2 top-2 z-20 h-7 rounded-full bg-accent px-3 text-2xs font-semibold text-accent-foreground shadow-none hover:bg-accent/90 hover:text-accent-foreground"
+      className="absolute right-3 top-3 z-40 rounded-full bg-primary px-2.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
       onClick={(event) => {
         event.stopPropagation();
         onOpenActivity(activeChannelId);
