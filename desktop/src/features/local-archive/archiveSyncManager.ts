@@ -1,4 +1,5 @@
 import { relayClient } from "@/shared/api/relayClient";
+import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   archiveEvents,
@@ -15,8 +16,8 @@ const FLUSH_IDLE_MS = 2_000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function buildFilter(sub: SaveSubscription): Record<string, unknown> {
-  const base = { kinds: sub.kinds, limit: 0 };
+function buildFilter(sub: SaveSubscription): RelaySubscriptionFilter {
+  const base = { kinds: sub.kinds, limit: 0 } as const;
   switch (sub.scopeType) {
     case "channel_h":
       return { ...base, "#h": [sub.scopeValue] };
