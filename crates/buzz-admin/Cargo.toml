@@ -26,6 +26,11 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 deadpool-redis = { workspace = true }
+# Redis TLS (rediss://, e.g. ElastiCache) uses rustls, which needs a process
+# CryptoProvider installed at startup. The workspace redis TLS feature compiles
+# both aws-lc-rs and ring in transitively, so rustls can't auto-select one — we
+# install ring explicitly in main(). Mirrors buzz-relay's setup.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tracing = { workspace = true }
 sqlx = { workspace = true }
 url = { workspace = true }

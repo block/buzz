@@ -27,6 +27,14 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install the ring CryptoProvider for rustls. Required before any rustls
+    // TLS connection (rediss:// to ElastiCache, wss://, S3 over TLS): both
+    // aws-lc-rs and ring are compiled in transitively, so rustls can't
+    // auto-select a provider and would panic at first use without this.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     // JSON-only structured logs — simple, machine-parseable, CAKE-compatible.
     tracing_subscriber::registry()
         .with(fmt::layer().json().flatten_event(true))
