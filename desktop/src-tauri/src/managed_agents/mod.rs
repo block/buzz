@@ -5,6 +5,7 @@ mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
+pub(crate) mod global_config;
 mod nest;
 mod persona_avatars;
 mod persona_card;
@@ -28,6 +29,9 @@ mod types;
 pub use backend::*;
 pub use discovery::*;
 pub use env_vars::*;
+pub(crate) use global_config::{
+    load_global_agent_config, save_global_agent_config, validate_global_config, GlobalAgentConfig,
+};
 pub use nest::*;
 pub use persona_card::*;
 pub use personas::*;

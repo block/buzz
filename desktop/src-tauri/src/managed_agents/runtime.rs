@@ -1768,7 +1768,8 @@ pub fn spawn_agent_child(
             agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
         };
 
-        let effective = resolve_effective_agent_env(record, &personas, runtime_meta);
+        let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+        let effective = resolve_effective_agent_env(record, &personas, runtime_meta, &global);
         // Compute the optional payload before touching the command.
         let setup_payload_json =
             if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
@@ -1969,18 +1970,22 @@ pub fn spawn_agent_child(
     // (snapshotted at create) already merged under the agent's own overrides.
     // We read it directly and never look up the live persona, so credential
     // edits on the persona reach the agent only via delete+respawn (which
-    // rewrites the snapshot), not on a plain restart. `merged_user_env` with an
-    // empty persona map still applies the reserved-key / malformed-key / NUL
-    // filtering as defense-in-depth for older on-disk records.
+    // rewrites the snapshot), not on a plain restart. `merged_user_env` with a
+    // global-config lower map applies reserved-key / malformed-key / NUL
+    // filtering to both layers as defense-in-depth.
+    //
+    // Precedence: baked floor < Buzz-set env above < GLOBAL < per-agent.
+    // Global is the lower-precedence map; agent env_vars win on collision.
     //
     // These writes go LAST so user-provided values win over every Buzz-set env
     // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
     // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
     // which `merged_user_env` strips. Those carry Buzz's identity and must
     // never be GUI-overridable.
-    for (key, value) in
-        super::env_vars::merged_user_env(&std::collections::BTreeMap::new(), &record.env_vars)
-    {
+    let global_env_for_spawn = crate::managed_agents::load_global_agent_config(app)
+        .unwrap_or_default()
+        .env_vars;
+    for (key, value) in super::env_vars::merged_user_env(&global_env_for_spawn, &record.env_vars) {
         command.env(key, value);
     }
 

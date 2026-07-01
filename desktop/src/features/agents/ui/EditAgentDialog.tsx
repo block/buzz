@@ -45,6 +45,7 @@ import {
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { usePersonaModelDiscovery } from "./usePersonaModelDiscovery";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 
 export function EditAgentDialog({
   agent,
@@ -323,6 +324,15 @@ export function EditAgentDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
+
+  const { globalConfig } = useGlobalAgentConfig();
+
+  // Merge global + persona env for the inherited display hint in EnvVarsEditor.
+  // Persona wins over global on collision (higher precedence), so persona keys
+  // shadow global for display consistency.
+  const inheritedWithGlobal = React.useMemo(() => {
+    return { ...globalConfig.env_vars, ...inheritedEnvVars };
+  }, [globalConfig.env_vars, inheritedEnvVars]);
 
   // When the provider scope changes and the current model is no longer valid
   // for the new scope, clear it (mirrors Persona's useEffect for the same).
@@ -756,8 +766,8 @@ export function EditAgentDialog({
               disabled={updateMutation.isPending}
               fileSatisfiedKeys={fileSatisfiedEnvKeys}
               helperText="Per-agent env vars. Override the persona's vars on collision."
-              inheritedFrom={inheritedEnvVars}
-              inheritedLabel="persona"
+              inheritedFrom={inheritedWithGlobal}
+              inheritedLabel="persona / global defaults"
               onChange={setEnvVars}
               requiredKeys={requiredEnvKeys}
               value={envVars}
