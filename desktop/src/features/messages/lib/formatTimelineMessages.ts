@@ -254,6 +254,7 @@ export function formatTimelineMessages(
       actorPubkey: string;
       emoji: string;
       emojiUrl?: string;
+      createdAt: number;
     }
   >();
 
@@ -288,15 +289,19 @@ export function formatTimelineMessages(
       actorPubkey,
       emoji,
       emojiUrl,
+      createdAt: event.created_at,
     });
   }
 
-  const reactionsByEventId = new Map<string, Map<string, TimelineReaction>>();
+  // Internal accumulator: TimelineReaction + earliest timestamp for pill ordering.
+  type ReactionAccum = TimelineReaction & { earliestCreatedAt: number };
+  const reactionsByEventId = new Map<string, Map<string, ReactionAccum>>();
   for (const {
     targetId,
     actorPubkey,
     emoji,
     emojiUrl,
+    createdAt,
   } of reactionPresence.values()) {
     const current = reactionsByEventId.get(targetId) ?? new Map();
     const existing = current.get(emoji) ?? {
@@ -305,7 +310,11 @@ export function formatTimelineMessages(
       count: 0,
       reactedByCurrentUser: false,
       users: [],
+      earliestCreatedAt: createdAt,
     };
+    if (createdAt < existing.earliestCreatedAt) {
+      existing.earliestCreatedAt = createdAt;
+    }
 
     existing.count += 1;
     if (currentPubkeyLower && actorPubkey === currentPubkeyLower) {
@@ -434,7 +443,16 @@ export function formatTimelineMessages(
       tags: applyEditTagOverlay(event.tags, edit?.tags),
       reactions: (() => {
         const reactions = reactionsByEventId.get(event.id);
-        return reactions ? [...reactions.values()] : undefined;
+        if (!reactions) return undefined;
+        // Sort pills by earliest reaction time ascending (Slack-style: first-reacted
+        // emoji leftmost). Tiebreak on emoji string for determinism.
+        return [...reactions.values()]
+          .sort(
+            (a, b) =>
+              a.earliestCreatedAt - b.earliestCreatedAt ||
+              a.emoji.localeCompare(b.emoji),
+          )
+          .map(({ earliestCreatedAt: _drop, ...pill }) => pill);
       })(),
     };
   });
