@@ -451,7 +451,7 @@ function ProjectsToolbar({
       </div>
 
       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-        <fieldset className="flex flex-wrap items-center gap-1.5">
+        <fieldset className="flex flex-wrap items-center gap-0.5">
           <legend className="sr-only">Project owner filter</legend>
           {filterOptions.map((option) => (
             <Button

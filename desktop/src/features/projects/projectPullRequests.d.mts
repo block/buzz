@@ -25,6 +25,8 @@ export type ProjectPullRequest = {
   repoAddress: string | null;
   labels: string[];
   recipients: string[];
+  status: "Open" | "Merged" | "Closed" | "Draft";
+  statusEventId: string | null;
   branchName: string | null;
   commit: string | null;
   cloneUrls: string[];
@@ -38,9 +40,11 @@ export function eventToProjectPullRequest(
   pullRequest: RelayEvent,
   updateEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
+  statusEvents?: RelayEvent[],
 ): ProjectPullRequest;
 export function projectPullRequestEventsToPullRequests(
   pullRequestEvents: RelayEvent[],
   updateEvents?: RelayEvent[],
   commentEvents?: RelayEvent[],
+  statusEvents?: RelayEvent[],
 ): ProjectPullRequest[];

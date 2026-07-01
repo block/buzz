@@ -1,16 +1,13 @@
-use std::process::Command;
-use std::time::UNIX_EPOCH;
-
-use nostr::ToBech32;
-use serde::Serialize;
-use tauri::State;
-use url::Url;
-
 use crate::{
     app_state::AppState,
     managed_agents::{nest_dir, resolve_command},
 };
-
+use nostr::ToBech32;
+use serde::Serialize;
+use std::process::Command;
+use std::time::UNIX_EPOCH;
+use tauri::State;
+use url::Url;
 #[derive(Clone, Serialize)]
 pub struct ProjectRepoCommitInfo {
     pub hash: String,
@@ -20,7 +17,6 @@ pub struct ProjectRepoCommitInfo {
     pub timestamp: i64,
     pub subject: String,
 }
-
 #[derive(Serialize)]
 pub struct ProjectRepoFileInfo {
     pub path: String,
@@ -30,7 +26,6 @@ pub struct ProjectRepoFileInfo {
     pub last_changed_at: Option<i64>,
     pub latest_commit: Option<ProjectRepoCommitInfo>,
 }
-
 #[derive(Serialize)]
 pub struct ProjectRepoContributorInfo {
     pub name: String,
@@ -38,7 +33,6 @@ pub struct ProjectRepoContributorInfo {
     pub commit_count: usize,
     pub last_commit_at: i64,
 }
-
 #[derive(Serialize)]
 pub struct ProjectRepoSnapshotInfo {
     pub latest_commit: Option<ProjectRepoCommitInfo>,
@@ -46,19 +40,16 @@ pub struct ProjectRepoSnapshotInfo {
     pub files: Vec<ProjectRepoFileInfo>,
     pub contributors: Vec<ProjectRepoContributorInfo>,
 }
-
 #[derive(Serialize)]
 pub struct ProjectLocalRepoSnapshotInfo {
     pub path: String,
     pub snapshot: ProjectRepoSnapshotInfo,
 }
-
 #[derive(Serialize)]
 pub struct ProjectLocalRepoInfo {
     pub name: String,
     pub path: String,
 }
-
 #[derive(Serialize)]
 pub struct ProjectRepoSyncStatusInfo {
     pub local_path: Option<String>,
@@ -75,13 +66,11 @@ pub struct ProjectRepoSyncStatusInfo {
     pub can_push: bool,
     pub push_block_reason: Option<String>,
 }
-
 #[derive(Serialize)]
 pub struct ProjectRepoPushResult {
     pub pushed: bool,
     pub message: String,
 }
-
 struct GitAuthConfig {
     git_path: std::path::PathBuf,
     credential_helper: Option<std::path::PathBuf>,
@@ -99,7 +88,6 @@ fn run_git(
         command.current_dir(cwd);
     }
     configure_git_auth(&mut command, auth);
-
     let output = command
         .output()
         .map_err(|error| format!("failed to run git: {error}"))?;
@@ -111,27 +99,18 @@ fn run_git(
             stderr
         });
     }
-
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-
 fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig) {
     command.env("GIT_TERMINAL_PROMPT", "0");
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
-
-    // Clear inherited/global helpers first. Otherwise Git may authenticate with
-    // git-credential-nostr successfully, then call a system helper such as
-    // git-credential-osxkeychain to `store` the ephemeral NIP-98 credential;
-    // that helper can fail and make an otherwise-successful read look broken.
     command.env("GIT_CONFIG_COUNT", "1");
     command.env("GIT_CONFIG_KEY_0", "credential.helper");
     command.env("GIT_CONFIG_VALUE_0", "");
-
     let Some(cred_helper) = &auth.credential_helper else {
         return;
     };
-
     command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
     command.env("GIT_CONFIG_COUNT", "3");
     command.env("GIT_CONFIG_KEY_1", "credential.helper");
@@ -139,7 +118,6 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig) {
     command.env("GIT_CONFIG_KEY_2", "credential.useHttpPath");
     command.env("GIT_CONFIG_VALUE_2", "true");
 }
-
 fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
     let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
     let credential_helper = resolve_command("git-credential-nostr");
@@ -156,7 +134,6 @@ fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
         nsec,
     })
 }
-
 fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     let parsed = Url::parse(clone_url).map_err(|error| format!("invalid clone URL: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -167,7 +144,6 @@ fn validate_clone_url(clone_url: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
 fn parse_latest_commit(output: &str) -> Option<ProjectRepoCommitInfo> {
     let line = output.lines().next()?;
     let mut parts = line.split('\0');
@@ -187,7 +163,6 @@ fn parse_latest_commit(output: &str) -> Option<ProjectRepoCommitInfo> {
         subject,
     })
 }
-
 fn short_hash(hash: &str) -> String {
     hash.chars().take(7).collect()
 }
@@ -781,6 +756,8 @@ pub async fn get_project_repo_snapshot(
     clone_url: String,
     default_branch: Option<String>,
     base_branch: Option<String>,
+    target_ref: Option<String>,
+    target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
     validate_clone_url(&clone_url)?;
@@ -795,6 +772,10 @@ pub async fn get_project_repo_snapshot(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let target_ref = target_ref.filter(|value| value.starts_with("refs/") && !value.contains(".."));
+    let target_commit = target_commit
+        .filter(|value| matches!(value.len(), 40 | 64))
+        .filter(|value| value.chars().all(|c| c.is_ascii_hexdigit()));
 
     tauri::async_runtime::spawn_blocking(move || {
         let temp_dir = tempfile::tempdir().map_err(|error| format!("create temp dir: {error}"))?;
@@ -812,16 +793,32 @@ pub async fn get_project_repo_snapshot(
         clone_args.push(repo_path);
 
         if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
-            // A newly-announced Buzz git repo can be empty even when the project
-            // metadata says its default branch is `main`. In that state,
-            // `git clone --branch main` fails because the ref does not exist yet.
-            // Retry without the branch selector so we can still render a clean
-            // "no commits/files yet" state instead of an error card.
-            run_git(
-                &["clone", "--filter=blob:none", clone_url.as_str(), repo_path],
-                None,
-                &auth,
-            )?;
+            let has_pr_target = target_ref.is_some() || target_commit.is_some();
+            let fallback_args = if has_pr_target {
+                vec![
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    clone_url.as_str(),
+                    repo_path,
+                ]
+            } else {
+                vec!["clone", "--filter=blob:none", clone_url.as_str(), repo_path]
+            };
+            run_git(&fallback_args, None, &auth)?;
+            if has_pr_target {
+                let fetch_ref = target_ref.as_deref().or(target_commit.as_deref()).unwrap();
+                run_git(
+                    &["fetch", "--depth=100", "origin", fetch_ref],
+                    Some(&repo_dir),
+                    &auth,
+                )?;
+                run_git(
+                    &["checkout", "--detach", "FETCH_HEAD"],
+                    Some(&repo_dir),
+                    &auth,
+                )?;
+            }
         }
 
         let snapshot =

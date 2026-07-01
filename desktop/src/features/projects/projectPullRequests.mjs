@@ -6,6 +6,16 @@ function latestUpdateForPullRequest(pullRequestId, updateEvents) {
     .sort((left, right) => right.created_at - left.created_at)[0];
 }
 
+function latestStatusForPullRequest(pullRequestId, statusEvents) {
+  return statusEvents
+    .filter((event) =>
+      event.tags.some(
+        (tag) => (tag[0] === "e" || tag[0] === "E") && tag[1] === pullRequestId,
+      ),
+    )
+    .sort((left, right) => right.created_at - left.created_at)[0];
+}
+
 function eventsForPullRequest(pullRequestId, events) {
   return events
     .filter((event) =>
@@ -21,6 +31,17 @@ function getCloneUrls(event) {
     .filter((tag) => tag[0] === "clone")
     .flatMap((tag) => tag.slice(1))
     .filter(Boolean);
+}
+
+function statusFromEvent(pullRequest, statusEvent) {
+  if (statusEvent?.kind === 1630) return "Open";
+  if (statusEvent?.kind === 1631) return "Merged";
+  if (statusEvent?.kind === 1632) return "Closed";
+  if (statusEvent?.kind === 1633) return "Draft";
+  const labels = getAllTags(pullRequest, "t").map((label) =>
+    label.toLowerCase(),
+  );
+  return labels.includes("draft") ? "Draft" : "Open";
 }
 
 function eventToPullRequestUpdate(event) {
@@ -47,8 +68,10 @@ export function eventToProjectPullRequest(
   pullRequest,
   updateEvents = [],
   commentEvents = [],
+  statusEvents = [],
 ) {
   const latestUpdate = latestUpdateForPullRequest(pullRequest.id, updateEvents);
+  const latestStatus = latestStatusForPullRequest(pullRequest.id, statusEvents);
   const updates = eventsForPullRequest(pullRequest.id, updateEvents).map(
     eventToPullRequestUpdate,
   );
@@ -70,14 +93,24 @@ export function eventToProjectPullRequest(
     repoAddress: getTag(pullRequest, "a") ?? null,
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
+    status: statusFromEvent(pullRequest, latestStatus),
+    statusEventId: latestStatus?.id ?? null,
     branchName: getTag(pullRequest, "branch-name") ?? null,
     commit: latestCommit,
     cloneUrls: getCloneUrls(latestUpdate ?? pullRequest),
     updateCount: updates.length,
     updatedAt:
-      [...updates, ...comments].sort(
-        (left, right) => right.createdAt - left.createdAt,
-      )[0]?.createdAt ??
+      [
+        ...updates,
+        ...comments,
+        ...(latestStatus
+          ? [
+              {
+                createdAt: latestStatus.created_at,
+              },
+            ]
+          : []),
+      ].sort((left, right) => right.createdAt - left.createdAt)[0]?.createdAt ??
       latestUpdate?.created_at ??
       pullRequest.created_at,
     updates,
@@ -89,10 +122,16 @@ export function projectPullRequestEventsToPullRequests(
   pullRequestEvents,
   updateEvents = [],
   commentEvents = [],
+  statusEvents = [],
 ) {
   return [...pullRequestEvents]
     .map((pullRequest) =>
-      eventToProjectPullRequest(pullRequest, updateEvents, commentEvents),
+      eventToProjectPullRequest(
+        pullRequest,
+        updateEvents,
+        commentEvents,
+        statusEvents,
+      ),
     )
     .sort((left, right) => right.updatedAt - left.updatedAt);
 }

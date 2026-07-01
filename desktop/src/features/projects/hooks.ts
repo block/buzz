@@ -280,28 +280,40 @@ async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
 async function fetchProjectPullRequests(
   project: Project,
 ): Promise<ProjectPullRequest[]> {
-  const [pullRequestEvents, updateEvents, commentEvents] = await Promise.all([
-    relayClient.fetchEvents({
-      kinds: [KIND_GIT_PULL_REQUEST],
-      "#a": [project.repoAddress],
-      limit: 200,
-    }),
-    relayClient.fetchEvents({
-      kinds: [KIND_GIT_PR_UPDATE],
-      "#a": [project.repoAddress],
-      limit: 500,
-    }),
-    relayClient.fetchEvents({
-      kinds: [KIND_TEXT_NOTE],
-      "#a": [project.repoAddress],
-      limit: 500,
-    }),
-  ]);
+  const [pullRequestEvents, updateEvents, commentEvents, statusEvents] =
+    await Promise.all([
+      relayClient.fetchEvents({
+        kinds: [KIND_GIT_PULL_REQUEST],
+        "#a": [project.repoAddress],
+        limit: 200,
+      }),
+      relayClient.fetchEvents({
+        kinds: [KIND_GIT_PR_UPDATE],
+        "#a": [project.repoAddress],
+        limit: 500,
+      }),
+      relayClient.fetchEvents({
+        kinds: [KIND_TEXT_NOTE],
+        "#a": [project.repoAddress],
+        limit: 500,
+      }),
+      relayClient.fetchEvents({
+        kinds: [
+          KIND_GIT_STATUS_OPEN,
+          KIND_GIT_STATUS_MERGED,
+          KIND_GIT_STATUS_CLOSED,
+          KIND_GIT_STATUS_DRAFT,
+        ],
+        "#a": [project.repoAddress],
+        limit: 500,
+      }),
+    ]);
 
   return projectPullRequestEventsToPullRequests(
     pullRequestEvents,
     updateEvents,
     commentEvents,
+    statusEvents,
   );
 }
 
@@ -352,14 +364,17 @@ async function createProjectPullRequestComment({
 async function fetchProjectRepoSnapshot(
   project: Project,
   branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
 ): Promise<ProjectRepoSnapshot | null> {
-  const cloneUrl = project.cloneUrls[0];
+  const cloneUrl = pullRequest?.cloneUrls[0] ?? project.cloneUrls[0];
   if (!cloneUrl) return null;
 
   return getProjectRepoSnapshot({
     cloneUrl,
     defaultBranch: branchName ?? project.defaultBranch,
     baseBranch: project.defaultBranch,
+    targetCommit: pullRequest?.commit ?? null,
+    targetRef: pullRequest ? `refs/nostr/${pullRequest.id}` : null,
   });
 }
 
@@ -455,6 +470,7 @@ export function useRepoStateQuery(project: Project | null | undefined) {
 export function useProjectRepoSnapshotQuery(
   project: Project | null | undefined,
   branchName?: string | null,
+  pullRequest?: ProjectPullRequest | null,
 ) {
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
 
@@ -465,10 +481,12 @@ export function useProjectRepoSnapshotQuery(
       project?.id ?? "none",
       "repo-snapshot",
       selectedBranch ?? "default",
+      pullRequest?.id ?? "none",
+      pullRequest?.commit ?? "none",
     ],
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
-      return fetchProjectRepoSnapshot(project, selectedBranch);
+      return fetchProjectRepoSnapshot(project, selectedBranch, pullRequest);
     },
     staleTime: 30_000,
     retry: 1,

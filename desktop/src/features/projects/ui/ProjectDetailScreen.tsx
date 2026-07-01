@@ -1,16 +1,19 @@
 import {
   ArrowLeft,
-  BookOpen,
   ExternalLink,
   FolderGit2,
   MessageSquare,
-  Users,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useOpenDmMutation } from "@/features/channels/hooks";
+import {
+  contributorKey,
+  profileForCommitAuthor,
+  profileForContributor,
+} from "@/features/projects/lib/projectContributorMatching";
 import {
   type Project,
   type ProjectLocalRepoSnapshot,
@@ -51,30 +54,49 @@ import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { isSafeUrl } from "@/shared/lib/url";
-import type { ProjectRepoCommit } from "@/shared/api/types";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { Button } from "@/shared/ui/button";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { Tabs, TabsContent } from "@/shared/ui/tabs";
 import {
   findReadmeFile,
   ReadmePanel,
   RepositoryFilesPanel,
 } from "./ProjectRepositoryPanel";
 import { PullRequestsPanel } from "./ProjectPullRequestsPanel";
-import { RepositorySourceCard } from "./ProjectRepositorySource";
 import {
-  ProfileAuthorName,
-  ProfileIdentityButton,
-} from "./ProjectProfileIdentity";
+  ProjectTabsList,
+  PullRequestTabsList,
+} from "./ProjectWorkspaceTabList";
+import { RepositorySourceCard } from "./ProjectRepositorySource";
+import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
 function compactDate(createdAt: number) {
   return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
   });
+}
+
+function relativeCommitTime(createdAt: number) {
+  const elapsedSeconds = Math.max(
+    1,
+    Math.floor(Date.now() / 1_000 - createdAt),
+  );
+  const units = [
+    { label: "year", seconds: 365 * 24 * 60 * 60 },
+    { label: "month", seconds: 30 * 24 * 60 * 60 },
+    { label: "day", seconds: 24 * 60 * 60 },
+    { label: "hour", seconds: 60 * 60 },
+    { label: "min", seconds: 60 },
+  ];
+  const unit =
+    units.find((item) => elapsedSeconds >= item.seconds) ??
+    units[units.length - 1];
+  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
+  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
 }
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
@@ -89,77 +111,6 @@ function projectPeople(project: Project) {
         .map(normalizePubkey),
     ),
   ];
-}
-
-function contributorKey(contributor: ProjectRepoContributor) {
-  return (contributor.email || contributor.name).trim().toLowerCase();
-}
-
-function profileMatchesContributor(
-  contributor: ProjectRepoContributor,
-  profile: UserProfileLookup[string] | undefined,
-  pubkey?: string,
-) {
-  if (!profile) return false;
-  const name = contributor.name.trim().toLowerCase();
-  const email = contributor.email.trim().toLowerCase();
-  const emailLocalPart = email.split("@")[0] ?? "";
-  const candidates = [
-    pubkey,
-    profile.displayName,
-    profile.nip05Handle,
-    profile.ownerPubkey,
-  ]
-    .map((value) => value?.trim().toLowerCase() ?? "")
-    .filter(Boolean);
-  const candidateLocalParts = candidates.map(
-    (candidate) => candidate.split("@")[0] ?? "",
-  );
-
-  return (
-    candidates.includes(name) ||
-    candidates.includes(email) ||
-    candidateLocalParts.includes(emailLocalPart) ||
-    candidates.some(
-      (candidate) => candidate.length >= 4 && name.startsWith(candidate),
-    )
-  );
-}
-
-function profileForContributor(
-  contributor: ProjectRepoContributor,
-  profiles: UserProfileLookup | undefined,
-) {
-  if (!profiles) return null;
-
-  for (const [pubkey, profile] of Object.entries(profiles)) {
-    if (profileMatchesContributor(contributor, profile, pubkey)) {
-      return { pubkey, profile };
-    }
-  }
-
-  return null;
-}
-
-function profileForCommitAuthor(
-  commit: ProjectRepoCommit,
-  profiles: UserProfileLookup | undefined,
-) {
-  if (!profiles) return null;
-  const contributor = {
-    name: commit.authorName,
-    email: commit.authorEmail,
-    commitCount: 0,
-    lastCommitAt: commit.timestamp,
-  };
-
-  for (const [pubkey, profile] of Object.entries(profiles)) {
-    if (profileMatchesContributor(contributor, profile, pubkey)) {
-      return { pubkey, profile };
-    }
-  }
-
-  return null;
 }
 
 function ContributorsPanel({
@@ -199,45 +150,46 @@ function ContributorsPanel({
   }
 
   return (
-    <section className="space-y-2">
-      <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        <Users className="h-4 w-4" />
-        Contributors ({rows.length})
-      </h3>
-      <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
-        <table className="w-full caption-bottom text-sm">
-          <tbody>
-            {rows.map((row, index) => (
-              <tr
-                className={cn(
-                  "transition-colors hover:bg-muted/35",
-                  index !== rows.length - 1 && "border-border/50 border-b",
-                )}
-                key={row.id}
-              >
-                <td className="min-w-52 p-3 align-middle">
-                  <ProfileIdentityButton
-                    avatarUrl={row.avatarUrl}
-                    isAgent={row.isAgent}
-                    label={row.label}
-                    pubkey={row.pubkey}
-                    role={row.role}
-                  />
-                </td>
-                <td className="hidden p-3 align-middle text-muted-foreground sm:table-cell">
-                  {row.commitCount === null
-                    ? "No git commits"
-                    : `${row.commitCount} git commit${row.commitCount === 1 ? "" : "s"}`}
-                </td>
-                <td className="w-36 whitespace-nowrap p-3 text-right align-middle text-muted-foreground">
-                  {row.lastCommitAt ? compactDate(row.lastCommitAt) : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <div className="overflow-hidden rounded-xl border border-border/50 bg-card/60">
+      {rows.map((row, index) => (
+        <div
+          className={cn(
+            "flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/35",
+            index !== rows.length - 1 && "border-border/50 border-b",
+          )}
+          key={row.id}
+        >
+          <ProfileIdentityButton
+            avatarClassName="mt-0.5 shrink-0"
+            avatarSize="md"
+            avatarUrl={row.avatarUrl}
+            isAgent={row.isAgent}
+            label={row.label}
+            pubkey={row.pubkey}
+            showLabel={false}
+          />
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <p className="truncate text-sm font-semibold leading-5 text-foreground">
+              {row.label}
+            </p>
+            <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
+              <span className="truncate">{row.role}</span>
+              <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+                {row.commitCount === null
+                  ? "No git commits"
+                  : `${row.commitCount} commit${row.commitCount === 1 ? "" : "s"}`}
+              </span>
+              {row.lastCommitAt ? (
+                <>
+                  <span>·</span>
+                  <span>updated {compactDate(row.lastCommitAt)}</span>
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -273,11 +225,11 @@ function ActivityPanel({
   }
 
   return (
-    <div className="relative space-y-1 p-2">
+    <div className="relative">
       {commits.length > 1 ? (
         <div
           aria-hidden="true"
-          className="absolute bottom-7 left-9 top-7 w-px bg-border/45"
+          className="absolute bottom-5 left-8 top-5 w-px bg-border/45"
         />
       ) : null}
       {commits.map((commit) => {
@@ -299,7 +251,7 @@ function ActivityPanel({
 
         return (
           <article
-            className="group/feed-item relative flex min-w-0 items-start gap-3 rounded-lg p-3 transition-colors hover:bg-muted/35"
+            className="group/feed-item relative flex min-w-0 items-start gap-3 p-3 transition-colors hover:bg-muted/35"
             data-testid="project-activity-feed-item"
             key={commit.hash}
           >
@@ -312,27 +264,31 @@ function ActivityPanel({
               pubkey={matchedProfile?.pubkey ?? null}
               showLabel={false}
             />
-            <div className="min-w-0 flex-1 space-y-2">
-              <div className="flex min-w-0 items-start gap-3">
-                <div className="min-w-0 flex-1">
-                  <p className="min-w-0 text-sm leading-5 text-muted-foreground">
-                    <ProfileAuthorName pubkey={matchedProfile?.pubkey ?? null}>
-                      {authorLabel}
-                    </ProfileAuthorName>{" "}
+            <div className="min-w-0 flex-1 space-y-1.5">
+              <div className="space-y-0.5">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <p className="truncate text-sm font-semibold leading-5 text-foreground">
+                    {authorLabel}
+                  </p>
+                  <span className="shrink-0 text-sm leading-5 text-muted-foreground">
                     pushed a commit
-                  </p>
-                  <p className="truncate text-xs text-muted-foreground/80">
-                    {authorSubtitle} · {compactDate(commit.timestamp)}
-                    {matchingContributor?.commitCount
-                      ? ` · ${pluralize(matchingContributor.commitCount, "commit")}`
-                      : ""}
-                  </p>
+                  </span>
                 </div>
-                <code className="shrink-0 rounded-md border border-border/50 bg-background/55 px-2 py-1 text-xs text-muted-foreground transition-colors group-hover/feed-item:text-foreground">
-                  {commit.shortHash}
-                </code>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs leading-4 text-muted-foreground">
+                  <span className="truncate">{authorSubtitle}</span>
+                  <span>{commit.shortHash}</span>
+                  {matchingContributor?.commitCount ? (
+                    <span className="rounded-full border border-border/50 px-1.5 py-0.5 text-2xs">
+                      {pluralize(matchingContributor.commitCount, "commit")}
+                    </span>
+                  ) : null}
+                  <span>·</span>
+                  <time className="transition-colors group-hover/feed-item:text-foreground">
+                    {relativeCommitTime(commit.timestamp)}
+                  </time>
+                </div>
               </div>
-              <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-2">
+              <div className="rounded-lg border border-border/50 bg-background/45 px-3 py-1.5">
                 <p className="line-clamp-2 text-sm font-medium leading-5 text-foreground">
                   {commit.subject}
                 </p>
@@ -360,9 +316,12 @@ function WorkspaceTabs({
   localSnapshotError,
   localSnapshotLoading,
   project,
+  selectedPullRequestId,
   pullRequests,
   pullRequestsError,
   pullRequestsLoading,
+  onSelectedPullRequestIdChange,
+  onBranchChange,
   snapshot,
   snapshotError,
   snapshotLoading,
@@ -374,9 +333,12 @@ function WorkspaceTabs({
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
   project: Project;
+  selectedPullRequestId: string | null;
   pullRequests: ProjectPullRequest[];
   pullRequestsError: unknown;
   pullRequestsLoading: boolean;
+  onSelectedPullRequestIdChange: (id: string | null) => void;
+  onBranchChange: (branch: string | null) => void;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
   snapshotLoading: boolean;
@@ -395,6 +357,11 @@ function WorkspaceTabs({
     displayedSnapshot?.contributors ?? repoContributors;
   const files = displayedSnapshot?.files ?? [];
   const readmeFile = React.useMemo(() => findReadmeFile(files), [files]);
+  const selectedPullRequest =
+    pullRequests.find(
+      (pullRequest) => pullRequest.id === selectedPullRequestId,
+    ) ?? null;
+  const isPullRequestSelected = Boolean(selectedPullRequest);
   const [selectedTab, setSelectedTab] = React.useState("readme");
 
   React.useEffect(() => {
@@ -405,36 +372,45 @@ function WorkspaceTabs({
     );
   }, [displayedSnapshotLoading, readmeFile]);
 
+  React.useEffect(() => {
+    if (isPullRequestSelected) {
+      setSelectedTab((currentTab) =>
+        currentTab.startsWith("pr-") ? currentTab : "pr-conversation",
+      );
+      if (selectedPullRequest?.branchName) {
+        onBranchChange(selectedPullRequest.branchName);
+      }
+    } else {
+      setSelectedTab((currentTab) =>
+        currentTab.startsWith("pr-") ? "prs" : currentTab,
+      );
+    }
+  }, [isPullRequestSelected, onBranchChange, selectedPullRequest?.branchName]);
+
+  const handleTabChange = React.useCallback(
+    (nextTab: string) => {
+      setSelectedTab(nextTab);
+      if (!nextTab.startsWith("pr-") && nextTab !== "prs") {
+        onSelectedPullRequestIdChange(null);
+      }
+    },
+    [onSelectedPullRequestIdChange],
+  );
+
   return (
     <Tabs
       className="space-y-3"
-      onValueChange={setSelectedTab}
+      onValueChange={handleTabChange}
       value={selectedTab}
     >
-      <TabsList className="h-9 w-fit justify-start gap-1.5 bg-transparent p-0">
-        {readmeFile ? (
-          <TabsTrigger
-            aria-label="README"
-            className={PROJECT_TAB_TRIGGER_CLASS}
-            title="README"
-            value="readme"
-          >
-            <BookOpen className="h-3.5 w-3.5" />
-          </TabsTrigger>
-        ) : null}
-        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
-          Activity
-        </TabsTrigger>
-        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="prs">
-          PRs
-        </TabsTrigger>
-        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="files">
-          Files
-        </TabsTrigger>
-        <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="contributors">
-          Contributors
-        </TabsTrigger>
-      </TabsList>
+      {selectedPullRequest ? (
+        <PullRequestTabsList
+          filesCount={files.length}
+          pullRequest={selectedPullRequest}
+        />
+      ) : (
+        <ProjectTabsList hasReadme={Boolean(readmeFile)} />
+      )}
 
       <TabsContent
         className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
@@ -456,11 +432,32 @@ function WorkspaceTabs({
         <PullRequestsPanel
           error={pullRequestsError}
           isLoading={pullRequestsLoading}
+          onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
           profiles={profiles}
           project={project}
           pullRequests={pullRequests}
+          selectedPullRequestId={selectedPullRequestId}
         />
       </TabsContent>
+
+      {(["conversation", "commits", "checks"] as const).map((mode) => (
+        <TabsContent
+          className="m-0 overflow-hidden rounded-xl border border-border/50 bg-card/60"
+          key={mode}
+          value={`pr-${mode}`}
+        >
+          <PullRequestsPanel
+            error={pullRequestsError}
+            isLoading={pullRequestsLoading}
+            mode={mode}
+            onSelectedPullRequestIdChange={onSelectedPullRequestIdChange}
+            profiles={profiles}
+            project={project}
+            pullRequests={pullRequests}
+            selectedPullRequestId={selectedPullRequestId}
+          />
+        </TabsContent>
+      ))}
 
       <TabsContent className="m-0" value="files">
         {repoSource === "local" && !localSnapshot && !localSnapshotLoading ? (
@@ -470,6 +467,17 @@ function WorkspaceTabs({
             </div>
           </div>
         ) : null}
+        <RepositoryFilesPanel
+          error={displayedSnapshotError}
+          fallbackAuthorPubkey={project.owner}
+          files={files}
+          isLoading={displayedSnapshotLoading}
+          profiles={profiles}
+          snapshot={displayedSnapshot}
+        />
+      </TabsContent>
+
+      <TabsContent className="m-0" value="pr-files">
         <RepositoryFilesPanel
           error={displayedSnapshotError}
           fallbackAuthorPubkey={project.owner}
@@ -506,9 +514,6 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
   "profileView",
 ] as const;
 
-const PROJECT_TAB_TRIGGER_CLASS =
-  "h-8 gap-1.5 rounded-full px-3 text-foreground hover:bg-accent hover:text-accent-foreground data-[state=active]:bg-secondary data-[state=active]:text-secondary-foreground data-[state=active]:shadow-xs";
-
 export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const { goChannel, goProjects } = useAppNavigation();
   const { activeWorkspace } = useWorkspaces();
@@ -521,19 +526,38 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const projectQuery = useProjectQuery(projectId);
   const project = projectQuery.data;
   const repoStateQuery = useRepoStateQuery(project);
+  const pullRequestsQuery = useProjectPullRequestsQuery(project);
   const branchOptions = React.useMemo(() => {
     const names = [
       project?.defaultBranch,
       ...(repoStateQuery.data?.branches.map((branch) => branch.name) ?? []),
+      ...(pullRequestsQuery.data
+        ?.map((pullRequest) => pullRequest.branchName)
+        .filter((name): name is string => Boolean(name)) ?? []),
     ].filter((name): name is string => Boolean(name));
     return [...new Set(names)];
-  }, [project?.defaultBranch, repoStateQuery.data?.branches]);
+  }, [
+    project?.defaultBranch,
+    pullRequestsQuery.data,
+    repoStateQuery.data?.branches,
+  ]);
   const [selectedBranch, setSelectedBranch] = React.useState<string | null>(
     null,
   );
   const activeBranch =
     selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
-  const repoSnapshotQuery = useProjectRepoSnapshotQuery(project, activeBranch);
+  const selectedBranchPullRequest = React.useMemo(
+    () =>
+      pullRequestsQuery.data?.find(
+        (pullRequest) => pullRequest.branchName === activeBranch,
+      ) ?? null,
+    [activeBranch, pullRequestsQuery.data],
+  );
+  const repoSnapshotQuery = useProjectRepoSnapshotQuery(
+    project,
+    activeBranch,
+    selectedBranchPullRequest,
+  );
   const localRepoSnapshotQuery = useProjectLocalRepoSnapshotQuery(
     project,
     activeWorkspace?.reposDir,
@@ -549,7 +573,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
     activeWorkspace?.reposDir,
     activeBranch,
   );
-  const pullRequestsQuery = useProjectPullRequestsQuery(project);
   const hasLocalCheckout = Boolean(
     localRepoSnapshotQuery.data || repoSyncStatusQuery.data?.localPath,
   );
@@ -557,10 +580,15 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   const [repoSource, setRepoSource] = React.useState<"remote" | "local">(
     "remote",
   );
+  const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
+    string | null
+  >(null);
+  const isPullRequestDetailOpen = Boolean(selectedPullRequestId);
 
   React.useEffect(() => {
     if (!project) {
       setSelectedBranch(null);
+      setSelectedPullRequestId(null);
       return;
     }
 
@@ -799,43 +827,45 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                   </div>
                 </div>
 
-                <RepositorySourceCard
-                  branch={activeBranch ?? ""}
-                  branchOptions={branchOptions}
-                  cloneUrls={project.cloneUrls}
-                  localDisabled={
-                    !repoSyncStatusQuery.data?.localPath &&
-                    !localRepoSnapshotQuery.data &&
-                    !localRepoSnapshotQuery.isLoading
-                  }
-                  localLabel={
-                    localRepoSnapshotQuery.isLoading
-                      ? "Local checking"
-                      : repoSyncStatusQuery.data?.localPath ||
-                          localRepoSnapshotQuery.data
-                        ? "Local"
-                        : "Local missing"
-                  }
-                  localPath={
-                    repoSyncStatusQuery.data?.localPath ??
-                    localRepoSnapshotQuery.data?.path
-                  }
-                  onBranchChange={setSelectedBranch}
-                  onPush={() => {
-                    void handlePushLocalRepo();
-                  }}
-                  onSourceChange={setRepoSource}
-                  pushDisabled={
-                    pushLocalRepoMutation.isPending ||
-                    !repoSyncStatusQuery.data?.canPush
-                  }
-                  pushPending={pushLocalRepoMutation.isPending}
-                  remoteLabel={
-                    repoSnapshotQuery.isLoading ? "Remote checking" : "Remote"
-                  }
-                  source={repoSource}
-                  status={repoSyncStatusQuery.data}
-                />
+                {!isPullRequestDetailOpen ? (
+                  <RepositorySourceCard
+                    branch={activeBranch ?? ""}
+                    branchOptions={branchOptions}
+                    cloneUrls={project.cloneUrls}
+                    localDisabled={
+                      !repoSyncStatusQuery.data?.localPath &&
+                      !localRepoSnapshotQuery.data &&
+                      !localRepoSnapshotQuery.isLoading
+                    }
+                    localLabel={
+                      localRepoSnapshotQuery.isLoading
+                        ? "Local checking"
+                        : repoSyncStatusQuery.data?.localPath ||
+                            localRepoSnapshotQuery.data
+                          ? "Local"
+                          : "Local missing"
+                    }
+                    localPath={
+                      repoSyncStatusQuery.data?.localPath ??
+                      localRepoSnapshotQuery.data?.path
+                    }
+                    onBranchChange={setSelectedBranch}
+                    onPush={() => {
+                      void handlePushLocalRepo();
+                    }}
+                    onSourceChange={setRepoSource}
+                    pushDisabled={
+                      pushLocalRepoMutation.isPending ||
+                      !repoSyncStatusQuery.data?.canPush
+                    }
+                    pushPending={pushLocalRepoMutation.isPending}
+                    remoteLabel={
+                      repoSnapshotQuery.isLoading ? "Remote checking" : "Remote"
+                    }
+                    source={repoSource}
+                    status={repoSyncStatusQuery.data}
+                  />
+                ) : null}
               </section>
 
               <WorkspaceTabs
@@ -843,6 +873,8 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 localSnapshot={localRepoSnapshotQuery.data}
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
+                onBranchChange={setSelectedBranch}
+                onSelectedPullRequestIdChange={setSelectedPullRequestId}
                 profiles={profiles}
                 project={project}
                 pullRequests={pullRequestsQuery.data ?? []}
@@ -850,6 +882,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 pullRequestsLoading={pullRequestsQuery.isLoading}
                 repoContributors={repoContributors}
                 repoSource={repoSource}
+                selectedPullRequestId={selectedPullRequestId}
                 snapshot={repoSnapshotQuery.data}
                 snapshotError={repoSnapshotQuery.error}
                 snapshotLoading={repoSnapshotQuery.isLoading}

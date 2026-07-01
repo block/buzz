@@ -14,6 +14,7 @@ type ProfileIdentityButtonProps = {
   pubkey: string | null;
   role?: React.ReactNode;
   showLabel?: boolean;
+  textSize?: "xs" | "sm";
 };
 
 export function ProfileIdentityButton({
@@ -26,7 +27,10 @@ export function ProfileIdentityButton({
   pubkey,
   role,
   showLabel = true,
+  textSize = "xs",
 }: ProfileIdentityButtonProps) {
+  const labelClassName = textSize === "sm" ? "text-sm leading-5" : "text-xs";
+  const roleClassName = textSize === "sm" ? "text-sm leading-5" : "text-xs";
   const className = cn(
     "flex min-w-0 rounded-lg text-left",
     align === "center" ? "items-center" : "items-start",
@@ -47,14 +51,20 @@ export function ProfileIdentityButton({
         <span className="min-w-0">
           <span
             className={cn(
-              "block truncate text-xs font-medium text-foreground",
+              "block truncate font-medium text-foreground",
+              labelClassName,
               pubkey && "hover:underline",
             )}
           >
             {label}
           </span>
           {role ? (
-            <span className="block truncate text-xs text-muted-foreground">
+            <span
+              className={cn(
+                "block truncate text-muted-foreground",
+                roleClassName,
+              )}
+            >
               {role}
             </span>
           ) : null}
