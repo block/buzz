@@ -626,10 +626,18 @@ function ProjectGridCard({
               <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary shadow-inner">
                 <FolderGit2 className="h-4 w-4" />
               </span>
-              <div className="min-w-0">
+              <div className="min-w-0 space-y-1">
                 <span className="block truncate text-sm font-semibold text-foreground">
                   {project.name}
                 </span>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                  <MetadataItem icon={Users}>
+                    {pluralize(people.length, "person", "people")}
+                  </MetadataItem>
+                  <MetadataItem icon={CalendarDays}>
+                    {formatCreatedDate(project.createdAt)}
+                  </MetadataItem>
+                </div>
               </div>
             </div>
           </div>
@@ -653,15 +661,6 @@ function ProjectGridCard({
           <span className="truncate font-mono">
             {getClonePathLabel(project)}
           </span>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <MetadataItem icon={Users}>
-            {pluralize(people.length, "person", "people")}
-          </MetadataItem>
-          <MetadataItem icon={CalendarDays}>
-            {formatCreatedDate(project.createdAt)}
-          </MetadataItem>
         </div>
 
         <div className="mt-auto space-y-2 rounded-lg bg-muted/70 px-2.5 py-2">

@@ -1,4 +1,28 @@
-import { FileDiff, Files, GitCommitHorizontal, Search } from "lucide-react";
+import {
+  Braces,
+  CodeXml,
+  Database,
+  FileArchive,
+  FileAudio,
+  FileCode2,
+  FileCog,
+  FileDiff,
+  Files,
+  FileImage,
+  FileJson,
+  FileLock2,
+  FileSpreadsheet,
+  FileText,
+  FileType,
+  FileVideo,
+  FolderGit2,
+  GitCommitHorizontal,
+  Package,
+  Search,
+  Settings,
+  Terminal,
+  type LucideIcon,
+} from "lucide-react";
 import * as React from "react";
 
 import type { ProjectPullRequest } from "@/features/projects/hooks";
@@ -22,6 +46,257 @@ type DiffRow = {
   oldLine: number | null;
   type: "add" | "context" | "delete" | "hunk";
 };
+
+type FileTreeNode = {
+  children: Map<string, FileTreeNode>;
+  file: ProjectRepoDiffFile | null;
+  name: string;
+  path: string;
+};
+
+type ChangedFileIconVisual = {
+  Icon: LucideIcon;
+  className: string;
+  containerClassName: string;
+};
+
+const CODE_EXTENSIONS = new Set([
+  "c",
+  "cc",
+  "cpp",
+  "cs",
+  "dart",
+  "go",
+  "h",
+  "hpp",
+  "java",
+  "js",
+  "jsx",
+  "kt",
+  "kts",
+  "mjs",
+  "mts",
+  "py",
+  "rb",
+  "rs",
+  "swift",
+  "ts",
+  "tsx",
+  "zig",
+]);
+const IMAGE_EXTENSIONS = new Set([
+  "avif",
+  "gif",
+  "jpeg",
+  "jpg",
+  "png",
+  "svg",
+  "webp",
+]);
+const ARCHIVE_EXTENSIONS = new Set([
+  "7z",
+  "bz2",
+  "gz",
+  "rar",
+  "tar",
+  "tgz",
+  "zip",
+]);
+const AUDIO_EXTENSIONS = new Set(["aac", "flac", "m4a", "mp3", "ogg", "wav"]);
+const VIDEO_EXTENSIONS = new Set(["avi", "m4v", "mov", "mp4", "webm"]);
+const SPREADSHEET_EXTENSIONS = new Set(["csv", "ods", "tsv", "xls", "xlsx"]);
+const TEXT_EXTENSIONS = new Set(["md", "mdx", "rst", "txt"]);
+
+function createFileTreeNode(name: string, path: string): FileTreeNode {
+  return { children: new Map(), file: null, name, path };
+}
+
+function buildFileTree(files: ProjectRepoDiffFile[]) {
+  const root = createFileTreeNode("", "");
+  for (const file of files) {
+    const segments = file.path.split("/").filter(Boolean);
+    let node = root;
+    segments.forEach((segment, index) => {
+      const path = segments.slice(0, index + 1).join("/");
+      let child = node.children.get(segment);
+      if (!child) {
+        child = createFileTreeNode(segment, path);
+        node.children.set(segment, child);
+      }
+      node = child;
+    });
+    node.file = file;
+  }
+  return root;
+}
+
+function sortedFileTreeChildren(node: FileTreeNode) {
+  return [...node.children.values()].sort((left, right) => {
+    if (Boolean(left.file) !== Boolean(right.file)) {
+      return left.file ? 1 : -1;
+    }
+    return left.name.localeCompare(right.name);
+  });
+}
+
+function extensionForPath(path: string) {
+  const name = fileName(path).toLowerCase();
+  if (!name.includes(".")) return "";
+  return name.split(".").pop() ?? "";
+}
+
+function changedFileIconVisual(path: string): ChangedFileIconVisual {
+  const name = fileName(path).toLowerCase();
+  const extension = extensionForPath(path);
+
+  if (
+    name === "dockerfile" ||
+    name === "containerfile" ||
+    name === "package.json"
+  ) {
+    return {
+      Icon: Package,
+      className: "fill-orange-500/20 text-orange-500",
+      containerClassName: "bg-orange-500/15",
+    };
+  }
+  if (name.includes("lock") || extension === "pem" || extension === "key") {
+    return {
+      Icon: FileLock2,
+      className: "fill-amber-500/20 text-amber-500",
+      containerClassName: "bg-amber-500/15",
+    };
+  }
+  if (extension === "json") {
+    return {
+      Icon: FileJson,
+      className: "fill-yellow-500/20 text-yellow-500",
+      containerClassName: "bg-yellow-500/15",
+    };
+  }
+  if (
+    ["yaml", "yml", "toml", "ini", "conf", "config", "env"].includes(extension)
+  ) {
+    return {
+      Icon: Settings,
+      className: "fill-zinc-500/20 text-zinc-500",
+      containerClassName: "bg-zinc-500/15",
+    };
+  }
+  if (["html", "xml"].includes(extension)) {
+    return {
+      Icon: CodeXml,
+      className: "fill-rose-500/20 text-rose-500",
+      containerClassName: "bg-rose-500/15",
+    };
+  }
+  if (extension === "css") {
+    return {
+      Icon: Braces,
+      className: "fill-violet-500/20 text-violet-500",
+      containerClassName: "bg-violet-500/15",
+    };
+  }
+  if (CODE_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileCode2,
+      className: "fill-blue-500/20 text-blue-500",
+      containerClassName: "bg-blue-500/15",
+    };
+  }
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileImage,
+      className: "fill-pink-500/20 text-pink-500",
+      containerClassName: "bg-pink-500/15",
+    };
+  }
+  if (ARCHIVE_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileArchive,
+      className: "fill-orange-500/20 text-orange-500",
+      containerClassName: "bg-orange-500/15",
+    };
+  }
+  if (AUDIO_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileAudio,
+      className: "fill-purple-500/20 text-purple-500",
+      containerClassName: "bg-purple-500/15",
+    };
+  }
+  if (VIDEO_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileVideo,
+      className: "fill-red-500/20 text-red-500",
+      containerClassName: "bg-red-500/15",
+    };
+  }
+  if (SPREADSHEET_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileSpreadsheet,
+      className: "fill-emerald-500/20 text-emerald-500",
+      containerClassName: "bg-emerald-500/15",
+    };
+  }
+  if (extension === "sql" || extension === "db" || extension === "sqlite") {
+    return {
+      Icon: Database,
+      className: "fill-cyan-500/20 text-cyan-500",
+      containerClassName: "bg-cyan-500/15",
+    };
+  }
+  if (["bash", "fish", "sh", "zsh"].includes(extension)) {
+    return {
+      Icon: Terminal,
+      className: "fill-lime-500/20 text-lime-500",
+      containerClassName: "bg-lime-500/15",
+    };
+  }
+  if (TEXT_EXTENSIONS.has(extension)) {
+    return {
+      Icon: FileText,
+      className: "fill-slate-500/20 text-slate-500",
+      containerClassName: "bg-slate-500/15",
+    };
+  }
+  if (extension === "pdf") {
+    return {
+      Icon: FileType,
+      className: "fill-red-500/20 text-red-500",
+      containerClassName: "bg-red-500/15",
+    };
+  }
+  return {
+    Icon: FileCog,
+    className: "fill-muted-foreground/20 text-muted-foreground",
+    containerClassName: "bg-muted/70",
+  };
+}
+
+function ChangedFileTreeIcon({ path }: { path: string }) {
+  const visual = changedFileIconVisual(path);
+  const Icon = visual.Icon;
+
+  return (
+    <span
+      className={cn(
+        "flex h-6 w-6 shrink-0 items-center justify-center rounded-md",
+        visual.containerClassName,
+      )}
+    >
+      <Icon className={cn("h-4 w-4", visual.className)} />
+    </span>
+  );
+}
+
+function ChangedFolderTreeIcon() {
+  return (
+    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-500/15">
+      <FolderGit2 className="h-4 w-4 fill-sky-500/25 text-sky-500" />
+    </span>
+  );
+}
 
 function parseHunkHeader(line: string) {
   const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
@@ -154,6 +429,56 @@ function DiffPreview({ file }: { file: ProjectRepoDiffFile }) {
   );
 }
 
+function FileTreeItems({
+  node,
+  onSelect,
+  selectedPath,
+  depth = 0,
+}: {
+  node: FileTreeNode;
+  onSelect: (path: string) => void;
+  selectedPath: string | null;
+  depth?: number;
+}) {
+  return sortedFileTreeChildren(node).map((child) => {
+    if (child.file) {
+      return (
+        <button
+          className={cn(
+            "flex w-full min-w-0 items-center gap-2 py-1.5 pr-3 text-left text-xs text-muted-foreground hover:bg-muted/35 hover:text-foreground focus-visible:bg-muted/35 focus-visible:outline-hidden",
+            selectedPath === child.file.path && "bg-muted/45 text-foreground",
+          )}
+          key={child.path}
+          onClick={() => onSelect(child.file?.path ?? child.path)}
+          style={{ paddingLeft: `${0.75 + depth * 0.9}rem` }}
+          type="button"
+        >
+          <ChangedFileTreeIcon path={child.file.path} />
+          <span className="min-w-0 flex-1 truncate">{child.name}</span>
+        </button>
+      );
+    }
+
+    return (
+      <div key={child.path}>
+        <div
+          className="flex min-w-0 items-center gap-2 py-1.5 pr-3 text-xs font-medium text-muted-foreground"
+          style={{ paddingLeft: `${0.75 + depth * 0.9}rem` }}
+        >
+          <ChangedFolderTreeIcon />
+          <span className="min-w-0 flex-1 truncate">{child.name}</span>
+        </div>
+        <FileTreeItems
+          depth={depth + 1}
+          node={child}
+          onSelect={onSelect}
+          selectedPath={selectedPath}
+        />
+      </div>
+    );
+  });
+}
+
 export function ProjectPullRequestFilesChangedPanel({
   error,
   diff,
@@ -176,6 +501,10 @@ export function ProjectPullRequestFilesChangedPanel({
     );
   }, [files, query]);
   const stats = React.useMemo(() => changedFileStats(diff), [diff]);
+  const fileTree = React.useMemo(
+    () => buildFileTree(filteredFiles),
+    [filteredFiles],
+  );
   const selectedFile =
     filteredFiles.find((file) => file.path === selectedPath) ??
     filteredFiles[0] ??
@@ -243,20 +572,11 @@ export function ProjectPullRequestFilesChangedPanel({
           </label>
         </div>
         <nav className="max-h-96 overflow-auto border-border/50 border-t py-1">
-          {filteredFiles.map((file) => (
-            <button
-              className={cn(
-                "flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/35 hover:text-foreground focus-visible:bg-muted/35 focus-visible:outline-hidden",
-                selectedPath === file.path && "bg-muted/45 text-foreground",
-              )}
-              key={file.path}
-              onClick={() => setSelectedPath(file.path)}
-              type="button"
-            >
-              <FileDiff className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{file.path}</span>
-            </button>
-          ))}
+          <FileTreeItems
+            node={fileTree}
+            onSelect={setSelectedPath}
+            selectedPath={selectedPath}
+          />
         </nav>
       </aside>
 
