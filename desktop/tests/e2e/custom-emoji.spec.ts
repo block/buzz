@@ -464,3 +464,35 @@ test("emoji picker search input has spellcheck, autocorrect, and autocapitalize 
   expect(attrs.autocorrect).toBe("off");
   expect(attrs.autocapitalize).toBe("off");
 });
+
+// Regression guard for PR #1438: after the spellcheck fix, the shadow-DOM
+// traversal must also own autofocus so Radix's focus-scope can't steal it.
+// Will reported that opening the picker required a manual click before typing.
+test("emoji picker search input is focused immediately on open (no manual click needed)", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the reaction picker — it passes autoFocus, so the input must receive
+  // focus via our shadow traversal before the user interacts.
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  // The search input must be the active element inside the shadow root.
+  // If Radix's focus-scope wins instead, shadowRoot.activeElement is the
+  // popover host (or null), not the input — this assertion catches that.
+  const isFocused = await picker.evaluate((el: Element) => {
+    const host = el as HTMLElement & { shadowRoot: ShadowRoot };
+    const input = host.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (!input) return false;
+    return host.shadowRoot?.activeElement === input;
+  });
+  expect(isFocused).toBe(true);
+});

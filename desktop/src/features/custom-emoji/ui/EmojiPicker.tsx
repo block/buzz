@@ -30,14 +30,20 @@ warmEmojiIndex();
 
 /**
  * Reach into the `em-emoji-picker` shadow root and disable spellcheck,
- * autocorrect, and autocapitalize on its search input.
+ * autocorrect, and autocapitalize on its search input. When `autoFocus` is
+ * true, also focus the input so the cursor lands there immediately — this
+ * makes focus deterministic and owned by us, preventing Radix's focus-scope
+ * from racing emoji-mart's own async focus call and winning.
  *
  * emoji-mart mounts the custom element and its shadow content asynchronously,
  * so the input is not present on first render. A MutationObserver on the
  * shadow root watches for the input to appear, applies the attributes once,
  * then disconnects. Returns a cleanup function for `useEffect`.
  */
-function disableSearchInputCorrections(host: HTMLElement): () => void {
+function disableSearchInputCorrections(
+  host: HTMLElement,
+  autoFocus: boolean,
+): () => void {
   const picker = host.querySelector("em-emoji-picker");
   const shadowRoot = picker?.shadowRoot ?? null;
   if (!shadowRoot) {
@@ -53,6 +59,9 @@ function disableSearchInputCorrections(host: HTMLElement): () => void {
     input.spellcheck = false;
     input.setAttribute("autocorrect", "off");
     input.setAttribute("autocapitalize", "off");
+    if (autoFocus) {
+      input.focus();
+    }
     return true;
   }
 
@@ -111,8 +120,8 @@ export const EmojiPicker = React.memo(function EmojiPicker({
 
   React.useEffect(() => {
     if (!hostRef.current) return;
-    return disableSearchInputCorrections(hostRef.current);
-  }, []);
+    return disableSearchInputCorrections(hostRef.current, autoFocus);
+  }, [autoFocus]);
 
   return (
     <div ref={hostRef}>
