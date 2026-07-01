@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildTranscript } from "./agentSessionTranscript.ts";
+import {
+  buildTranscriptDisplayBlocks,
+  flattenDisplayBlocks,
+} from "./agentSessionTranscriptGrouping.ts";
 import { formatToolTitle } from "./agentSessionToolCatalog.ts";
 
 const baseEvent = {
@@ -944,11 +948,13 @@ test("buildTranscript does not render unknown session/update types (firehose saf
 
 // --- system-prompt ordering ---
 
-test("buildTranscript gives system-prompt item a null turnId so it sorts before per-turn prompt-context (first turn, shared turnId)", () => {
+test("observer feed renders system-prompt before prompt-context in display order (first turn, shared turnId)", () => {
   // Reproduces the ordering bug: session/new and session/prompt arrive with the
-  // same turnId (as the harness emits on the first turn). Without the fix the
-  // system-prompt item lands in the same turn bucket as the prompt-context and
-  // renders AFTER it; with the fix it has turnId=null and sorts before.
+  // same turnId (as the harness emits on the first turn). Without turnId=null on
+  // the system-prompt item, both items land in the same turn bucket and
+  // classifyTurnItems renders system-prompt AFTER prompt-context (as "activity").
+  // The ordering assertion runs through the display layer — buildTranscript alone
+  // is a tautology because session/new always arrives before session/prompt.
   const events = [
     {
       seq: 1,
@@ -994,26 +1000,38 @@ test("buildTranscript gives system-prompt item a null turnId so it sorts before 
     },
   ];
 
-  const items = buildTranscript(events);
-  const systemPromptIdx = items.findIndex((i) => i.title === "System prompt");
-  const promptContextIdx = items.findIndex((i) => i.title === "Prompt context");
+  // Route through the display layer — this is the layer that contained the bug.
+  // buildTranscriptDisplayBlocks groups items into turn buckets; flattenDisplayBlocks
+  // returns them in final render order.
+  const rawItems = buildTranscript(events);
+  const displayItems = flattenDisplayBlocks(
+    buildTranscriptDisplayBlocks(rawItems),
+  );
+  const systemPromptIdx = displayItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
+  const promptContextIdx = displayItems.findIndex(
+    (i) => i.title === "Prompt context",
+  );
   assert.ok(systemPromptIdx !== -1, "expected a System prompt item");
   assert.ok(promptContextIdx !== -1, "expected a Prompt context item");
   assert.ok(
     systemPromptIdx < promptContextIdx,
-    `expected System prompt (idx ${systemPromptIdx}) before Prompt context (idx ${promptContextIdx})`,
+    `expected System prompt (idx ${systemPromptIdx}) before Prompt context (idx ${promptContextIdx}) in display order`,
   );
-  // Verify the system-prompt item has no turnId so the display grouper treats
-  // it as a standalone item, not a turn-scoped one.
-  const systemPromptItem = items[systemPromptIdx];
+  // Also verify the fix input: system-prompt item must have turnId=null so the
+  // display grouper treats it as a standalone entry, not a turn-bucket item.
+  const systemPromptRawIdx = rawItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
   assert.equal(
-    systemPromptItem.turnId ?? null,
+    rawItems[systemPromptRawIdx].turnId ?? null,
     null,
     "system-prompt item must have turnId=null to avoid turn-bucket grouping",
   );
 });
 
-test("buildTranscript system-prompt stays before prompt-context on subsequent turns (multi-turn)", () => {
+test("observer feed renders system-prompt before prompt-context in display order (multi-turn)", () => {
   const events = [
     {
       seq: 1,
@@ -1082,10 +1100,15 @@ test("buildTranscript system-prompt stays before prompt-context on subsequent tu
     },
   ];
 
-  const items = buildTranscript(events);
-  const systemPromptIdx = items.findIndex((i) => i.title === "System prompt");
+  const rawItems = buildTranscript(events);
+  const displayItems = flattenDisplayBlocks(
+    buildTranscriptDisplayBlocks(rawItems),
+  );
+  const systemPromptIdx = displayItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
   // Both turns produce a Prompt context — grab the first one (turn-1).
-  const firstPromptContextIdx = items.findIndex(
+  const firstPromptContextIdx = displayItems.findIndex(
     (i) => i.title === "Prompt context",
   );
   assert.ok(systemPromptIdx !== -1, "expected a System prompt item");
@@ -1095,10 +1118,13 @@ test("buildTranscript system-prompt stays before prompt-context on subsequent tu
   );
   assert.ok(
     systemPromptIdx < firstPromptContextIdx,
-    `expected System prompt (idx ${systemPromptIdx}) before first Prompt context (idx ${firstPromptContextIdx})`,
+    `expected System prompt (idx ${systemPromptIdx}) before first Prompt context (idx ${firstPromptContextIdx}) in display order`,
+  );
+  const systemPromptRawIdx = rawItems.findIndex(
+    (i) => i.title === "System prompt",
   );
   assert.equal(
-    items[systemPromptIdx].turnId ?? null,
+    rawItems[systemPromptRawIdx].turnId ?? null,
     null,
     "system-prompt item must have turnId=null",
   );
