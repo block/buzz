@@ -428,4 +428,191 @@ test.describe("observer feed screenshots", () => {
       path: `${SHOTS}/06-system-prompt-expanded.png`,
     });
   });
+
+  test("07 — current_mode_update lifecycle status line", async ({ page }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "acp_read",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-007",
+        turnId: "turn-007",
+        payload: {
+          method: "session/update",
+          params: {
+            sessionId: "session-007",
+            update: {
+              sessionUpdate: "current_mode_update",
+              currentModeId: "plan",
+            },
+          },
+        },
+      },
+    ]);
+
+    await expect(feedPanel.getByText("Mode")).toBeVisible({ timeout: 5_000 });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/07-current-mode-update.png`,
+    });
+  });
+
+  test("08 — usage_update lifecycle status line (coalesced)", async ({
+    page,
+  }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      // Two usage frames — only the last should be visible.
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "acp_read",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-008",
+        turnId: "turn-008",
+        payload: {
+          method: "session/update",
+          params: {
+            sessionId: "session-008",
+            update: {
+              sessionUpdate: "usage_update",
+              used: 1200,
+              size: 8192,
+            },
+          },
+        },
+      },
+      {
+        seq: 2,
+        timestamp: NOW,
+        kind: "acp_read",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-008",
+        turnId: "turn-008",
+        payload: {
+          method: "session/update",
+          params: {
+            sessionId: "session-008",
+            update: {
+              sessionUpdate: "usage_update",
+              used: 3450,
+              size: 8192,
+              cost: { amount: 0.0018, currency: "USD" },
+            },
+          },
+        },
+      },
+    ]);
+
+    await expect(feedPanel.getByText("Usage")).toBeVisible({ timeout: 5_000 });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/08-usage-update-coalesced.png`,
+    });
+  });
+
+  test("09 — available_commands_update lifecycle status line", async ({
+    page,
+  }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "acp_read",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-009",
+        turnId: "turn-009",
+        payload: {
+          method: "session/update",
+          params: {
+            sessionId: "session-009",
+            update: {
+              sessionUpdate: "available_commands_update",
+              availableCommands: [
+                {
+                  name: "create_plan",
+                  description: "Create a structured plan for the task",
+                },
+                {
+                  name: "research_codebase",
+                  description: "Research and understand the codebase",
+                },
+                {
+                  name: "execute_steps",
+                  description: "Execute the planned steps",
+                },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+
+    await expect(feedPanel.getByText("Commands")).toBeVisible({
+      timeout: 5_000,
+    });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/09-available-commands-update.png`,
+    });
+  });
+
+  test("10 — config_option_update lifecycle status line", async ({ page }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "acp_read",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: "session-010",
+        turnId: "turn-010",
+        payload: {
+          method: "session/update",
+          params: {
+            sessionId: "session-010",
+            update: {
+              sessionUpdate: "config_option_update",
+              configOptions: [
+                {
+                  id: "model",
+                  name: "Model",
+                  type: "select",
+                  currentValue: "gpt-4o",
+                },
+                {
+                  id: "mode",
+                  name: "Mode",
+                  type: "select",
+                  currentValue: "auto",
+                },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+
+    await expect(feedPanel.getByText("Config")).toBeVisible({ timeout: 5_000 });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/10-config-option-update.png`,
+    });
+  });
 });
