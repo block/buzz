@@ -80,8 +80,9 @@ The `content` field decrypts to a UTF-8 JSON object:
   "harness":   "goose",                  // REQUIRED: harness identifier
   "model":     "claude-sonnet-4-5",      // model id, or null if unknown
   "channelId": "<channel_uuid>" | null,
-  "sessionId": "<session_id>"  | null,
+  "sessionId": "<session_id>"  | null,   // REQUIRED when "cumulative" is present
   "turnId":    "<turn_id>"     | null,
+  "turnSeq":   17 | null,                // REQUIRED when "cumulative" is present
   "timestamp": "2026-07-01T20:11:03.213Z", // REQUIRED: RFC 3339, end of turn
 
   // Usage for THIS turn (computed delta). Fields are null when the harness
@@ -111,13 +112,48 @@ The `content` field decrypts to a UTF-8 JSON object:
 ```
 
 `harness` and `timestamp` are REQUIRED. All other fields are OPTIONAL or
-nullable. Consumers MUST ignore unknown fields (forward compatibility).
+nullable, except as constrained below. Consumers MUST ignore unknown fields
+(forward compatibility).
+
+### Ordering and delta recomputation
+
+When a `cumulative` object is present, `sessionId` and `turnSeq` are
+REQUIRED. `turnSeq` is a per-session monotonically increasing integer
+starting at any value, incremented by the publisher on every published turn
+metric for that session; a publisher restart that loses the counter MUST
+start a new `sessionId` rather than reuse the old one with a reset `turnSeq`.
+Cumulative values form a series only *within* one `sessionId`, ordered by
+`turnSeq` — consumers MUST NOT diff cumulative values across different
+`sessionId`s, and MUST NOT rely on `created_at` (seconds precision, ambiguous
+for same-second turns) for ordering within a session.
+
+If a consumer recomputing deltas observes a cumulative counter that decreases
+between consecutive `turnSeq` values (counter reset, harness bug), it MUST
+treat the affected turn's usage as unknown (null), not as negative usage.
+Publishers likewise MUST NOT emit negative values in `turn`; when the
+computed delta would be negative or the previous baseline is unknown, the
+publisher sets the affected `turn` counters to null and `deltaReliable:
+false`.
 
 Where the harness reports only cumulative counters, the publisher computes
 `turn` as the difference between consecutive cumulative snapshots within one
-session. Publishers MUST set `deltaReliable: false` when the baseline is
-unknown; consumers doing exact accounting SHOULD prefer recomputing deltas
+session. Consumers doing exact accounting SHOULD prefer recomputing deltas
 from consecutive `cumulative` values and treat `turn` as a convenience.
+
+### Numeric validity and token semantics
+
+All token counts MUST be non-negative integers. `costUsd` MUST be a finite,
+non-negative number. `totalTokens` is the harness- or provider-reported
+total when available; publishers MUST NOT derive it by summing `inputTokens`
+and `outputTokens` (providers may count categories a simple sum misses) —
+when no total is reported, `totalTokens` is null. `inputTokens` is the
+inclusive input-side total: where the provider reports cache reads/writes
+separately (e.g. Anthropic `cache_read_input_tokens` /
+`cache_creation_input_tokens`), the publisher folds them into `inputTokens`.
+Publishers MAY additionally report the cache components in optional
+`cacheReadTokens` / `cacheWriteTokens` fields inside `turn` and `cumulative`;
+when present these are informational subsets of `inputTokens`, not additions
+to it.
 
 `costUsd` values are estimates (provider list prices at publish time, or a
 harness-reported estimate). They are advisory, not billing records.
@@ -148,8 +184,13 @@ On receiving a kind 44200 event, a relay MUST:
    searchable and must not enter search indexes).
 
 Reads MUST be gated: only an authenticated ([NIP-42](42.md)) reader whose
-pubkey equals the `#p` tag value may receive the event. Unauthorized publish
-or subscribe attempts MUST be rejected with `AUTH required`.
+pubkey equals the `#p` tag value may receive the event. This gate applies to
+**every** read path, including explicit `ids` filters — knowing an event id
+MUST NOT grant access. (Some p-gated kinds exempt id-addressed lookups on the
+theory that knowing the id implies authorization; kind 44200 events are
+long-lived and their cleartext envelope leaks turn activity, so no such
+exemption is permitted.) Unauthorized publish or subscribe attempts MUST be
+rejected with `AUTH required`.
 
 Relays SHOULD rate-limit kind 44200 to a rate consistent with real turn
 frequency (RECOMMENDED: 60 events/minute per agent pubkey).
@@ -164,7 +205,10 @@ Owners recover usage history with:
 
 On receiving an event, a client MUST verify the signature, decrypt with its
 own secret key and `event.pubkey`, and ignore events that fail to decrypt or
-parse. Clients SHOULD deduplicate by event id and sort by `created_at`.
+parse. Clients SHOULD deduplicate by event id. For within-session ordering,
+clients MUST use `(sessionId, turnSeq)` from the decrypted payload as
+described above; `created_at` is suitable only for coarse time-window
+queries.
 
 ## Relationship to Other NIPs
 
