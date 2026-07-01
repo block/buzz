@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ArchiveSyncManager } from "./archiveSyncManager.ts";
 
 // ── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +35,7 @@ function makeFakeRelayClient() {
 
 /**
  * Fake tauriArchive module — captures invocations for assertion.
+ * createSaveSubscription is an upsert (matching store.rs ON CONFLICT behaviour).
  */
 function makeFakeArchive() {
   let subs = [];
@@ -45,17 +47,25 @@ function makeFakeArchive() {
       return subs;
     },
     async createSaveSubscription(scopeType, scopeValue, kinds) {
-      subs = [
-        ...subs,
-        {
-          scopeType,
-          scopeValue,
-          kinds,
-          identityPubkey: "pk",
-          relayUrl: "wss://r",
-          createdAt: 0,
-        },
-      ];
+      // Upsert: update kinds if scope already exists, otherwise append.
+      const existing = subs.findIndex(
+        (s) => s.scopeType === scopeType && s.scopeValue === scopeValue,
+      );
+      if (existing >= 0) {
+        subs = subs.map((s, i) => (i === existing ? { ...s, kinds } : s));
+      } else {
+        subs = [
+          ...subs,
+          {
+            scopeType,
+            scopeValue,
+            kinds,
+            identityPubkey: "pk",
+            relayUrl: "wss://r",
+            createdAt: 0,
+          },
+        ];
+      }
       for (const l of listeners) l();
     },
     async deleteSaveSubscription(scopeType, scopeValue) {
@@ -84,20 +94,21 @@ function makeFakeArchive() {
   };
 }
 
-// ── Import the module under test with injected fakes ─────────────────────────
+/** Helper: wait for microtasks/promises to settle */
+function tick() {
+  return new Promise((r) => setTimeout(r, 0));
+}
 
-/**
- * Build an ArchiveSyncManager with injected fakes instead of importing the
- * singleton relayClient and tauriArchive. We inline a minimal version of the
- * class here that accepts the deps as constructor args — this is the
- * testability seam documented in the implementation file.
- *
- * Rather than re-implementing the full class here, we import it from the
- * source and test via the public API.  Because the module uses module-level
- * singletons (relayClient, tauriArchive) we test the observable behaviours
- * that don't depend on them (kinds decoding, preset arrays) and test the
- * manager's response to subscription-change events via a thin adapter.
- */
+/** Build a manager wired to fakes. */
+function makeManager(relay, archive, extra = {}) {
+  return new ArchiveSyncManager({
+    relayClient: relay,
+    listSaveSubscriptions: () => archive.listSaveSubscriptions(),
+    archiveEvents: (c) => archive.archiveEvents(c),
+    onSubscriptionChange: (l) => archive.onSubscriptionChange(l),
+    ...extra,
+  });
+}
 
 // ── kinds decoding ────────────────────────────────────────────────────────────
 
@@ -333,140 +344,7 @@ test("subscription_change_notifier_fires_multiple_listeners", () => {
   assert.equal(b, 1);
 });
 
-// ── ArchiveSyncManager with fakes ─────────────────────────────────────────────
-
-/**
- * Inline testable ArchiveSyncManager that accepts injected deps.
- * Mirrors the structure in archiveSyncManager.ts — same logic, injectable.
- */
-class TestableArchiveSyncManager {
-  constructor({
-    relayClient,
-    archive,
-    flushBatchSize = 25,
-    flushIdleMs = 2000,
-  }) {
-    this._relay = relayClient;
-    this._archive = archive;
-    this._flushBatchSize = flushBatchSize;
-    this._flushIdleMs = flushIdleMs;
-    this._unsubs = new Map();
-    this._buffer = [];
-    this._flushTimer = null;
-    this._destroyed = false;
-    this._offChange = null;
-  }
-
-  async start() {
-    await this._resubscribeAll();
-    this._offChange = this._archive.onSubscriptionChange(() => {
-      void this._resubscribeAll();
-    });
-  }
-
-  destroy() {
-    this._destroyed = true;
-    if (this._flushTimer !== null) {
-      clearTimeout(this._flushTimer);
-      this._flushTimer = null;
-    }
-    this._offChange?.();
-    if (this._buffer.length > 0) {
-      const batch = this._buffer.splice(0);
-      void this._archive.archiveEvents(batch);
-    }
-    for (const [, unsub] of this._unsubs) void unsub();
-    this._unsubs.clear();
-  }
-
-  async _resubscribeAll() {
-    if (this._destroyed) return;
-    let subs;
-    try {
-      subs = await this._archive.listSaveSubscriptions();
-    } catch {
-      return;
-    }
-    if (this._destroyed) return;
-
-    const wanted = new Set(subs.map((s) => `${s.scopeType}:${s.scopeValue}`));
-    for (const [key, unsub] of this._unsubs) {
-      if (!wanted.has(key)) {
-        void unsub();
-        this._unsubs.delete(key);
-      }
-    }
-    for (const sub of subs) {
-      const key = `${sub.scopeType}:${sub.scopeValue}`;
-      if (this._unsubs.has(key)) continue;
-      const scopeType = sub.scopeType;
-      const scopeValue = sub.scopeValue;
-      const filter = this._buildFilter(sub);
-      let unsub = null;
-      let cancelled = false;
-      void this._relay
-        .subscribeLive(filter, (event) => {
-          this._enqueue(event, scopeType, scopeValue);
-        })
-        .then((dispose) => {
-          if (cancelled) void dispose();
-          else unsub = dispose;
-        });
-      this._unsubs.set(key, async () => {
-        cancelled = true;
-        if (unsub) await unsub();
-      });
-    }
-  }
-
-  _buildFilter(sub) {
-    const base = { kinds: sub.kinds, limit: 0 };
-    switch (sub.scopeType) {
-      case "channel_h":
-        return { ...base, "#h": [sub.scopeValue] };
-      case "owner_p":
-        return { ...base, "#p": [sub.scopeValue] };
-      case "referenced_e":
-        return { ...base, "#e": [sub.scopeValue] };
-    }
-  }
-
-  _enqueue(event, scopeType, scopeValue) {
-    if (this._destroyed) return;
-    this._buffer.push({
-      rawEventJson: JSON.stringify(event),
-      matchedScope: { scopeType, scopeValue },
-    });
-    if (this._buffer.length >= this._flushBatchSize) {
-      this._flush();
-    } else {
-      this._scheduleFlush();
-    }
-  }
-
-  _scheduleFlush() {
-    if (this._flushTimer !== null) return;
-    this._flushTimer = setTimeout(() => {
-      this._flushTimer = null;
-      this._flush();
-    }, this._flushIdleMs);
-  }
-
-  _flush() {
-    if (this._flushTimer !== null) {
-      clearTimeout(this._flushTimer);
-      this._flushTimer = null;
-    }
-    if (this._buffer.length === 0) return;
-    const batch = this._buffer.splice(0);
-    void this._archive.archiveEvents(batch);
-  }
-}
-
-// Helper: wait for microtasks/promises to settle
-function tick() {
-  return new Promise((r) => setTimeout(r, 0));
-}
+// ── ArchiveSyncManager (real class, injected fakes) ───────────────────────────
 
 test("manager_opens_one_sub_per_saved_subscription", async () => {
   const relay = makeFakeRelayClient();
@@ -481,7 +359,7 @@ test("manager_opens_one_sub_per_saved_subscription", async () => {
       createdAt: 0,
     },
   ]);
-  const mgr = new TestableArchiveSyncManager({ relayClient: relay, archive });
+  const mgr = makeManager(relay, archive);
   await mgr.start();
   await tick();
   assert.equal(relay.activeCount(), 1);
@@ -501,7 +379,7 @@ test("manager_builds_correct_filter_for_channel_h", async () => {
       createdAt: 0,
     },
   ]);
-  const mgr = new TestableArchiveSyncManager({ relayClient: relay, archive });
+  const mgr = makeManager(relay, archive);
   await mgr.start();
   await tick();
   const keys = [...relay.subs.keys()];
@@ -526,7 +404,7 @@ test("manager_builds_correct_filter_for_owner_p", async () => {
       createdAt: 0,
     },
   ]);
-  const mgr = new TestableArchiveSyncManager({ relayClient: relay, archive });
+  const mgr = makeManager(relay, archive);
   await mgr.start();
   await tick();
   const keys = [...relay.subs.keys()];
@@ -549,11 +427,7 @@ test("manager_forwards_events_to_archive_events_on_flush", async () => {
     },
   ]);
   // Use flushBatchSize=1 so flush fires immediately on first event
-  const mgr = new TestableArchiveSyncManager({
-    relayClient: relay,
-    archive,
-    flushBatchSize: 1,
-  });
+  const mgr = makeManager(relay, archive, { flushBatchSize: 1 });
   await mgr.start();
   await tick();
 
@@ -579,12 +453,12 @@ test("manager_resubscribes_when_subscription_added", async () => {
   const relay = makeFakeRelayClient();
   const archive = makeFakeArchive();
   archive.setSubs([]);
-  const mgr = new TestableArchiveSyncManager({ relayClient: relay, archive });
+  const mgr = makeManager(relay, archive);
   await mgr.start();
   await tick();
   assert.equal(relay.activeCount(), 0);
 
-  // Simulate create_save_subscription — sets subs then fires notifier
+  // Simulate create_save_subscription — upserts subs then fires notifier
   await archive.createSaveSubscription("channel_h", "chan-new", [9]);
   await tick();
 
@@ -605,7 +479,7 @@ test("manager_removes_sub_when_subscription_deleted", async () => {
       createdAt: 0,
     },
   ]);
-  const mgr = new TestableArchiveSyncManager({ relayClient: relay, archive });
+  const mgr = makeManager(relay, archive);
   await mgr.start();
   await tick();
   assert.equal(relay.activeCount(), 1);
@@ -616,6 +490,54 @@ test("manager_removes_sub_when_subscription_deleted", async () => {
   // The sub should be unsubbed now
   const entry = [...relay.subs.values()][0];
   assert.equal(entry.unsubbed, true);
+  mgr.destroy();
+});
+
+test("manager_resubscribes_with_new_filter_when_kinds_upserted", async () => {
+  const relay = makeFakeRelayClient();
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "channel_h",
+      scopeValue: "chan-1",
+      kinds: [9],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive);
+  await mgr.start();
+  await tick();
+
+  // Confirm initial subscription is active with kinds=[9]
+  assert.equal(relay.activeCount(), 1);
+  const oldKeys = [...relay.subs.keys()];
+  assert.equal(oldKeys.length, 1);
+  assert.deepEqual(JSON.parse(oldKeys[0]).kinds, [9]);
+
+  // Upsert same scope with different kinds — fake archive replaces kinds + fires notifier
+  await archive.createSaveSubscription("channel_h", "chan-1", [9, 40002]);
+  await tick();
+
+  // Old subscription must be unsubbed
+  const oldEntry = relay.subs.get(oldKeys[0]);
+  assert.equal(
+    oldEntry.unsubbed,
+    true,
+    "old kinds=[9] filter must be torn down",
+  );
+
+  // New subscription with kinds=[9,40002] must be active
+  assert.equal(relay.activeCount(), 1, "exactly one active sub after upsert");
+  const newKeys = [...relay.subs.keys()].filter((k) => k !== oldKeys[0]);
+  assert.equal(newKeys.length, 1);
+  assert.deepEqual(
+    JSON.parse(newKeys[0]).kinds,
+    [9, 40002],
+    "new filter must use updated kinds",
+  );
+
   mgr.destroy();
 });
 
@@ -632,9 +554,7 @@ test("manager_flushes_buffer_on_destroy", async () => {
       createdAt: 0,
     },
   ]);
-  const mgr = new TestableArchiveSyncManager({
-    relayClient: relay,
-    archive,
+  const mgr = makeManager(relay, archive, {
     flushBatchSize: 100,
     flushIdleMs: 10000,
   });
