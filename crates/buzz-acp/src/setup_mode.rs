@@ -728,8 +728,7 @@ mod tests {
         let event_id = fake_event_id(0xAA);
 
         let result = should_nudge_for_event(
-            event_id,
-            false, // author NOT allowed
+            event_id, false, // author NOT allowed
             true,  // filter matched — would otherwise nudge
             &mut dedup,
         );
@@ -750,8 +749,7 @@ mod tests {
         let event_id = fake_event_id(0xBB);
 
         let first = should_nudge_for_event(
-            event_id,
-            true, // allowed
+            event_id, true, // allowed
             true, // matched
             &mut dedup,
         );
@@ -759,8 +757,7 @@ mod tests {
 
         // Simulate reconnect replay: same event arrives again.
         let second = should_nudge_for_event(
-            event_id,
-            true, // allowed
+            event_id, true, // allowed
             true, // matched
             &mut dedup,
         );
