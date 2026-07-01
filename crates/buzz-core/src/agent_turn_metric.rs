@@ -9,9 +9,7 @@
 use nostr::{Event, Keys, PublicKey};
 use serde::{Deserialize, Serialize};
 
-use crate::observer::{
-    decrypt_observer_payload, encrypt_observer_payload, ObserverPayloadError,
-};
+use crate::observer::{decrypt_observer_payload, encrypt_observer_payload, ObserverPayloadError};
 
 // Re-export for callers that only need the error type.
 pub use crate::observer::ObserverPayloadError as AgentTurnMetricError;
@@ -208,8 +206,7 @@ mod tests {
             .sign_with_keys(&agent_keys)
             .expect("sign");
 
-        let decoded =
-            decrypt_agent_turn_metric(&owner_keys, &event).expect("decrypt");
+        let decoded = decrypt_agent_turn_metric(&owner_keys, &event).expect("decrypt");
 
         assert_eq!(decoded, payload);
     }
@@ -239,9 +236,11 @@ mod tests {
     #[test]
     fn delta_reliable_defaults_to_true_when_absent() {
         let json = r#"{"harness":"goose","timestamp":"2026-07-01T20:11:03Z"}"#;
-        let payload: AgentTurnMetricPayload =
-            serde_json::from_str(json).expect("parse");
-        assert!(payload.delta_reliable, "deltaReliable should default to true");
+        let payload: AgentTurnMetricPayload = serde_json::from_str(json).expect("parse");
+        assert!(
+            payload.delta_reliable,
+            "deltaReliable should default to true"
+        );
     }
 
     #[test]
