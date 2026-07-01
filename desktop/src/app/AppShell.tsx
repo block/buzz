@@ -66,6 +66,7 @@ import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
+import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
@@ -92,6 +93,7 @@ export function AppShell() {
   useWebviewScrollBoundaryLock();
 
   const workspacesHook = useWorkspaces();
+  const workspaceRailEnabled = useFeatureEnabled("workspaceRail");
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
@@ -611,20 +613,25 @@ export function AppShell() {
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
-                  <WorkspaceRail
-                    activeWorkspaceId={
-                      workspacesHook.activeWorkspace?.id ?? null
-                    }
-                    onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
-                    onSwitchWorkspace={workspacesHook.switchWorkspace}
-                    workspaces={workspacesHook.workspaces}
-                  />
+                  {workspaceRailEnabled ? (
+                    <WorkspaceRail
+                      activeWorkspaceId={
+                        workspacesHook.activeWorkspace?.id ?? null
+                      }
+                      onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
+                      onSwitchWorkspace={workspacesHook.switchWorkspace}
+                      workspaces={workspacesHook.workspaces}
+                    />
+                  ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
                     {!settingsOpen ? (
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
-                        hasWorkspaceRail={workspacesHook.workspaces.length > 1}
+                        hasWorkspaceRail={
+                          workspaceRailEnabled &&
+                          workspacesHook.workspaces.length > 1
+                        }
                         onGoBack={goBack}
                         onGoForward={goForward}
                       />
