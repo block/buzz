@@ -28,6 +28,7 @@ use tauri::AppHandle;
 
 use crate::managed_agents::env_vars::{validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS};
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
+use crate::managed_agents::types::{ManagedAgentRecord, PersonaRecord};
 
 /// The global agent configuration record.
 ///
@@ -142,6 +143,46 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
     let payload = serde_json::to_vec_pretty(&config)
         .map_err(|e| format!("failed to serialize global agent config: {e}"))?;
     atomic_write_json_restricted(&path, &payload)
+}
+
+/// Resolve the effective model and provider for an agent using the
+/// precedence chain: `agent record → linked persona → global defaults → None`.
+///
+/// This is the single source of truth used by readiness evaluation, spawn,
+/// and deploy-payload construction. All three paths must use this function so
+/// they agree on what model/provider the agent will actually run with.
+///
+/// # Arguments
+/// * `record` — the `ManagedAgentRecord` (may have `None` for model/provider)
+/// * `personas` — all current persona records (looked up by `record.persona_id`)
+/// * `global` — global agent config defaults
+///
+/// # Returns
+/// `(effective_model, effective_provider)` — both `Option<&str>`.
+pub(crate) fn resolve_effective_model_provider<'a>(
+    record: &'a ManagedAgentRecord,
+    personas: &'a [PersonaRecord],
+    global: &'a GlobalAgentConfig,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let (persona_model, persona_provider) = record
+        .persona_id
+        .as_deref()
+        .and_then(|pid| personas.iter().find(|p| p.id == pid))
+        .map(|p| (p.model.as_deref(), p.provider.as_deref()))
+        .unwrap_or((None, None));
+
+    let effective_model = record
+        .model
+        .as_deref()
+        .or(persona_model)
+        .or(global.model.as_deref());
+    let effective_provider = record
+        .provider
+        .as_deref()
+        .or(persona_provider)
+        .or(global.provider.as_deref());
+
+    (effective_model, effective_provider)
 }
 
 #[cfg(test)]

@@ -333,37 +333,16 @@ fn build_deploy_payload(
 
     // Resolve the persona's structured provider/model so the remote provider
     // receives the same authoritative values that local spawn derives from
-    // `runtime_metadata_env_vars`. Without this, remote deploy would rely on
-    // stale derived env copies in `env_vars` (or have no provider at all for
-    // imported personas whose derived keys were filtered at import time).
-    //
-    // Precedence mirrors local spawn: persona structured model is authoritative
-    // when present; the agent record's model is a fallback; global model is the
-    // last resort (when no persona or agent specifies one).
+    // `runtime_metadata_env_vars`. Uses the shared resolver for consistent
+    // agent → persona → global → None precedence.
     let global_config = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
-    let (effective_model, effective_provider) = if let Some(pid) = record.persona_id.as_deref() {
-        let personas = load_personas(app).map_err(|e| {
-            format!(
-                "failed to load personas while building deploy payload for persona `{pid}`: {e}"
-            )
-        })?;
-        let persona = personas
-            .into_iter()
-            .find(|p| p.id == pid)
-            .ok_or_else(|| format!("persona `{pid}` not found while building deploy payload"))?;
-        let model = persona
-            .model
-            .clone()
-            .or(record.model.clone())
-            .or(global_config.model.clone());
-        let provider = persona.provider.or(global_config.provider.clone());
-        (model, provider)
-    } else {
-        (
-            record.model.clone().or(global_config.model.clone()),
-            global_config.provider.clone(),
-        )
-    };
+    let personas = load_personas(app).unwrap_or_default();
+    let (effective_model, effective_provider) =
+        crate::managed_agents::resolve_effective_model_provider(record, &personas, &global_config);
+    let (effective_model, effective_provider) = (
+        effective_model.map(|s| s.to_string()),
+        effective_provider.map(|s| s.to_string()),
+    );
 
     Ok(serde_json::json!({
         "name": &record.name,

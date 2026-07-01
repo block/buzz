@@ -93,9 +93,21 @@ fn resolve_config_surface(
             None
         }
     } else {
+        // Prefer persona as baseline, fall back to global when persona has none
+        // and the model was overridden mid-session (global-default agent).
         persona_model
             .clone()
             .map(|m| (m, ConfigOrigin::PersonaDefault))
+            .or_else(|| {
+                if model_overridden {
+                    global
+                        .model
+                        .clone()
+                        .map(|m| (m, ConfigOrigin::GlobalDefault))
+                } else {
+                    None
+                }
+            })
     };
 
     // Inject resolved persona values into the record where absent.
@@ -706,5 +718,50 @@ mod tests {
         assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
         assert_eq!(model.overridden_value.as_deref(), Some("persona-model"));
         assert_eq!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
+    }
+
+    /// Fix 2 regression: a global-default-only agent (no record model, no
+    /// persona model, but global has a model) that live-switches mid-session
+    /// must render the global model as the secondary tagged `GlobalDefault`.
+    /// Before the fix, `baseline` was `None` in the `!had_model` arm when
+    /// persona has no model, so `read_config_surface` had no secondary to
+    /// surface. Fails against pre-fix code where the baseline arm returned
+    /// `None` when `!had_model && persona_model.is_none() && model_overridden`.
+    #[test]
+    fn global_default_live_switch_renders_global_model_as_secondary_global_default() {
+        // Record has no model, no persona, global provides the model.
+        let mut record = agent_record();
+        record.persona_id = None;
+        // record.model = None (set by agent_record())
+        let personas: Vec<PersonaRecord> = vec![];
+        let cache = session_cache("model-y", true);
+        let global = crate::managed_agents::GlobalAgentConfig {
+            model: Some("global-model".to_string()),
+            ..Default::default()
+        };
+
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            Some(&cache),
+            &global,
+        );
+        let model = surface.normalized.model.expect("model resolved");
+
+        // Live model wins as primary.
+        assert_eq!(model.value.as_deref(), Some("model-y"));
+        assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
+        // Global model surfaces as secondary, tagged GlobalDefault.
+        assert_eq!(
+            model.overridden_value.as_deref(),
+            Some("global-model"),
+            "global model must be the override baseline secondary"
+        );
+        assert_eq!(
+            model.overridden_origin,
+            Some(ConfigOrigin::GlobalDefault),
+            "override baseline origin must be GlobalDefault, not PersonaDefault or BuzzExplicit"
+        );
     }
 }
