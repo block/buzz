@@ -80,7 +80,7 @@ export function AgentSessionTranscriptList({
   emptyState = "idle",
   items,
   profiles,
-  scrollContainerClassName,
+  contentContainerClassName,
   scrollScopeKey,
   variant = "default",
 }: AgentTranscriptIdentityProps & {
@@ -89,7 +89,7 @@ export function AgentSessionTranscriptList({
   emptyState?: AgentSessionTranscriptEmptyState;
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
-  scrollContainerClassName?: string;
+  contentContainerClassName?: string;
   scrollScopeKey?: string | null;
   variant?: AgentSessionTranscriptVariant;
 }) {
@@ -118,7 +118,6 @@ export function AgentSessionTranscriptList({
   const scrollContainerClassNames = cn(
     "w-full",
     autoTail ? "h-full overflow-y-auto" : null,
-    scrollContainerClassName,
   );
 
   if (items.length === 0) {
@@ -161,6 +160,7 @@ export function AgentSessionTranscriptList({
           "flex w-full flex-col",
           isCompactPreview ? "gap-2" : "gap-4",
           autoTail && "pb-4",
+          contentContainerClassName,
         )}
         ref={autoTail ? contentRef : undefined}
         role="log"
