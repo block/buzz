@@ -204,10 +204,8 @@ pub async fn archive_events(
             };
 
             // Index returned event ids for O(1) lookup.
-            let returned_ids: std::collections::HashSet<String> = returned
-                .iter()
-                .map(|e| e.id.to_hex())
-                .collect();
+            let returned_ids: std::collections::HashSet<String> =
+                returned.iter().map(|e| e.id.to_hex()).collect();
 
             for p in group {
                 let eid = p.event.id.to_hex();
@@ -272,7 +270,14 @@ pub async fn archive_events(
 
     // ── Ephemeral path (owner_p) ─────────────────────────────────────────────
     for p in ephemeral {
-        match validate_ephemeral_frame(&p.event, &identity_pk, &p.matched_scope.scope_value, &conn, &identity_pk, &relay_url) {
+        match validate_ephemeral_frame(
+            &p.event,
+            &identity_pk,
+            &p.matched_scope.scope_value,
+            &conn,
+            &identity_pk,
+            &relay_url,
+        ) {
             Ok(()) => {}
             Err(_) => {
                 dropped += 1;
@@ -379,7 +384,9 @@ fn validate_ephemeral_frame(
 
     // 6. Matching owner_p subscription exists.
     if !store::has_save_subscription(conn, sub_identity, relay_url, "owner_p", scope_value)? {
-        return Err(format!("no owner_p subscription for scope_value={scope_value:?}"));
+        return Err(format!(
+            "no owner_p subscription for scope_value={scope_value:?}"
+        ));
     }
 
     Ok(())
@@ -449,8 +456,8 @@ pub async fn create_save_subscription(
         }
     }
 
-    let kinds_json = serde_json::to_string(&kinds)
-        .map_err(|e| format!("failed to serialize kinds: {e}"))?;
+    let kinds_json =
+        serde_json::to_string(&kinds).map_err(|e| format!("failed to serialize kinds: {e}"))?;
 
     let conn = open_db()?;
     store::upsert_save_subscription(
@@ -494,7 +501,9 @@ async fn probe_channel_access(
         )
         .await?;
         if meta.is_empty() {
-            return Err(format!("channel {channel_id:?} not found or not accessible"));
+            return Err(format!(
+                "channel {channel_id:?} not found or not accessible"
+            ));
         }
         // Open channel — readable, access granted.
         return Ok(());
@@ -593,11 +602,7 @@ mod tests {
 
     // ── Helper: build a real signed observer frame ────────────────────────────
 
-    fn make_observer_frame(
-        owner_keys: &Keys,
-        agent_keys: &Keys,
-        frame_type: &str,
-    ) -> Event {
+    fn make_observer_frame(owner_keys: &Keys, agent_keys: &Keys, frame_type: &str) -> Event {
         let owner_pk = owner_keys.public_key().to_hex();
         let agent_pk = agent_keys.public_key().to_hex();
 
@@ -642,15 +647,10 @@ mod tests {
         add_owner_p_sub(&conn, &owner_pk, relay_url, &owner_pk);
         let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
 
-        assert!(validate_ephemeral_frame(
-            &ev,
-            &owner_pk,
-            &owner_pk,
-            &conn,
-            &owner_pk,
-            relay_url
-        )
-        .is_ok());
+        assert!(
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -672,7 +672,8 @@ mod tests {
             .sign_with_keys(&agent_keys)
             .unwrap();
 
-        let result = validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("kind"));
     }
@@ -695,7 +696,8 @@ mod tests {
             .sign_with_keys(&agent_keys)
             .unwrap();
 
-        let result = validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("#p"));
     }
@@ -718,7 +720,8 @@ mod tests {
             .sign_with_keys(&agent_keys)
             .unwrap();
 
-        let result = validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("agent"));
     }
@@ -734,7 +737,8 @@ mod tests {
 
         // frame=control, not telemetry.
         let ev = make_observer_frame(&owner_keys, &agent_keys, "control");
-        let result = validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("telemetry"));
     }
@@ -759,7 +763,8 @@ mod tests {
             .sign_with_keys(&other_keys) // wrong signer
             .unwrap();
 
-        let result = validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("author"));
     }
@@ -774,7 +779,8 @@ mod tests {
         // Deliberately do NOT add a subscription.
 
         let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
-        let result = validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
+        let result =
+            validate_ephemeral_frame(&ev, &owner_pk, &owner_pk, &conn, &owner_pk, relay_url);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("owner_p subscription"));
     }
@@ -845,12 +851,13 @@ mod tests {
         let keys = Keys::generate();
         // Build a valid event then tamper with the content to break the id
         // (the id is a hash of the event fields including content).
-        let mut ev_json: serde_json::Value =
-            serde_json::from_str(&EventBuilder::new(Kind::TextNote, "ok")
+        let mut ev_json: serde_json::Value = serde_json::from_str(
+            &EventBuilder::new(Kind::TextNote, "ok")
                 .sign_with_keys(&keys)
                 .unwrap()
-                .as_json())
-            .unwrap();
+                .as_json(),
+        )
+        .unwrap();
         ev_json["content"] = serde_json::Value::String("tampered".into());
         let tampered = ev_json.to_string();
         let ev = Event::from_json(&tampered).unwrap();
