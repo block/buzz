@@ -258,7 +258,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example:8443',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -311,7 +310,6 @@ void main() {
     test('returns null when the gallery picker is cancelled', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: null,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => null,
@@ -343,7 +341,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'http://[::1]:3000',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -396,7 +393,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -447,7 +443,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -499,7 +494,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -550,7 +544,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -603,7 +596,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -633,7 +625,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
@@ -658,7 +649,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient(
           (request) async => http.Response('{}', 200),
@@ -702,7 +692,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: client,
         pickGalleryVideo: () async => null,
@@ -725,7 +714,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         httpClient: http_testing.MockClient(
           (request) async => http.Response('{}', 200),
@@ -753,7 +741,6 @@ void main() {
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: nsec,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => XFile.fromData(
@@ -874,7 +861,6 @@ void main() {
       try {
         final service = MediaUploadService(
           baseUrl: 'https://relay.example',
-          apiToken: null,
           nsec: nsec,
           httpClient: client,
           pickGalleryVideo: () async => xfile,
@@ -920,7 +906,6 @@ void main() {
       try {
         final service = MediaUploadService(
           baseUrl: 'https://relay.example',
-          apiToken: null,
           nsec: nsec,
           httpClient: client,
           pickGalleryVideo: () async => xfile,
@@ -948,7 +933,6 @@ void main() {
     test('returns null when video picker is cancelled', () async {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
-        apiToken: null,
         nsec: null,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => null,
@@ -969,7 +953,6 @@ void main() {
       try {
         final service = MediaUploadService(
           baseUrl: 'https://relay.example',
-          apiToken: null,
           nsec: null,
           pickGalleryVideo: () async => XFile(file.path),
           pickGalleryImage: () async => null,
