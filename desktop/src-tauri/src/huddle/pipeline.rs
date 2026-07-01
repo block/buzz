@@ -50,12 +50,15 @@ pub(crate) async fn post_connect_setup(
         let hs = state.huddle()?;
         hs.parent_channel_id.clone()
     };
-    let (cancel, pcm_tx) =
+    let (cancel, pcm_tx, screen_tx) =
         relay_api::connect_audio_relay(ephemeral_channel_id, parent_id.as_deref(), state).await?;
+    let screen_share_available = screen_tx.is_some();
     {
         let mut hs = state.huddle()?;
         hs.audio_ws_cancel = Some(cancel);
         hs.audio_relay_pcm_tx = Some(pcm_tx);
+        hs.screen_relay_tx = screen_tx;
+        hs.screen_share_available = screen_share_available;
     }
 
     // Start TTS immediately. STT/transcript posting is opt-in and starts only

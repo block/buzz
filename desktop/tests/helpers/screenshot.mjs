@@ -22,6 +22,7 @@
 //   --outdir <path>            Output directory (default: test-results/screenshots)
 //   --messages <path>          JSON file with messages to inject before capture
 //   --update-ready             Mock an available update so the sidebar update card renders
+//   --huddle-active            Mock an active huddle with screen sharing enabled
 
 import { parseArgs } from "node:util";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -42,6 +43,7 @@ const { values: args } = parseArgs({
     outdir: { type: "string", default: "test-results/screenshots" },
     messages: { type: "string" },
     "update-ready": { type: "boolean", default: false },
+    "huddle-active": { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -69,6 +71,12 @@ function bail(msg) {
 
 const BASE_URL = "http://127.0.0.1:4173";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
+const ALICE_PUBKEY =
+  "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
+const BOB_PUBKEY =
+  "bb22a5299220cad76ffd46190ccbeede8ab5dc260faa28b6e5a2cb31b9aff260";
+const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
+const HUDDLE_EPHEMERAL_CHANNEL_ID = "5aa9f4fd-437b-5834-9128-00e2e2e0041d";
 const ONBOARDING_PREFIX = "buzz-onboarding-complete.v1:";
 
 const TEST_PUBKEYS = [
@@ -110,7 +118,15 @@ await page.addInitScript(
 
 // Install E2E mock bridge config + MockNotification (mirrors installBridge in bridge.ts)
 await page.addInitScript(
-  ({ updateReady }) => {
+  ({
+    alicePubkey,
+    bobPubkey,
+    defaultMockPubkey,
+    engineeringChannelId,
+    huddleActive,
+    huddleEphemeralChannelId,
+    updateReady,
+  }) => {
     class MockNotification extends EventTarget {
       static permission = "granted";
       static async requestPermission() {
@@ -132,13 +148,41 @@ await page.addInitScript(
       writable: true,
     });
 
+    const mock = {
+      ...(updateReady ? { updateAvailable: true } : {}),
+      ...(huddleActive
+        ? {
+            huddleState: {
+              agent_pubkeys: [],
+              ephemeral_channel_id: huddleEphemeralChannelId,
+              is_creator: true,
+              parent_channel_id: engineeringChannelId,
+              participants: [defaultMockPubkey, alicePubkey, bobPubkey],
+              phase: "active",
+              screen_share_available: true,
+              transcription_enabled: false,
+              tts_enabled: true,
+              voice_input_mode: "voice_activity",
+            },
+          }
+        : {}),
+    };
+
     window.__BUZZ_E2E__ = {
       mode: "mock",
-      ...(updateReady ? { mock: { updateAvailable: true } } : {}),
+      ...(Object.keys(mock).length > 0 ? { mock } : {}),
     };
     window.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
   },
-  { updateReady: args["update-ready"] },
+  {
+    alicePubkey: ALICE_PUBKEY,
+    bobPubkey: BOB_PUBKEY,
+    defaultMockPubkey: DEFAULT_MOCK_PUBKEY,
+    engineeringChannelId: ENGINEERING_CHANNEL_ID,
+    huddleActive: args["huddle-active"],
+    huddleEphemeralChannelId: HUDDLE_EPHEMERAL_CHANNEL_ID,
+    updateReady: args["update-ready"],
+  },
 );
 
 try {

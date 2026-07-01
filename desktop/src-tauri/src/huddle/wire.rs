@@ -9,7 +9,7 @@
 //! Kept for backward compatibility — relay still admits v1 clients into
 //! v1-pinned rooms — but new clients always speak v2.
 //!
-//! ## v2 (this commit)
+//! ## v2
 //!
 //! Client → relay: `<header: [u8; 8]><opus_bytes>`
 //! Relay   → client: `<peer_index: u8><header: [u8; 8]><opus_bytes>`
@@ -34,10 +34,26 @@
 //! * Negotiation lives in the WS auth message (`protocol_version: 2`), not
 //!   in any bit of `flags`. Mixed-version rooms are rejected at the relay
 //!   with `upgrade_required`.
+//!
+//! ## v3
+//!
+//! Client → relay: `<media_kind: u8><payload...>`
+//! Relay   → client: `<peer_index: u8><media_kind: u8><payload...>`
+//!
+//! Audio payloads keep the v2 shape (`<header><opus_bytes>`). The one-byte
+//! kind lets the same huddle websocket carry screen-share JPEG frames and
+//! tiny JSON control messages without feeding those bytes to the Opus decoder.
 
 /// Wire protocol version this client speaks. Bumped only when the frame
 /// layout itself changes; the relay tracks pinned per-room.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
+
+/// v3 media kind: payload is a v2 audio frame (`FrameHeader` + Opus bytes).
+pub const MEDIA_KIND_AUDIO: u8 = 0x01;
+/// v3 media kind: payload is a JPEG screen-share frame.
+pub const MEDIA_KIND_SCREEN_FRAME: u8 = 0x02;
+/// v3 media kind: payload is UTF-8 JSON screen-share control data.
+pub const MEDIA_KIND_SCREEN_CONTROL: u8 = 0x03;
 
 /// Length of the v2 per-frame header in bytes.
 pub const V2_HEADER_LEN: usize = 8;

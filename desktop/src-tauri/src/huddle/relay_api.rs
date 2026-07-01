@@ -40,16 +40,73 @@ pub(crate) fn parse_channel_uuid(channel_id: &str) -> Result<Uuid, String> {
 
 /// Handshake timeout — matches the server's AUTH_TIMEOUT (5 s).
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const FALLBACK_AUDIO_PROTOCOL_VERSION: u8 = 2;
+
+fn should_fallback_to_audio_v2(error: &str) -> bool {
+    error.contains("unsupported_version")
+        || error.contains("upgrade_required")
+        || error.contains("not supported")
+        || error.contains("relay max is v2")
+}
 
 /// Connect to the relay's audio WebSocket and run the Opus encode/decode pipeline.
 ///
-/// Returns `(cancel_token, pcm_sender)` — caller stores both in `HuddleState`.
+/// Returns `(cancel_token, pcm_sender, screen_sender)` — caller stores them in
+/// `HuddleState`.
 /// Dropping the sender or calling `cancel.cancel()` shuts down the relay task.
 pub(crate) async fn connect_audio_relay(
     channel_id: &str,
     parent_channel_id: Option<&str>,
     state: &AppState,
-) -> Result<(CancellationToken, tokio::sync::mpsc::Sender<Vec<u8>>), String> {
+) -> Result<
+    (
+        CancellationToken,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        Option<tokio::sync::mpsc::Sender<ScreenRelayFrame>>,
+    ),
+    String,
+> {
+    match connect_audio_relay_with_version(
+        channel_id,
+        parent_channel_id,
+        state,
+        super::wire::PROTOCOL_VERSION,
+    )
+    .await
+    {
+        Ok(v) => Ok(v),
+        Err(e)
+            if super::wire::PROTOCOL_VERSION > FALLBACK_AUDIO_PROTOCOL_VERSION
+                && should_fallback_to_audio_v2(&e) =>
+        {
+            eprintln!(
+                "buzz-desktop: huddle relay does not support screen-share protocol yet; falling back to audio v{FALLBACK_AUDIO_PROTOCOL_VERSION}: {e}"
+            );
+            connect_audio_relay_with_version(
+                channel_id,
+                parent_channel_id,
+                state,
+                FALLBACK_AUDIO_PROTOCOL_VERSION,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn connect_audio_relay_with_version(
+    channel_id: &str,
+    parent_channel_id: Option<&str>,
+    state: &AppState,
+    protocol_version: u8,
+) -> Result<
+    (
+        CancellationToken,
+        tokio::sync::mpsc::Sender<Vec<u8>>,
+        Option<tokio::sync::mpsc::Sender<ScreenRelayFrame>>,
+    ),
+    String,
+> {
     use nostr::JsonUtil;
 
     let relay_url = crate::relay::relay_ws_url_with_override(state);
@@ -109,12 +166,12 @@ pub(crate) async fn connect_audio_relay(
         "type": "auth",
         "event": event_json,
         "parent_channel_id": parent_channel_id,
-        // Negotiate huddle audio protocol v2 (8-byte sender-authored header
-        // per Opus frame: seq | ts_48k | level_dbov | flags). See
-        // huddle::wire for the layout. The relay pins the first joiner's
-        // version per-room and rejects mismatched joiners with
+        // Negotiate huddle media protocol v3. Audio keeps the v2 per-Opus
+        // header (seq | ts_48k | level_dbov | flags) and v3 adds a one-byte
+        // media-kind envelope for screen sharing. The relay pins the first
+        // joiner's version per-room and rejects mismatched joiners with
         // `upgrade_required`.
-        "protocol_version": super::wire::PROTOCOL_VERSION,
+        "protocol_version": protocol_version,
     });
     ws_tx
         .send(WsMsg::Text(auth_msg.to_string().into()))
@@ -144,7 +201,11 @@ pub(crate) async fn connect_audio_relay(
                             break Ok(peers);
                         }
                         Some("error") => {
-                            break Err(format!("audio relay auth error: {}", v["message"]));
+                            let code = v["code"].as_str().unwrap_or("unknown");
+                            break Err(format!(
+                                "audio relay auth error ({code}): {}",
+                                v["message"]
+                            ));
                         }
                         _ => continue,
                     }
@@ -163,6 +224,7 @@ pub(crate) async fn connect_audio_relay(
     let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
     let (pcm_tx, pcm_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(50);
+    let (screen_tx, screen_rx) = tokio::sync::mpsc::channel::<ScreenRelayFrame>(8);
     let output_device_name = state
         .audio_output_device
         .lock()
@@ -174,6 +236,12 @@ pub(crate) async fn connect_audio_relay(
             ws_tx,
             ws_rx,
             pcm_rx,
+            screen_rx: if protocol_version >= 3 {
+                Some(screen_rx)
+            } else {
+                None
+            },
+            protocol_version,
             cancel: cancel_clone.clone(),
             app_handle: app_handle.clone(),
             initial_peers,
@@ -197,17 +265,31 @@ pub(crate) async fn connect_audio_relay(
         }
     });
 
-    Ok((cancel, pcm_tx))
+    let screen_tx = if protocol_version >= 3 {
+        Some(screen_tx)
+    } else {
+        None
+    };
+
+    Ok((cancel, pcm_tx, screen_tx))
 }
 
 /// Background Opus encode/decode pipeline spawned by `connect_audio_relay`.
 pub(crate) type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+#[derive(Debug)]
+pub(crate) enum ScreenRelayFrame {
+    Video(Vec<u8>),
+    Control(Vec<u8>),
+}
+
 struct AudioRelayPipelineArgs {
     ws_tx: futures_util::stream::SplitSink<WsStream, WsMsg>,
     ws_rx: futures_util::stream::SplitStream<WsStream>,
     pcm_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    screen_rx: Option<tokio::sync::mpsc::Receiver<ScreenRelayFrame>>,
+    protocol_version: u8,
     cancel: CancellationToken,
     app_handle: Option<tauri::AppHandle>,
     initial_peers: Vec<(u8, String)>,
@@ -221,6 +303,8 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         ws_tx,
         ws_rx,
         mut pcm_rx,
+        mut screen_rx,
+        protocol_version,
         cancel,
         app_handle,
         initial_peers,
@@ -246,79 +330,100 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
     let cancel_send = cancel.clone();
 
     let send_task = tokio::spawn(async move {
-        use super::wire::{audio_level_dbov, FrameHeader, V2_HEADER_LEN};
+        use super::wire::{
+            audio_level_dbov, FrameHeader, MEDIA_KIND_AUDIO, MEDIA_KIND_SCREEN_CONTROL,
+            MEDIA_KIND_SCREEN_FRAME, V2_HEADER_LEN,
+        };
         let mut encoder = encoder; // Move encoder into task.
         const FRAME_SAMPLES: usize = 960;
         let mut out_buf = vec![0u8; 4000];
-        // Per-frame wire-protocol state. We send v2 frames now: each Opus
-        // payload is preceded by an 8-byte header carrying our own seq +
-        // 48 kHz timestamp + audio level + flags.
+        // Per-frame wire-protocol state. v3 audio payloads retain the v2
+        // header shape, wrapped in a one-byte media-kind envelope.
         let mut seq: u16 = 0;
         let mut ts_48k: u32 = 0;
 
         loop {
-            let pcm_bytes = {
-                use futures_util::future::Either;
-                let cancelled = std::pin::pin!(cancel_send.cancelled());
-                let recv = std::pin::pin!(pcm_rx.recv());
-                match futures_util::future::select(cancelled, recv).await {
-                    Either::Left(_) => break, // Cancelled.
-                    Either::Right((Some(b), _)) => b,
-                    Either::Right((None, _)) => break, // Sender dropped.
-                }
-            };
-
-            if pcm_bytes.len() % 4 != 0 {
-                continue; // Malformed batch.
-            }
-            let samples: Vec<f32> = pcm_bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect();
-
-            let mut tx = ws_tx_send.lock().await;
-            for chunk in samples.chunks(FRAME_SAMPLES) {
-                // dBov is computed from the pre-encode PCM. Opus DTX may
-                // produce a 1-2 byte comfort packet; computing level from
-                // the encoded payload would be meaningless.
-                let level = audio_level_dbov(chunk);
-                let encode_result = if chunk.len() == FRAME_SAMPLES {
-                    encoder.encode_float(chunk, &mut out_buf)
-                } else {
-                    let mut padded = chunk.to_vec();
-                    padded.resize(FRAME_SAMPLES, 0.0);
-                    encoder.encode_float(&padded, &mut out_buf)
-                };
-                let n = match encode_result {
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("buzz-desktop: opus encode error: {e}");
-                        continue;
+            tokio::select! {
+                _ = cancel_send.cancelled() => break,
+                screen = async {
+                    match screen_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
                     }
-                };
-                if n > 0 {
-                    // Opus DTX packets are very small (≤2 bytes). Flag them
-                    // explicitly so the receiver can elide DTX from speaker
-                    // detection without re-parsing the Opus payload.
-                    let flags = if n <= 2 { super::wire::FLAG_DTX } else { 0 };
-                    let header = FrameHeader {
-                        seq,
-                        ts_48k,
-                        level_dbov: level,
-                        flags,
-                    }
-                    .encode();
-
-                    // Build the v2 wire frame: 8-byte header + Opus payload.
-                    let mut frame = Vec::with_capacity(V2_HEADER_LEN + n);
-                    frame.extend_from_slice(&header);
-                    frame.extend_from_slice(&out_buf[..n]);
+                } => {
+                    let Some(screen) = screen else { break };
+                    let (kind, payload) = match screen {
+                        ScreenRelayFrame::Video(bytes) => (MEDIA_KIND_SCREEN_FRAME, bytes),
+                        ScreenRelayFrame::Control(bytes) => (MEDIA_KIND_SCREEN_CONTROL, bytes),
+                    };
+                    let mut frame = Vec::with_capacity(1 + payload.len());
+                    frame.push(kind);
+                    frame.extend_from_slice(&payload);
+                    let mut tx = ws_tx_send.lock().await;
                     if tx.send(WsMsg::Binary(frame.into())).await.is_err() {
-                        return; // WS closed.
+                        return;
                     }
+                }
+                pcm = pcm_rx.recv() => {
+                    let Some(pcm_bytes) = pcm else { break };
+                    if pcm_bytes.len() % 4 != 0 {
+                        continue; // Malformed batch.
+                    }
+                    let samples: Vec<f32> = pcm_bytes
+                        .chunks_exact(4)
+                        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                        .collect();
 
-                    seq = seq.wrapping_add(1);
-                    ts_48k = ts_48k.wrapping_add(super::jitter::FRAME_TIMESTAMP_DELTA);
+                    let mut tx = ws_tx_send.lock().await;
+                    for chunk in samples.chunks(FRAME_SAMPLES) {
+                        // dBov is computed from the pre-encode PCM. Opus DTX may
+                        // produce a 1-2 byte comfort packet; computing level from
+                        // the encoded payload would be meaningless.
+                        let level = audio_level_dbov(chunk);
+                        let encode_result = if chunk.len() == FRAME_SAMPLES {
+                            encoder.encode_float(chunk, &mut out_buf)
+                        } else {
+                            let mut padded = chunk.to_vec();
+                            padded.resize(FRAME_SAMPLES, 0.0);
+                            encoder.encode_float(&padded, &mut out_buf)
+                        };
+                        let n = match encode_result {
+                            Ok(n) => n,
+                            Err(e) => {
+                                eprintln!("buzz-desktop: opus encode error: {e}");
+                                continue;
+                            }
+                        };
+                        if n > 0 {
+                            // Opus DTX packets are very small (≤2 bytes). Flag them
+                            // explicitly so the receiver can elide DTX from speaker
+                            // detection without re-parsing the Opus payload.
+                            let flags = if n <= 2 { super::wire::FLAG_DTX } else { 0 };
+                            let header = FrameHeader {
+                                seq,
+                                ts_48k,
+                                level_dbov: level,
+                                flags,
+                            }
+                            .encode();
+
+                            let mut frame = if protocol_version >= 3 {
+                                let mut frame = Vec::with_capacity(1 + V2_HEADER_LEN + n);
+                                frame.push(MEDIA_KIND_AUDIO);
+                                frame
+                            } else {
+                                Vec::with_capacity(V2_HEADER_LEN + n)
+                            };
+                            frame.extend_from_slice(&header);
+                            frame.extend_from_slice(&out_buf[..n]);
+                            if tx.send(WsMsg::Binary(frame.into())).await.is_err() {
+                                return; // WS closed.
+                            }
+
+                            seq = seq.wrapping_add(1);
+                            ts_48k = ts_48k.wrapping_add(super::jitter::FRAME_TIMESTAMP_DELTA);
+                        }
+                    }
                 }
             }
         }
@@ -335,6 +440,7 @@ async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String
         initial_peers,
         tts_active,
         tts_cancel,
+        protocol_version,
     ));
 
     // Wait for either task to finish, then abort the survivor.

@@ -26,13 +26,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 use tokio_util::sync::CancellationToken;
 
 use super::jitter::{PeerJitterBuffer, SAMPLE_RATE_HZ};
 use super::relay_api::{WsStream, REMOTE_SPEECH_THRESHOLD};
-use super::wire::{FrameHeader, FLAG_DTX, V2_HEADER_LEN};
+use super::wire::{
+    FrameHeader, FLAG_DTX, MEDIA_KIND_AUDIO, MEDIA_KIND_SCREEN_CONTROL, MEDIA_KIND_SCREEN_FRAME,
+    V2_HEADER_LEN,
+};
 
 /// Speaker-tick window for emitting `huddle-active-speakers`. Active set is
 /// cleared each tick — peers that didn't send a frame in the last window are
@@ -89,6 +94,19 @@ struct PeerSlot {
     last_packet_at: tokio::time::Instant,
 }
 
+#[derive(Clone, Serialize)]
+struct HuddleScreenFrameEvent {
+    pubkey: String,
+    mime_type: &'static str,
+    data_base64: String,
+}
+
+#[derive(Clone, Serialize)]
+struct HuddleScreenControlEvent {
+    pubkey: String,
+    control: serde_json::Value,
+}
+
 impl PeerSlot {
     fn new(peer_idx: u8, sink_mixer: &rodio::mixer::Mixer) -> Option<Self> {
         match PeerJitterBuffer::new(peer_idx) {
@@ -123,6 +141,77 @@ impl PeerSlot {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn handle_audio_frame(
+    peer_idx: u8,
+    payload: &[u8],
+    peers: &mut std::collections::HashMap<u8, PeerSlot>,
+    active_indices: &mut std::collections::HashSet<u8>,
+    frame_counts: &mut std::collections::HashMap<u8, u16>,
+    last_frame_reset: &mut tokio::time::Instant,
+    tts_was_active: &mut bool,
+    tts_active: &AtomicBool,
+    tts_cancel: &AtomicBool,
+    sink_mixer: &rodio::mixer::Mixer,
+) {
+    if payload.len() <= V2_HEADER_LEN {
+        return;
+    }
+    let Some((header, opus_bytes)) = FrameHeader::parse(payload) else {
+        eprintln!(
+            "buzz-desktop: dropping malformed audio frame from peer {peer_idx} ({} bytes)",
+            payload.len(),
+        );
+        return;
+    };
+    if opus_bytes.is_empty() {
+        return;
+    }
+
+    let is_dtx = (header.flags & FLAG_DTX) != 0;
+    if !is_dtx {
+        active_indices.insert(peer_idx);
+    }
+
+    let tts_now = tts_active.load(Ordering::Acquire);
+    if tts_now && !*tts_was_active {
+        frame_counts.clear();
+        *last_frame_reset = tokio::time::Instant::now();
+    }
+    *tts_was_active = tts_now;
+
+    let slot = match peers.entry(peer_idx) {
+        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        std::collections::hash_map::Entry::Vacant(e) => {
+            let Some(slot) = PeerSlot::new(peer_idx, sink_mixer) else {
+                return;
+            };
+            e.insert(slot)
+        }
+    };
+
+    if let Err(err) = slot
+        .jitter
+        .insert_packet(header.seq, header.ts_48k, opus_bytes)
+    {
+        eprintln!("buzz-desktop: jitter insert peer {peer_idx}: {err}");
+    } else {
+        slot.last_packet_at = tokio::time::Instant::now();
+    }
+
+    if tts_now && !is_dtx {
+        if last_frame_reset.elapsed() >= FRAME_WINDOW {
+            frame_counts.clear();
+            *last_frame_reset = tokio::time::Instant::now();
+        }
+        let count = frame_counts.entry(peer_idx).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count >= REMOTE_SPEECH_THRESHOLD {
+            tts_cancel.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// Drive the receive loop until cancelled or the WS closes.
 ///
 /// `ws_tx_for_pongs` is shared with the encode-side task and only used here to
@@ -138,6 +227,7 @@ pub(crate) async fn run_playout_recv_loop(
     initial_peers: Vec<(u8, String)>,
     tts_active: Arc<AtomicBool>,
     tts_cancel: Arc<AtomicBool>,
+    protocol_version: u8,
 ) {
     use rodio::buffer::SamplesBuffer;
     use std::num::NonZero;
@@ -224,87 +314,93 @@ pub(crate) async fn run_playout_recv_loop(
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(WsMsg::Binary(data))) => {
-                        // Wire shape (v2): [peer_index: u8][header: 8 bytes][opus payload...]
-                        // The minimum size is 1 (peer_index) + 8 (header) + ≥1 Opus byte.
-                        if data.len() <= 1 + V2_HEADER_LEN {
+                        if protocol_version < 3 {
+                            // Wire shape (v2): [peer_index: u8][header: 8 bytes][opus...]
+                            if data.len() <= 1 + V2_HEADER_LEN {
+                                continue;
+                            }
+                            handle_audio_frame(
+                                data[0],
+                                &data[1..],
+                                &mut peers,
+                                &mut active_indices,
+                                &mut frame_counts,
+                                &mut last_frame_reset,
+                                &mut tts_was_active,
+                                &tts_active,
+                                &tts_cancel,
+                                sink_handle.mixer(),
+                            );
+                            continue;
+                        }
+
+                        // Wire shape (v3): [peer_index: u8][media_kind: u8][payload...]
+                        if data.len() < 2 {
                             continue;
                         }
                         let peer_idx = data[0];
-                        let after_idx = &data[1..];
-                        let Some((header, opus_bytes)) = FrameHeader::parse(after_idx)
-                        else {
-                            // Malformed v2 frame: header parse only fails when
-                            // the slice is too short, which `if data.len() <= ...`
-                            // already guards. Defensive log + drop.
-                            eprintln!(
-                                "buzz-desktop: dropping malformed audio frame from peer {peer_idx} ({} bytes)",
-                                data.len(),
-                            );
-                            continue;
+                        let media_kind = data[1];
+                        let payload = &data[2..];
+                        let peer_pubkey = || {
+                            index_to_pubkey
+                                .get(&peer_idx)
+                                .cloned()
+                                .unwrap_or_else(|| format!("peer:{peer_idx}"))
                         };
-                        if opus_bytes.is_empty() {
-                            continue;
-                        }
-                        let is_dtx = (header.flags & FLAG_DTX) != 0;
-                        // Only count non-DTX arrivals toward the UI's
-                        // active-speaker set. DTX/comfort packets are emitted
-                        // by an idle peer to keep the codec alive — they
-                        // don't mean the peer is speaking, and shouldn't
-                        // make their tile flash for the 500 ms speaker tick.
-                        if !is_dtx {
-                            active_indices.insert(peer_idx);
-                        }
 
-                        // TTS interrupt frame counter — reset on TTS rising edge.
-                        let tts_now = tts_active.load(Ordering::Acquire);
-                        if tts_now && !tts_was_active {
-                            frame_counts.clear();
-                            last_frame_reset = tokio::time::Instant::now();
-                        }
-                        tts_was_active = tts_now;
-
-                        let slot = match peers.entry(peer_idx) {
-                            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                            std::collections::hash_map::Entry::Vacant(e) => {
-                                let Some(slot) = PeerSlot::new(peer_idx, sink_handle.mixer())
-                                else {
+                        match media_kind {
+                            MEDIA_KIND_SCREEN_FRAME => {
+                                if payload.is_empty() {
                                     continue;
-                                };
-                                e.insert(slot)
+                                }
+                                if let Some(ref app) = app_handle {
+                                    use tauri::Emitter;
+                                    let data_base64 = base64::engine::general_purpose::STANDARD
+                                        .encode(payload);
+                                    let _ = app.emit(
+                                        "huddle-screen-frame",
+                                        HuddleScreenFrameEvent {
+                                            pubkey: peer_pubkey(),
+                                            mime_type: "image/jpeg",
+                                            data_base64,
+                                        },
+                                    );
+                                }
+                                continue;
                             }
-                        };
-
-                        // Sender-authored seq/ts: NetEq can detect real
-                        // packet reordering & loss, not just arrival jitter.
-                        if let Err(err) =
-                            slot.jitter
-                                .insert_packet(header.seq, header.ts_48k, opus_bytes)
-                        {
-                            eprintln!(
-                                "buzz-desktop: jitter insert peer {peer_idx}: {err}"
-                            );
-                        } else {
-                            // Heartbeat for the playout tick's idle-peer
-                            // guard — only on successful insert so a stream
-                            // of bad packets can't keep a dead peer "active".
-                            slot.last_packet_at = tokio::time::Instant::now();
+                            MEDIA_KIND_SCREEN_CONTROL => {
+                                if let Ok(control) =
+                                    serde_json::from_slice::<serde_json::Value>(payload)
+                                {
+                                    if let Some(ref app) = app_handle {
+                                        use tauri::Emitter;
+                                        let _ = app.emit(
+                                            "huddle-screen-control",
+                                            HuddleScreenControlEvent {
+                                                pubkey: peer_pubkey(),
+                                                control,
+                                            },
+                                        );
+                                    }
+                                }
+                                continue;
+                            }
+                            MEDIA_KIND_AUDIO => {}
+                            _ => continue,
                         }
 
-                        // Count remote-speech frame arrivals for the TTS
-                        // interrupt. DTX/comfort frames don't count — they
-                        // mean the peer is silent, just keeping the codec
-                        // state alive.
-                        if tts_now && !is_dtx {
-                            if last_frame_reset.elapsed() >= FRAME_WINDOW {
-                                frame_counts.clear();
-                                last_frame_reset = tokio::time::Instant::now();
-                            }
-                            let count = frame_counts.entry(peer_idx).or_insert(0);
-                            *count = count.saturating_add(1);
-                            if *count >= REMOTE_SPEECH_THRESHOLD {
-                                tts_cancel.store(true, Ordering::Release);
-                            }
-                        }
+                        handle_audio_frame(
+                            peer_idx,
+                            payload,
+                            &mut peers,
+                            &mut active_indices,
+                            &mut frame_counts,
+                            &mut last_frame_reset,
+                            &mut tts_was_active,
+                            &tts_active,
+                            &tts_cancel,
+                            sink_handle.mixer(),
+                        );
                     }
                     Some(Ok(WsMsg::Text(text))) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {

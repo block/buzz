@@ -70,6 +70,25 @@ type MockSearchProfileSeed = {
   isAgent?: boolean;
 };
 
+type MockHuddleState = {
+  phase:
+    | "idle"
+    | "creating"
+    | "connecting"
+    | "connected"
+    | "active"
+    | "leaving";
+  parent_channel_id: string | null;
+  ephemeral_channel_id: string | null;
+  participants: string[];
+  agent_pubkeys: string[];
+  tts_enabled: boolean;
+  transcription_enabled: boolean;
+  screen_share_available: boolean;
+  is_creator: boolean;
+  voice_input_mode: "push_to_talk" | "voice_activity";
+};
+
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
@@ -104,6 +123,7 @@ type E2eConfig = {
     updateDownloadDelayMs?: number;
     restartDelayMs?: number;
     updateVersion?: string;
+    huddleState?: MockHuddleState | null;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -2059,6 +2079,7 @@ const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
+let mockHuddleState: MockHuddleState | null = null;
 
 // Mesh-compute mock state — TEST-ONLY.
 //
@@ -2094,6 +2115,42 @@ function resetMockMesh() {
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
 }
+
+function cloneMockHuddleState(state: MockHuddleState): MockHuddleState {
+  return {
+    ...state,
+    agent_pubkeys: [...state.agent_pubkeys],
+    participants: [...state.participants],
+  };
+}
+
+function idleMockHuddleState(): MockHuddleState {
+  return {
+    agent_pubkeys: [],
+    ephemeral_channel_id: null,
+    is_creator: false,
+    parent_channel_id: null,
+    participants: [],
+    phase: "idle",
+    screen_share_available: false,
+    transcription_enabled: false,
+    tts_enabled: false,
+    voice_input_mode: "voice_activity",
+  };
+}
+
+function resetMockHuddle(config: E2eConfig | undefined) {
+  mockHuddleState = config?.mock?.huddleState
+    ? cloneMockHuddleState(config.mock.huddleState)
+    : null;
+}
+
+function currentMockHuddleState(): MockHuddleState {
+  return mockHuddleState
+    ? cloneMockHuddleState(mockHuddleState)
+    : idleMockHuddleState();
+}
+
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
 // Listeners registered via the mock __TAURI_INTERNALS__.listen — keyed by event name.
@@ -6795,6 +6852,7 @@ export function maybeInstallE2eTauriMocks() {
   seedMockSearchProfiles(config);
   resetMockWorkflows();
   resetMockMesh();
+  resetMockHuddle(config);
   resetMockUserStatuses();
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
@@ -7517,6 +7575,52 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "get_media_proxy_port":
         return MOCK_MEDIA_PROXY_PORT;
+      case "get_huddle_state":
+        return currentMockHuddleState();
+      case "get_huddle_agent_pubkeys":
+        return currentMockHuddleState().agent_pubkeys;
+      case "get_model_status":
+        return { stt: "ready", tts: "ready" };
+      case "set_tts_enabled":
+        if (mockHuddleState) {
+          mockHuddleState.tts_enabled = Boolean(
+            (payload as { enabled?: boolean }).enabled,
+          );
+        }
+        return undefined;
+      case "set_huddle_transcription_enabled":
+        if (mockHuddleState) {
+          mockHuddleState.transcription_enabled = Boolean(
+            (payload as { enabled?: boolean }).enabled,
+          );
+        }
+        return undefined;
+      case "add_agent_to_huddle": {
+        if (!mockHuddleState) return undefined;
+        const agentPubkey =
+          (payload as { agentPubkey?: string; pubkey?: string }).agentPubkey ??
+          (payload as { agentPubkey?: string; pubkey?: string }).pubkey;
+        if (
+          agentPubkey &&
+          !mockHuddleState.agent_pubkeys.includes(agentPubkey)
+        ) {
+          mockHuddleState.agent_pubkeys.push(agentPubkey);
+          mockHuddleState.participants.push(agentPubkey);
+        }
+        return {
+          ephemeral_added: true,
+          parent_added: true,
+          parent_error: null,
+        };
+      }
+      case "leave_huddle":
+      case "end_huddle":
+        mockHuddleState = null;
+        return undefined;
+      case "confirm_huddle_active":
+      case "push_huddle_screen_control":
+      case "push_huddle_screen_frame":
+        return undefined;
       case "pick_and_upload_media":
         return await resolveMockUploadDescriptors(activeConfig);
       case "upload_media_bytes":

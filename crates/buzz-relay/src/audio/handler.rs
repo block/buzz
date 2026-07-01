@@ -43,6 +43,12 @@ use crate::state::AppState;
 /// Maximum binary frame size: 4 KB is generous for a single Opus packet.
 const MAX_AUDIO_FRAME_BYTES: usize = 4096;
 
+/// Maximum screen-share JPEG frame size.
+const MAX_SCREEN_FRAME_BYTES: usize = 512 * 1024;
+
+/// Maximum screen-share control JSON size.
+const MAX_SCREEN_CONTROL_BYTES: usize = 2 * 1024;
+
 /// Maximum text frame size: 8 KB bounds auth/control JSON parsing.
 const MAX_TEXT_FRAME_BYTES: usize = 8192;
 
@@ -87,7 +93,7 @@ pub async fn ws_audio_handler(
 /// Highest huddle audio protocol version this relay understands. Clients are
 /// allowed to negotiate any version in `1..=CURRENT_PROTOCOL_VERSION`; older
 /// versions stay supported indefinitely for staged rollouts.
-const CURRENT_PROTOCOL_VERSION: u8 = 2;
+const CURRENT_PROTOCOL_VERSION: u8 = 3;
 
 #[derive(Deserialize)]
 struct AuthMsg {
@@ -200,7 +206,6 @@ async fn handle_audio_connection(
         return;
     }
 
-    // ── Step 3: membership check / auto-add ───────────────────────────────────
     let parent_id_for_event = match ensure_membership(
         &state,
         &tenant,
@@ -384,7 +389,6 @@ async fn handle_audio_connection(
 
     room.broadcast_control(joined_msg);
 
-    // ── Step 6: emit kind:48101 (PARTICIPANT_JOINED) ──────────────────────────
     emit_participant_event(
         &state,
         &tenant,
@@ -508,7 +512,10 @@ async fn recv_loop(
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
-    use crate::audio::wire::{FrameHeader, V2_HEADER_LEN};
+    use crate::audio::wire::{
+        FrameHeader, MEDIA_KIND_AUDIO, MEDIA_KIND_SCREEN_CONTROL, MEDIA_KIND_SCREEN_FRAME,
+        V2_HEADER_LEN,
+    };
 
     loop {
         tokio::select! {
@@ -517,6 +524,81 @@ async fn recv_loop(
             msg = ws_recv.next() => {
                 match msg {
                     Some(Ok(WsMessage::Binary(data))) => {
+                        if protocol_version >= 3 {
+                            let Some((&media_kind, payload)) = data.split_first() else {
+                                warn!(peer_id = %peer_id, "v3 media frame missing kind — dropping");
+                                continue;
+                            };
+
+                            match media_kind {
+                                MEDIA_KIND_AUDIO => {
+                                    if payload.len() > MAX_AUDIO_FRAME_BYTES {
+                                        warn!(peer_id = %peer_id, bytes = payload.len(), "audio frame too large — dropping");
+                                        continue;
+                                    }
+                                    if payload.len() <= V2_HEADER_LEN {
+                                        warn!(
+                                            peer_id = %peer_id,
+                                            bytes = payload.len(),
+                                            "v3 audio frame missing header or payload — dropping"
+                                        );
+                                        continue;
+                                    }
+                                    match FrameHeader::parse(payload) {
+                                        Some((header, opus_payload)) if !opus_payload.is_empty() => {
+                                            tracing::trace!(
+                                                peer_id = %peer_id,
+                                                seq = header.seq,
+                                                ts_48k = header.ts_48k,
+                                                level_dbov = header.level_dbov,
+                                                is_dtx = header.is_dtx(),
+                                                "v3 audio frame"
+                                            );
+                                        }
+                                        _ => {
+                                            warn!(
+                                                peer_id = %peer_id,
+                                                bytes = payload.len(),
+                                                "v3 audio frame failed header parse — dropping"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                                MEDIA_KIND_SCREEN_FRAME => {
+                                    if payload.is_empty() || payload.len() > MAX_SCREEN_FRAME_BYTES {
+                                        warn!(
+                                            peer_id = %peer_id,
+                                            bytes = payload.len(),
+                                            "screen-share frame empty or too large — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                MEDIA_KIND_SCREEN_CONTROL => {
+                                    if payload.is_empty() || payload.len() > MAX_SCREEN_CONTROL_BYTES {
+                                        warn!(
+                                            peer_id = %peer_id,
+                                            bytes = payload.len(),
+                                            "screen-share control empty or too large — dropping"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                _ => {
+                                    warn!(
+                                        peer_id = %peer_id,
+                                        media_kind,
+                                        "unknown v3 media kind — dropping"
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            room.broadcast_frame(peer_id, data);
+                            continue;
+                        }
+
                         if data.len() > MAX_AUDIO_FRAME_BYTES {
                             warn!(peer_id = %peer_id, bytes = data.len(), "audio frame too large — dropping");
                             continue;
