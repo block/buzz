@@ -5,6 +5,7 @@ import {
   runtimeSupportsLlmProviderSelection,
   getPersonaProviderOptions,
   requiredCredentialEnvKeys,
+  isMissingRequiredDropdownField,
 } from "./personaDialogPickers.tsx";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel.ts";
 
@@ -1075,4 +1076,132 @@ test("requiredCredentialEnvKeys: codex → empty (uses CLI login, not env keys)"
 test("requiredCredentialEnvKeys: custom/unknown runtime → empty", () => {
   const keys = requiredCredentialEnvKeys("my-custom-harness", "anthropic");
   assert.deepEqual(keys, []);
+});
+
+// ── Block-save gate: hasRequiredEnvKeyMissing logic ────────────────────────
+//
+// The EditAgentDialog computes:
+//   hasRequiredEnvKeyMissing = requiredEnvKeys.some(k => (envVars[k] ?? "").length === 0)
+// and folds it into canSubmit. These tests exercise that predicate directly.
+
+function hasRequiredEnvKeyMissing(requiredKeys, envVars) {
+  return requiredKeys.some((key) => (envVars[key] ?? "").length === 0);
+}
+
+test("blockSave_buzzAgentAnthropicMissingKey_blocked", () => {
+  // Will's exact case: buzz-agent / anthropic / opus / no ANTHROPIC_API_KEY
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = {}; // key absent
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when ANTHROPIC_API_KEY is missing",
+  );
+});
+
+test("blockSave_buzzAgentAnthropicKeyProvided_allowed", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = { ANTHROPIC_API_KEY: "sk-ant-test" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "save must be allowed when ANTHROPIC_API_KEY is present",
+  );
+});
+
+test("blockSave_buzzAgentAnthropicEmptyStringKey_blocked", () => {
+  // Empty string is treated the same as absent — matches EnvVarsEditor isMissing
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "anthropic");
+  const envVars = { ANTHROPIC_API_KEY: "" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when ANTHROPIC_API_KEY is empty string",
+  );
+});
+
+test("blockSave_claudeNoCliLogin_notBlocked", () => {
+  // CLI-login runtimes have no dialog-fixable requirement — must never block
+  const requiredKeys = requiredCredentialEnvKeys("claude", "");
+  const envVars = {}; // no keys set
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "claude save must NOT be blocked — CLI login is out-of-band",
+  );
+});
+
+test("blockSave_codexNoCliLogin_notBlocked", () => {
+  const requiredKeys = requiredCredentialEnvKeys("codex", "");
+  const envVars = {};
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "codex save must NOT be blocked — CLI login is out-of-band",
+  );
+});
+
+test("blockSave_buzzAgentDatabricksMissingHost_blocked", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  const envVars = {};
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    true,
+    "save must be blocked when DATABRICKS_HOST is missing",
+  );
+});
+
+test("blockSave_buzzAgentDatabricksHostProvided_allowed", () => {
+  const requiredKeys = requiredCredentialEnvKeys("buzz-agent", "databricks");
+  const envVars = { DATABRICKS_HOST: "https://my.databricks.instance" };
+  assert.equal(
+    hasRequiredEnvKeyMissing(requiredKeys, envVars),
+    false,
+    "save must be allowed when DATABRICKS_HOST is present",
+  );
+});
+
+// ── Block-save gate: isMissingRequiredDropdownField ────────────────────────
+//
+// The EditAgentDialog also gates on modelRequired / providerRequired.
+// These tests guard the isMissingRequiredDropdownField predicate used for both.
+
+test("blockSave_missingRequiredModel_blocked", () => {
+  // isRequired=true and value is empty → should block
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, ""),
+    true,
+    "canSubmit must be blocked when required model is unset",
+  );
+});
+
+test("blockSave_requiredModelProvided_allowed", () => {
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: true }, "claude-opus-4-5"),
+    false,
+    "canSubmit must be allowed when required model is set",
+  );
+});
+
+test("blockSave_optionalModelEmpty_allowed", () => {
+  // isRequired=false → not a block-save condition
+  assert.equal(
+    isMissingRequiredDropdownField({ isRequired: false }, ""),
+    false,
+    "optional empty model must not block save",
+  );
+});
+
+test("blockSave_nullField_allowed", () => {
+  // null/undefined field descriptor → not required, not blocked
+  assert.equal(
+    isMissingRequiredDropdownField(null, ""),
+    false,
+    "null field must not block save",
+  );
+  assert.equal(
+    isMissingRequiredDropdownField(undefined, ""),
+    false,
+    "undefined field must not block save",
+  );
 });
