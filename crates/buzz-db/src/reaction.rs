@@ -3,7 +3,7 @@
 //! One reaction per user per emoji per event. Soft-delete via removed_at.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::error::Result;
 use crate::CommunityId;
@@ -62,6 +62,16 @@ pub struct ActiveReactionRecord {
 
 // -- Write operations ---------------------------------------------------------
 
+const ADD_REACTION_SQL: &str = r#"
+        INSERT INTO reactions (community_id, event_created_at, event_id, pubkey, emoji, reaction_event_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (community_id, event_created_at, event_id, pubkey, emoji) DO UPDATE SET
+            created_at = NOW(),
+            removed_at = NULL,
+            reaction_event_id = COALESCE(EXCLUDED.reaction_event_id, reactions.reaction_event_id)
+        WHERE reactions.removed_at IS NOT NULL
+        "#;
+
 /// Add (or re-activate) a reaction.
 ///
 /// Returns `Ok(true)` if the reaction was added or re-activated, `Ok(false)` if
@@ -78,25 +88,15 @@ pub async fn add_reaction(
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        INSERT INTO reactions (community_id, event_created_at, event_id, pubkey, emoji, reaction_event_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (community_id, event_created_at, event_id, pubkey, emoji) DO UPDATE SET
-            created_at = NOW(),
-            removed_at = NULL,
-            reaction_event_id = COALESCE(EXCLUDED.reaction_event_id, reactions.reaction_event_id)
-        WHERE reactions.removed_at IS NOT NULL
-        "#,
-    )
-    .bind(community.as_uuid())
-    .bind(event_created_at)
-    .bind(event_id)
-    .bind(pubkey)
-    .bind(emoji)
-    .bind(reaction_event_id)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query(ADD_REACTION_SQL)
+        .bind(community.as_uuid())
+        .bind(event_created_at)
+        .bind(event_id)
+        .bind(pubkey)
+        .bind(emoji)
+        .bind(reaction_event_id)
+        .execute(pool)
+        .await?;
 
     // Three cases:
     // (a) New reaction (no existing row): INSERT succeeds → rows_affected = 1 → true.
@@ -104,6 +104,33 @@ pub async fn add_reaction(
     //     → rows_affected = 1 → true.
     // (c) Active duplicate (row exists, removed_at IS NULL): WHERE fails → no UPDATE
     //     → rows_affected = 0 → false. Caller should short-circuit and not store the event.
+    Ok(result.rows_affected() != 0)
+}
+
+/// Add (or re-activate) a reaction inside an existing transaction.
+///
+/// Uses the same `INSERT ... ON CONFLICT DO UPDATE ... WHERE removed_at IS NOT NULL`
+/// statement as [`add_reaction`], preserving the new / re-activate / active-duplicate
+/// semantics while letting callers atomically couple the reaction row to other writes.
+pub(crate) async fn add_reaction_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    event_id: &[u8],
+    event_created_at: DateTime<Utc>,
+    pubkey: &[u8],
+    emoji: &str,
+    reaction_event_id: Option<&[u8]>,
+) -> Result<bool> {
+    let result = sqlx::query(ADD_REACTION_SQL)
+        .bind(community.as_uuid())
+        .bind(event_created_at)
+        .bind(event_id)
+        .bind(pubkey)
+        .bind(emoji)
+        .bind(reaction_event_id)
+        .execute(&mut **tx)
+        .await?;
+
     Ok(result.rows_affected() != 0)
 }
 

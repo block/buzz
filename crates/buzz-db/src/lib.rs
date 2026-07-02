@@ -41,7 +41,7 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::EventQuery;
+pub use event::{EventQuery, ReactionEventInsertOutcome};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
@@ -588,6 +588,40 @@ impl Db {
             }
         }
         Ok(result)
+    }
+
+    /// Atomically insert a kind:7 reaction event and its reaction row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_reaction_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        target_event_id: &[u8],
+        actor_pubkey: &[u8],
+        emoji: &str,
+    ) -> Result<event::ReactionEventInsertOutcome> {
+        let outcome = event::insert_reaction_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            target_event_id,
+            actor_pubkey,
+            emoji,
+        )
+        .await?;
+        if let event::ReactionEventInsertOutcome::Inserted {
+            was_inserted: true, ..
+        } = &outcome
+        {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(outcome)
     }
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.

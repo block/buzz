@@ -1833,10 +1833,9 @@ async fn ingest_event_inner(
         ));
     }
 
-    // Resolve target event, insert the reaction row (dedup via ON CONFLICT),
-    // store the event, then backfill the reaction_event_id. If the event insert
-    // fails, compensate by removing the reaction row so state stays consistent.
-    // This replaces the post-storage side-effect handler for kind:7.
+    // Resolve the target reference, then use one DB transaction to upsert the
+    // reaction row (dedup via ON CONFLICT) with reaction_event_id already set and
+    // store the kind:7 event. This replaces the post-storage side-effect handler.
     if kind_u32 == KIND_REACTION {
         // Extract target event hex from last e-tag (NIP-25).
         let target_hex = event
@@ -1865,19 +1864,6 @@ async fn ingest_event_inner(
         let target_id = hex::decode(&target_hex)
             .map_err(|_| IngestError::Rejected("invalid: malformed reaction target id".into()))?;
 
-        let target_event = state
-            .db
-            .get_event_by_id(tenant.community(), &target_id)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-            .ok_or_else(|| {
-                IngestError::Rejected("invalid: reaction target event not found".into())
-            })?;
-
-        let target_created_at =
-            chrono::DateTime::from_timestamp(target_event.event.created_at.as_secs() as i64, 0)
-                .unwrap_or_else(chrono::Utc::now);
-
         let actor_bytes = effective_message_author(&event, &state.relay_keypair.public_key());
         let emoji = if event.content.is_empty() {
             "+"
@@ -1897,78 +1883,41 @@ async fn ingest_event_inner(
             )));
         }
 
-        // add_reaction returns false if the (target, actor, emoji) tuple already
-        // exists — short-circuit without storing the event.
-        let inserted = state
-            .db
-            .add_reaction(
-                tenant.community(),
-                &target_id,
-                target_created_at,
-                &actor_bytes,
-                emoji,
-                None,
-            )
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
-
-        if !inserted {
-            return Ok(IngestResult {
-                event_id: event_id_hex,
-                accepted: false,
-                message: "duplicate: reaction already exists".into(),
-            });
-        }
-
-        // Store the event; on failure compensate by removing the reaction row.
+        // Atomically upsert the reaction row with this kind:7 event id, then store
+        // the event in the same transaction. Ordering is load-bearing: active
+        // duplicate reactions must return before storing a duplicate kind:7 event.
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         let (stored_event, was_inserted) = match state
             .db
-            .insert_event_with_thread_metadata(
+            .insert_reaction_event_with_thread_metadata(
                 tenant.community(),
                 &event,
                 channel_id,
                 thread_params,
+                &target_id,
+                &actor_bytes,
+                emoji,
             )
             .await
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
         {
-            Ok(result) => result,
-            Err(e) => {
-                // Compensate: undo the reaction row so state stays consistent.
-                if let Err(re) = state
-                    .db
-                    .remove_reaction(
-                        tenant.community(),
-                        &target_id,
-                        target_created_at,
-                        &actor_bytes,
-                        emoji,
-                    )
-                    .await
-                {
-                    warn!(event_id = %event_id_hex, "reaction compensation failed: {re}");
-                }
-                return Err(IngestError::Internal(format!("error: database error: {e}")));
+            buzz_db::ReactionEventInsertOutcome::TargetMissing => {
+                return Err(IngestError::Rejected(
+                    "invalid: reaction target event not found".into(),
+                ));
             }
+            buzz_db::ReactionEventInsertOutcome::Duplicate => {
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: false,
+                    message: "duplicate: reaction already exists".into(),
+                });
+            }
+            buzz_db::ReactionEventInsertOutcome::Inserted {
+                stored_event,
+                was_inserted,
+            } => (stored_event, was_inserted),
         };
-
-        if was_inserted {
-            // Backfill the reaction_event_id so the row is fully linked.
-            if let Err(e) = state
-                .db
-                .set_reaction_event_id(
-                    tenant.community(),
-                    &target_id,
-                    target_created_at,
-                    &actor_bytes,
-                    emoji,
-                    event.id.as_bytes(),
-                )
-                .await
-            {
-                warn!(event_id = %event_id_hex, "set_reaction_event_id failed: {e}");
-            }
-        }
 
         let pubkey_hex = auth.pubkey().to_hex();
         // Spec WriteInsert (line 514) / WriteDuplicate (line 606): emit
