@@ -12,14 +12,17 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 }
 
 /// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently only `KIND_DM_VISIBILITY`: the reader
-/// MUST equal the snapshot's `#p` (owner). Returns `true` for every other kind.
+/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
+/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
+/// (owner). Returns `true` for every other kind.
 ///
-/// This guards the delivery surfaces directly, so a query that bypasses the
-/// filter-level `#p` gate (e.g. a kindless `ids:[…]` lookup of a known snapshot
-/// id) still cannot read another viewer's hidden-DM set.
+/// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
+/// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
+/// bypasses the filter-level `#p` gate (e.g. a kindless `ids:[…]` lookup of
+/// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
-    if crate::kind::event_kind_u32(event) != crate::kind::KIND_DM_VISIBILITY {
+    let kind = crate::kind::event_kind_u32(event);
+    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -260,5 +263,38 @@ mod tests {
             .sign_with_keys(&relay)
             .expect("sign");
         assert!(reader_authorized_for_event(&note, other));
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_agent_turn_metric_by_p() {
+        let agent_keys = Keys::generate();
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let attacker = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        // Agent turn metric event: pubkey=agent, p tag=owner (NIP-AM envelope shape).
+        let metric = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_AGENT_TURN_METRIC as u16),
+            "encrypted-payload",
+        )
+        .tags([
+            Tag::parse(["p", owner]).unwrap(),
+            Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&agent_keys)
+        .expect("sign");
+
+        assert!(
+            reader_authorized_for_event(&metric, owner),
+            "owner must be authorized to read their own agent turn metric"
+        );
+        assert!(
+            !reader_authorized_for_event(&metric, attacker),
+            "non-owner must NOT be authorized to read an agent turn metric via kindless ids"
+        );
+        // The authoring agent also does not get read-back (NIP-AM: owner-only read).
+        assert!(
+            !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
+            "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
+        );
     }
 }

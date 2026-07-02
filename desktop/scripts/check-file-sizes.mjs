@@ -132,7 +132,18 @@ const overrides = new Map([
   ["src/shared/ui/markdown.tsx", 2119],
   ["src/shared/ui/VideoPlayer.tsx", 2199],
   ["src/shared/ui/sidebar.tsx", 1042],
-  // Option C databricks-model-discovery: parse/HTTP logic moved to buzz-agent
+  // permission-outcome (fix #1381 regression): pendingPermissions state map,
+  // describePermissionOutcome helper, jsonRpcId key helper (handles both
+  // string and finite-number JSON-RPC ids per spec), and the acp_write
+  // response correlation branch are all tightly coupled to the existing
+  // request handler. Load-bearing logic growth, not generic debt. Queued to
+  // split into a dedicated permission module in the next transcript refactor.
+  // +123: observer parity — 4 new named session/update classifier cases
+  // (current_mode_update, usage_update, available_commands_update,
+  // config_option_update) + replaceLifecycleItem helper for usage coalescing +
+  // system-prompt ordering fix (turnId: null for per-channel items).
+  // Load-bearing feature growth; queued to split in next transcript refactor.
+  ["src/features/agents/ui/agentSessionTranscript.ts", 1167],
   // catalog module; agent_models.rs retains the thin wrapper (~50 lines).
   // File still exceeds 1000 due to OpenAI/Anthropic discovery + subprocess
   // fallback. Queued to split into dedicated discovery modules.

@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildTranscript } from "./agentSessionTranscript.ts";
+import {
+  buildTranscriptDisplayBlocks,
+  flattenDisplayBlocks,
+} from "./agentSessionTranscriptGrouping.ts";
 import { formatToolTitle } from "./agentSessionToolCatalog.ts";
 
 const baseEvent = {
@@ -638,4 +642,540 @@ test("buildTranscript separates repeated lifecycle text", () => {
   const [item] = buildTranscript(events);
   assert.equal(item.type, "lifecycle");
   assert.equal(item.text, "recovered: first\nrecovered: second");
+});
+
+// --- permission outcome (Fix #3) ---
+
+function makePermissionRequest(seq, requestId, turnId = "turn-1") {
+  return {
+    seq,
+    timestamp: "2026-06-30T10:00:00.000Z",
+    kind: "acp_read",
+    agentIndex: 0,
+    channelId: "channel-1",
+    sessionId: "session-1",
+    turnId,
+    payload: {
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "session/request_permission",
+      params: {
+        title: "Confirm push",
+        toolCallId: "tool-1",
+        options: [
+          { optionId: "allow_once", kind: "allow_once", name: "Allow" },
+          { optionId: "reject_once", kind: "reject_once", name: "Reject" },
+        ],
+      },
+    },
+  };
+}
+
+function makePermissionResponse(seq, requestId, outcome, optionId = null) {
+  const resultOutcome =
+    outcome === "selected" ? { outcome: "selected", optionId } : { outcome };
+  return {
+    seq,
+    timestamp: "2026-06-30T10:00:01.000Z",
+    kind: "acp_write",
+    agentIndex: 0,
+    channelId: "channel-1",
+    sessionId: "session-1",
+    turnId: "turn-1",
+    payload: {
+      jsonrpc: "2.0",
+      id: requestId,
+      result: { outcome: resultOutcome },
+    },
+  };
+}
+
+test("buildTranscript appends Approved outcome when allow_once is selected", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-1"),
+    makePermissionResponse(2, "req-1", "selected", "allow_once"),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "permission");
+  assert.equal(item.outcome, "Approved (allow_once)");
+  assert.doesNotMatch(item.text ?? "", /Approved/);
+});
+
+test("buildTranscript appends Denied outcome when reject_once is selected", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-2"),
+    makePermissionResponse(2, "req-2", "selected", "reject_once"),
+  ]);
+
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.outcome, "Denied (reject_once)");
+  assert.doesNotMatch(item.text ?? "", /Denied/);
+});
+
+test("buildTranscript appends Cancelled outcome on cancelled response", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-3"),
+    makePermissionResponse(2, "req-3", "cancelled"),
+  ]);
+
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.outcome, "Cancelled");
+  assert.doesNotMatch(item.text ?? "", /Cancelled/);
+});
+
+test("buildTranscript no-ops on a permission response with an unmatched id", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, "req-4"),
+    makePermissionResponse(2, "req-WRONG", "selected", "allow_once"),
+  ]);
+
+  // The permission item exists but has no outcome appended — the mismatched
+  // response id must not crash or attach to the wrong item.
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "permission");
+  assert.equal(item.outcome, undefined);
+  assert.doesNotMatch(item.text ?? "", /Approved/);
+  assert.doesNotMatch(item.text ?? "", /Denied/);
+});
+
+test("buildTranscript appends Approved outcome for a numeric JSON-RPC id (selected allow_once)", () => {
+  // JSON-RPC 2.0 allows numeric ids; the ACP runtime preserves them as
+  // serde_json::Value. asString() drops numbers, so this exercises the
+  // jsonRpcId() helper path that handles finite-number ids.
+  const transcript = buildTranscript([
+    makePermissionRequest(1, 42),
+    makePermissionResponse(2, 42, "selected", "allow_once"),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "permission");
+  assert.equal(item.outcome, "Approved (allow_once)");
+  assert.doesNotMatch(item.text ?? "", /Approved/);
+});
+
+test("buildTranscript appends Cancelled outcome for a numeric JSON-RPC id (cancelled)", () => {
+  const transcript = buildTranscript([
+    makePermissionRequest(1, 99),
+    makePermissionResponse(2, 99, "cancelled"),
+  ]);
+
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.outcome, "Cancelled");
+  assert.doesNotMatch(item.text ?? "", /Cancelled/);
+});
+
+test('buildTranscript does not collide between numeric id 1 and string id "1"', () => {
+  // JSON.stringify produces "1" for number 1 and "\"1\"" for string "1",
+  // so requests with these two different id types must NOT cross-attach.
+  const transcriptNumeric = buildTranscript([
+    makePermissionRequest(1, 1),
+    makePermissionResponse(2, 1, "selected", "allow_once"),
+  ]);
+  const transcriptString = buildTranscript([
+    makePermissionRequest(1, "1"),
+    makePermissionResponse(2, "1", "selected", "reject_once"),
+  ]);
+
+  assert.equal(transcriptNumeric[0].outcome, "Approved (allow_once)");
+  assert.equal(transcriptString[0].outcome, "Denied (reject_once)");
+});
+
+// ─── observer parity: new session/update classifier cases ────────────────────
+
+test("buildTranscript renders current_mode_update as a lifecycle status line", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: "plan",
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Mode");
+  assert.equal(item.text, "plan");
+  assert.equal(item.acpSource, "current_mode_update");
+});
+
+test("buildTranscript suppresses current_mode_update when currentModeId is missing", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "current_mode_update" }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript renders usage_update as a lifecycle status line with tokens", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "usage_update",
+      used: 1500,
+      size: 8192,
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Usage");
+  assert.equal(item.text, "Tokens: 1500/8192");
+  assert.equal(item.acpSource, "usage_update");
+});
+
+test("buildTranscript renders usage_update with cost when present", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "usage_update",
+      used: 800,
+      size: 4096,
+      cost: { amount: 0.0025, currency: "USD" },
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].text, "Tokens: 800/4096 ($0.0025 USD)");
+});
+
+test("buildTranscript coalesces usage_update to latest-per-turn (replace, not append)", () => {
+  // Three usage frames in the same turn must produce exactly ONE lifecycle item
+  // showing the LAST value — not an accumulation of all three.
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "usage_update", used: 100, size: 8192 }),
+    acpToolUpdate(2, { sessionUpdate: "usage_update", used: 300, size: 8192 }),
+    acpToolUpdate(3, { sessionUpdate: "usage_update", used: 600, size: 8192 }),
+  ]);
+
+  const usageItems = transcript.filter((i) => i.acpSource === "usage_update");
+  assert.equal(usageItems.length, 1, "must coalesce to one item");
+  assert.equal(usageItems[0].text, "Tokens: 600/8192");
+});
+
+test("buildTranscript suppresses usage_update when used or size is missing", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "usage_update", used: 100 }), // size absent
+    acpToolUpdate(2, { sessionUpdate: "usage_update", size: 8192 }), // used absent
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript renders available_commands_update as a lifecycle status line", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "create_plan", description: "Create a plan" },
+        { name: "research_codebase", description: "Research the codebase" },
+      ],
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Commands");
+  assert.equal(item.text, "Commands available: 2");
+  assert.equal(item.acpSource, "available_commands_update");
+});
+
+test("buildTranscript renders available_commands_update with zero commands", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [],
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  assert.equal(transcript[0].text, "Commands available: 0");
+});
+
+test("buildTranscript renders config_option_update as a lifecycle status line", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        { id: "model", name: "Model", type: "select", currentValue: "gpt-4o" },
+        { id: "mode", name: "Mode", type: "select", currentValue: "auto" },
+      ],
+    }),
+  ]);
+
+  assert.equal(transcript.length, 1);
+  const item = transcript[0];
+  assert.equal(item.type, "lifecycle");
+  assert.equal(item.renderClass, "status");
+  assert.equal(item.title, "Config");
+  assert.equal(item.text, "Model = gpt-4o, Mode = auto");
+  assert.equal(item.acpSource, "config_option_update");
+});
+
+test("buildTranscript suppresses config_option_update when configOptions is empty", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, {
+      sessionUpdate: "config_option_update",
+      configOptions: [],
+    }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript does not render keepalive (stays in else-dropped bucket)", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "keepalive" }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+test("buildTranscript does not render unknown session/update types (firehose safety net)", () => {
+  const transcript = buildTranscript([
+    acpToolUpdate(1, { sessionUpdate: "some_future_type", value: 42 }),
+  ]);
+  assert.equal(transcript.length, 0);
+});
+
+// --- system-prompt ordering ---
+
+test("observer feed renders system-prompt before prompt-context in display order (first turn, realistic pool.rs sequence)", () => {
+  // Reproduces the real ordering bug: pool.rs emits turn_started BEFORE session/new,
+  // so turn_started creates the turn bucket first. Without the injection mechanism,
+  // displayOrder becomes [turn(turn-1), single(system-prompt)] and System prompt
+  // renders after the entire turn block — after Prompt context.
+  // The fix: system-prompt items (acpSource "session/new") are held and injected
+  // into the prompt segment of the first turn that follows them in stream order.
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt:
+            "[Base]\nYou are a helpful assistant.\n\n[System]\nObserver Agent.",
+        },
+      },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-1", isNewSession: true },
+    },
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: hello`,
+            },
+            { type: "text", text: "[Thread context]\nPrior messages here." },
+          ],
+        },
+      },
+    },
+  ];
+
+  // Route through the display layer — this is the layer that contained the bug.
+  const rawItems = buildTranscript(events);
+  const displayItems = flattenDisplayBlocks(
+    buildTranscriptDisplayBlocks(rawItems),
+  );
+  const systemPromptIdx = displayItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
+  const promptContextIdx = displayItems.findIndex(
+    (i) => i.title === "Prompt context",
+  );
+  assert.ok(systemPromptIdx !== -1, "expected a System prompt item");
+  assert.ok(promptContextIdx !== -1, "expected a Prompt context item");
+  assert.ok(
+    systemPromptIdx < promptContextIdx,
+    `expected System prompt (idx ${systemPromptIdx}) before Prompt context (idx ${promptContextIdx}) in display order`,
+  );
+  // Also verify the fix input: system-prompt item must have turnId=null so the
+  // display grouper treats it as a standalone entry, not a turn-bucket item.
+  const systemPromptRawIdx = rawItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
+  assert.equal(
+    rawItems[systemPromptRawIdx].turnId ?? null,
+    null,
+    "system-prompt item must have turnId=null to avoid turn-bucket grouping",
+  );
+});
+
+test("observer feed renders system-prompt before prompt-context in display order (multi-turn)", () => {
+  // On subsequent turns, session/new does not re-fire. The system-prompt item
+  // injected into turn-1 must not re-appear in turn-2's prompt segment.
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-07-01T10:00:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-07-01T10:00:00.100Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: null,
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "session/new",
+        params: {
+          systemPrompt: "[Base]\nYou are helpful.\n\n[System]\nObserver.",
+        },
+      },
+    },
+    {
+      seq: 3,
+      timestamp: "2026-07-01T10:00:00.200Z",
+      kind: "session_resolved",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: { sessionId: "sess-1", isNewSession: true },
+    },
+    {
+      seq: 4,
+      timestamp: "2026-07-01T10:00:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      payload: {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"a".repeat(64)}\nFrom: x (hex: ${"b".repeat(64)})\nContent: turn 1`,
+            },
+            { type: "text", text: "[Thread context]\nEmpty." },
+          ],
+        },
+      },
+    },
+    {
+      seq: 5,
+      timestamp: "2026-07-01T10:05:00.000Z",
+      kind: "turn_started",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-2",
+      payload: { source: "channel", triggeringEventIds: [] },
+    },
+    {
+      seq: 6,
+      timestamp: "2026-07-01T10:05:01.000Z",
+      kind: "acp_write",
+      agentIndex: 0,
+      channelId: "ch-1",
+      sessionId: "sess-1",
+      turnId: "turn-2",
+      payload: {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "session/prompt",
+        params: {
+          sessionId: "sess-1",
+          prompt: [
+            {
+              type: "text",
+              text: `[Buzz event: @mention]\nEvent ID: ${"c".repeat(64)}\nFrom: x (hex: ${"d".repeat(64)})\nContent: turn 2`,
+            },
+            { type: "text", text: "[Thread context]\nOne prior message." },
+          ],
+        },
+      },
+    },
+  ];
+
+  const rawItems = buildTranscript(events);
+  const displayItems = flattenDisplayBlocks(
+    buildTranscriptDisplayBlocks(rawItems),
+  );
+  const systemPromptIdx = displayItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
+  // Both turns produce a Prompt context — grab the first one (turn-1).
+  const firstPromptContextIdx = displayItems.findIndex(
+    (i) => i.title === "Prompt context",
+  );
+  assert.ok(systemPromptIdx !== -1, "expected a System prompt item");
+  assert.ok(
+    firstPromptContextIdx !== -1,
+    "expected at least one Prompt context item",
+  );
+  assert.ok(
+    systemPromptIdx < firstPromptContextIdx,
+    `expected System prompt (idx ${systemPromptIdx}) before first Prompt context (idx ${firstPromptContextIdx}) in display order`,
+  );
+  const systemPromptRawIdx = rawItems.findIndex(
+    (i) => i.title === "System prompt",
+  );
+  assert.equal(
+    rawItems[systemPromptRawIdx].turnId ?? null,
+    null,
+    "system-prompt item must have turnId=null",
+  );
 });

@@ -35,6 +35,16 @@ export type TranscriptState = {
   activeMessageKey: Map<string, string>;
   sealedKeys: Set<string>;
   triggeringEventIdsByTurn: Map<string, string[]>;
+  /**
+   * Maps JSON-RPC request id → { itemId, optionNames }.
+   * Populated when a `session/request_permission` request is ingested so the
+   * matching response (which carries the same JSON-RPC id, no `method`) can
+   * correlate and append the outcome to the lifecycle item.
+   */
+  pendingPermissions: Map<
+    string,
+    { itemId: string; optionNames: Map<string, string> }
+  >;
   continuationSeq: number;
   latestSessionId: string | null;
 };
@@ -46,6 +56,7 @@ export function createEmptyTranscriptState(): TranscriptState {
     activeMessageKey: new Map(),
     sealedKeys: new Set(),
     triggeringEventIdsByTurn: new Map(),
+    pendingPermissions: new Map(),
     continuationSeq: 0,
     latestSessionId: null,
   };
@@ -62,6 +73,10 @@ type TranscriptDraft = {
   activeMessageKey: Map<string, string>;
   sealedKeys: Set<string>;
   triggeringEventIdsByTurn: Map<string, string[]>;
+  pendingPermissions: Map<
+    string,
+    { itemId: string; optionNames: Map<string, string> }
+  >;
   continuationSeq: number;
   latestSessionId: string | null;
   changed: boolean;
@@ -74,6 +89,7 @@ function draftFrom(state: TranscriptState): TranscriptDraft {
     activeMessageKey: state.activeMessageKey,
     sealedKeys: state.sealedKeys,
     triggeringEventIdsByTurn: state.triggeringEventIdsByTurn,
+    pendingPermissions: state.pendingPermissions,
     continuationSeq: state.continuationSeq,
     latestSessionId: state.latestSessionId,
     changed: false,
@@ -178,9 +194,24 @@ function describePermissionRequest(payload: Record<string, unknown>) {
   if (title !== "Permission requested") detail.push(title);
   if (toolCallId) detail.push(`Tool call: ${toolCallId}`);
   if (options.length > 0) detail.push(`Options: ${options.join(", ")}`);
+
+  // Build optionId → kind map for outcome labeling on the response.
+  const optionNames = new Map<string, string>();
+  if (Array.isArray(params.options)) {
+    for (const option of params.options) {
+      const record = asRecord(option);
+      const optionId = asString(record.optionId);
+      const kind = asString(record.kind);
+      if (optionId && kind) {
+        optionNames.set(optionId, kind);
+      }
+    }
+  }
+
   return {
     title,
     text: detail.join("\n"),
+    optionNames,
     descriptor: {
       renderClass: "permission" as const,
       label: "Permission requested",
@@ -193,6 +224,41 @@ function describePermissionRequest(payload: Record<string, unknown>) {
       groupKey: "permission:request",
     },
   };
+}
+
+/**
+ * Format a human-readable outcome label from a permission response.
+ * kind values from ACP: allow_once, allow_always, reject_once, reject_always.
+ * "reject_*" kinds are denials; anything else that is selected is an approval.
+ */
+function describePermissionOutcome(
+  outcome: string,
+  optionId: string | null,
+  optionNames: Map<string, string>,
+): string {
+  if (outcome === "cancelled") {
+    return "Cancelled";
+  }
+  if (outcome === "selected" && optionId) {
+    const kind = optionNames.get(optionId) ?? optionId;
+    const isDenial = kind.startsWith("reject");
+    const verb = isDenial ? "Denied" : "Approved";
+    return `${verb} (${kind})`;
+  }
+  return outcome;
+}
+
+/**
+ * Stable map key for a JSON-RPC id, which may be a string or a finite number
+ * per the spec. Using JSON.stringify avoids collisions between the number 1 and
+ * the string "1". Returns null for null, undefined, or non-id values (objects,
+ * booleans) so callers can gate on presence without a separate type check.
+ */
+function jsonRpcId(value: unknown): string | null {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" && Number.isFinite(value))
+    return JSON.stringify(value);
+  return null;
 }
 
 function describeFreeformStatus(payload: Record<string, unknown>) {
@@ -366,6 +432,52 @@ function upsertLifecycleItem(
     text,
     timestamp,
     descriptor,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
+    acpSource,
+  });
+}
+
+// Like upsertLifecycleItem but REPLACES the text on update instead of
+// appending. Used for coalescing fields (e.g. usage_update) where only the
+// latest value is meaningful — repeated updates must not accumulate.
+function replaceLifecycleItem(
+  d: TranscriptDraft,
+  id: string,
+  renderClass: Extract<
+    AgentActivityRenderClass,
+    "status" | "permission" | "error"
+  >,
+  title: string,
+  text: string,
+  timestamp: string,
+  ctx: TranscriptItemContext,
+  acpSource?: string,
+) {
+  const existing = d.itemsById.get(id);
+  if (existing?.type === "lifecycle") {
+    replaceItem(d, id, {
+      ...existing,
+      renderClass,
+      title,
+      text,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
+      acpSource: acpSource ?? existing.acpSource,
+    });
+    return;
+  }
+
+  sealOpenMessages(d);
+  pushItem(d, {
+    id,
+    type: "lifecycle",
+    renderClass,
+    title,
+    text,
+    timestamp,
     channelId: ctx.channelId,
     turnId: ctx.turnId,
     sessionId: ctx.sessionId,
@@ -677,9 +789,10 @@ export function processTranscriptEvent(
 
     if (method === "session/request_permission") {
       const request = describePermissionRequest(payload);
+      const itemId = `permission:${ch}:${event.turnId ?? event.seq}`;
       upsertLifecycleItem(
         d,
-        `permission:${ch}:${event.turnId ?? event.seq}`,
+        itemId,
         "permission",
         "Permission requested",
         request.text,
@@ -688,6 +801,40 @@ export function processTranscriptEvent(
         "permission_request",
         request.descriptor,
       );
+      // Index by JSON-RPC id so the response (acp_write with result.outcome,
+      // no method) can correlate by id rather than by turn/seq.
+      const requestId = jsonRpcId(payload.id);
+      if (requestId) {
+        d.pendingPermissions = new Map(d.pendingPermissions);
+        d.pendingPermissions.set(requestId, {
+          itemId,
+          optionNames: request.optionNames,
+        });
+      }
+    } else if (event.kind === "acp_write" && !method) {
+      // Permission response: {"id": <same as request>, "result": {"outcome": {...}}}
+      const responseId = jsonRpcId(payload.id);
+      const result = asRecord(asRecord(payload.result).outcome);
+      const outcomeKind = asString(result.outcome);
+      const pending = responseId ? d.pendingPermissions.get(responseId) : null;
+      if (pending && outcomeKind && responseId) {
+        const optionId = asString(result.optionId) ?? null;
+        const outcomeText = describePermissionOutcome(
+          outcomeKind,
+          optionId,
+          pending.optionNames,
+        );
+        const existing = d.itemsById.get(pending.itemId);
+        if (existing?.type === "lifecycle") {
+          replaceItem(d, pending.itemId, {
+            ...existing,
+            outcome: outcomeText,
+          });
+          // Remove from pending map — the outcome is now recorded.
+          d.pendingPermissions = new Map(d.pendingPermissions);
+          d.pendingPermissions.delete(responseId);
+        }
+      }
     } else if (event.kind === "acp_write" && method === "session/prompt") {
       const promptText = extractPromptText(payload);
       if (promptText) {
@@ -722,9 +869,10 @@ export function processTranscriptEvent(
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
       // the harness as [Base]/[System]. Surface them as one "System prompt" item
-      // keyed per channel-session — the frame carries no session id (it predates
-      // session creation), and session/new fires once per channel-session, so a
-      // re-created session correctly replaces the prior item.
+      // keyed per channel-session — session/new fires once per channel-session,
+      // so a re-created session correctly replaces the prior item.
+      // turnId: null keeps it out of turn buckets; acpSource "session/new" lets
+      // the display grouper inject it before prompt-context in the prompt segment.
       const params = asRecord(payload.params);
       const systemPrompt = asString(params.systemPrompt);
       if (systemPrompt) {
@@ -736,7 +884,8 @@ export function processTranscriptEvent(
             "System prompt",
             sections,
             event.timestamp,
-            ctx,
+            { ...ctx, turnId: null },
+            "session/new",
           );
         }
       }
@@ -870,6 +1019,83 @@ export function processTranscriptEvent(
           updateType,
           `plan-update:${ch}:${turnKey}:${event.seq}`,
         );
+      } else if (updateType === "current_mode_update") {
+        const mode = asString(update.currentModeId) ?? "";
+        if (mode) {
+          upsertLifecycleItem(
+            d,
+            `mode:${ch}:${turnKey}`,
+            "status",
+            "Mode",
+            mode,
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
+      } else if (updateType === "usage_update") {
+        const used = typeof update.used === "number" ? update.used : null;
+        const size = typeof update.size === "number" ? update.size : null;
+        if (used !== null && size !== null) {
+          const costRecord = asRecord(update.cost);
+          const costAmount =
+            typeof costRecord.amount === "number" ? costRecord.amount : null;
+          const costCurrency = asString(costRecord.currency);
+          const costStr =
+            costAmount !== null && costCurrency
+              ? ` ($${costAmount.toFixed(4)} ${costCurrency})`
+              : "";
+          replaceLifecycleItem(
+            d,
+            `usage:${ch}:${turnKey}`,
+            "status",
+            "Usage",
+            `Tokens: ${used}/${size}${costStr}`,
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
+      } else if (updateType === "available_commands_update") {
+        const cmds = Array.isArray(update.availableCommands)
+          ? update.availableCommands
+          : [];
+        upsertLifecycleItem(
+          d,
+          `commands:${ch}:${turnKey}`,
+          "status",
+          "Commands",
+          `Commands available: ${cmds.length}`,
+          event.timestamp,
+          ctx,
+          updateType,
+        );
+      } else if (updateType === "config_option_update") {
+        const opts = Array.isArray(update.configOptions)
+          ? (update.configOptions as Array<Record<string, unknown>>)
+          : [];
+        const optText = opts
+          .map((o) => {
+            const name = asString(o.name) ?? asString(o.id) ?? "?";
+            const val =
+              asString(o.currentValue) ??
+              (typeof o.value === "boolean" ? String(o.value) : null) ??
+              "";
+            return val ? `${name} = ${val}` : name;
+          })
+          .join(", ");
+        if (optText) {
+          upsertLifecycleItem(
+            d,
+            `config:${ch}:${turnKey}`,
+            "status",
+            "Config",
+            optText,
+            event.timestamp,
+            ctx,
+            updateType,
+          );
+        }
       } else {
         // Free-form observer status records are not part of the ACP session/update
         // union. Surface only explicit title/text payloads; leave all other
@@ -918,6 +1144,7 @@ export function processTranscriptEvent(
     activeMessageKey: d.activeMessageKey,
     sealedKeys: d.sealedKeys,
     triggeringEventIdsByTurn: d.triggeringEventIdsByTurn,
+    pendingPermissions: d.pendingPermissions,
     continuationSeq: d.continuationSeq,
     latestSessionId: d.latestSessionId,
   };

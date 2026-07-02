@@ -432,3 +432,117 @@ test("a system message accepts a custom-emoji reaction", async ({ page }) => {
     .locator(`img[alt=':${REACTION_SHORTCODE}:']`);
   await expect(reactionImg).toBeVisible();
 });
+
+test("emoji picker search input has spellcheck, autocorrect, and autocapitalize disabled", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the reaction picker on the seeded reactable message.
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  // Wait for the picker to be visible, then read the shadow-root input attributes.
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  const attrs = await picker.evaluate((el: Element) => {
+    const input = (
+      el as HTMLElement & { shadowRoot: ShadowRoot }
+    ).shadowRoot?.querySelector<HTMLInputElement>('input[type="search"]');
+    if (!input) throw new Error("search input not found in shadow root");
+    return {
+      spellcheck: input.spellcheck,
+      autocorrect: input.getAttribute("autocorrect"),
+      autocapitalize: input.getAttribute("autocapitalize"),
+    };
+  });
+
+  expect(attrs.spellcheck).toBe(false);
+  expect(attrs.autocorrect).toBe("off");
+  expect(attrs.autocapitalize).toBe("off");
+});
+
+// Regression guard for PR #1438: after the spellcheck fix, the shadow-DOM
+// traversal must also own autofocus so Radix's focus-scope can't steal it.
+// Will reported that opening the picker required a manual click before typing.
+test("emoji picker search input is focused immediately on open (no manual click needed)", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the reaction picker — it passes autoFocus, so the input must receive
+  // focus via our shadow traversal before the user interacts.
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  // The search input must be the active element inside the shadow root.
+  // If Radix's focus-scope wins instead, shadowRoot.activeElement is the
+  // popover host (or null), not the input — this assertion catches that.
+  const isFocused = await picker.evaluate((el: Element) => {
+    const host = el as HTMLElement & { shadowRoot: ShadowRoot };
+    const input = host.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (!input) return false;
+    return host.shadowRoot?.activeElement === input;
+  });
+  expect(isFocused).toBe(true);
+});
+
+test("composer emoji picker search input is focused immediately on open", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the composer emoji picker via the toolbar button.
+  await page.getByTestId("composer-emoji-button").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  // The search input must be the active element inside the shadow root so
+  // the user can type immediately without a manual click.
+  const isFocused = await picker.evaluate((el: Element) => {
+    const host = el as HTMLElement & { shadowRoot: ShadowRoot };
+    const input = host.shadowRoot?.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    if (!input) return false;
+    return host.shadowRoot?.activeElement === input;
+  });
+  expect(isFocused).toBe(true);
+
+  // Pick an emoji and verify focus returns to the composer message input,
+  // not left stranded in the now-closed popover. The insertEmoji handler
+  // calls editor.chain().focus() before setIsEmojiPickerOpen(false), so
+  // the Tiptap editor owns focus before Radix's onCloseAutoFocus fires.
+  await picker.getByRole("button", { name: "😀" }).first().click();
+  await expect(page.getByTestId("message-input")).toBeFocused();
+});
+
+test("composer emoji picker restores editor focus on Escape dismiss", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Open the composer emoji picker via the toolbar button.
+  await page.getByTestId("composer-emoji-button").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker.locator("input[type='search']")).toBeVisible();
+
+  // Dismiss via Escape without selecting an emoji. The onClose callback
+  // in ComposerEmojiPicker must restore focus to the editor so the user
+  // can keep typing without an extra click.
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByTestId("message-input")).toBeFocused();
+});
