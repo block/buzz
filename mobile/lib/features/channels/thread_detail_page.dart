@@ -116,6 +116,9 @@ class ThreadDetailPage extends HookConsumerWidget {
         children: [
           Expanded(
             child: ListView.builder(
+              // Reversed so the list opens pinned to the newest reply,
+              // matching the channel message list.
+              reverse: true,
               padding: EdgeInsets.only(
                 left: Grid.gutter,
                 right: Grid.gutter,
@@ -124,7 +127,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               ),
               itemCount: replies.length + 1, // +1 for thread head
               itemBuilder: (context, index) {
-                if (index == 0) {
+                if (index == replies.length) {
                   // Thread head.
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -163,8 +166,10 @@ class ThreadDetailPage extends HookConsumerWidget {
                   );
                 }
 
-                final reply = replies[index - 1];
-                final prevReply = index > 1 ? replies[index - 2] : null;
+                // Reversed list: index 0 = newest reply.
+                final chronIdx = replies.length - 1 - index;
+                final reply = replies[chronIdx];
+                final prevReply = chronIdx > 0 ? replies[chronIdx - 1] : null;
                 final showAuthor =
                     prevReply == null ||
                     prevReply.pubkey.toLowerCase() !=
