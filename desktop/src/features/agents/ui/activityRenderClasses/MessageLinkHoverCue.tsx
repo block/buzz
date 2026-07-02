@@ -12,7 +12,7 @@ export function MessageLinkHoverCue({ className }: { className?: string }) {
     <span
       aria-hidden="true"
       className={cn(
-        "pointer-events-none absolute right-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-md border border-border/70 bg-background/95 py-0.5 pl-1.5 pr-1 text-2xs font-medium text-muted-foreground shadow-sm",
+        "pointer-events-none absolute right-1.5 top-1.5 inline-flex items-center gap-0.5 rounded-md bg-background/95 py-0.5 pl-1.5 pr-1 text-2xs font-medium text-muted-foreground",
         "opacity-0 transition-opacity duration-150 group-hover/bubble:opacity-100 group-focus-visible/bubble:opacity-100",
         className,
       )}
