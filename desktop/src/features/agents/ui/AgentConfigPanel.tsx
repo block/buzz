@@ -371,10 +371,23 @@ export function AgentConfigPanel({
       keyof NormalizedConfig,
       NormalizedField | null,
     ][]
-  ).filter(
-    ([key, field]) =>
-      field !== null && !(advancedMode === "flat" && key === "systemPrompt"),
-  ) as [keyof NormalizedConfig, NormalizedField][];
+  ).filter(([key, field]) => {
+    if (field === null) {
+      return false;
+    }
+    // Flat (profile) mode renders the record/persona system prompt in the
+    // dedicated Instructions block above, so drop it here to avoid the
+    // duplicate — but keep a config-file-sourced prompt, which has no other
+    // home in the profile panel.
+    if (
+      advancedMode === "flat" &&
+      key === "systemPrompt" &&
+      field.origin !== "configFile"
+    ) {
+      return false;
+    }
+    return true;
+  }) as [keyof NormalizedConfig, NormalizedField][];
 
   return (
     <div className="space-y-0.5">
