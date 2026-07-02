@@ -12,7 +12,6 @@ import {
   getChannelMembers,
   listManagedAgents,
   startManagedAgent,
-  stopManagedAgent,
   updateManagedAgent,
   uploadMediaBytes,
 } from "@/shared/api/tauri";
@@ -38,7 +37,6 @@ export type AttachManagedAgentToChannelInput = {
 export type AttachManagedAgentToChannelResult = {
   agent: ManagedAgent;
   membershipAdded: boolean;
-  restarted: boolean;
   started: boolean;
 };
 
@@ -122,25 +120,16 @@ export async function attachManagedAgentToChannel(
 
   let agent = input.agent;
   let started = false;
-  let restarted = false;
 
   if (ensureRunning) {
-    // Provider-backed agents use startManagedAgent as the deploy operation.
-    // Already-deployed providers auto-discover new channel membership via the
-    // harness; not-yet-deployed providers need the deploy call before the
-    // first mention can reach them.
+    // Running agents (local or provider) auto-discover new channel membership
+    // via the harness's membership notifications — no restart needed. Only
+    // not-yet-running agents need a start/deploy call before the first
+    // mention can reach them.
     const isRemote = input.agent.backend.type === "provider";
     if (isRemote && input.agent.status !== "deployed") {
       agent = await startManagedAgent(input.agent.pubkey);
       started = true;
-    } else if (
-      !isRemote &&
-      membershipAdded &&
-      (input.agent.status === "running" || input.agent.status === "deployed")
-    ) {
-      await stopManagedAgent(input.agent.pubkey);
-      agent = await startManagedAgent(input.agent.pubkey);
-      restarted = true;
     } else if (
       !isRemote &&
       input.agent.status !== "running" &&
@@ -154,7 +143,6 @@ export async function attachManagedAgentToChannel(
   return {
     agent,
     membershipAdded,
-    restarted,
     started,
   } satisfies AttachManagedAgentToChannelResult;
 }

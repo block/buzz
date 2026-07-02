@@ -534,7 +534,6 @@ export function useEnsureGooseInChannelMutation(channelId: string | null) {
       return {
         agent: attached.agent,
         membershipAdded: attached.membershipAdded,
-        restarted: attached.restarted,
         started: attached.started,
         created: attached.created,
       };

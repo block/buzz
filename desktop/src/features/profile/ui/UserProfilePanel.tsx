@@ -662,11 +662,7 @@ export function UserProfilePanel({
 
   const handleAddedToChannel = React.useCallback(
     (channel: Channel, result: AttachManagedAgentToChannelResult) => {
-      if (result.restarted) {
-        toast.success(
-          `Added ${result.agent.name} to ${channel.name} and restarted it.`,
-        );
-      } else if (result.started) {
+      if (result.started) {
         toast.success(`Added ${result.agent.name} to ${channel.name}.`);
       } else if (result.membershipAdded) {
         toast.success(`Added ${result.agent.name} to ${channel.name}.`);
