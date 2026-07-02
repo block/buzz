@@ -24,6 +24,8 @@ export type AgentActivityRenderClass =
   | "message"
   | "relay-op"
   | "file-edit"
+  | "file-read"
+  | "image"
   | "shell"
   | "status"
   | "thought"

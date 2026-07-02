@@ -26,7 +26,7 @@ export function buildFileReadContent(
   item: ToolItem,
   descriptor: AgentActivityDescriptor,
 ): FileReadContent | null {
-  if (descriptor.groupKey !== "read_file") {
+  if (descriptor.renderClass !== "file-read") {
     return null;
   }
 

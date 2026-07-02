@@ -87,6 +87,8 @@ const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
   message: "Message",
   "relay-op": "Buzz relay op",
   "file-edit": "File edit",
+  "file-read": "File read",
+  image: "Image",
   shell: "Shell command",
   status: "Status",
   thought: "Thought",
@@ -164,7 +166,7 @@ function classifyDeveloperHarnessTool(
   if (kind === "read_file") {
     const path = getToolString(input.args, ["path"]);
     return {
-      renderClass: "generic",
+      renderClass: "file-read",
       label: "Read file",
       preview: path,
       action: { verb: "Read", object: path ?? "file" },
@@ -176,7 +178,7 @@ function classifyDeveloperHarnessTool(
   if (kind === "view_image") {
     const source = getToolString(input.args, ["source"]);
     return {
-      renderClass: "generic",
+      renderClass: "image",
       label: "Viewed image",
       preview: source ? basenameOrUrl(source) : null,
       action: {

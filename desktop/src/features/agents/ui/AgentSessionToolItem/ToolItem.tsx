@@ -13,7 +13,6 @@ import type { AgentTranscriptIdentityProps } from "../activityRenderClasses/type
 import {
   formatTranscriptTimestampTitle,
   getToolDurationDisplay,
-  getToolString,
 } from "../agentSessionUtils";
 import { CompactMessageSummary } from "./CompactMessageSummary";
 import {
@@ -124,6 +123,7 @@ export function ToolItem({
             action={compactSummary.action}
             duration={duration}
             fileEditSummary={compactSummary.fileEditSummary}
+            kind={compactSummary.kind}
             preview={compactSummary.preview}
             thumbnailSrc={compactSummary.thumbnailSrc}
             label={compactSummary.label}
@@ -138,22 +138,16 @@ export function ToolItem({
           hasArgs={hasArgs}
           hasResult={hasResult}
           imagePreview={
-            compactSummary.thumbnailSrc != null && isExpanded
+            compactSummary.imageContent != null && isExpanded
               ? {
-                  src: compactSummary.thumbnailSrc,
-                  title: compactSummary.preview,
+                  src: compactSummary.imageContent.src,
+                  title: compactSummary.imageContent.title,
                 }
               : null
           }
           isError={item.isError}
           result={item.result}
-          shellCommand={
-            compactSummary.kind === "shell"
-              ? (getToolString(item.args, ["command"]) ??
-                compactSummary.preview ??
-                "command")
-              : null
-          }
+          shellCommand={compactSummary.shellContent}
         />
       </details>
     </div>

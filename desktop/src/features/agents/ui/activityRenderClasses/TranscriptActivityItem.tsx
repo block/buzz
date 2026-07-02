@@ -17,6 +17,8 @@ export const ACTIVITY_RENDER_CLASS_PRESENTERS = {
   message: MessageActivity,
   "relay-op": ToolActivity,
   "file-edit": ToolActivity,
+  "file-read": ToolActivity,
+  image: ToolActivity,
   shell: ToolActivity,
   status: LifecycleActivity,
   thought: ThoughtActivity,

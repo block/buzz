@@ -15,11 +15,17 @@ import {
   buildFileReadContent,
   type FileReadContent,
 } from "./agentSessionFileRead";
+import {
+  buildImageContent,
+  type ImageToolContent,
+} from "./agentSessionImageContent";
 
 export type CompactToolKind =
   | "message"
   | "relay-op"
   | "file-edit"
+  | "file-read"
+  | "image"
   | "shell"
   | "status"
   | "thought"
@@ -38,6 +44,8 @@ export type CompactToolSummary = {
   fileEditSummary: FileEditDiffSummary | null;
   fileEditDiff: FileEditDiff | null;
   fileReadContent: FileReadContent | null;
+  imageContent: ImageToolContent | null;
+  shellContent: string | null;
   /** When set, the compact row renders a tiny image instead of text preview. */
   thumbnailSrc: string | null;
   presentation: "inline" | "message";
@@ -61,7 +69,9 @@ export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
       }
     : null;
   const fileReadContent = buildFileReadContent(item, descriptor);
-  const thumbnailSrc = getThumbnailSrc(item, descriptor);
+  const imageContent = buildImageContent(item, descriptor);
+  const shellContent = buildShellContent(item, descriptor);
+  const thumbnailSrc = imageContent?.src ?? null;
   const failed = item.isError || item.status === "failed";
   const running = item.status === "executing" || item.status === "pending";
   return {
@@ -72,6 +82,8 @@ export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
     fileEditSummary,
     fileEditDiff,
     fileReadContent,
+    imageContent,
+    shellContent,
     thumbnailSrc,
     presentation: descriptor.renderClass === "message" ? "message" : "inline",
     descriptor,
@@ -98,22 +110,18 @@ function labelForStatus(
   return label;
 }
 
-function getThumbnailSrc(
+function buildShellContent(
   item: ToolItem,
   descriptor: AgentActivityDescriptor,
 ): string | null {
-  const operation =
-    descriptor.operation ?? descriptor.groupKey ?? item.toolName;
-  if (!operation.includes("view_image") && item.toolName !== "view_image") {
+  const command = getToolString(item.args, ["command"]);
+  if (!command) {
     return null;
   }
 
-  const source = getToolString(item.args, ["source"]);
-  if (!source) return null;
-  const trimmed = source.trim();
-  return trimmed.startsWith("data:image/") ||
-    trimmed.startsWith("http://") ||
-    trimmed.startsWith("https://")
-    ? trimmed
-    : null;
+  if (descriptor.renderClass === "shell" || descriptor.source === "shell") {
+    return command;
+  }
+
+  return null;
 }
