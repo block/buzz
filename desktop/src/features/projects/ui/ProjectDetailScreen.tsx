@@ -857,9 +857,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
             <div className="w-full space-y-5 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
               <section className="space-y-3">
                 <div className="flex min-w-0 items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-1 space-y-0.5">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <h2 className="truncate text-lg font-semibold">
+                      <h2 className="truncate text-xl font-semibold tracking-tight">
                         {project.name}
                       </h2>
                       {safeWebUrl ? (
@@ -881,7 +881,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       ) : null}
                     </div>
                     {project.description ? (
-                      <p className="mt-0.5 text-sm text-muted-foreground">
+                      <p className="max-w-2xl text-sm font-normal text-muted-foreground">
                         {project.description}
                       </p>
                     ) : null}

@@ -63,6 +63,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectsViewMode = "grid" | "list";
@@ -189,6 +190,30 @@ function getClonePathLabel(project: Project) {
   }
 }
 
+const CLONE_PATH_TAIL_CHARS = 14;
+
+function ClonePathLabel({ project }: { project: Project }) {
+  const label = getClonePathLabel(project);
+  const fullUrl = project.cloneUrls[0] ?? label;
+  const splitAt = Math.max(0, label.length - CLONE_PATH_TAIL_CHARS);
+  const head = label.slice(0, splitAt);
+  const tail = label.slice(splitAt);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="relative z-10 flex min-w-0 font-mono">
+          <span className="min-w-0 truncate">{head}</span>
+          <span className="shrink-0">{tail}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-96 break-all font-mono">
+        {fullUrl}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function repositoryIdentityKey(project: Project) {
   const cloneUrl = project.cloneUrls[0];
   if (cloneUrl) return normalizeRepositoryUrl(cloneUrl);
@@ -283,16 +308,22 @@ function ProjectPeopleStack({
         const profile = profiles?.[normalizePubkey(pubkey)];
         const label = resolveUserLabel({ pubkey, profiles });
         return (
-          <UserAvatar
-            accent={
-              normalizePubkey(pubkey) === normalizePubkey(workOwnerPubkey)
-            }
-            avatarUrl={profile?.avatarUrl ?? null}
-            className="ring-2 ring-card"
-            displayName={label}
-            key={pubkey}
-            size="xs"
-          />
+          <Tooltip key={pubkey}>
+            <TooltipTrigger asChild>
+              <span className="inline-flex">
+                <UserAvatar
+                  accent={
+                    normalizePubkey(pubkey) === normalizePubkey(workOwnerPubkey)
+                  }
+                  avatarUrl={profile?.avatarUrl ?? null}
+                  className="ring-2 ring-card"
+                  displayName={label}
+                  size="xs"
+                />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{label}</TooltipContent>
+          </Tooltip>
         );
       })}
       {remaining > 0 ? (
@@ -523,9 +554,7 @@ function ProjectGridCard({
 
         <div className="flex min-w-0 items-center gap-1.5 rounded-lg bg-muted/45 px-2.5 py-1.5 text-xs text-muted-foreground/80">
           <GitFork className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate font-mono">
-            {getClonePathLabel(project)}
-          </span>
+          <ClonePathLabel project={project} />
         </div>
 
         <div className="mt-auto space-y-2 rounded-lg bg-muted/70 px-2.5 py-2">
@@ -586,9 +615,7 @@ function ProjectListRow({
           </p>
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/75">
             <GitFork className="h-3.5 w-3.5 shrink-0" />
-            <span className="truncate font-mono">
-              {getClonePathLabel(project)}
-            </span>
+            <ClonePathLabel project={project} />
           </div>
         </div>
 
@@ -833,7 +860,6 @@ export function ProjectsView() {
           {filter === "all" ? (
             <ProjectsOverviewPanel
               localRepositoryCount={localRepositoriesQuery.data?.length ?? 0}
-              onOpenProject={handleOpenProject}
               profiles={profiles}
               projects={projects}
               relayName={activeWorkspace?.name || "Relay"}

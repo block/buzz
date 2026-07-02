@@ -1,4 +1,4 @@
-import { Activity, FolderGit2, GitPullRequest, Radio } from "lucide-react";
+import { CircleDot, FolderGit2, GitPullRequest, Radio } from "lucide-react";
 import type * as React from "react";
 
 import { WorkspaceEmojiIcon } from "@/features/workspaces/ui/WorkspaceSwitcher";
@@ -11,11 +11,11 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectsOverviewPanelProps = {
   localRepositoryCount: number;
-  onOpenProject: (project: Project) => void;
   profiles?: UserProfileLookup;
   projects: Project[];
   relayName: string;
@@ -71,21 +71,6 @@ function overviewStats(
   );
 }
 
-function recentProjects(
-  projects: Project[],
-  summaries: Record<string, ProjectActivitySummary> | undefined,
-) {
-  return [...projects]
-    .sort((left, right) => {
-      const leftUpdated =
-        summaries?.[left.repoAddress]?.updatedAt ?? left.createdAt;
-      const rightUpdated =
-        summaries?.[right.repoAddress]?.updatedAt ?? right.createdAt;
-      return rightUpdated - leftUpdated;
-    })
-    .slice(0, 3);
-}
-
 function StatPill({
   icon: Icon,
   label,
@@ -108,7 +93,6 @@ function StatPill({
 
 export function ProjectsOverviewPanel({
   localRepositoryCount,
-  onOpenProject,
   profiles,
   projects,
   relayName,
@@ -116,18 +100,17 @@ export function ProjectsOverviewPanel({
 }: ProjectsOverviewPanelProps) {
   const stats = overviewStats(projects, summaries);
   const people = overviewPeople(projects, summaries);
-  const recent = recentProjects(projects, summaries);
 
   return (
-    <section className="mb-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <section className="mb-4">
       <div className="rounded-xl border border-border/60 bg-card/60 p-4">
         <div className="flex min-w-0 items-start gap-3">
-          <WorkspaceEmojiIcon className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-muted/60 text-3xl shadow-inner" />
-          <div className="min-w-0 flex-1">
-            <h2 className="text-lg font-semibold text-foreground">
+          <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border/70 bg-muted/60 text-2xl shadow-inner" />
+          <div className="-mt-1 min-w-0 flex-1 space-y-0.5">
+            <h2 className="text-xl font-semibold leading-7 tracking-tight text-foreground">
               {relayName} Projects
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-muted-foreground">
+            <p className="max-w-2xl text-sm font-normal text-muted-foreground">
               Browse shared repositories, pull requests, and local project
               checkouts in this workspace.
             </p>
@@ -150,69 +133,33 @@ export function ProjectsOverviewPanel({
             value={pluralize(localRepositoryCount, "checkout")}
           />
           <StatPill
-            icon={Activity}
-            label="Activity"
-            value={pluralize(stats.events, "event")}
+            icon={CircleDot}
+            label="Issues"
+            value={pluralize(stats.issues, "issue")}
           />
         </div>
-        {recent.length > 0 ? (
-          <div className="mt-4 grid gap-2 md:grid-cols-3">
-            {recent.map((project) => (
-              <button
-                className="min-w-0 rounded-lg border border-border/50 bg-background/45 p-3 text-left transition-colors hover:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                key={project.id}
-                onClick={() => onOpenProject(project)}
-                type="button"
-              >
-                <p className="truncate text-sm font-semibold text-foreground">
-                  {project.name}
-                </p>
-                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                  {project.description || "A shared project repository."}
-                </p>
-              </button>
-            ))}
-          </div>
-        ) : null}
+        <div className="mt-4 flex flex-wrap gap-1.5">
+          {people.slice(0, 18).map((pubkey) => {
+            const profile = profiles?.[normalizePubkey(pubkey)];
+            const label = resolveUserLabel({ pubkey, profiles });
+            return (
+              <Tooltip key={pubkey}>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex">
+                    <UserAvatar
+                      accent={profile?.isAgent === true}
+                      avatarUrl={profile?.avatarUrl ?? null}
+                      displayName={label}
+                      size="sm"
+                    />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{label}</TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </div>
       </div>
-      <aside className="space-y-3 rounded-xl border border-border/60 bg-card/60 p-4">
-        <div>
-          <div className="flex flex-wrap gap-1.5">
-            {people.slice(0, 18).map((pubkey) => {
-              const profile = profiles?.[normalizePubkey(pubkey)];
-              return (
-                <UserAvatar
-                  accent={profile?.isAgent === true}
-                  avatarUrl={profile?.avatarUrl ?? null}
-                  displayName={resolveUserLabel({ pubkey, profiles })}
-                  key={pubkey}
-                  size="sm"
-                />
-              );
-            })}
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {pluralize(people.length, "person", "people")} across active
-            projects.
-          </p>
-        </div>
-        <div className="space-y-1.5 text-sm text-muted-foreground">
-          <div className="flex items-center justify-between gap-3">
-            <span>Issues</span>
-            <span className="font-medium text-foreground">{stats.issues}</span>
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <span>Pull requests</span>
-            <span className="font-medium text-foreground">{stats.prs}</span>
-          </div>
-          <div className="flex items-center justify-between gap-3">
-            <span>Local checkouts</span>
-            <span className="font-medium text-foreground">
-              {localRepositoryCount}
-            </span>
-          </div>
-        </div>
-      </aside>
     </section>
   );
 }

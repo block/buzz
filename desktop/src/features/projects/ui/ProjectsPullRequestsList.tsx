@@ -12,6 +12,7 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectsPullRequestsListProps = {
@@ -87,13 +88,19 @@ function PullRequestGridCard({
       </button>
       <div className="flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex min-w-0 items-start gap-3">
-          <UserAvatar
-            accent={authorProfile?.isAgent === true}
-            avatarUrl={authorProfile?.avatarUrl ?? null}
-            className="shrink-0"
-            displayName={authorLabel}
-            size="md"
-          />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="relative z-10 inline-flex shrink-0">
+                <UserAvatar
+                  accent={authorProfile?.isAgent === true}
+                  avatarUrl={authorProfile?.avatarUrl ?? null}
+                  displayName={authorLabel}
+                  size="md"
+                />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{authorLabel}</TooltipContent>
+          </Tooltip>
           <div className="min-w-0 flex-1 space-y-1">
             <div className="flex min-w-0 items-center gap-1.5">
               <p className="truncate text-sm font-semibold text-foreground">
@@ -183,13 +190,19 @@ function PullRequestListRow({
         <span className="sr-only">View {pullRequest.title}</span>
       </button>
       <div className="flex min-w-0 items-start gap-3">
-        <UserAvatar
-          accent={authorProfile?.isAgent === true}
-          avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="shrink-0"
-          displayName={authorLabel}
-          size="md"
-        />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="relative z-10 inline-flex shrink-0">
+              <UserAvatar
+                accent={authorProfile?.isAgent === true}
+                avatarUrl={authorProfile?.avatarUrl ?? null}
+                displayName={authorLabel}
+                size="md"
+              />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>{authorLabel}</TooltipContent>
+        </Tooltip>
         <div className="min-w-0 flex-1 space-y-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <p className="truncate text-sm font-semibold text-foreground">
