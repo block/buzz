@@ -5,7 +5,10 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
-use crate::config::{is_openai_host, Config, OpenAiApi, Provider, ThinkingEffort};
+use crate::config::{
+    is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
+    Config, OpenAiApi, Provider, ThinkingEffort,
+};
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
 };
@@ -118,18 +121,30 @@ impl Llm {
             }
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
-                    DatabricksV2Route::OpenAiResponses => (
-                        responses_body(cfg, system_prompt, history, tools, effective_model, effort),
-                        parse_responses as OpenAiParse,
-                    ),
-                    DatabricksV2Route::AnthropicMessages => (
-                        anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
-                        parse_anthropic as OpenAiParse,
-                    ),
-                    DatabricksV2Route::MlflowChatCompletions => (
-                        openai_body(cfg, system_prompt, history, tools, effective_model, effort),
-                        parse_openai as OpenAiParse,
-                    ),
+                    DatabricksV2Route::OpenAiResponses => {
+                        // OpenAI Responses path: normalize effort (max → xhigh).
+                        let e = effort.map(normalize_effort_for_openai_route);
+                        (
+                            responses_body(cfg, system_prompt, history, tools, effective_model, e),
+                            parse_responses as OpenAiParse,
+                        )
+                    }
+                    DatabricksV2Route::AnthropicMessages => {
+                        // Anthropic Messages path: normalize effort (none|minimal → omit).
+                        let e = effort.and_then(normalize_effort_for_anthropic_route);
+                        (
+                            anthropic_body(cfg, system_prompt, history, tools, effective_model, e),
+                            parse_anthropic as OpenAiParse,
+                        )
+                    }
+                    DatabricksV2Route::MlflowChatCompletions => {
+                        // MLflow Chat path (OpenAI-shaped): normalize effort (max → xhigh).
+                        let e = effort.map(normalize_effort_for_openai_route);
+                        (
+                            openai_body(cfg, system_prompt, history, tools, effective_model, e),
+                            parse_openai as OpenAiParse,
+                        )
+                    }
                 })
                 .await
             }
@@ -1878,6 +1893,138 @@ mod tests {
             Some(ThinkingEffort::Minimal),
         );
         assert_eq!(body["reasoning"]["effort"], "minimal");
+    }
+
+    // ---- DatabricksV2 route-aware effort normalization (body-level assertions) ----
+    //
+    // The DBv2 `complete()` dispatch applies `normalize_effort_for_openai_route` /
+    // `normalize_effort_for_anthropic_route` before calling body builders. These tests
+    // verify the body shape that results from the already-normalized effort values — i.e.,
+    // they confirm the body builders correctly serialize the values the dispatch passes them.
+
+    #[test]
+    fn dbv2_openai_route_max_effort_clamped_to_xhigh_in_responses_body() {
+        // DBv2 GPT-5 route: max → clamped to xhigh by normalize_effort_for_openai_route
+        // before reaching responses_body. The body must carry "xhigh", never "max".
+        let clamped = crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max);
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "gpt-5",
+            Some(clamped),
+        );
+        assert_eq!(
+            body["reasoning"]["effort"], "xhigh",
+            "DBv2 GPT-5 route: max must be clamped to xhigh before responses_body"
+        );
+    }
+
+    #[test]
+    fn dbv2_mlflow_route_max_effort_clamped_to_xhigh_in_openai_body() {
+        // DBv2 MLflow route: max → clamped to xhigh by normalize_effort_for_openai_route.
+        let clamped = crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max);
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "llama-4",
+            Some(clamped),
+        );
+        assert_eq!(
+            body["reasoning_effort"], "xhigh",
+            "DBv2 MLflow route: max must be clamped to xhigh before openai_body"
+        );
+    }
+
+    #[test]
+    fn dbv2_openai_route_none_minimal_pass_through_in_responses_body() {
+        // DBv2 GPT-5 route: none and minimal are valid OpenAI effort values.
+        // normalize_effort_for_openai_route passes them through unchanged.
+        for effort in [ThinkingEffort::None, ThinkingEffort::Minimal] {
+            let normalized = crate::config::normalize_effort_for_openai_route(effort);
+            assert_eq!(
+                normalized, effort,
+                "OpenAI normalizer must not touch none/minimal"
+            );
+            let body = responses_body(
+                &cfg_responses(),
+                "system",
+                &[HistoryItem::User("hi".into())],
+                &[],
+                "gpt-5",
+                Some(normalized),
+            );
+            assert_eq!(
+                body["reasoning"]["effort"],
+                effort.openai_effort_str(),
+                "DBv2 GPT-5 route: {effort:?} must be emitted as-is"
+            );
+        }
+    }
+
+    #[test]
+    fn dbv2_claude_route_none_effort_omits_thinking_fields() {
+        // DBv2 Claude route: none → normalize_effort_for_anthropic_route returns None → omit.
+        let normalized = crate::config::normalize_effort_for_anthropic_route(ThinkingEffort::None);
+        assert_eq!(
+            normalized, None,
+            "Anthropic normalizer must return None for ThinkingEffort::None"
+        );
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-8",
+            normalized, // None → omit thinking fields
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "DBv2 Claude route: none effort must omit thinking fields"
+        );
+        assert!(
+            body.get("output_config").is_none(),
+            "DBv2 Claude route: none effort must omit output_config"
+        );
+    }
+
+    #[test]
+    fn dbv2_session_set_model_route_switch_max_emits_correctly() {
+        // Simulates a session/set_model switch from a Claude model to a GPT-5 model
+        // when thinking_effort=max. Before the switch: Claude route → max passes through
+        // as Anthropic "max". After the switch: GPT-5 route → max clamped to xhigh.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+
+        // Before switch: claude-opus-4-8 with effort=max → adaptive shape, effort="max"
+        let (thinking_before, oc_before) = crate::config::anthropic_thinking_config(
+            "claude-opus-4-8",
+            ThinkingEffort::Max,
+            32_768,
+        );
+        assert_eq!(thinking_before.unwrap()["type"], "adaptive");
+        assert_eq!(oc_before.unwrap()["effort"], "max");
+
+        // After switch to GPT-5 route: normalize max → xhigh for responses_body
+        let clamped = crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max);
+        assert_eq!(clamped, ThinkingEffort::XHigh);
+        let body_after = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "gpt-5",
+            Some(clamped),
+        );
+        assert_eq!(
+            body_after["reasoning"]["effort"], "xhigh",
+            "After set_model to GPT-5: max must be clamped to xhigh"
+        );
     }
 
     /// Regression: a connection that is accepted and then dropped before any
