@@ -49,6 +49,7 @@ import {
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
 import { useWorkspaceEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
 import { useProfileQuery } from "@/features/profile/hooks";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -146,6 +147,7 @@ export function AppShell() {
   );
   usePersonaSync(identityQuery.data?.pubkey);
   useAgentsDataRefresh();
+  useArchiveSync();
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   useRelayAutoHeal();
