@@ -612,7 +612,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 24.14.0
+          node-version: 24.14.1
           # Disable dependency caching: a writable cache in this release workflow
           # (contents: write, feeds a signed installer) is a poisoning vector. pnpm
           # install runs uncached below.
