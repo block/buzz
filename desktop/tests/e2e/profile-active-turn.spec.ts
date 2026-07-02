@@ -94,9 +94,14 @@ test.describe("profile active turn indicator", () => {
 
     const panel = page.getByTestId("user-profile-panel");
     await expect(panel).toBeVisible();
-    await expect(panel).toContainText("Working in #general", {
-      timeout: 5_000,
-    });
+    const liveActivity = panel.getByTestId(
+      `user-profile-live-activity-${AGENT_PUBKEY}`,
+    );
+    await expect(liveActivity).toBeVisible({ timeout: 5_000 });
+    await expect(liveActivity).toContainText("Latest Activity");
+    await expect(
+      liveActivity.getByTestId("user-profile-activity-channel-label"),
+    ).toContainText("#general");
   });
 
   test("02 — profile panel: agent working in two channels", async ({
@@ -113,10 +118,18 @@ test.describe("profile active turn indicator", () => {
 
     const panel = page.getByTestId("user-profile-panel");
     await expect(panel).toBeVisible();
-    await expect(panel).toContainText("Working in #general", {
-      timeout: 5_000,
-    });
-    await expect(panel).toContainText("Working in #engineering");
+    const liveActivity = panel.getByTestId(
+      `user-profile-live-activity-${AGENT_PUBKEY}`,
+    );
+    await expect(liveActivity).toBeVisible({ timeout: 5_000 });
+    await expect(liveActivity).toContainText("Latest Activity");
+    // One carousel dot per working channel.
+    await expect(
+      panel.getByTestId(`user-profile-activity-dot-${CHANNEL_GENERAL}`),
+    ).toBeVisible();
+    await expect(
+      panel.getByTestId(`user-profile-activity-dot-${CHANNEL_ENGINEERING}`),
+    ).toBeVisible();
   });
 
   test("03 — hover popover: agent working", async ({ page }) => {
