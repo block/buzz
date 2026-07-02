@@ -10,6 +10,15 @@
 // `include!`. See reconnect_hook_config.rs for why this is shared, not a module.
 include!("reconnect_hook_config.rs");
 
+/// Returns `true` when an internal build has a reconnect hook configured.
+///
+/// Used by the frontend to decide whether to show "Waiting to reconnect…"
+/// copy and to skip escalation in OSS builds where the hook is a no-op.
+#[tauri::command]
+pub fn relay_reconnect_hook_configured() -> bool {
+    option_env!("BUZZ_DESKTOP_BUILD_RELAY_RECONNECT_CMD").is_some()
+}
+
 #[tauri::command]
 pub async fn relay_reconnect_hook() -> Result<(), String> {
     let Some(config_str) = option_env!("BUZZ_DESKTOP_BUILD_RELAY_RECONNECT_CMD") else {

@@ -412,7 +412,12 @@ class _SectionLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.xs, Grid.xs, Grid.half),
+      padding: const EdgeInsets.fromLTRB(
+        Grid.gutter,
+        Grid.xs,
+        Grid.gutter,
+        Grid.half,
+      ),
       child: Text(
         label.toUpperCase(),
         style: context.textTheme.labelSmall?.copyWith(

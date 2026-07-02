@@ -49,6 +49,8 @@ export type ActiveChannelTurnSummary = {
   channelId: string;
   anchorAt: number;
   agentCount: number;
+  agentPubkeys: string[];
+  agentNames?: string[];
 };
 
 // Module-level state: agentPubkey → turnId → ActiveTurn
@@ -478,6 +480,7 @@ export function getActiveTurnsByChannel(): ActiveChannelTurnSummary[] {
       channelId,
       anchorAt: summary.anchorAt,
       agentCount: summary.agentPubkeys.size,
+      agentPubkeys: [...summary.agentPubkeys].sort(),
     }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedChannelTurnSummaries = result;

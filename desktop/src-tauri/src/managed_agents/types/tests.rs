@@ -209,6 +209,46 @@ fn validate_respond_to_allowlist_accepts_empty() {
     assert!(result.is_empty());
 }
 
+#[test]
+fn update_request_provider_tristate_absent_means_no_touch() {
+    // A JSON payload with no "provider" key deserialized with `None` —
+    // the backend must leave the record's existing provider unchanged.
+    let request: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234"}"#)
+            .expect("minimal update request should deserialize");
+    assert!(
+        request.provider.is_none(),
+        "absent provider must deserialize to None (don't touch)"
+    );
+}
+
+#[test]
+fn update_request_provider_tristate_null_means_clear() {
+    // A JSON payload with `"provider": null` deserialized with `Some(None)` —
+    // the backend must clear the record's provider back to the runtime default.
+    let request: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234", "provider": null}"#)
+            .expect("null provider request should deserialize");
+    assert_eq!(
+        request.provider,
+        Some(None),
+        "explicit null must deserialize to Some(None) (clear)"
+    );
+}
+
+#[test]
+fn update_request_provider_tristate_value_means_set() {
+    // A JSON payload with a provider string deserialized with `Some(Some(…))`.
+    let request: super::UpdateManagedAgentRequest =
+        serde_json::from_str(r#"{"pubkey": "abcd1234", "provider": "databricks_v2"}"#)
+            .expect("provider value request should deserialize");
+    assert_eq!(
+        request.provider,
+        Some(Some("databricks_v2".to_string())),
+        "provider value must deserialize to Some(Some(value)) (set)"
+    );
+}
+
 use super::{CreateManagedAgentRequest, RelayMeshConfig};
 
 /// Wire-shape test: the create request arrives from TS as camelCase

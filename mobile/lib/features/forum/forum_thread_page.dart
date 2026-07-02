@@ -110,7 +110,12 @@ class ForumThreadPage extends HookConsumerWidget {
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -125,13 +130,11 @@ class ForumThreadPage extends HookConsumerWidget {
               ListTile(
                 leading: Icon(
                   LucideIcons.trash2,
-                  color: Theme.of(sheetContext).colorScheme.error,
+                  color: sheetContext.colors.error,
                 ),
                 title: Text(
                   'Delete post',
-                  style: TextStyle(
-                    color: Theme.of(sheetContext).colorScheme.error,
-                  ),
+                  style: TextStyle(color: sheetContext.colors.error),
                 ),
                 onTap: () {
                   Navigator.of(sheetContext).pop();
@@ -169,7 +172,7 @@ class ForumThreadPage extends HookConsumerWidget {
               }
             },
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              backgroundColor: dialogContext.colors.error,
             ),
             child: const Text('Delete'),
           ),
@@ -228,7 +231,7 @@ class _ThreadContent extends HookConsumerWidget {
 
               Padding(
                 padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.xs,
+                  horizontal: Grid.gutter,
                   vertical: Grid.xxs,
                 ),
                 child: Row(
@@ -392,7 +395,7 @@ class _ReplyRow extends ConsumerWidget {
 
     return Padding(
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.xxs,
       ),
       child: Column(
@@ -470,7 +473,12 @@ class _ReplyRow extends ConsumerWidget {
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(Grid.xs, 0, Grid.xs, Grid.xs),
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -486,13 +494,11 @@ class _ReplyRow extends ConsumerWidget {
                 ListTile(
                   leading: Icon(
                     LucideIcons.trash2,
-                    color: Theme.of(sheetContext).colorScheme.error,
+                    color: sheetContext.colors.error,
                   ),
                   title: Text(
                     'Delete reply',
-                    style: TextStyle(
-                      color: Theme.of(sheetContext).colorScheme.error,
-                    ),
+                    style: TextStyle(color: sheetContext.colors.error),
                   ),
                   onTap: () {
                     Navigator.of(sheetContext).pop();
@@ -528,7 +534,7 @@ class _ReplyRow extends ConsumerWidget {
               );
             },
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              backgroundColor: dialogContext.colors.error,
             ),
             child: const Text('Delete'),
           ),

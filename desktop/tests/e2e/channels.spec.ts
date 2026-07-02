@@ -931,6 +931,117 @@ test("channel with messages shows content", async ({ page }) => {
   );
 });
 
+test("channel date divider keeps the date sticky while the separator rule scrolls", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-engineering").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+  await waitForMockLiveSubscription(page, "engineering");
+
+  await page.evaluate(() => {
+    const firstDay = 1_700_000_000;
+    for (let day = 0; day < 2; day += 1) {
+      for (let index = 0; index < 14; index += 1) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "engineering",
+          content: `date handoff day ${day + 1} row ${index + 1}\nsecond line for scroll height`,
+          createdAt: firstDay + day * 86_400 + index,
+          pubkey:
+            "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+        });
+      }
+    }
+  });
+
+  await expect(page.getByTestId("message-timeline-day-group")).toHaveCount(2);
+  await expect(page.getByTestId("message-timeline-day-divider")).toHaveCount(2);
+
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.evaluate((element) => {
+    const firstGroup = element.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-group"]',
+    );
+    if (!firstGroup) {
+      throw new Error("missing first day group");
+    }
+    element.scrollTop = firstGroup.offsetTop + 180;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(50);
+
+  const metrics = await timeline.evaluate((element) => {
+    const firstGroup = element.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-group"]',
+    );
+    const firstDivider = firstGroup?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-divider"]',
+    );
+    const firstDividerPill = firstDivider?.querySelector<HTMLElement>("p");
+    if (!firstGroup || !firstDivider || !firstDividerPill) {
+      throw new Error("missing day group or divider");
+    }
+
+    const groupRect = firstGroup.getBoundingClientRect();
+    const dividerRect = firstDivider.getBoundingClientRect();
+    const groupBefore = getComputedStyle(firstGroup, "::before");
+    const dividerBefore = getComputedStyle(firstDivider, "::before");
+
+    return {
+      dividerBeforeContent: dividerBefore.content,
+      dividerPillBackground: getComputedStyle(firstDividerPill).backgroundColor,
+      dividerPillShadow: getComputedStyle(firstDividerPill).boxShadow,
+      dividerPosition: getComputedStyle(firstDivider).position,
+      dividerTop: dividerRect.top,
+      dividerZIndex: getComputedStyle(firstDivider).zIndex,
+      groupBeforeContent: groupBefore.content,
+      groupBeforePosition: groupBefore.position,
+      groupTop: groupRect.top,
+      ruleTop: groupRect.top + Number.parseFloat(groupBefore.top),
+    };
+  });
+
+  expect(metrics.dividerPosition).toBe("sticky");
+  expect(Number.parseInt(metrics.dividerZIndex, 10)).toBeGreaterThan(10);
+  await expect
+    .poll(async () => {
+      const headerZIndex = await page
+        .getByTestId("chat-header")
+        .evaluate(
+          (element) =>
+            getComputedStyle(element.parentElement ?? element).zIndex,
+        );
+      return Number.parseInt(headerZIndex, 10);
+    })
+    .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
+  await expect
+    .poll(async () => {
+      const sharedBackdropZIndex = await page
+        .getByTestId("channel-shared-header-backdrop")
+        .evaluate((element) => getComputedStyle(element).zIndex);
+      return Number.parseInt(sharedBackdropZIndex, 10);
+    })
+    .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
+  await expect(page.getByTestId("channel-composer-overlay")).toBeVisible();
+  await expect
+    .poll(async () => {
+      const composerOverlayZIndex = await page
+        .getByTestId("channel-composer-overlay")
+        .evaluate((element) => getComputedStyle(element).zIndex);
+      return Number.parseInt(composerOverlayZIndex, 10);
+    })
+    .toBeGreaterThan(Number.parseInt(metrics.dividerZIndex, 10));
+  expect(metrics.dividerPillBackground).not.toBe("rgba(0, 0, 0, 0)");
+  expect(metrics.dividerPillBackground).not.toBe("transparent");
+  expect(metrics.dividerPillShadow).toBe("none");
+  expect(metrics.dividerBeforeContent).toBe("none");
+  expect(metrics.groupBeforePosition).toBe("absolute");
+  expect(metrics.groupBeforeContent).not.toBe("none");
+  expect(metrics.groupTop).toBeLessThan(metrics.dividerTop - 8);
+  expect(metrics.ruleTop).toBeLessThan(metrics.dividerTop - 8);
+});
+
 test("shows and clears activity indicators for active channel agents", async ({
   page,
 }) => {
@@ -960,6 +1071,14 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
   await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
     "alice",
+  );
+  await expect(page.getByTestId("agent-transcript-now-summary")).toHaveCount(0);
+  await page.getByTestId("agent-session-settings-menu-trigger").click();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeVisible();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
+    "No ACP activity yet",
   );
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
@@ -992,6 +1111,21 @@ test("shows and clears activity indicators for active channel agents", async ({
 test("members sidebar exposes view-activity for a viewer-owned relay agent", async ({
   page,
 }) => {
+  // nadia is no longer in the default relay-agent seeds (the no-relay-record
+  // owner path claims that fixture), so seed her relay registry entry here to
+  // exercise the relay-bot classification.
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        name: "nadia",
+        agentType: "goose",
+        capabilities: ["search", "summaries"],
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+  });
   await page.goto("/");
 
   await openMembersSidebar(page, "agents");
@@ -1530,6 +1664,83 @@ test("members sidebar can invite and remove members", async ({ page }) => {
     page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toHaveCount(0);
   await expectMembersTriggerCount(page, initialMemberCount);
+});
+
+test("members sidebar pages add-member search beyond the first 50 people", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await openMembersSidebar(page, "general");
+  await page.getByTestId("channel-management-search-users").fill("Alex");
+
+  const results = page.locator("[data-testid^='channel-user-search-result-']");
+  await expect(results).toHaveCount(50);
+
+  await page
+    .getByTestId("members-sidebar-people")
+    .evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(results).toHaveCount(55);
+  await expect(page.getByText("Alex 55")).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
+});
+
+test("new DM picker pages people search beyond the first 50 results", async ({
+  page,
+}) => {
+  const searchProfiles = Array.from({ length: 55 }, (_, index) => ({
+    pubkey: `${(index + 1).toString(16).padStart(64, "0")}`,
+    displayName: `Alex ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await installMockBridge(page, { searchProfiles });
+
+  await page.goto("/");
+  await page.getByTestId("new-dm-trigger").click();
+  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+  await page.getByTestId("new-dm-search").fill("Alex");
+
+  const results = page.locator("[data-testid^='new-dm-result-']");
+  await expect(results).toHaveCount(50);
+
+  await page
+    .getByTestId("new-dm-results")
+    .evaluate((node) => node.scrollTo(0, node.scrollHeight));
+
+  await expect(results).toHaveCount(55);
+  await expect(page.getByText("Alex 55")).toBeVisible();
+
+  const searchCalls = (await readCommandPayloadLog(page)).filter(
+    (entry) => entry.command === "search_users",
+  );
+  expect(searchCalls).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: null, limit: 50 }),
+      }),
+      expect.objectContaining({
+        payload: expect.objectContaining({ cursor: "2", limit: 50 }),
+      }),
+    ]),
+  );
 });
 
 test("members modal does not show direct pubkey entry", async ({ page }) => {

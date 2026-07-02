@@ -147,7 +147,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_OUTPUT_TOKENS` | `32768` | Per LLM call. Headroom for large tool-call inputs (e.g. file writes via heredoc); Sonnet 4 / Opus 4 cap at 64K. |
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
 | `BUZZ_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
-| `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `120` | |
+| `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `240` | |
 | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |
 | `BUZZ_AGENT_MAX_SESSIONS` | unlimited | Max concurrent ACP sessions. Sessions are cheap; default has no cap. |
@@ -244,7 +244,7 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 | Tool schema bytes | 4 KiB | `MAX_SCHEMA_BYTES` (oversize → replaced with `{}`) |
 | Tool calls per turn | 64 | `MAX_TOOL_CALLS_PER_TURN` |
 | Loop rounds | 0 (unlimited) | `BUZZ_AGENT_MAX_ROUNDS` |
-| LLM call timeout | 120 s | `BUZZ_AGENT_LLM_TIMEOUT_SECS` |
+| LLM call timeout | 240 s | `BUZZ_AGENT_LLM_TIMEOUT_SECS` |
 | Tool call timeout | 660 s | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` |
 
 ## What This Is NOT

@@ -203,6 +203,46 @@ export function selectTimelineBodySurface({
   return renderState;
 }
 
+export type TimelineMessageDelta = "prepend" | "append" | "replace" | "none";
+
+export function classifyTimelineMessageDelta({
+  current,
+  previous,
+}: {
+  current: readonly Pick<TimelineMessage, "id">[];
+  previous: readonly Pick<TimelineMessage, "id">[];
+}): TimelineMessageDelta {
+  if (previous.length === 0 || current.length === 0) {
+    return previous.length === current.length ? "none" : "replace";
+  }
+
+  const previousFirstId = previous[0]?.id;
+  const previousLastId = previous[previous.length - 1]?.id;
+  const currentFirstId = current[0]?.id;
+  const currentLastId = current[current.length - 1]?.id;
+
+  if (previousFirstId === currentFirstId && previousLastId === currentLastId) {
+    if (previous.length === current.length) {
+      return "none";
+    }
+    return current.length > previous.length ? "append" : "replace";
+  }
+
+  if (
+    previousFirstId !== undefined &&
+    currentFirstId !== previousFirstId &&
+    current.some((message) => message.id === previousFirstId)
+  ) {
+    return "prepend";
+  }
+
+  if (previousLastId !== undefined && currentLastId !== previousLastId) {
+    return "append";
+  }
+
+  return "replace";
+}
+
 export type TimelineSnapshotIdentity = {
   channelId: string | null;
 };

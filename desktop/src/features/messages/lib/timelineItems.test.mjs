@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
-import { buildTimelineItems, getTimelineItemKey } from "./timelineItems.ts";
+import {
+  buildTimelineDayGroups,
+  buildTimelineItems,
+  getTimelineItemKey,
+} from "./timelineItems.ts";
 
 function dayAt(year, month, day, hour = 12) {
   return Math.floor(
@@ -86,6 +90,62 @@ test("buildTimelineItems: system messages flatten to a 'system' item", () => {
   assert.deepEqual(kinds(items), ["day-divider", "message", "system"]);
 });
 
+test("buildTimelineItems: consecutive messages from the same author are grouped", () => {
+  const entries = [
+    entry({ id: "a", pubkey: "author-a", createdAt: dayAt(2026, 6, 14) }),
+    entry({ id: "b", pubkey: "AUTHOR-A", createdAt: dayAt(2026, 6, 14, 13) }),
+    entry({ id: "c", pubkey: "author-b", createdAt: dayAt(2026, 6, 14, 14) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, null).items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, false],
+  );
+});
+
+test("buildTimelineItems: dividers break grouping while thread summaries do not", () => {
+  const sameAuthor = "author-a";
+  const entries = [
+    entry({ id: "a", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14) }),
+    {
+      ...entry({
+        id: "b",
+        pubkey: sameAuthor,
+        createdAt: dayAt(2026, 6, 14, 13),
+      }),
+      summary: {
+        threadHeadId: "b",
+        replyCount: 1,
+        lastReplyAt: dayAt(2026, 6, 14, 13),
+        participants: [],
+      },
+    },
+    entry({ id: "c", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 14, 14) }),
+    entry({ id: "d", pubkey: sameAuthor, createdAt: dayAt(2026, 6, 15) }),
+  ];
+
+  const messageItems = buildTimelineItems(entries, "c").items.filter(
+    (item) => item.kind === "message",
+  );
+
+  assert.deepEqual(
+    messageItems.map((item) => item.isContinuation),
+    [false, true, false, false],
+  );
+  assert.deepEqual(
+    messageItems.map((item) => item.isFollowedByContinuation),
+    [true, false, false, false],
+  );
+});
+
 test("buildTimelineItems: empty entries produce no items", () => {
   const { items } = buildTimelineItems([], null);
   assert.equal(items.length, 0);
@@ -99,4 +159,43 @@ test("getTimelineItemKey: keys are unique across the stream", () => {
   const { items } = buildTimelineItems(entries, "b");
   const keys = items.map(getTimelineItemKey);
   assert.equal(new Set(keys).size, keys.length);
+});
+
+test("buildTimelineDayGroups: moves non-day rows under their day section", () => {
+  const entries = [
+    entry({ id: "d1a", createdAt: dayAt(2026, 6, 12) }),
+    entry({ id: "d1b", createdAt: dayAt(2026, 6, 12, 13) }),
+    entry({ id: "d2a", createdAt: dayAt(2026, 6, 13) }),
+    entry({ id: "d2b", createdAt: dayAt(2026, 6, 13, 13) }),
+  ];
+  const { items } = buildTimelineItems(entries, "d2b");
+
+  const groups = buildTimelineDayGroups(items);
+
+  assert.equal(groups.length, 2);
+  assert.deepEqual(
+    groups.map((group) => group.items.map((item) => item.kind)),
+    [
+      ["message", "message"],
+      ["message", "unread-divider", "message"],
+    ],
+  );
+  assert.ok(groups.every((group) => group.headingTimestamp !== null));
+});
+
+test("buildTimelineDayGroups: preserves leading rows without a day divider", () => {
+  const leadingRows = [
+    { kind: "unread-divider", key: "unread-a" },
+    { kind: "message", key: "a", entry: entry({ id: "a" }) },
+  ];
+
+  const groups = buildTimelineDayGroups(leadingRows);
+
+  assert.deepEqual(groups, [
+    {
+      key: "day-undated",
+      headingTimestamp: null,
+      items: leadingRows,
+    },
+  ]);
 });

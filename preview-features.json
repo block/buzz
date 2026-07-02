@@ -26,6 +26,14 @@
       ]
     },
     {
+      "id": "workspaceRail",
+      "name": "Workspace Rail",
+      "description": "Far-left rail for switching relays with cross-relay unread indicators",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",

@@ -47,6 +47,7 @@ import {
 } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
+import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -285,32 +286,13 @@ export function ChannelScreen({
         : [],
     [activeChannel],
   );
-  const messageProfilePubkeys = React.useMemo(
-    () => [
-      ...new Set([
-        ...messageAuthorPubkeys,
-        ...messageMentionPubkeys,
-        ...activeDmParticipantPubkeys,
-        ...typingEntries.map((entry) => entry.pubkey),
-      ]),
-    ],
-    [
-      activeDmParticipantPubkeys,
-      messageAuthorPubkeys,
-      messageMentionPubkeys,
-      typingEntries,
-    ],
-  );
-  const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
-    enabled: messageProfilePubkeys.length > 0,
-  });
   const channelMembersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
   const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data ?? [];
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
-  const agentPubkeys = React.useMemo(() => {
+  const knownAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
     for (const member of channelMembers ?? []) {
       if (member.role === "bot" || member.isAgent) {
@@ -323,6 +305,31 @@ export function ChannelScreen({
     for (const agent of relayAgents) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
+    return pubkeys;
+  }, [channelMembers, managedAgents, relayAgents]);
+  const messageProfilePubkeys = React.useMemo(
+    () => [
+      ...new Set([
+        ...messageAuthorPubkeys,
+        ...messageMentionPubkeys,
+        ...activeDmParticipantPubkeys,
+        ...knownAgentPubkeys,
+        ...typingEntries.map((entry) => entry.pubkey),
+      ]),
+    ],
+    [
+      activeDmParticipantPubkeys,
+      knownAgentPubkeys,
+      messageAuthorPubkeys,
+      messageMentionPubkeys,
+      typingEntries,
+    ],
+  );
+  const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
+    enabled: messageProfilePubkeys.length > 0,
+  });
+  const agentPubkeys = React.useMemo(() => {
+    const pubkeys = new Set(knownAgentPubkeys);
     for (const [pubkey, profile] of Object.entries(
       messageProfilesQuery.data?.profiles ?? {},
     )) {
@@ -331,7 +338,7 @@ export function ChannelScreen({
       }
     }
     return pubkeys;
-  }, [channelMembers, managedAgents, messageProfilesQuery.data, relayAgents]);
+  }, [knownAgentPubkeys, messageProfilesQuery.data]);
   const agentPubkeysPending =
     activeChannel?.channelType === "dm" &&
     (channelMembersQuery.isPending ||
@@ -383,9 +390,15 @@ export function ChannelScreen({
         messageProfilesQuery.data?.profiles,
         currentProfile,
       ) ?? {};
-    return mergeAgentNamesIntoProfiles(base, managedAgents, relayAgents);
+    return mergeAgentNamesIntoProfiles(
+      base,
+      managedAgents,
+      relayAgents,
+      currentPubkey,
+    );
   }, [
     currentProfile,
+    currentPubkey,
     managedAgents,
     messageProfilesQuery.data?.profiles,
     relayAgents,
@@ -699,6 +712,10 @@ export function ChannelScreen({
   ]);
 
   useLoadMissingAncestors(activeChannel, resolvedMessages);
+  // Fetch the full reply subtree server-side when a thread is open, closing the
+  // descendant gap that useLoadMissingAncestors (ancestors-only) leaves. The
+  // open thread head is the top-level message, i.e. the thread root.
+  useThreadReplies(activeChannel, effectiveOpenThreadHeadId);
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||

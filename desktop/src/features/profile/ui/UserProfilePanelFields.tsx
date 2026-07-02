@@ -11,10 +11,9 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
-import { toast } from "sonner";
-
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { truncatePubkey as truncatePubkeyShort } from "@/features/profile/lib/identity";
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type {
   AgentPersona,
@@ -32,11 +31,6 @@ const RUNTIME_LABELS: Record<string, string> = {
 
 function runtimeLabel(command: string): string {
   return RUNTIME_LABELS[command] ?? command;
-}
-
-async function copyToClipboard(value: string, label?: string) {
-  await navigator.clipboard.writeText(value);
-  toast.success(label ? `Copied ${label}` : "Copied to clipboard");
 }
 
 export type ProfileField = {
@@ -60,6 +54,7 @@ const AGENT_INFO_LABELS = new Set([
 ]);
 const AGENT_SETTINGS_LABELS = new Set([
   "Runtime",
+  "Agent profile",
   "Respond to",
   "ACP command",
   "MCP command",
@@ -134,10 +129,7 @@ export function useProfileFieldBuckets({
           })
         : []),
     ];
-    return {
-      ...bucketProfileFields(metadataFields),
-      modelLabel: managedAgent?.model ?? persona?.model ?? "Auto",
-    };
+    return bucketProfileFields(metadataFields);
   }, [
     isBot,
     isOwner,
@@ -252,10 +244,11 @@ export function buildOwnerFields({
   relayAgent: RelayAgent | undefined;
 }): ProfileField[] {
   const fields: ProfileField[] = [];
-  const respondToDisplayValue = managedAgent
-    ? managedAgent.respondTo === "owner-only" && ownerDisplayName
+  const respondTo = managedAgent?.respondTo ?? relayAgent?.respondTo ?? null;
+  const respondToDisplayValue = respondTo
+    ? respondTo === "owner-only" && ownerDisplayName
       ? ownerDisplayName
-      : managedAgent.respondTo.replace(/-/g, " ")
+      : respondTo.replace(/-/g, " ")
     : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerProfilePubkey);
@@ -321,6 +314,14 @@ export function buildOwnerFields({
       label: "Runtime",
       testId: "user-profile-runtime",
     });
+  } else if (ownerPubkey) {
+    fields.push({
+      copyValue: ownerPubkey,
+      displayValue: "Declared owner verified",
+      icon: UserRound,
+      label: "Agent profile",
+      testId: "user-profile-agent-profile",
+    });
   }
 
   if (managedAgent) {
@@ -338,24 +339,6 @@ export function buildOwnerFields({
       icon: Activity,
       label: "Status",
       testId: "user-profile-agent-status",
-    });
-  }
-
-  if (managedAgent?.model) {
-    fields.push({
-      copyValue: managedAgent.model,
-      displayValue: managedAgent.model,
-      icon: Cpu,
-      label: "Model",
-      testId: "user-profile-model",
-    });
-  } else if (persona?.model) {
-    fields.push({
-      copyValue: persona.model,
-      displayValue: persona.model,
-      icon: Cpu,
-      label: "Model",
-      testId: "user-profile-model",
     });
   }
 
@@ -397,14 +380,15 @@ export function buildOwnerFields({
       label: "Start on launch",
       testId: "user-profile-start-on-launch",
     });
-    if (respondToDisplayValue) {
-      fields.push({
-        displayValue: respondToDisplayValue,
-        icon: Ear,
-        label: "Respond to",
-        testId: "user-profile-respond-to",
-      });
-    }
+  }
+
+  if (respondToDisplayValue) {
+    fields.push({
+      displayValue: respondToDisplayValue,
+      icon: Ear,
+      label: "Respond to",
+      testId: "user-profile-respond-to",
+    });
   }
 
   if (managedAgent?.lastError) {
@@ -522,7 +506,9 @@ function ProfileFieldRow({ field }: { field: ProfileField }) {
         aria-label={`Copy ${field.label}`}
         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
         data-testid={field.testId}
-        onClick={() => void copyToClipboard(field.copyValue ?? "", field.label)}
+        onClick={() =>
+          copyTextToClipboard(field.copyValue ?? "", `Copied ${field.label}`)
+        }
         title={`Copy ${field.label}`}
         type="button"
       >

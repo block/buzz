@@ -4,6 +4,60 @@ import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
+type RelayConnectionState =
+  | "connected"
+  | "connecting"
+  | "disconnected"
+  | "idle"
+  | "reconnecting"
+  | "stalled";
+
+/**
+ * Drive the mock relay connection state via the E2E bridge seam.
+ * When targeting a degraded state, waits for baseline "connected" first so
+ * the mock auth handshake can't race the override back to "connected".
+ */
+async function setRelayConnectionState(
+  page: Page,
+  state: RelayConnectionState,
+) {
+  if (state !== "connected") {
+    await page.waitForFunction(() => {
+      const win = window as Window & {
+        __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+        __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+      };
+      return (
+        typeof win.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function" &&
+        typeof win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function" &&
+        win.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__() === "connected"
+      );
+    });
+  } else {
+    await page.waitForFunction(
+      () =>
+        typeof (
+          window as Window & {
+            __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+          }
+        ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
+    );
+  }
+  await page.evaluate((nextState) => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (
+        state: RelayConnectionState,
+      ) => void;
+    };
+    const setConnectionState =
+      testWindow.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__;
+    if (!setConnectionState) {
+      throw new Error("Mock relay connection state helper is not installed.");
+    }
+    setConnectionState(nextState);
+  }, state);
+}
+
 const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
 const HOME_SEEN_STORAGE_KEY_PREFIX = "buzz-home-feed-seen.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
@@ -1284,4 +1338,84 @@ test("membership denial can import a different invited key", async ({
     .toBe(TEST_IDENTITIES.alice.pubkey);
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expectHomeView(page);
+});
+
+test("onboarding relay reconnect — click shows Connected then auto-dismisses", async ({
+  page,
+}) => {
+  // Produce the relay reconnect card via a relay-unreachable profile save error.
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  const card = page.getByTestId("onboarding-relay-reconnect-card");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Can't reach the relay");
+
+  // Drive degraded before clicking so the card is in the expected error state.
+  await setRelayConnectionState(page, "disconnected");
+
+  // Click the reconnect button. The controller attempts reconnect; the mock
+  // relay reconnects successfully (fast-path or via the state seam). Either
+  // path should result in the card transitioning to Connected and then
+  // auto-dismissing.
+  await page.getByTestId("onboarding-reconnect-relay").click();
+
+  // Drive connected to ensure the controller's connection-state path fires
+  // and the component's hadActiveReconnectRef guard is satisfied.
+  await setRelayConnectionState(page, "connected");
+
+  await expect(card).toContainText("Connected", { timeout: 5_000 });
+  await expect(card).not.toContainText("Can't reach the relay");
+
+  // Auto-dismiss fires after ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS
+  // (2500ms). Allow generous headroom for CI.
+  await expect(card).toBeHidden({ timeout: 10_000 });
+});
+
+test("onboarding relay reconnect — connected without a prior click does not show Connected", async ({
+  page,
+}) => {
+  // Tests the hadActiveReconnectRef guard: if the relay transitions to
+  // "connected" without the user having clicked the reconnect button, the card
+  // must NOT show Connected. This guards against spurious success on initial
+  // connection or background recovery with no user action.
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  const card = page.getByTestId("onboarding-relay-reconnect-card");
+  await expect(card).toBeVisible();
+
+  // Drive to disconnected state (no reconnect click has happened).
+  await setRelayConnectionState(page, "disconnected");
+
+  // Drive to connected WITHOUT clicking — this would happen on a spontaneous
+  // background recovery. The hadActiveReconnectRef guard must block markSuccess().
+  await setRelayConnectionState(page, "connected");
+
+  // Wait long enough for any spurious markSuccess() to fire, then assert the
+  // card stayed in the error state.
+  await page.waitForTimeout(500);
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Can't reach the relay");
+  await expect(card).not.toContainText("Connected");
 });

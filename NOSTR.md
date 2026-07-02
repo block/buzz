@@ -262,6 +262,7 @@ the sender to be authenticated (NIP-42) as the relay owner or an admin.
 | 9030 | Add member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
 | 9031 | Remove member | `["p", "<hex-pubkey>"]`, optional `["role", "member\|admin"]` |
 | 9032 | Change role | `["p", "<hex-pubkey>"]`, `["role", "member\|admin"]` |
+| 9033 | Set workspace profile (icon) | `["icon", "<https-url or data:image/* URL>"]` (empty clears) |
 
 Example using `nak`:
 
@@ -294,6 +295,13 @@ After each add/remove/role-change, the relay publishes a kind:13534 membership l
 # Subscribe to the live membership roster
 nak req -k 13534 --auth --sec <privkey> ws://localhost:3000
 ```
+
+A kind:9033 command similarly makes the relay store the workspace icon (per
+community) and serve it in the standard NIP-11 `icon` field of its relay
+information document. Clients render it in the workspace rail/switcher; anyone
+can read it (`curl -H 'Accept: application/nostr+json' http://localhost:3000`),
+but only admins/owners can set it. Full spec:
+[docs/nips/NIP-WP.md](docs/nips/NIP-WP.md).
 
 ### Known Limitations
 

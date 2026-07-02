@@ -231,7 +231,7 @@ pub async fn search_users(
     let escaped = escape_like(&normalized);
     let contains_pattern = format!("%{escaped}%");
     let prefix_pattern = format!("{escaped}%");
-    let limit = limit.clamp(1, 50) as i64;
+    let limit = limit.clamp(1, 500) as i64;
 
     let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
         r#"

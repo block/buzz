@@ -12,7 +12,6 @@ import {
   ProfileFieldRows,
 } from "@/features/profile/ui/UserProfilePanelFields";
 import type { ProfilePanelTab } from "@/features/profile/ui/UserProfilePanelUtils";
-import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -329,8 +328,6 @@ export function ProfileRuntimeTabContent({
   agentInstruction,
   diagnosticsFields,
   diagnosticsSummary,
-  managedAgent,
-  modelLabel,
   onOpenDiagnostics,
   onOpenInstructions,
   runtimeConfigurationFields,
@@ -341,8 +338,6 @@ export function ProfileRuntimeTabContent({
   agentInstruction: string | null;
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: React.ReactNode;
-  managedAgent: ManagedAgent | undefined;
-  modelLabel: string;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
   runtimeConfigurationFields: ProfileField[];
@@ -357,10 +352,7 @@ export function ProfileRuntimeTabContent({
     (field) => field.label !== "Last error" && field.label !== "Status",
   );
   const hasRuntimeRows =
-    runtimeConfigurationFields.length > 0 ||
-    runtimeSettingsFields.length > 0 ||
-    managedAgent !== undefined ||
-    modelLabel.trim().length > 0;
+    runtimeConfigurationFields.length > 0 || runtimeSettingsFields.length > 0;
 
   if (
     !hasRuntimeRows &&
@@ -396,12 +388,7 @@ export function ProfileRuntimeTabContent({
       ) : null}
       {hasRuntimeRows ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
-          <AgentDetailsRows
-            fields={runtimeConfigurationFields}
-            managedAgent={managedAgent}
-            modelLabel={modelLabel}
-            showModel={true}
-          />
+          <AgentDetailsRows fields={runtimeConfigurationFields} />
           {runtimeSettingsFields.length > 0 ? (
             <ProfileFieldRows fields={runtimeSettingsFields} />
           ) : null}

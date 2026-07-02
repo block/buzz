@@ -38,13 +38,23 @@ mod tests {
         columns: Vec<String>,
     }
 
-    fn migration_sql() -> &'static str {
-        MIGRATOR
+    /// Concatenated SQL of every embedded migration, in version order.
+    ///
+    /// The tenant-isolation lints must cover objects introduced by *any*
+    /// migration, not just the consolidated `0001`. Concatenating keeps that
+    /// coverage honest as additive migrations (e.g. `0002_git_repo_names`) land.
+    fn migration_sql() -> String {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+        assert!(
+            !migrations.is_empty(),
+            "at least the initial migration must exist"
+        );
+        migrations
             .iter()
-            .find(|migration| migration.version == 1)
-            .expect("initial migration must exist")
-            .sql
-            .as_str()
+            .map(|migration| migration.sql.as_ref())
+            .collect::<Vec<&str>>()
+            .join("\n")
     }
 
     fn strip_sql_comments(sql: &str) -> String {
@@ -458,9 +468,10 @@ mod tests {
 
     #[test]
     fn embedded_migrator_contains_consolidated_initial_schema() {
-        let migrations: Vec<_> = MIGRATOR.iter().collect();
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 1);
+        assert_eq!(migrations.len(), 3);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -484,6 +495,26 @@ mod tests {
             .sql
             .as_str()
             .contains("search_tsv  TSVECTOR GENERATED ALWAYS"));
+
+        // The git repo-name registry is an additive migration, never folded into
+        // 0001 — folding it would change 0001's checksum and break brownfield
+        // startup (sqlx VersionMismatch). It must live in its own version, and
+        // 0001 must not carry it.
+        assert_eq!(migrations[1].version, 2);
+        assert!(migrations[1]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE git_repo_names"));
+        assert!(!migrations[0].sql.as_str().contains("git_repo_names"));
+
+        // Same additive-migration rule for the per-community workspace icon
+        // (NIP-11 `icon`): its own version, never folded into 0001.
+        assert_eq!(migrations[2].version, 3);
+        assert!(migrations[2]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE communities ADD COLUMN icon"));
+        assert!(!migrations[0].sql.as_str().contains("icon"));
     }
 
     #[test]
@@ -575,6 +606,7 @@ mod tests {
     #[test]
     fn all_non_operator_global_tables_have_not_null_community_id() {
         let sql = migration_sql();
+        let sql = sql.as_str();
         let scoped = scoped_tables(sql);
         let missing = create_table_definitions(sql)
             .into_iter()
@@ -593,6 +625,7 @@ mod tests {
     #[test]
     fn scoped_primary_key_unique_and_foreign_key_constraints_lead_with_community_id() {
         let sql = migration_sql();
+        let sql = sql.as_str();
         let violations = scoped_constraint_violations(sql)
             .into_iter()
             .map(|constraint| {
@@ -613,6 +646,7 @@ mod tests {
     #[test]
     fn channels_community_id_is_immutable_after_insert() {
         let sql = migration_sql();
+        let sql = sql.as_str();
         let forbidden_mutations = forbidden_channels_community_id_mutations(sql);
 
         assert!(
@@ -664,8 +698,9 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1]);
-        let tables = create_tables(migration_sql());
+        assert_eq!(applied_versions(&pool).await, vec![1, 2]);
+        let sql = migration_sql();
+        let tables = create_tables(sql.as_str());
         for table in [
             "communities",
             "events",

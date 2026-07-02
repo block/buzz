@@ -373,7 +373,7 @@ const MessageTimelineBase = React.forwardRef<
         {showUnreadPill ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
               channelChrome.top,
             )}
           >
@@ -391,7 +391,7 @@ const MessageTimelineBase = React.forwardRef<
         isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-30 flex translate-y-3 justify-center px-4",
               channelChrome.top,
             )}
             data-testid="message-timeline-fetching-older"
@@ -501,7 +501,7 @@ const MessageTimelineBase = React.forwardRef<
                               "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                               hasDescription
                                 ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
-                                : "h-28 w-64 flex-col rounded-xl p-4",
+                                : "h-28 w-64 flex-col rounded-2xl p-4",
                             )}
                             data-testid={action.testId}
                             key={action.label}
@@ -557,7 +557,7 @@ const MessageTimelineBase = React.forwardRef<
 
               {showGenericEmpty ? (
                 <div
-                  className="mt-auto rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
+                  className="mt-auto rounded-2xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
                   data-testid="message-empty"
                 >
                   <p className="text-base font-semibold tracking-tight">
@@ -618,7 +618,7 @@ const MessageTimelineBase = React.forwardRef<
         {!isAtBottom ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-50 flex justify-center px-4",
               hasComposerOverlay ? "bottom-36" : "bottom-4",
             )}
           >

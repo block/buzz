@@ -364,9 +364,6 @@ export function useManagedAgentActions() {
   ) {
     setActionErrorMessage(null);
     setActionNoticeMessage(() => {
-      if (result.restarted) {
-        return `Added ${result.agent.name} to ${channel.name} and restarted it so the new channel subscription is live.`;
-      }
       if (result.started) {
         return `Added ${result.agent.name} to ${channel.name} and spawned it.`;
       }

@@ -283,9 +283,10 @@ pub fn run() {
                     .store(port, std::sync::atomic::Ordering::Relaxed);
             });
 
-            // Create the Buzz nest (~/.buzz) before agents are restored,
-            // so default_agent_workdir() resolves to the nest directory.
-            // Non-fatal: agents fall back to $HOME if nest creation fails.
+            // Create the Buzz nest (~/.buzz or ~/.buzz-dev for dev builds) before
+            // agents are restored, so default_agent_workdir() resolves to the
+            // nest directory. Non-fatal: agents fall back to $HOME if nest
+            // creation fails.
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
@@ -306,12 +307,23 @@ pub fn run() {
             };
 
             // Carry the agent's knowledge from the legacy nest (~/.sprout) into
-            // the live nest (~/.buzz) after it exists. Must run after
-            // ensure_nest() so the destination is present. Non-fatal.
+            // the live nest after it exists. Must run after ensure_nest() so the
+            // destination is present. Non-fatal.
             // On a real migration, emit a one-time hint so the user can delete
             // the now-inert ~/.sprout; the frontend dedupes the toast.
             if migration::migrate_legacy_nest() {
                 let _ = app_handle.emit("legacy-nest-migrated", ());
+            }
+
+            // One-time migration for dev builds: copy accumulated knowledge
+            // from the shared ~/.buzz nest into the new dedicated ~/.buzz-dev
+            // nest so no work is lost when the nest is first namespaced.
+            // Runs only when nest_dir() resolved to ~/.buzz-dev (dev instance).
+            let is_dev_nest = managed_agents::nest_dir()
+                .and_then(|p| p.file_name().map(|n| n.to_os_string()))
+                .is_some_and(|n| n == ".buzz-dev");
+            if is_dev_nest {
+                migration::migrate_dev_nest();
             }
 
             // Create/update the local CLI symlink pointing to the
@@ -480,6 +492,8 @@ pub fn run() {
             send_managed_agent_channel_message,
             get_forum_posts,
             get_forum_thread,
+            get_thread_replies,
+            get_channel_messages_before,
             edit_message,
             delete_message,
             add_reaction,
@@ -593,9 +607,11 @@ pub fn run() {
             apply_workspace,
             validate_repos_dir,
             get_active_workspace,
+            fetch_workspace_icon,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,
+            relay_reconnect_hook_configured,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -144,19 +144,20 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
-    /// Goose-specific: most recently observed `_meta.goose.activeRunId` from
-    /// a `session/update` notification of kind `session_info_update`.
+    /// Most recently observed `_meta.goose.activeRunId` from a
+    /// `session/update` notification of kind `session_info_update`.
     ///
-    /// Goose emits this whenever it starts or clears an active prompt run
+    /// Both goose and buzz-agent emit `session_info_update` with this field;
+    /// goose emits it whenever it starts or clears an active prompt run
     /// (`crates/goose/src/acp/server.rs:2277` `send_active_run_update`).
     /// Required as `expectedRunId` when calling the non-standard
     /// `_goose/unstable/session/steer` method to inject a message into an
     /// in-flight turn without cancelling it.
     ///
     /// `None` until the first `session_info_update` arrives, or after the
-    /// run clears (goose emits `activeRunId: null` at end of turn). Other
-    /// agents will simply never populate this — readers must treat `None`
-    /// as "no active run to steer into" and fall back to cancel+merge.
+    /// run clears (goose/buzz-agent emit `activeRunId: null` at end of turn).
+    /// Other agents may leave this unset — readers must treat `None` as
+    /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
@@ -490,8 +491,9 @@ impl AcpClient {
     /// Most recently observed goose `_meta.goose.activeRunId` from a
     /// `session_info_update`, if any.
     ///
-    /// Goose-only: other agents leave this `None` for the lifetime of the
-    /// client. Read directly by `read_until_response_with_idle_timeout`'s
+    /// Both goose and buzz-agent emit `session_info_update`; other agents
+    /// leave this `None` for the lifetime of the client. Read directly by
+    /// `read_until_response_with_idle_timeout`'s
     /// steer arm at write time (see [`crate::pool::SteerRequest`] for
     /// why the read loop owns this); production callers do not need this
     /// accessor. Kept as `pub` so tests can introspect the field.
@@ -520,6 +522,25 @@ impl AcpClient {
              stacking receivers would misroute steer requests across turns"
         );
         self.steer_rx = Some(rx);
+    }
+
+    /// Clear any installed steer receiver without consuming it.
+    ///
+    /// Called by `send_prompt_result` on every exit path of `run_prompt_task`
+    /// so that `install_steer_rx`'s `is_none()` invariant holds for the next
+    /// dispatch even when the turn ended before the read loop ran `take()`.
+    /// Idempotent — safe to call when `steer_rx` is already `None`.
+    pub fn clear_steer_rx(&mut self) {
+        self.steer_rx = None;
+    }
+
+    /// Returns `true` if no steer receiver is currently installed.
+    ///
+    /// Test-only: used by `pool` tests to assert the post-return invariant
+    /// without exposing the private field directly.
+    #[cfg(test)]
+    pub fn steer_rx_is_none(&self) -> bool {
+        self.steer_rx.is_none()
     }
 
     /// Cancel a turn cleanly, handling any pending permission request first.
@@ -1247,11 +1268,11 @@ impl AcpClient {
                 false
             }
             "session_info_update" => {
-                // Goose-only as of writing: `_meta.goose.activeRunId` carries
-                // the id of the currently-active prompt run, or `null` when
-                // the run has cleared. Other agents don't emit this field;
-                // for them `active_run_id` stays `None` and steer callers
-                // will fall back to cancel+merge.
+                // Both goose and buzz-agent emit `session_info_update` with
+                // `_meta.goose.activeRunId`: the id of the currently-active
+                // prompt run, or `null` when the run has cleared. Other agents
+                // don't emit this field; for them `active_run_id` stays `None`
+                // and steer callers will fall back to cancel+merge.
                 //
                 // Per the ACP `SessionInfoUpdate` schema, `_meta` is a field
                 // on the update object itself — nested inside `update`, not

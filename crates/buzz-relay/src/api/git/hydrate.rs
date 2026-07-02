@@ -459,6 +459,7 @@ mod tests {
             "buzz_dev",
             "buzz_dev_secret",
             "buzz-git",
+            "us-east-1",
         )
         .expect("connect minio")
     }

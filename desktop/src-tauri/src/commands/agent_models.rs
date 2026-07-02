@@ -11,11 +11,11 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, default_agent_workdir,
-        find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
-        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
-        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
-        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_ACP_COMMAND,
+        discovery_env_with_baked_floor, find_managed_agent_mut, known_acp_runtime,
+        load_managed_agents, load_personas, managed_agent_avatar_url, missing_command_message,
+        normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
+        try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
+        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -90,6 +90,7 @@ pub async fn get_agent_models(
         )
     }; // store lock released — subprocess runs without holding the lock
 
+    let merged_env = discovery_env_with_baked_floor(merged_env);
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
         effective_provider.as_deref(),
@@ -222,6 +223,7 @@ pub async fn discover_agent_models(
         }
     }
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
+    let merged_env = discovery_env_with_baked_floor(merged_env);
 
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
@@ -824,6 +826,9 @@ pub async fn update_managed_agent(
         }
         if let Some(model_update) = input.model {
             record.model = model_update;
+        }
+        if let Some(provider_update) = input.provider {
+            record.provider = provider_update;
         }
         if let Some(prompt_update) = input.system_prompt {
             record.system_prompt = prompt_update;

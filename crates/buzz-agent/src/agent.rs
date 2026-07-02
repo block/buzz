@@ -160,6 +160,20 @@ impl RunCtx<'_> {
                 );
             }
 
+            if !response.reasoning.is_empty() {
+                wire::send(
+                    self.wire,
+                    wire::session_update(
+                        self.session_id,
+                        json!({
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": { "type": "text", "text": &response.reasoning }
+                        }),
+                    ),
+                )
+                .await;
+            }
+
             if !response.text.is_empty() {
                 wire::send(
                     self.wire,

@@ -76,6 +76,38 @@ async function openModelMenu(
   return menu;
 }
 
+async function selectDropdownOption(
+  page: import("@playwright/test").Page,
+  trigger: import("@playwright/test").Locator,
+  optionName: string,
+) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await expect(trigger).toBeVisible({ timeout: 2_000 });
+    await trigger.press("Enter", { timeout: 2_000 });
+    const menu = page
+      .getByRole("menu")
+      .filter({
+        has: page.getByRole("menuitemradio", {
+          exact: true,
+          name: optionName,
+        }),
+      })
+      .last();
+
+    try {
+      await expect(menu).toBeVisible({ timeout: 1_500 });
+      await menu
+        .getByRole("menuitemradio", { exact: true, name: optionName })
+        .click({ force: true, timeout: 1_500 });
+      return;
+    } catch (error) {
+      if (attempt === 1) throw error;
+      await page.keyboard.press("Escape", { timeout: 1_000 });
+      await waitForAnimations(page);
+    }
+  }
+}
+
 test("persona env_vars round-trip through create_persona + update_persona", async ({
   page,
 }) => {
@@ -300,10 +332,7 @@ test("persona model options follow the selected LLM provider", async ({
   await expect(model).toContainText("Default model");
 
   // Switch to OpenAI — the API-key field appears and is labelled correctly.
-  await llmProvider.click();
-  await page
-    .getByRole("menuitemradio", { name: "OpenAI", exact: true })
-    .click();
+  await selectDropdownOption(page, llmProvider, "OpenAI");
   const providerApiKey = page.getByTestId("persona-provider-api-key");
   await expect(page.getByText("OpenAI API key")).toBeVisible();
   await expect(providerApiKey).toBeVisible();
@@ -317,10 +346,7 @@ test("persona model options follow the selected LLM provider", async ({
     .click();
 
   // Switch to Anthropic — API-key field label changes and value clears.
-  await llmProvider.click();
-  await page
-    .getByRole("menuitemradio", { name: "Anthropic", exact: true })
-    .click();
+  await selectDropdownOption(page, llmProvider, "Anthropic");
   await expect(page.getByText("Anthropic API key")).toBeVisible();
   await expect(providerApiKey).toHaveValue("");
   await expect(model).toBeVisible();
@@ -330,14 +356,7 @@ test("persona model options follow the selected LLM provider", async ({
   await expect(model).toBeVisible();
 
   // Switch to Default (no explicit provider) — model resets to "Default model".
-  await llmProvider.click();
-  const llmProviderMenu = page.getByRole("menu").filter({
-    has: page.getByRole("menuitemradio", { name: "OpenAI", exact: true }),
-  });
-  await llmProviderMenu
-    .last()
-    .getByRole("menuitemradio", { name: "Default", exact: true })
-    .click();
+  await selectDropdownOption(page, llmProvider, "Default");
   await expect(model).toBeVisible();
   await expect(model).toContainText("Default model");
 });

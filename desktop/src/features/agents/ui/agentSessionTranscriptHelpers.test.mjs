@@ -20,6 +20,7 @@ test("parsePromptText returns the empty/Prompt fallback for whitespace-only inpu
     userText: "",
     userTitle: "Prompt",
     userPubkey: null,
+    userEventId: null,
   });
 });
 
@@ -36,14 +37,16 @@ test("parsePromptText wraps header-less free text in a single Prompt section", (
   assert.equal(result.userText, "");
   assert.equal(result.userTitle, "Buzz event");
   assert.equal(result.userPubkey, null);
+  assert.equal(result.userEventId, null);
 });
 
-test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () => {
+test("parsePromptText extracts event id, content, hex pubkey, and a title-cased kind", () => {
   const text = [
     "[System]",
     "system preamble here",
     "",
     "[Buzz event: @mention]",
+    `Event ID: ${HEX_UPPER}`,
     "Channel: demo",
     `From: Wes (hex: ${HEX})`,
     "Content: hello @Brain please look",
@@ -53,6 +56,7 @@ test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () 
 
   assert.equal(result.userText, "hello @Brain please look");
   assert.equal(result.userPubkey, HEX);
+  assert.equal(result.userEventId, HEX);
   // titleCase capitalizes after word boundaries but leaves the leading "@"
   // (a non-word char) in place: "@mention" -> "@Mention".
   assert.equal(result.userTitle, "@Mention");
@@ -61,6 +65,38 @@ test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () 
     result.sections.map((s) => s.title),
     ["System", "Buzz event: @mention"],
   );
+});
+
+test("parsePromptText preserves multiline event content in the user bubble text", () => {
+  const text = [
+    "[Buzz event: @mention]",
+    "Event ID: event-1",
+    "Channel: agents",
+    `From: tho (hex: ${HEX})`,
+    "Time: 2026-06-15T17:15:00Z",
+    "Content: @Ned",
+    "",
+    "- remove that stray cherry pick if it's not adding value here",
+    "- help me understand what that e2eBridge change does",
+    "- we'd want the e2e seed path as a separate pull request",
+    'Tags: [["h","agents"]]',
+    "Parsed: mentions=[Ned]",
+  ].join("\n");
+
+  const result = parsePromptText(text);
+
+  assert.equal(
+    result.userText,
+    [
+      "@Ned",
+      "",
+      "- remove that stray cherry pick if it's not adding value here",
+      "- help me understand what that e2eBridge change does",
+      "- we'd want the e2e seed path as a separate pull request",
+    ].join("\n"),
+  );
+  assert.equal(result.userPubkey, HEX);
+  assert.equal(result.userEventId, null);
 });
 
 test("parsePromptText lowercases the extracted hex pubkey", () => {

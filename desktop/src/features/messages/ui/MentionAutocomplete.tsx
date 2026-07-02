@@ -25,6 +25,7 @@ export type MentionSuggestion = {
 type MentionAutocompleteProps = {
   suggestions: MentionSuggestion[];
   selectedIndex: number;
+  onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   position?: "above" | "below";
 };
@@ -32,6 +33,7 @@ type MentionAutocompleteProps = {
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
   selectedIndex,
+  onFetchMore,
   onSelect,
   position = "above",
 }: MentionAutocompleteProps) {
@@ -43,6 +45,15 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       | undefined;
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
+
+  const handleScroll = React.useCallback(() => {
+    const list = listRef.current;
+    if (!list || !onFetchMore) return;
+
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 48) {
+      onFetchMore();
+    }
+  }, [onFetchMore]);
 
   if (suggestions.length === 0) {
     return null;
@@ -65,6 +76,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
           POPOVER_SURFACE_CLASS,
         )}
         data-testid="mention-autocomplete"
+        onScroll={handleScroll}
         ref={listRef}
         style={POPOVER_SHADOW_STYLE}
       >
@@ -138,14 +150,18 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                       <span
                         className="min-w-0 truncate"
                         title={
-                          suggestion.ownerLabel
-                            ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
-                            : "not in channel"
+                          suggestion.ownerLabel && suggestion.notInChannel
+                            ? `owned by ${suggestion.ownerLabel} · not in channel`
+                            : suggestion.ownerLabel
+                              ? `owned by ${suggestion.ownerLabel}`
+                              : "not in channel"
                         }
                       >
-                        {suggestion.ownerLabel
-                          ? `owned by ${suggestion.ownerLabel}${suggestion.notInChannel ? " · not in channel" : ""}`
-                          : "not in channel"}
+                        {suggestion.ownerLabel && suggestion.notInChannel
+                          ? `owned by ${suggestion.ownerLabel} · not in channel`
+                          : suggestion.ownerLabel
+                            ? `owned by ${suggestion.ownerLabel}`
+                            : "not in channel"}
                       </span>
                     ) : null}
                   </span>

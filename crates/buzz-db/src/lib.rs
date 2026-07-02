@@ -23,6 +23,8 @@ pub mod error;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// Git repository name registry (NIP-34 kind:30617).
+pub mod git_repo;
 /// Embedded database migrations.
 pub mod migration;
 /// Monthly table partition management.
@@ -39,7 +41,7 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::EventQuery;
+pub use event::{EventQuery, ReactionEventInsertOutcome};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
@@ -129,6 +131,19 @@ pub async fn insert_mentions(
 #[derive(Clone, Debug)]
 pub struct Db {
     pub(crate) pool: PgPool,
+    /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
+    pub(crate) max_connections: u32,
+}
+
+/// Snapshot of Postgres connection pool utilisation.
+#[derive(Debug, Clone, Copy)]
+pub struct DbPoolStats {
+    /// Total connections currently in the pool (idle + active).
+    pub size: u32,
+    /// Connections available for immediate reuse.
+    pub idle: u32,
+    /// Pool ceiling — the `max_connections` value set at construction.
+    pub max: u32,
 }
 
 /// Configuration for the Postgres connection pool.
@@ -201,12 +216,18 @@ impl Db {
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .connect(&config.database_url)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            max_connections: config.max_connections,
+        })
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            max_connections: pool.options().get_max_connections(),
+            pool,
+        }
     }
 
     /// Run pending database migrations.
@@ -217,6 +238,19 @@ impl Db {
     /// Returns `true` if the database is reachable (used by readiness probes).
     pub async fn ping(&self) -> bool {
         sqlx::query("SELECT 1").execute(&self.pool).await.is_ok()
+    }
+
+    /// Returns pool utilisation stats for metrics emission.
+    ///
+    /// `size`  — total connections (idle + active)
+    /// `idle`  — connections available for immediate reuse
+    /// `max`   — pool ceiling set at construction
+    pub fn pool_stats(&self) -> DbPoolStats {
+        DbPoolStats {
+            size: self.pool.size(),
+            idle: self.pool.num_idle() as u32,
+            max: self.max_connections,
+        }
     }
 
     /// Begin a database transaction for atomic multi-statement operations.
@@ -285,6 +319,49 @@ impl Db {
             Ok(host)
         })
         .transpose()
+    }
+
+    /// Returns the community's workspace icon (NIP-11 `icon`), if set.
+    ///
+    /// Set by relay admins/owners via the kind:9033 command; the value is
+    /// validated and size-capped at that write path.
+    pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT icon
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("icon"))
+            .transpose()?
+            .flatten()
+            .filter(|icon| !icon.is_empty()))
+    }
+
+    /// Sets or clears (`None`) the community's workspace icon.
+    pub async fn set_community_icon(
+        &self,
+        community_id: CommunityId,
+        icon: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET icon = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(icon)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Ensure a configured community host exists and return its row.
@@ -554,6 +631,40 @@ impl Db {
             }
         }
         Ok(result)
+    }
+
+    /// Atomically insert a kind:7 reaction event and its reaction row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_reaction_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        target_event_id: &[u8],
+        actor_pubkey: &[u8],
+        emoji: &str,
+    ) -> Result<event::ReactionEventInsertOutcome> {
+        let outcome = event::insert_reaction_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            target_event_id,
+            actor_pubkey,
+            emoji,
+        )
+        .await?;
+        if let event::ReactionEventInsertOutcome::Inserted {
+            was_inserted: true, ..
+        } = &outcome
+        {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(outcome)
     }
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
@@ -1724,12 +1835,13 @@ impl Db {
     }
 
     /// Delete a workflow only when it belongs to the provided owner.
+    /// Returns the deleted workflow's `channel_id`.
     pub async fn delete_workflow_for_owner(
         &self,
         community_id: CommunityId,
         id: Uuid,
         owner_pubkey: &[u8],
-    ) -> Result<()> {
+    ) -> Result<Option<Uuid>> {
         workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
     }
 
@@ -2061,6 +2173,50 @@ impl Db {
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
+    }
+
+    /// Return the current owner of git repo name `repo_id` in `community`, or
+    /// `None` if unreserved. See [`git_repo::repo_name_owner`].
+    pub async fn repo_name_owner(
+        &self,
+        community: CommunityId,
+        repo_id: &str,
+    ) -> Result<Option<String>> {
+        git_repo::repo_name_owner(&self.pool, community, repo_id).await
+    }
+
+    /// Reserve a git repo name for `owner_pubkey` in `community` (NIP-34).
+    ///
+    /// See [`git_repo::reserve_repo_name`] for the outcome semantics. The
+    /// per-pubkey quota is enforced by the caller against `count_repos_for_owner`.
+    pub async fn reserve_repo_name(
+        &self,
+        community: CommunityId,
+        repo_id: &str,
+        owner_pubkey: &str,
+    ) -> Result<git_repo::ReserveOutcome> {
+        git_repo::reserve_repo_name(&self.pool, community, repo_id, owner_pubkey).await
+    }
+
+    /// Count git repos reserved by `owner_pubkey` in `community` (quota check).
+    pub async fn count_repos_for_owner(
+        &self,
+        community: CommunityId,
+        owner_pubkey: &str,
+    ) -> Result<i64> {
+        git_repo::count_repos_for_owner(&self.pool, community, owner_pubkey).await
+    }
+
+    /// Release a git repo name reservation held by `owner_pubkey` (rollback).
+    ///
+    /// Returns the number of rows removed (0 or 1). See [`git_repo::release_repo_name`].
+    pub async fn release_repo_name(
+        &self,
+        community: CommunityId,
+        repo_id: &str,
+        owner_pubkey: &str,
+    ) -> Result<u64> {
+        git_repo::release_repo_name(&self.pool, community, repo_id, owner_pubkey).await
     }
 
     /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
@@ -2517,7 +2673,7 @@ mod tests {
         let pool = PgPool::connect(TEST_DB_URL)
             .await
             .expect("connect to test DB");
-        Db { pool }
+        Db::from_pool(pool)
     }
 
     async fn make_community(pool: &PgPool) -> Uuid {

@@ -274,6 +274,26 @@ test("settings shortcut returns without opening search dialog", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   const channelUrl = page.url();
 
+  // Open search via the ⌘K shortcut so the focus-request counter is non-zero,
+  // then close it. The Settings subtree remounts the sidebar + search on close,
+  // which must not replay the stale counter and resurrect search.
+  await page.evaluate(() => {
+    const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyK",
+        ctrlKey: !isMac,
+        key: "k",
+        metaKey: isMac,
+      }),
+    );
+  });
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("search-results")).not.toBeVisible();
+
   await page.keyboard.press(
     process.platform === "darwin" ? "Meta+Comma" : "Control+Comma",
   );

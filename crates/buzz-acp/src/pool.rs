@@ -36,7 +36,7 @@ use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup,
+    PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -996,6 +996,35 @@ fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
     }
 }
 
+/// Return `agent` to the pool via `result_tx`, clearing any steer receiver first.
+///
+/// Every path that returns an `OwnedAgent` to the pool via `PromptResult` goes
+/// through this function. Panic/abort paths do not — and don't need to, since a
+/// panicked task's agent is never sent back via `PromptResult`.
+///
+/// Clearing `steer_rx` here — rather than per-arm — makes the `install_steer_rx`
+/// invariant (`steer_rx.is_none()` at dispatch) structurally unviolatable: a receiver
+/// installed for a turn that ends before the read loop's `take()` (e.g. session-create
+/// error) is always dropped before the agent re-enters the pool, so the next dispatch
+/// can never trigger the assert.
+///
+/// On the happy path the read loop has already called `take()`, so this is a no-op.
+fn send_prompt_result(
+    result_tx: &mpsc::UnboundedSender<PromptResult>,
+    mut agent: OwnedAgent,
+    source: PromptSource,
+    outcome: PromptOutcome,
+    batch: Option<FlushBatch>,
+) {
+    agent.acp.clear_steer_rx();
+    let _ = result_tx.send(PromptResult {
+        agent,
+        source,
+        outcome,
+        batch,
+    });
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -1153,21 +1182,23 @@ pub async fn run_prompt_task(
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::AgentExited,
-                            batch: requeue_batch_if_queue(&ctx, batch),
-                        });
+                            PromptOutcome::AgentExited,
+                            requeue_batch_if_queue(&ctx, batch),
+                        );
                         return;
                     }
                     Err(e) => {
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::Error(e),
-                            batch: requeue_batch_if_queue(&ctx, batch),
-                        });
+                            PromptOutcome::Error(e),
+                            requeue_batch_if_queue(&ctx, batch),
+                        );
                         return;
                     }
                 }
@@ -1189,21 +1220,23 @@ pub async fn run_prompt_task(
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::AgentExited,
-                            batch: None,
-                        });
+                            PromptOutcome::AgentExited,
+                            None,
+                        );
                         return;
                     }
                     Err(e) => {
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::Error(e),
-                            batch: None,
-                        });
+                            PromptOutcome::Error(e),
+                            None,
+                        );
                         return;
                     }
                 }
@@ -1254,12 +1287,13 @@ pub async fn run_prompt_task(
                 }
                 Err(AcpError::AgentExited) => {
                     agent.state.invalidate_all();
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::AgentExited,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::AgentExited,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
                 Err(AcpError::IdleTimeout(_)) => {
@@ -1278,12 +1312,13 @@ pub async fn run_prompt_task(
                         }
                         Err(AcpError::AgentExited) => {
                             agent.state.invalidate_all();
-                            let _ = result_tx.send(PromptResult {
+                            send_prompt_result(
+                                &result_tx,
                                 agent,
                                 source,
-                                outcome: PromptOutcome::AgentExited,
-                                batch: requeue_batch_if_queue(&ctx, batch),
-                            });
+                                PromptOutcome::AgentExited,
+                                requeue_batch_if_queue(&ctx, batch),
+                            );
                             return;
                         }
                         Err(e) => {
@@ -1294,12 +1329,13 @@ pub async fn run_prompt_task(
                             agent.state.invalidate(&source);
                         }
                     }
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
                 Err(AcpError::HardTimeout) => {
@@ -1309,12 +1345,13 @@ pub async fn run_prompt_task(
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
                 Err(e) => {
@@ -1323,12 +1360,13 @@ pub async fn run_prompt_task(
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Error(e),
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Error(e),
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                     return;
                 }
             }
@@ -1396,12 +1434,13 @@ pub async fn run_prompt_task(
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
         tracing::error!("run_prompt_task: no batch and no prompt_text — returning agent");
-        let _ = result_tx.send(PromptResult {
+        send_prompt_result(
+            &result_tx,
             agent,
             source,
-            outcome: PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
-            batch: None,
-        });
+            PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
+            None,
+        );
         return;
     };
 
@@ -1500,12 +1539,13 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
-                                let _ = result_tx.send(PromptResult {
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::Cancelled,
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::Cancelled,
+                                    retry_batch,
+                                );
                                 return;
                             }
                             Err(AcpError::AgentExited) => {
@@ -1513,12 +1553,13 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
-                                let _ = result_tx.send(PromptResult {
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::AgentExited,
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::AgentExited,
+                                    retry_batch,
+                                );
                                 return;
                             }
                             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
@@ -1527,12 +1568,13 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
-                                let _ = result_tx.send(PromptResult {
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::Timeout,
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::Timeout,
+                                    retry_batch,
+                                );
                                 return;
                             }
                             Err(e) => {
@@ -1540,12 +1582,13 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
-                                let _ = result_tx.send(PromptResult {
+                                send_prompt_result(
+                                    &result_tx,
                                     agent,
                                     source,
-                                    outcome: PromptOutcome::Error(e),
-                                    batch: retry_batch,
-                                });
+                                    PromptOutcome::Error(e),
+                                    retry_batch,
+                                );
                                 return;
                             }
                         }
@@ -1583,12 +1626,13 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
-                        let _ = result_tx.send(PromptResult {
+                        send_prompt_result(
+                            &result_tx,
                             agent,
                             source,
-                            outcome: PromptOutcome::Ok(StopReason::EndTurn),
-                            batch: None, // turn succeeded — batch was processed, no requeue
-                        });
+                            PromptOutcome::Ok(StopReason::EndTurn),
+                            None, // turn succeeded — batch was processed, no requeue
+                        );
                         return;
                     }
                 }
@@ -1632,22 +1676,24 @@ pub async fn run_prompt_task(
                 agent.state.invalidate(&source);
             }
 
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::Ok(stop_reason),
-                batch: None,
-            });
+                PromptOutcome::Ok(stop_reason),
+                None,
+            );
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
             agent.state.invalidate_all();
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::AgentExited,
-                batch: requeue_batch_if_queue(&ctx, batch),
-            });
+                PromptOutcome::AgentExited,
+                requeue_batch_if_queue(&ctx, batch),
+            );
         }
         Err(AcpError::IdleTimeout(_)) => {
             tracing::warn!(
@@ -1664,12 +1710,13 @@ pub async fn run_prompt_task(
                     log_stop_reason(&source, &stop_reason);
                     // Timeout triggers respawn in handle_prompt_result —
                     // session state will be discarded with the old agent.
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                 }
                 Err(AcpError::AgentExited) => {
                     tracing::error!(
@@ -1678,12 +1725,13 @@ pub async fn run_prompt_task(
                         agent.index
                     );
                     agent.state.invalidate_all();
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::AgentExited,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::AgentExited,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                 }
                 Err(e) => {
                     tracing::error!(
@@ -1691,12 +1739,13 @@ pub async fn run_prompt_task(
                         "cancel_with_cleanup error: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
-                    let _ = result_tx.send(PromptResult {
+                    send_prompt_result(
+                        &result_tx,
                         agent,
                         source,
-                        outcome: PromptOutcome::Timeout,
-                        batch: requeue_batch_if_queue(&ctx, batch),
-                    });
+                        PromptOutcome::Timeout,
+                        requeue_batch_if_queue(&ctx, batch),
+                    );
                 }
             }
         }
@@ -1707,12 +1756,13 @@ pub async fn run_prompt_task(
                 ctx.max_turn_duration.as_secs()
             );
             agent.state.invalidate_all();
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::Timeout,
-                batch: requeue_batch_if_queue(&ctx, batch),
-            });
+                PromptOutcome::Timeout,
+                requeue_batch_if_queue(&ctx, batch),
+            );
         }
         Err(e) => {
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
@@ -1722,12 +1772,13 @@ pub async fn run_prompt_task(
             if !matches!(e, AcpError::AgentError(_)) {
                 agent.state.invalidate(&source);
             }
-            let _ = result_tx.send(PromptResult {
+            send_prompt_result(
+                &result_tx,
                 agent,
                 source,
-                outcome: PromptOutcome::Error(e),
-                batch: requeue_batch_if_queue(&ctx, batch),
-            });
+                PromptOutcome::Error(e),
+                requeue_batch_if_queue(&ctx, batch),
+            );
         }
     }
     // _reaction_guard drops here → spawns clear_reactions for all exit paths.
@@ -2561,6 +2612,50 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::debug!(event_id, emoji, "reaction add failed: {e}"),
         Err(_) => tracing::debug!(event_id, emoji, "reaction add timed out"),
+    }
+}
+
+/// Best-effort: post a visible failure notice (kind:9) to a channel after a
+/// batch is dead-lettered. Replies into the thread of `thread_tags` when the
+/// triggering event was threaded. Errors are logged and swallowed — the
+/// notice must never take down the main loop.
+pub(crate) async fn post_failure_notice(
+    rest: &crate::relay::RestClient,
+    channel_id: Uuid,
+    thread_tags: &ThreadTags,
+    content: &str,
+) {
+    let thread_ref = thread_tags.root_event_id.as_deref().and_then(|root| {
+        let root_id = nostr::EventId::from_hex(root).ok()?;
+        let parent_id = thread_tags
+            .parent_event_id
+            .as_deref()
+            .and_then(|p| nostr::EventId::from_hex(p).ok())
+            .unwrap_or(root_id);
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: root_id,
+            parent_event_id: parent_id,
+        })
+    });
+    let builder =
+        match buzz_sdk::build_message(channel_id, content, thread_ref.as_ref(), &[], false, &[]) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(channel = %channel_id, "failure notice: build failed: {e}");
+                return;
+            }
+        };
+    let event = match builder.sign_with_keys(&rest.keys) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
+            return;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
+        Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
 }
 
@@ -3446,5 +3541,120 @@ mod tests {
             _ = &mut liveness => unreachable!("handle-less liveness future never resolves"),
         }
         // No observer to assert against — reaching here without panic is the test.
+    }
+
+    // ── steer_rx invariant tests ──────────────────────────────────────────
+    //
+    // These pin the `send_prompt_result` invariant: `steer_rx` is always
+    // `None` on any agent returned to the pool, regardless of which exit
+    // path fired.
+    //
+    // Test 1 (session-create-error path): installs a receiver, then calls
+    // `send_prompt_result` without the read loop running `take()` — simulating
+    // any early-return arm (e.g. session-create failure). The receiver must be
+    // cleared and the next `install_steer_rx` must not panic.
+    //
+    // Test 2 (post-read-loop path): receiver is already `None` (the read loop
+    // already consumed it via `take()`). `send_prompt_result` is idempotent —
+    // `steer_rx` stays `None` and the next `install_steer_rx` still does not
+    // panic.
+
+    /// After an early-return path (receiver installed but read loop never ran),
+    /// the returned agent's `steer_rx` is `None` and a subsequent
+    /// `install_steer_rx` does not panic.
+    #[tokio::test]
+    async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
+            .await
+            .expect("failed to spawn test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            protocol_version: 2,
+        };
+
+        // Simulate dispatch: install a steer receiver (normally done by
+        // `dispatch_pending` before `run_prompt_task` is spawned).
+        let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        agent.acp.install_steer_rx(steer_rx);
+
+        // Simulate session-create error: early-return path calls
+        // `send_prompt_result` without the read loop ever running `take()`.
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<PromptResult>();
+        let source = PromptSource::Heartbeat;
+        send_prompt_result(
+            &result_tx,
+            agent,
+            source,
+            PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
+            None,
+        );
+
+        // Receive the PromptResult back from the channel.
+        let mut result = result_rx.recv().await.expect("PromptResult must be sent");
+
+        // steer_rx must be cleared even though the read loop never ran take().
+        assert!(
+            result.agent.acp.steer_rx_is_none(),
+            "steer_rx must be None after send_prompt_result on error path"
+        );
+
+        // The next dispatch can now install a fresh receiver without panicking.
+        let (_steer_tx2, steer_rx2) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        result.agent.acp.install_steer_rx(steer_rx2);
+        // Reaching here without a panic is the test.
+    }
+
+    /// After a successful prompt (read loop already consumed `steer_rx` via
+    /// `take()`), `send_prompt_result` is a no-op — `steer_rx` stays `None`
+    /// and the next `install_steer_rx` does not panic.
+    #[tokio::test]
+    async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
+            .await
+            .expect("failed to spawn test agent");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            protocol_version: 2,
+        };
+
+        // Simulate a completed turn: `steer_rx` was consumed by the read loop
+        // (`take()` was called), so it is already `None` when the turn ends.
+        assert!(
+            agent.acp.steer_rx_is_none(),
+            "precondition: steer_rx starts as None"
+        );
+
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel::<PromptResult>();
+        let source = PromptSource::Heartbeat;
+        send_prompt_result(
+            &result_tx,
+            agent,
+            source,
+            PromptOutcome::Ok(StopReason::EndTurn),
+            None,
+        );
+
+        let mut result = result_rx.recv().await.expect("PromptResult must be sent");
+
+        // Still None — clear_steer_rx on an already-None field is idempotent.
+        assert!(
+            result.agent.acp.steer_rx_is_none(),
+            "steer_rx must remain None after send_prompt_result on happy path"
+        );
+
+        // The next dispatch can install a fresh receiver without panicking.
+        let (_steer_tx, steer_rx) = tokio::sync::mpsc::channel::<SteerRequest>(1);
+        result.agent.acp.install_steer_rx(steer_rx);
+        // Reaching here without a panic is the test.
     }
 }

@@ -1,7 +1,9 @@
+import * as React from "react";
 import { FileDiff, Maximize2 } from "lucide-react";
 
 import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
+import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { DiffViewer } from "./DiffViewer";
 
@@ -32,6 +34,9 @@ export default function DiffMessage({
   truncated,
   onExpand,
 }: DiffMessageProps) {
+  const diffCardRef = React.useRef<HTMLDivElement | null>(null);
+  useSmoothCorners(diffCardRef);
+
   const safeRepoUrl = isSafeUrl(repoUrl) ? repoUrl : undefined;
 
   const commitUrl =
@@ -40,7 +45,10 @@ export default function DiffMessage({
   const shortSha = commitSha ? commitSha.slice(0, 7) : undefined;
 
   return (
-    <div className="rounded-xl border border-border/70 bg-card/60 overflow-hidden text-sm">
+    <div
+      ref={diffCardRef}
+      className="overflow-hidden rounded-2xl border border-border/70 bg-card/60 text-sm"
+    >
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-muted/40">
         <FileDiff className="h-4 w-4 shrink-0 text-muted-foreground" />
         <span className="flex-1 truncate font-mono text-xs text-foreground/80">

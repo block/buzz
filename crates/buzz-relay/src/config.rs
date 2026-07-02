@@ -128,9 +128,14 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    /// Root directory for the relay's local git state. No per-repo bare repos
-    /// live here — runtime reads/writes hydrate ephemeral repos from object
-    /// storage. Holds only the name-reservation index at `{git_repo_path}/.names/`.
+    /// Root directory for the relay's local git scratch. No per-repo bare repos
+    /// or persistent git state live here — runtime reads/writes hydrate
+    /// ephemeral repos from object storage per request, and repo-name
+    /// uniqueness now lives in Postgres (`git_repo_names`), not on disk. Retained
+    /// for ephemeral working space and env compatibility; the relay no longer
+    /// depends on this path being persistent or shared across replicas, so it
+    /// needs no ReadWriteMany volume. (Removing the field entirely is a
+    /// follow-up cleanup once the deploy chart drops the git PVC mount.)
     pub git_repo_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
@@ -296,6 +301,9 @@ impl Config {
             s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
                 .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
             s3_bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
+            s3_region: std::env::var("BUZZ_S3_REGION")
+                .or_else(|_| std::env::var("AWS_REGION"))
+                .unwrap_or_else(|_| "us-east-1".to_string()),
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())

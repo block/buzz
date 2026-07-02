@@ -31,7 +31,7 @@ class AppListRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final row = Padding(
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.twelve,
       ),
       child: Row(
@@ -109,7 +109,7 @@ class AppListRowRaw extends StatelessWidget {
   Widget build(BuildContext context) {
     final row = Padding(
       padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
+        horizontal: Grid.gutter,
         vertical: Grid.twelve,
       ),
       child: Row(
@@ -167,9 +167,9 @@ class AppListSection extends StatelessWidget {
         if (label != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(
-              Grid.xs,
+              Grid.gutter,
               Grid.xxs,
-              Grid.xs,
+              Grid.gutter,
               Grid.quarter,
             ),
             child: Text(

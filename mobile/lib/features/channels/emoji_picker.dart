@@ -16,7 +16,7 @@ void showEmojiPicker({
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
-    backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+    backgroundColor: context.colors.surfaceContainerHighest,
     builder: (sheetContext) => EmojiPickerSheet(
       onSelect: (emoji) {
         Navigator.of(sheetContext).pop();
@@ -213,7 +213,7 @@ class _EmojiPickerSheetState extends ConsumerState<EmojiPickerSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final colors = context.colors;
     final customEmoji = ref.watch(customEmojiListProvider);
     final isCustomCategory =
         customEmoji.isNotEmpty && _selectedCategory == emojiCategories.length;
@@ -264,7 +264,9 @@ class _EmojiPickerSheetState extends ConsumerState<EmojiPickerSheet> {
                     onSelect: widget.onSelect,
                   )
                 : GridView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.gutter,
+                    ),
                     gridDelegate:
                         const SliverGridDelegateWithFixedCrossAxisCount(
                           crossAxisCount: 8,
@@ -298,7 +300,7 @@ class _CustomEmojiGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return GridView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 6,
         mainAxisSpacing: Grid.half,
@@ -339,7 +341,7 @@ class CategoryIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
+    final colors = context.colors;
     return SizedBox(
       width: 40,
       height: 40,
