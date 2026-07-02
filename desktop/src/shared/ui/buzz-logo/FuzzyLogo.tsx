@@ -9,6 +9,8 @@ export type FuzzyLogoProps = {
   className?: string;
   ariaLabel?: string;
   loop?: boolean;
+  /** When looping, hide the mark for this many seconds between plays. */
+  loopRestSeconds?: number;
   reverse?: boolean;
   variant?: BuzzLogoAnimationProps["variant"];
 };
@@ -23,15 +25,21 @@ export function FuzzyLogo({
   className,
   ariaLabel = "Buzz logo",
   loop = false,
+  loopRestSeconds = 0,
   reverse = false,
   variant = "v8",
 }: FuzzyLogoProps) {
+  // The rest-window loop already reads as "alive"; skip the pulse so the two
+  // opacity animations don't fight.
+  const hasRestWindow = loop && loopRestSeconds > 0;
+
   return (
     <BuzzLogoAnimation
       ariaLabel={ariaLabel}
-      className={cn(!fuzz && "buzz-logo--pulse", className)}
+      className={cn(!fuzz && !hasRestWindow && "buzz-logo--pulse", className)}
       fullScreen={false}
       loop={loop}
+      loopRestSeconds={loopRestSeconds}
       reverse={reverse}
       showBackground={false}
       textured={fuzz}

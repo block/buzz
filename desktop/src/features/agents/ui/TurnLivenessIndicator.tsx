@@ -12,15 +12,16 @@ export function TurnLivenessIndicator({
   return (
     <div
       aria-label="Agent turn in progress"
-      className={cn("flex items-center py-1 text-muted-foreground", className)}
+      className={cn("opacity-25", className)}
       data-testid="turn-liveness-indicator"
       role="status"
     >
       <FuzzyLogo
         ariaLabel="Agent turn in progress"
-        className="text-muted-foreground"
+        className="text-foreground"
         fuzz={fuzz}
         loop
+        loopRestSeconds={2}
       />
     </div>
   );
