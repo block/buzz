@@ -9,8 +9,8 @@ import {
   Cpu,
   Hash,
   Layers,
-  Lock,
   MessageSquare,
+  PenOff,
   Server,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -46,22 +46,27 @@ function isReadOnlyField({
   return writeVia.type === "readOnly" || origin === "harnessConstraint";
 }
 
-function ConfigFieldLabel({
-  label,
-  locked,
-}: {
-  label: string;
-  locked: boolean;
-}) {
+function ConfigFieldLabel({ label }: { label: string }) {
   return (
     <span className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-foreground">
       <span className="truncate">{label}</span>
+    </span>
+  );
+}
+
+function ProvenanceHint({
+  locked,
+  provenance,
+}: {
+  locked: boolean;
+  provenance: string;
+}) {
+  return (
+    <span className="mt-0.5 flex items-center gap-1 text-2xs text-muted-foreground/70">
       {locked ? (
-        <Lock
-          aria-label="Read-only"
-          className="h-3 w-3 shrink-0 text-muted-foreground/70"
-        />
+        <PenOff aria-label="Read-only" className="h-3 w-3 shrink-0" />
       ) : null}
+      <span className="min-w-0 truncate">{provenance}</span>
     </span>
   );
 }
@@ -193,7 +198,7 @@ function NormalizedRow({
       </span>
       <span className="min-w-0 flex-1 text-left">
         {variant === "profile" ? (
-          <ConfigFieldLabel label={label} locked={locked} />
+          <ConfigFieldLabel label={label} />
         ) : (
           <span className="block text-xs font-medium text-foreground">
             {label}
@@ -217,9 +222,7 @@ function NormalizedRow({
           ) : null}
         </span>
         {provenance ? (
-          <span className="mt-0.5 block text-2xs text-muted-foreground/70">
-            {provenance}
-          </span>
+          <ProvenanceHint locked={locked} provenance={provenance} />
         ) : null}
       </span>
       {isCopyable ? (
@@ -292,7 +295,7 @@ function AdvancedRow({
         <Hash className="h-4 w-4 text-muted-foreground" />
       </span>
       <span className="min-w-0 flex-1 text-left">
-        <ConfigFieldLabel label={field.label} locked={locked} />
+        <ConfigFieldLabel label={field.label} />
         <span
           className="mt-0.5 block truncate text-sm text-muted-foreground"
           title={field.value ?? undefined}
@@ -300,9 +303,7 @@ function AdvancedRow({
           {field.value ?? "—"}
         </span>
         {provenance ? (
-          <span className="mt-0.5 block text-2xs text-muted-foreground/70">
-            {provenance}
-          </span>
+          <ProvenanceHint locked={locked} provenance={provenance} />
         ) : null}
       </span>
       {isCopyable ? (
