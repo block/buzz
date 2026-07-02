@@ -510,9 +510,7 @@ function WorkspaceTabs({
   );
 }
 
-type ProjectDetailScreenProps = {
-  projectId: string;
-};
+type ProjectDetailScreenProps = { projectId: string; pullRequestId?: string };
 
 const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
   "profile",
@@ -520,7 +518,8 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
   "profileView",
 ] as const;
 
-export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
+export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
+  const { projectId, pullRequestId } = props;
   const { goChannel, goProjects } = useAppNavigation();
   const { activeWorkspace } = useWorkspaces();
   const mainInsetRef = useMainInsetRef();
@@ -554,7 +553,11 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
     selectedBranch ?? project?.defaultBranch ?? branchOptions[0] ?? null;
   const [selectedPullRequestId, setSelectedPullRequestId] = React.useState<
     string | null
-  >(null);
+  >(pullRequestId ?? null);
+  React.useEffect(
+    () => setSelectedPullRequestId(pullRequestId ?? null),
+    [pullRequestId],
+  );
   const selectedBranchPullRequest = React.useMemo(
     () =>
       pullRequestsQuery.data?.find(
@@ -804,7 +807,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                 </button>
-                <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground/60" />
                 {selectedPullRequest ? (
                   <>
                     <button

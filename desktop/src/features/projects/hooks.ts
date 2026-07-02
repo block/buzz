@@ -90,6 +90,11 @@ export type {
   ProjectRepoSyncStatus,
 };
 
+export type ProjectPullRequestListItem = {
+  project: Project;
+  pullRequest: ProjectPullRequest;
+};
+
 function getTag(event: RelayEvent, name: string): string | undefined {
   return event.tags.find((t) => t[0] === name)?.[1];
 }
@@ -681,6 +686,32 @@ export function useProjectPullRequestsQuery(
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
       return fetchProjectPullRequests(project);
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectsPullRequestsQuery(projects: Project[]) {
+  return useQuery({
+    enabled: projects.length > 0,
+    queryKey: [
+      "projects",
+      "pull-requests",
+      projects.map((project) => project.id),
+    ],
+    queryFn: async (): Promise<ProjectPullRequestListItem[]> => {
+      const results = await Promise.all(
+        projects.map(async (project) => {
+          const pullRequests = await fetchProjectPullRequests(project);
+          return pullRequests.map((pullRequest) => ({ project, pullRequest }));
+        }),
+      );
+      return results
+        .flat()
+        .sort(
+          (left, right) =>
+            right.pullRequest.updatedAt - left.pullRequest.updatedAt,
+        );
     },
     staleTime: 30_000,
   });

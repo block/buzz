@@ -2,11 +2,8 @@ import {
   CalendarDays,
   FolderGit2,
   GitFork,
-  LayoutGrid,
-  List,
   MessageSquare,
   MoreHorizontal,
-  Plus,
   Trash2,
   Users,
 } from "lucide-react";
@@ -22,16 +19,23 @@ import {
 import {
   type Project,
   type ProjectActivitySummary,
+  type ProjectPullRequest,
   useDeleteProjectMutation,
   useProjectActivitySummariesQuery,
   useProjectLocalRepositoriesQuery,
+  useProjectsPullRequestsQuery,
   useProjectsQuery,
 } from "@/features/projects/hooks";
+import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
+import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
+import {
+  ProjectsToolbar,
+  ProjectsViewModeToggle,
+} from "@/features/projects/ui/ProjectsToolbar";
 import { getDiscussionLabel } from "@/features/projects/lib/projectLabels";
 import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { ProjectsOverviewPanel } from "@/features/projects/ui/ProjectsOverviewPanel";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -327,42 +331,6 @@ function MetadataItem({
   );
 }
 
-function ProjectsViewModeToggle({
-  viewMode,
-  onViewModeChange,
-}: {
-  viewMode: ProjectsViewMode;
-  onViewModeChange: (viewMode: ProjectsViewMode) => void;
-}) {
-  return (
-    <fieldset className="flex items-center rounded-lg border border-border/60 bg-muted/30 p-1">
-      <legend className="sr-only">Project layout</legend>
-      <Button
-        aria-pressed={viewMode === "grid"}
-        className="h-7 gap-1.5 px-2"
-        onClick={() => onViewModeChange("grid")}
-        size="xs"
-        type="button"
-        variant={viewMode === "grid" ? "secondary" : "ghost"}
-      >
-        <LayoutGrid className="h-3.5 w-3.5" />
-        Grid
-      </Button>
-      <Button
-        aria-pressed={viewMode === "list"}
-        className="h-7 gap-1.5 px-2"
-        onClick={() => onViewModeChange("list")}
-        size="xs"
-        type="button"
-        variant={viewMode === "list" ? "secondary" : "ghost"}
-      >
-        <List className="h-3.5 w-3.5" />
-        List
-      </Button>
-    </fieldset>
-  );
-}
-
 function EmptyState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
@@ -388,98 +356,6 @@ function EmptyFilteredState() {
         <p className="text-sm text-muted-foreground">
           Try another owner filter or sort mode.
         </p>
-      </div>
-    </div>
-  );
-}
-
-function ProjectsToolbar({
-  filter,
-  onCreateProject,
-  onFilterChange,
-  onSortChange,
-  onViewModeChange,
-  sort,
-  viewMode,
-}: {
-  filter: ProjectsFilter;
-  onCreateProject: () => void;
-  onFilterChange: (filter: ProjectsFilter) => void;
-  onSortChange: (sort: ProjectsSort) => void;
-  onViewModeChange: (viewMode: ProjectsViewMode) => void;
-  sort: ProjectsSort;
-  viewMode: ProjectsViewMode;
-}) {
-  const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
-    { label: "All", value: "all" },
-    { label: "Mine", value: "mine" },
-    { label: "Local", value: "local" },
-    { label: "Repositories", value: "repositories" },
-    { label: "PRs", value: "prs" },
-    { label: "Agents", value: "agents" },
-    { label: "Users", value: "users" },
-  ];
-
-  return (
-    <div
-      className="pointer-events-auto flex flex-col gap-3 px-5 py-2"
-      data-tauri-drag-region
-    >
-      <div className="flex min-h-9 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <h2 className="min-w-0 text-lg font-semibold text-foreground">
-          Projects
-        </h2>
-        <Button
-          className="h-8 gap-1.5 self-start rounded-full border-border/60 bg-background/70 px-3 text-muted-foreground shadow-none hover:bg-muted/60 hover:text-foreground lg:self-auto"
-          data-testid="create-project-button"
-          onClick={onCreateProject}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          Create Project
-        </Button>
-      </div>
-
-      <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
-        <fieldset className="flex flex-wrap items-center gap-0.5">
-          <legend className="sr-only">Project owner filter</legend>
-          {filterOptions.map((option) => (
-            <Button
-              aria-pressed={filter === option.value}
-              className="h-8 gap-1.5 rounded-full px-3"
-              key={option.value}
-              onClick={() => onFilterChange(option.value)}
-              size="sm"
-              type="button"
-              variant={filter === option.value ? "secondary" : "ghost"}
-            >
-              {option.label}
-            </Button>
-          ))}
-        </fieldset>
-
-        <div className="flex flex-wrap items-center gap-2 lg:justify-end">
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="sr-only">Sort projects</span>
-            <select
-              className="h-7 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
-              onChange={(event) =>
-                onSortChange(event.target.value as ProjectsSort)
-              }
-              value={sort}
-            >
-              <option value="updated">Recent activity</option>
-              <option value="created">Created date</option>
-              <option value="name">Name</option>
-            </select>
-          </label>
-          <ProjectsViewModeToggle
-            onViewModeChange={onViewModeChange}
-            viewMode={viewMode}
-          />
-        </div>
       </div>
     </div>
   );
@@ -623,9 +499,6 @@ function ProjectGridCard({
                   {project.name}
                 </span>
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                  <MetadataItem icon={Users}>
-                    {pluralize(people.length, "person", "people")}
-                  </MetadataItem>
                   <MetadataItem icon={CalendarDays}>
                     {formatCreatedDate(project.createdAt)}
                   </MetadataItem>
@@ -769,6 +642,7 @@ export function ProjectsView() {
   const localRepositoriesQuery = useProjectLocalRepositoriesQuery(
     activeWorkspace?.reposDir,
   );
+  const projectPullRequestsQuery = useProjectsPullRequestsQuery(projects);
   const [storedViewMode, setStoredViewMode] =
     React.useState<ProjectsViewMode | null>(() => readStoredViewMode());
   const [filter, setFilter] = React.useState<ProjectsFilter>(() =>
@@ -782,15 +656,22 @@ export function ProjectsView() {
   const projectPubkeys = React.useMemo(
     () => [
       ...new Set(
-        projects.flatMap((project) =>
-          projectPeople(
-            project,
-            activitySummariesQuery.data?.[project.repoAddress],
+        [
+          ...projects.flatMap((project) =>
+            projectPeople(
+              project,
+              activitySummariesQuery.data?.[project.repoAddress],
+            ),
           ),
-        ),
+          ...(projectPullRequestsQuery.data?.flatMap(({ pullRequest }) => [
+            pullRequest.author,
+            ...pullRequest.recipients,
+            ...pullRequest.comments.map((comment) => comment.author),
+          ]) ?? []),
+        ].map(normalizePubkey),
       ),
     ],
-    [activitySummariesQuery.data, projects],
+    [activitySummariesQuery.data, projectPullRequestsQuery.data, projects],
   );
   const profilesQuery = useUsersBatchQuery(projectPubkeys, {
     enabled: projectPubkeys.length > 0,
@@ -866,9 +747,29 @@ export function ProjectsView() {
     sort,
   ]);
 
+  const visiblePullRequests = React.useMemo(() => {
+    const pullRequests = projectPullRequestsQuery.data ?? [];
+    return [...pullRequests].sort((left, right) => {
+      if (sort === "name") {
+        return left.pullRequest.title.localeCompare(right.pullRequest.title);
+      }
+      if (sort === "created") {
+        return right.pullRequest.createdAt - left.pullRequest.createdAt;
+      }
+      return right.pullRequest.updatedAt - left.pullRequest.updatedAt;
+    });
+  }, [projectPullRequestsQuery.data, sort]);
+
   const handleOpenProject = React.useCallback(
     (project: Project) => {
       void goProject(project.dtag);
+    },
+    [goProject],
+  );
+
+  const handleOpenPullRequest = React.useCallback(
+    (project: Project, pullRequest: ProjectPullRequest) => {
+      void goProject(project.dtag, { pullRequestId: pullRequest.id });
     },
     [goProject],
   );
@@ -924,10 +825,6 @@ export function ProjectsView() {
           filter={filter}
           onCreateProject={handleCreateProject}
           onFilterChange={handleFilterChange}
-          onSortChange={handleSortChange}
-          onViewModeChange={handleViewModeChange}
-          sort={sort}
-          viewMode={viewMode}
         />
       </div>
 
@@ -943,55 +840,90 @@ export function ProjectsView() {
               summaries={activitySummariesQuery.data}
             />
           ) : null}
-          {visibleProjects.length === 0 ? (
-            <EmptyFilteredState />
-          ) : viewMode === "grid" ? (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {visibleProjects.map((project) => {
-                const summary =
-                  activitySummariesQuery.data?.[project.repoAddress];
-                return (
-                  <ProjectGridCard
-                    canDelete={isProjectOwnedByCurrentUser(
-                      project,
-                      currentPubkey,
-                    )}
-                    deleteDisabled={deleteProjectMutation.isPending}
-                    key={project.id}
-                    onDelete={handleDeleteProject}
-                    onOpen={handleOpenProject}
-                    people={projectPeople(project, summary)}
-                    profiles={profiles}
-                    project={project}
-                    summary={summary}
-                  />
-                );
-              })}
+          <section className="space-y-3">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <h3 className="text-sm font-semibold text-foreground">
+                {filter === "prs" ? "Pull requests" : "Repositories"}
+              </h3>
+              <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <span className="sr-only">Sort projects</span>
+                  <select
+                    className="h-7 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
+                    onChange={(event) =>
+                      handleSortChange(event.target.value as ProjectsSort)
+                    }
+                    value={sort}
+                  >
+                    <option value="updated">Recent activity</option>
+                    <option value="created">Created date</option>
+                    <option value="name">Name</option>
+                  </select>
+                </label>
+                <ProjectsViewModeToggle
+                  onViewModeChange={handleViewModeChange}
+                  viewMode={viewMode}
+                />
+              </div>
             </div>
-          ) : (
-            <div className="space-y-2">
-              {visibleProjects.map((project) => {
-                const summary =
-                  activitySummariesQuery.data?.[project.repoAddress];
-                return (
-                  <ProjectListRow
-                    canDelete={isProjectOwnedByCurrentUser(
-                      project,
-                      currentPubkey,
-                    )}
-                    deleteDisabled={deleteProjectMutation.isPending}
-                    key={project.id}
-                    onDelete={handleDeleteProject}
-                    onOpen={handleOpenProject}
-                    people={projectPeople(project, summary)}
-                    profiles={profiles}
-                    project={project}
-                    summary={summary}
-                  />
-                );
-              })}
-            </div>
-          )}
+            {filter === "prs" ? (
+              <ProjectsPullRequestsList
+                isLoading={projectPullRequestsQuery.isLoading}
+                onOpen={handleOpenPullRequest}
+                profiles={profiles}
+                pullRequests={visiblePullRequests}
+                viewMode={viewMode}
+              />
+            ) : visibleProjects.length === 0 ? (
+              <EmptyFilteredState />
+            ) : viewMode === "grid" ? (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {visibleProjects.map((project) => {
+                  const summary =
+                    activitySummariesQuery.data?.[project.repoAddress];
+                  return (
+                    <ProjectGridCard
+                      canDelete={isProjectOwnedByCurrentUser(
+                        project,
+                        currentPubkey,
+                      )}
+                      deleteDisabled={deleteProjectMutation.isPending}
+                      key={project.id}
+                      onDelete={handleDeleteProject}
+                      onOpen={handleOpenProject}
+                      people={projectPeople(project, summary)}
+                      profiles={profiles}
+                      project={project}
+                      summary={summary}
+                    />
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {visibleProjects.map((project) => {
+                  const summary =
+                    activitySummariesQuery.data?.[project.repoAddress];
+                  return (
+                    <ProjectListRow
+                      canDelete={isProjectOwnedByCurrentUser(
+                        project,
+                        currentPubkey,
+                      )}
+                      deleteDisabled={deleteProjectMutation.isPending}
+                      key={project.id}
+                      onDelete={handleDeleteProject}
+                      onOpen={handleOpenProject}
+                      people={projectPeople(project, summary)}
+                      profiles={profiles}
+                      project={project}
+                      summary={summary}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
       </div>
     </div>

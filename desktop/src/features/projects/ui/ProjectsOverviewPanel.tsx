@@ -156,36 +156,28 @@ export function ProjectsOverviewPanel({
           />
         </div>
         {recent.length > 0 ? (
-          <div className="mt-4 border-border/50 border-t pt-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Recent Projects
-            </h3>
-            <div className="mt-2 grid gap-2 md:grid-cols-3">
-              {recent.map((project) => (
-                <button
-                  className="min-w-0 rounded-lg border border-border/50 bg-background/45 p-3 text-left transition-colors hover:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                  key={project.id}
-                  onClick={() => onOpenProject(project)}
-                  type="button"
-                >
-                  <p className="truncate text-sm font-semibold text-foreground">
-                    {project.name}
-                  </p>
-                  <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                    {project.description || "A shared project repository."}
-                  </p>
-                </button>
-              ))}
-            </div>
+          <div className="mt-4 grid gap-2 md:grid-cols-3">
+            {recent.map((project) => (
+              <button
+                className="min-w-0 rounded-lg border border-border/50 bg-background/45 p-3 text-left transition-colors hover:bg-muted/35 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                key={project.id}
+                onClick={() => onOpenProject(project)}
+                type="button"
+              >
+                <p className="truncate text-sm font-semibold text-foreground">
+                  {project.name}
+                </p>
+                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+                  {project.description || "A shared project repository."}
+                </p>
+              </button>
+            ))}
           </div>
         ) : null}
       </div>
       <aside className="space-y-3 rounded-xl border border-border/60 bg-card/60 p-4">
         <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            People
-          </h3>
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             {people.slice(0, 18).map((pubkey) => {
               const profile = profiles?.[normalizePubkey(pubkey)];
               return (
@@ -204,37 +196,21 @@ export function ProjectsOverviewPanel({
             projects.
           </p>
         </div>
-        <div className="border-border/50 border-t pt-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Status
-          </h3>
-          <div className="mt-2 space-y-1.5 text-sm text-muted-foreground">
-            <div className="flex items-center justify-between gap-3">
-              <span>Issues</span>
-              <span className="font-medium text-foreground">
-                {stats.issues}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Pull requests</span>
-              <span className="font-medium text-foreground">{stats.prs}</span>
-            </div>
-            <div className="flex items-center justify-between gap-3">
-              <span>Local checkouts</span>
-              <span className="font-medium text-foreground">
-                {localRepositoryCount}
-              </span>
-            </div>
+        <div className="space-y-1.5 text-sm text-muted-foreground">
+          <div className="flex items-center justify-between gap-3">
+            <span>Issues</span>
+            <span className="font-medium text-foreground">{stats.issues}</span>
           </div>
-        </div>
-        <div className="border-border/50 border-t pt-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Scope
-          </h3>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Showing project announcements, repository metadata, and activity
-            visible in the current workspace.
-          </p>
+          <div className="flex items-center justify-between gap-3">
+            <span>Pull requests</span>
+            <span className="font-medium text-foreground">{stats.prs}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>Local checkouts</span>
+            <span className="font-medium text-foreground">
+              {localRepositoryCount}
+            </span>
+          </div>
         </div>
       </aside>
     </section>
