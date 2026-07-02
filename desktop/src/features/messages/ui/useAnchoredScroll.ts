@@ -1,7 +1,6 @@
 import * as React from "react";
 
 import { classifyTimelineMessageDelta } from "@/features/messages/lib/timelineSnapshot";
-import type { TimelineMessage } from "@/features/messages/types";
 
 /**
  * Distance (in CSS pixels) below which we consider the scroll position
@@ -166,7 +165,7 @@ export function useAnchoredScroll({
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
-  const prevMessagesRef = React.useRef<TimelineMessage[]>([]);
+  const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
