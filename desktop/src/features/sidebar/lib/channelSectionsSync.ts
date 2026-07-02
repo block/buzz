@@ -208,13 +208,12 @@ export class ChannelSectionSyncManager {
   }
 
   destroy(): void {
-    if (this.debounceTimer !== null && this.pendingStore !== null) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-      void this.doPublish(this.pendingStore);
-    } else if (this.debounceTimer !== null) {
-      window.clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
-    }
+    // Cancel any pending publish without flushing. The scoped localStorage
+    // write is already durable; when the user returns to this relay the
+    // existing seed-publish guard will re-publish from local state. Flushing
+    // here would race against workspace switching and could publish relay A's
+    // sections to relay B via the shared relayClient singleton.
+    this.cancelPendingPublish();
+    this.pendingStore = null;
   }
 }
