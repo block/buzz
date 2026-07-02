@@ -1539,6 +1539,16 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                )
+                                .await;
                                 send_prompt_result(
                                     &result_tx,
                                     agent,
@@ -1553,6 +1563,16 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
                                 send_prompt_result(
                                     &result_tx,
                                     agent,
@@ -1568,6 +1588,16 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
                                 send_prompt_result(
                                     &result_tx,
                                     agent,
@@ -1582,6 +1612,16 @@ pub async fn run_prompt_task(
                                 let retry_batch =
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
+                                let usage = agent.acp.take_turn_usage();
+                                publish_agent_turn_metric(
+                                    &ctx,
+                                    usage,
+                                    observer_channel_id,
+                                    &session_id,
+                                    &turn_id,
+                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                )
+                                .await;
                                 send_prompt_result(
                                     &result_tx,
                                     agent,
@@ -1626,6 +1666,16 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        let usage = agent.acp.take_turn_usage();
+                        publish_agent_turn_metric(
+                            &ctx,
+                            usage,
+                            observer_channel_id,
+                            &session_id,
+                            &turn_id,
+                            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                        )
+                        .await;
                         send_prompt_result(
                             &result_tx,
                             agent,
@@ -3948,6 +3998,38 @@ mod tests {
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+        )
+        .await;
+    }
+
+    /// Regression for the control-cancel drain: `publish_agent_turn_metric`
+    /// with a `Cancelled` stop reason and pending usage executes without panic
+    /// (encrypt+sign path). This mirrors the control-signal arm that previously
+    /// returned early without draining usage.
+    #[tokio::test]
+    async fn test_publish_agent_turn_metric_cancelled_stop_reason() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        let usage = crate::goose_usage::GooseTurnUsage {
+            session_id: "sess-cancel".to_string(),
+            turn_seq: 2,
+            delta_reliable: true,
+            turn_input_tokens: Some(50),
+            turn_output_tokens: Some(20),
+            turn_cost_usd: None,
+            cumulative_input_tokens: 150,
+            cumulative_output_tokens: 70,
+            cumulative_cost_usd: None,
+        };
+        // Must not panic; HTTP submit will fail (no real relay) — that's fine.
+        publish_agent_turn_metric(
+            &ctx,
+            Some(usage),
+            Some(uuid::Uuid::new_v4()),
+            "sess-cancel",
+            "turn-cancel",
+            Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
         )
         .await;
     }
