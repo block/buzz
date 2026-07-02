@@ -4,13 +4,13 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
-mod goose_usage;
 mod observer;
 mod pool;
 mod queue;
 mod relay;
+mod usage;
 
-pub use goose_usage::GooseTurnUsage;
+pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1405,6 +1405,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
     });
 
     if !config.memory_enabled {

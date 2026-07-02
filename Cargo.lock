@@ -780,8 +780,6 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "buzz-core",
- "buzz-sdk",
  "chrono",
  "getrandom 0.4.2",
  "hex",

@@ -391,6 +391,9 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Harness identity string for NIP-AM `harness` field. Derived from the
+    /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
+    pub harness_name: String,
 }
 
 impl AgentPool {
@@ -2699,7 +2702,7 @@ fn acp_stop_to_core(r: &StopReason) -> buzz_core::agent_turn_metric::StopReason 
 /// publishing must never fail a turn.
 async fn publish_agent_turn_metric(
     ctx: &PromptContext,
-    usage: Option<crate::goose_usage::GooseTurnUsage>,
+    usage: Option<crate::usage::TurnUsage>,
     channel_id: Option<uuid::Uuid>,
     session_id: &str,
     turn_id: &str,
@@ -2735,7 +2738,7 @@ async fn publish_agent_turn_metric(
     });
     let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let payload = AgentTurnMetricPayload {
-        harness: "goose".to_string(),
+        harness: ctx.harness_name.clone(),
         model: None,
         channel_id: channel_id.map(|id| id.to_string()),
         session_id: Some(usage.session_id.clone()),
@@ -3948,7 +3951,7 @@ mod tests {
     #[tokio::test]
     async fn test_publish_agent_turn_metric_noop_on_no_owner() {
         let ctx = make_prompt_context_no_owner();
-        let usage = crate::goose_usage::GooseTurnUsage {
+        let usage = crate::usage::TurnUsage {
             session_id: "sess-1".to_string(),
             turn_seq: 1,
             delta_reliable: true,
@@ -3979,7 +3982,7 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         let owner_keys = nostr::Keys::generate();
         let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
-        let usage = crate::goose_usage::GooseTurnUsage {
+        let usage = crate::usage::TurnUsage {
             session_id: "sess-1".to_string(),
             turn_seq: 1,
             delta_reliable: true,
@@ -4011,7 +4014,7 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         let owner_keys = nostr::Keys::generate();
         let ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
-        let usage = crate::goose_usage::GooseTurnUsage {
+        let usage = crate::usage::TurnUsage {
             session_id: "sess-cancel".to_string(),
             turn_seq: 2,
             delta_reliable: true,
@@ -4030,6 +4033,38 @@ mod tests {
             "sess-cancel",
             "turn-cancel",
             Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+        )
+        .await;
+    }
+
+    /// `publish_agent_turn_metric` uses `ctx.harness_name` in the payload.
+    /// A buzz-agent-commanded context must not panic — verifies the harness
+    /// field flows through encrypt/sign without error.
+    #[tokio::test]
+    async fn test_publish_agent_turn_metric_buzz_agent_harness_name() {
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let mut ctx = make_prompt_context_with_owner(&agent_keys, owner_keys.public_key());
+        ctx.harness_name = "buzz-agent".to_string();
+        let usage = crate::usage::TurnUsage {
+            session_id: "sess-ba".to_string(),
+            turn_seq: 1,
+            delta_reliable: false, // first turn from buzz-agent
+            turn_input_tokens: None,
+            turn_output_tokens: None,
+            turn_cost_usd: None,
+            cumulative_input_tokens: 400,
+            cumulative_output_tokens: 100,
+            cumulative_cost_usd: None,
+        };
+        // Will try to publish (encrypt succeeds) and fail HTTP (no relay) — must not panic.
+        publish_agent_turn_metric(
+            &ctx,
+            Some(usage),
+            Some(uuid::Uuid::new_v4()),
+            "sess-ba",
+            "turn-ba",
+            Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
         )
         .await;
     }
@@ -4075,6 +4110,7 @@ mod tests {
             agent_keys: agent_keys.clone(),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
+            harness_name: "goose".to_string(),
         }
     }
 }
