@@ -43,7 +43,6 @@ import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeS
 import { MobilePairingCard } from "./MobilePairingCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
-import { GlobalAgentConfigSettingsCard } from "./GlobalAgentConfigSettingsCard";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -374,14 +373,7 @@ export function renderSettingsSection(
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
-      return (
-        <>
-          <PreventSleepSettingsCard />
-          <div className="mt-6">
-            <GlobalAgentConfigSettingsCard />
-          </div>
-        </>
-      );
+      return <PreventSleepSettingsCard />;
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":

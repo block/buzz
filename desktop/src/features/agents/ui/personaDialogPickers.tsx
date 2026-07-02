@@ -440,7 +440,8 @@ export function computeLocalModeGate({
 
   const missingNormalizedFields: string[] = [];
   if (needsProviderSelection) {
-    if (effectiveProvider.length === 0) missingNormalizedFields.push("provider");
+    if (effectiveProvider.length === 0)
+      missingNormalizedFields.push("provider");
     if (effectiveModel.length === 0) missingNormalizedFields.push("model");
   }
 
@@ -455,7 +456,7 @@ export function computeLocalModeGate({
   const fileSatisfiedEnvKeys: string[] = [];
   for (const key of requiredKeys) {
     const agentValue = envVars[key] ?? "";
-    const globalValue = (globalEnvVars ?? {})[key] ?? "";
+    const globalValue = globalEnvVars?.[key] ?? "";
     if (agentValue.length > 0 || globalValue.length > 0) {
       // Set in Buzz env or global defaults — satisfied, no action.
     } else if (fileSatisfiedKeys.has(key)) {
