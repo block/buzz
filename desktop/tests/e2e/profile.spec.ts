@@ -732,7 +732,14 @@ test("renders agent profile ingress subviews from the Playwright mock bridge", a
 
   await page.getByTestId("user-profile-tab-runtime").click();
   await expectHashSearchParam(page, "profileTab", "runtime");
-  await expect(page.getByTestId("user-profile-model")).toBeVisible();
+  // The dedicated Model row was consolidated into the runtime config panel;
+  // Model now renders as a normalized config row with real provenance.
+  await expect(
+    page
+      .getByTestId("user-profile-panel")
+      .getByText("Model", { exact: true })
+      .first(),
+  ).toBeVisible();
   await expect(page.getByTestId("user-profile-respond-to")).toBeVisible();
 
   await page.getByTestId("user-profile-settings-menu-trigger").click();

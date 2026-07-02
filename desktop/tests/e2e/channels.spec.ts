@@ -1111,6 +1111,21 @@ test("shows and clears activity indicators for active channel agents", async ({
 test("members sidebar exposes view-activity for a viewer-owned relay agent", async ({
   page,
 }) => {
+  // nadia is no longer in the default relay-agent seeds (the no-relay-record
+  // owner path claims that fixture), so seed her relay registry entry here to
+  // exercise the relay-bot classification.
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        name: "nadia",
+        agentType: "goose",
+        capabilities: ["search", "summaries"],
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+  });
   await page.goto("/");
 
   await openMembersSidebar(page, "agents");
