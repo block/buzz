@@ -158,6 +158,14 @@ type E2eConfig = {
     meshReporterPubkey?: string;
     uploadDelayMs?: number;
     uploadDescriptors?: RawBlobDescriptor[];
+    // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
+    // snake_case wire shape the Rust backend returns so tests can drive the
+    // LocalArchiveSettingsCard without a real SQLite database.
+    saveSubscriptions?: Array<{
+      scope_type: string;
+      scope_value: string;
+      kinds: string; // JSON-encoded integer array, e.g. "[9,40002]"
+    }>;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -8721,6 +8729,32 @@ export function maybeInstallE2eTauriMocks() {
         // Return the no-canvas success shape — content null means no canvas set.
         return { content: null, updated_at: null, author: null };
       }
+      // ── Local-save archive ──────────────────────────────────────────────
+      // These stubs drive the LocalArchiveSettingsCard in screenshot / UI tests
+      // without requiring a real SQLite backend. `activeConfig.mock.saveSubscriptions`
+      // seeds the initial list; create/delete return success shapes so the
+      // component's reload path behaves correctly.
+      case "list_save_subscriptions": {
+        const ident = activeConfig?.identity ?? DEFAULT_MOCK_IDENTITY;
+        return (activeConfig?.mock?.saveSubscriptions ?? []).map((s) => ({
+          identity_pubkey: ident.pubkey,
+          relay_url: DEFAULT_RELAY_WS_URL,
+          scope_type: s.scope_type,
+          scope_value: s.scope_value,
+          kinds: s.kinds,
+          created_at: Math.floor(Date.now() / 1000),
+        }));
+      }
+      case "create_save_subscription":
+        // UI calls this then re-fetches via list_save_subscriptions; returning
+        // null (Rust Ok(())) is sufficient to let the component proceed.
+        return null;
+      case "delete_save_subscription":
+        // Returns true == row removed; mirrors Rust success path.
+        return true;
+      case "archive_events":
+        // Returns the ArchiveBatchResult shape the UI expects.
+        return { persisted: 0, dropped: 0 };
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
