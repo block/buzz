@@ -60,6 +60,11 @@ const overrides = new Map([
   // config-bridge: get_agent_config_surface/write_agent_config_field/put_agent_session_config
   // commands add ~40 lines. Queued to split.
   // branch cut; override bumped to cover the merged total. Queued to split.
+  // archive/mod.rs carries the full test module: 897 unit tests + 4 real-relay
+  // integration tests (ignored, live-relay only). The test module is the source
+  // of the overage — production logic is ~408 lines. Queued to split the test
+  // module into archive/mod_tests.rs in a follow-up.
+  ["src-tauri/src/archive/mod.rs", 1277],
   ["src-tauri/src/commands/agents.rs", 1437],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so

@@ -1003,7 +1003,14 @@ mod tests {
         kinds_json: &str,
     ) {
         let conn = store::open_archive_db(path).expect("open file archive db");
-        add_sub(&conn, identity_pk, relay_url, scope_type, scope_value, kinds_json);
+        add_sub(
+            &conn,
+            identity_pk,
+            relay_url,
+            scope_type,
+            scope_value,
+            kinds_json,
+        );
         // conn drops here — file is flushed before the caller reopens it
     }
 
@@ -1078,7 +1085,14 @@ mod tests {
         // File-backed archive DB with a channel_h subscription.
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("archive.db");
-        file_db_with_subscription(&db_path, &identity_pk, &relay_url, "channel_h", &channel_id, "[9]");
+        file_db_with_subscription(
+            &db_path,
+            &identity_pk,
+            &relay_url,
+            "channel_h",
+            &channel_id,
+            "[9]",
+        );
 
         let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
         let result = run_batch_real_relay(cands, &state, &db_path).await;
@@ -1111,7 +1125,11 @@ mod tests {
         let stored_ev = Event::from_json(&raw_json).unwrap();
         assert_eq!(stored_ev.id.to_hex(), msg_ev.id.to_hex());
 
-        println!("✓ real relay: event {} archived under channel_h:{}", msg_ev.id.to_hex(), channel_id);
+        println!(
+            "✓ real relay: event {} archived under channel_h:{}",
+            msg_ev.id.to_hex(),
+            channel_id
+        );
         println!("  archived_events:       {event_count} row(s)");
         println!("  archived_event_scopes: {scope_count} row(s)");
     }
@@ -1144,7 +1162,14 @@ mod tests {
         // Subscription allows kinds=[1059] only — kind:9 must be dropped.
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("archive.db");
-        file_db_with_subscription(&db_path, &identity_pk, &relay_url, "channel_h", &channel_id, "[1059]");
+        file_db_with_subscription(
+            &db_path,
+            &identity_pk,
+            &relay_url,
+            "channel_h",
+            &channel_id,
+            "[1059]",
+        );
 
         let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
         let result = run_batch_real_relay(cands, &state, &db_path).await;
@@ -1204,14 +1229,24 @@ mod tests {
         // File-backed archive DB with an owner_p subscription for kind 24200.
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("archive.db");
-        file_db_with_subscription(&db_path, &identity_pk, &relay_url, "owner_p", &identity_pk, "[24200]");
+        file_db_with_subscription(
+            &db_path,
+            &identity_pk,
+            &relay_url,
+            "owner_p",
+            &identity_pk,
+            "[24200]",
+        );
 
         // owner_p candidates bypass the relay entirely — query_buckets gets an
         // empty bucket list and the ephemeral path handles the frame locally.
         let cands = vec![candidate(&ev, ScopeType::OwnerP, &identity_pk)];
         let result = run_batch_real_relay(cands, &state, &db_path).await;
 
-        assert_eq!(result.persisted, 1, "owner_p: valid frame should be persisted");
+        assert_eq!(
+            result.persisted, 1,
+            "owner_p: valid frame should be persisted"
+        );
         assert_eq!(result.dropped, 0, "owner_p: nothing should be dropped");
 
         // Reopen the same file to assert exact row counts.
@@ -1231,7 +1266,10 @@ mod tests {
             .unwrap();
         assert_eq!(scope_count, 1);
 
-        println!("✓ real relay: owner_p ephemeral frame {} archived", ev.id.to_hex());
+        println!(
+            "✓ real relay: owner_p ephemeral frame {} archived",
+            ev.id.to_hex()
+        );
         println!("  archived_events:       {event_count} row(s)");
         println!("  archived_event_scopes: {scope_count} row(s)");
     }

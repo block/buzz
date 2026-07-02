@@ -81,9 +81,9 @@ test.describe("local archive screenshots", () => {
 
     // Open the Add form — the source picker is Step 1.
     await card.getByTestId("local-archive-open-add").click();
-    await expect(
-      card.getByTestId("local-archive-add-channel"),
-    ).toBeVisible({ timeout: 5_000 });
+    await expect(card.getByTestId("local-archive-add-channel")).toBeVisible({
+      timeout: 5_000,
+    });
     await settleAnimations(card);
     await card.screenshot({ path: `${SHOTS}/02-step1-source-picker.png` });
   });
@@ -152,9 +152,9 @@ test.describe("local archive screenshots", () => {
     await card.getByTestId("local-archive-add-owner").click();
 
     // Step 2 for owner_p: shows the informational fixed-[24200] message.
-    await expect(
-      card.getByText(/observer frames/),
-    ).toBeVisible({ timeout: 5_000 });
+    await expect(card.getByText(/observer frames/)).toBeVisible({
+      timeout: 5_000,
+    });
     await settleAnimations(card);
     await card.screenshot({
       path: `${SHOTS}/05-observer-fixed-24200.png`,
