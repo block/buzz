@@ -23,13 +23,13 @@ import {
 } from "@/shared/ui/dialog";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
+  computeLocalModeGate,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getProviderApiKeyEnvVar,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
-  requiredCredentialEnvKeys,
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
@@ -303,19 +303,6 @@ export function EditAgentDialog({
     selectedRuntimeId,
   ]);
 
-  // Provider used for required-key validation — keyed off the PROSPECTIVE
-  // runtime, not the current dropdown. When the user transitions from a
-  // CLI-login pin (claude) to inherit a buzz-agent/goose persona, the current
-  // dropdown would suppress provider to "" (llmProviderFieldVisible=false),
-  // making requiredCredentialEnvKeys return [] and falsely unblocking the save.
-  // Using prospectiveRuntimeId here ensures the gate checks the credential
-  // requirements of the runtime that will actually be saved.
-  const providerForRequiredKeys = runtimeSupportsLlmProviderSelection(
-    prospectiveRuntimeId,
-  )
-    ? provider
-    : "";
-
   // Required credential env keys for the PROSPECTIVE post-submit runtime.
   // Using the prospective id (not the current dropdown) ensures the gate
   // validates what will actually be saved — in particular, on the inherit
@@ -327,43 +314,36 @@ export function EditAgentDialog({
   );
   const { globalConfig } = useGlobalAgentConfig();
 
-  // Credential keys satisfied by the runtime file config — shown as
-  // "Set in goose config" rows rather than amber required rows.
-  const fileSatisfiedEnvKeys = React.useMemo(() => {
-    if (!runtimeFileConfig) return [] as string[];
-    const allKeys = requiredCredentialEnvKeys(
-      prospectiveRuntimeId,
-      providerForRequiredKeys,
-    );
-    return allKeys.filter(
-      (key) =>
-        (envVars[key] ?? "").length === 0 &&
-        runtimeFileConfig.satisfiedEnvKeys.includes(key),
-    );
-  }, [
-    runtimeFileConfig,
-    prospectiveRuntimeId,
-    providerForRequiredKeys,
-    envVars,
-  ]);
-
-  const requiredEnvKeys = React.useMemo(
-    () =>
-      requiredCredentialEnvKeys(
+  // Derive required/file-satisfied env keys from the shared gate so the dialog
+  // and readiness.rs always agree on which keys are required. Passing global
+  // provider/model/env ensures an agent inheriting a global provider shows the
+  // correct credential rows even before the user sets a per-agent provider.
+  const { missingEnvKeys: requiredEnvKeys, fileSatisfiedEnvKeys } =
+    React.useMemo(
+      () =>
+        computeLocalModeGate({
+          envVars,
+          globalEnvVars: globalConfig.env_vars,
+          globalProvider: globalConfig.provider ?? "",
+          globalModel: globalConfig.model ?? "",
+          isProviderMode: false,
+          model,
+          provider,
+          runtimeId: prospectiveRuntimeId,
+          runtimeFileConfig,
+          useMesh: false,
+        }),
+      [
+        envVars,
+        globalConfig.env_vars,
+        globalConfig.provider,
+        globalConfig.model,
+        model,
+        provider,
         prospectiveRuntimeId,
-        providerForRequiredKeys,
-      ).filter(
-        (key) =>
-          !fileSatisfiedEnvKeys.includes(key) &&
-          (globalConfig.env_vars[key] ?? "").length === 0,
-      ),
-    [
-      prospectiveRuntimeId,
-      providerForRequiredKeys,
-      fileSatisfiedEnvKeys,
-      globalConfig.env_vars,
-    ],
-  );
+        runtimeFileConfig,
+      ],
+    );
 
   const {
     discoveredModelOptions,
