@@ -205,8 +205,8 @@ pub fn normalize_effort_for_openai_route(effort: ThinkingEffort) -> ThinkingEffo
 /// Anthropic-shaped bodies (`anthropic_body`) do not have a `none` or `minimal` concept —
 /// the thinking block is either present (with a level) or absent. When `none` or `minimal`
 /// is configured, we omit the thinking fields entirely and log a warning (omission = provider
-/// default = no thinking). This handles `DatabricksV2` sessions where the route can switch
-/// from GPT to Claude via `session/set_model` after startup.
+/// default; default-on/always-on adaptive models may still think). This handles `DatabricksV2`
+/// sessions where the route can switch from GPT to Claude via `session/set_model` after startup.
 ///
 /// Returns `None` to signal "omit thinking fields", or the original effort if it is a valid
 /// Anthropic level.
@@ -216,7 +216,7 @@ pub fn normalize_effort_for_anthropic_route(effort: ThinkingEffort) -> Option<Th
             tracing::warn!(
                 requested = effort.openai_effort_str(),
                 "BUZZ_AGENT_THINKING_EFFORT={} is not expressible as an Anthropic thinking level; \
-                 omitting thinking fields (provider default = no thinking)",
+                 omitting thinking fields (provider default; default-on/always-on adaptive models may still think)",
                 effort.openai_effort_str()
             );
             None

@@ -1994,10 +1994,13 @@ mod tests {
     }
 
     #[test]
-    fn dbv2_session_set_model_route_switch_max_emits_correctly() {
-        // Simulates a session/set_model switch from a Claude model to a GPT-5 model
-        // when thinking_effort=max. Before the switch: Claude route → max passes through
-        // as Anthropic "max". After the switch: GPT-5 route → max clamped to xhigh.
+    fn dbv2_route_switch_max_body_level_simulation() {
+        // Body-level simulation of a session/set_model switch from a Claude model to a GPT-5
+        // model when thinking_effort=max. Calls body builders and normalizers directly (not
+        // through the ACP session/set_model path or DatabricksV2 dispatch) to verify the
+        // correct output shape for each side of the route switch.
+        // Before the switch: Claude route → max passes through as Anthropic "max".
+        // After the switch: GPT-5 route → max clamped to xhigh.
         let mut c = cfg(Provider::Anthropic);
         c.max_output_tokens = 32_768;
 
