@@ -51,6 +51,27 @@ import { UserMessageBubble } from "./activityRenderClasses/UserMessageBubble";
 
 const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
 
+const ROW_ENTER_SPRING = {
+  damping: 38,
+  stiffness: 480,
+  type: "spring",
+} as const;
+const ROW_ENTER_FROM = { opacity: 0, y: 12 } as const;
+const ROW_ENTER_TO = { opacity: 1, y: 0 } as const;
+
+/**
+ * False during the mount commit, true afterwards. Children mounted with the
+ * initial batch (history load) read false and skip their enter animation;
+ * children appended later read true and animate in.
+ */
+function useHasCompletedInitialRender() {
+  const ref = React.useRef(false);
+  React.useEffect(() => {
+    ref.current = true;
+  }, []);
+  return ref;
+}
+
 /**
  * Opt-in only: source pills are useful while iterating on observer parsing, but
  * they should not appear for every local dev session.
@@ -126,12 +147,14 @@ export function AgentSessionTranscriptList({
   const shouldReduceMotion = useReducedMotion();
   const animationsDisabled =
     Boolean(shouldReduceMotion) || !animationPreferenceEnabled;
-  // Rows mounted on first render (history load) must not animate in; only
-  // blocks appended afterwards get the enter transition.
-  const hasCompletedInitialRenderRef = React.useRef(false);
-  React.useEffect(() => {
-    hasCompletedInitialRenderRef.current = true;
-  }, []);
+  // Position (layout) animations are only safe when this component owns the
+  // scroll container: `layoutScroll` below tells motion to subtract our scroll
+  // offset when measuring rows. When an ancestor scrolls instead (autoTail
+  // off), scrolling would register as false position deltas and rows would
+  // visibly spring back toward their pre-scroll position, so only the enter
+  // animation runs there.
+  const layoutAnimationsEnabled = !animationsDisabled && autoTail;
+  const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
   const hasRenderableContent =
     items.length > 0 && hasRenderableDisplayContent(displayBlocks, variant);
 
@@ -141,7 +164,7 @@ export function AgentSessionTranscriptList({
   );
 
   if (!hasRenderableContent) {
-    const isLoading = emptyState === "loading";
+    const isLoading = emptyState === "loading" || isTurnLive;
 
     return (
       <div className={scrollContainerClassNames}>
@@ -168,8 +191,9 @@ export function AgentSessionTranscriptList({
   }
 
   return (
-    <div
+    <motion.div
       className={scrollContainerClassNames}
+      layoutScroll
       onScroll={autoTail ? anchoredScroll.onScroll : undefined}
       ref={autoTail ? scrollContainerRef : undefined}
     >
@@ -190,16 +214,16 @@ export function AgentSessionTranscriptList({
             const blockKey = getDisplayBlockKey(block);
             return (
               <motion.div
-                animate={{ opacity: 1, y: 0 }}
+                animate={ROW_ENTER_TO}
                 data-message-id={blockKey}
                 initial={
                   animationsDisabled || !hasCompletedInitialRenderRef.current
                     ? false
-                    : { opacity: 0, y: 12 }
+                    : ROW_ENTER_FROM
                 }
                 key={blockKey}
-                layout={animationsDisabled ? false : "position"}
-                transition={{ damping: 38, stiffness: 480, type: "spring" }}
+                layout={layoutAnimationsEnabled ? "position" : false}
+                transition={ROW_ENTER_SPRING}
               >
                 {/* content-visibility stays on a non-animated child: motion
                     measures the outer wrapper for layout animations, which
@@ -219,7 +243,7 @@ export function AgentSessionTranscriptList({
           {isTurnLive && !isCompactPreview ? <TurnLivenessIndicator /> : null}
         </AgentSessionTranscriptVariantProvider>
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -301,6 +325,15 @@ function TranscriptDisplayBlockView({
 }) {
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";
+  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
+  const shouldReduceMotion = useReducedMotion();
+  // Streaming tool calls land as new segments inside the current turn block
+  // (the block key stays `turn:<id>`), so the list-level enter animation
+  // never fires for them — each segment animates in here instead. Segments
+  // present when the block mounts (history load, or the first paint of a new
+  // turn — the block wrapper already animates that) skip the transition.
+  const hasCompletedInitialRenderRef = useHasCompletedInitialRender();
+  const animateSegmentEnter = animationPreferenceEnabled && !shouldReduceMotion;
 
   if (block.kind === "single") {
     return (
@@ -321,14 +354,24 @@ function TranscriptDisplayBlockView({
       data-turn-id={block.turnId}
     >
       {block.segments.map((segment) => (
-        <TranscriptTurnSegmentView
-          agentAvatarUrl={agentAvatarUrl}
-          agentName={agentName}
-          agentPubkey={agentPubkey}
+        <motion.div
+          animate={ROW_ENTER_TO}
+          initial={
+            animateSegmentEnter && hasCompletedInitialRenderRef.current
+              ? ROW_ENTER_FROM
+              : false
+          }
           key={getTurnSegmentKey(block.turnId, segment)}
-          profiles={profiles}
-          segment={segment}
-        />
+          transition={ROW_ENTER_SPRING}
+        >
+          <TranscriptTurnSegmentView
+            agentAvatarUrl={agentAvatarUrl}
+            agentName={agentName}
+            agentPubkey={agentPubkey}
+            profiles={profiles}
+            segment={segment}
+          />
+        </motion.div>
       ))}
     </div>
   );
