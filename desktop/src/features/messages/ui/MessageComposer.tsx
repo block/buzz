@@ -86,10 +86,25 @@ type MessageComposerProps = {
    */
   onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  /**
+   * Called synchronously at the start of `submitMessage`, before any awaits,
+   * to capture context that must be stable throughout the async send pipeline.
+   * Used by the thread-reply composer to capture the current reply target before
+   * the mention-flow awaits can change navigation state.
+   */
+  onCaptureSendContext?: () => {
+    parentEventId: string | null;
+    threadHeadId: string | null;
+  } | null;
   onSend: (
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    channelId?: string | null,
+    threadContext?: {
+      parentEventId: string | null;
+      threadHeadId: string | null;
+    } | null,
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
@@ -115,6 +130,7 @@ function MessageComposerImpl({
   isSending = false,
   onCancelEdit,
   onCancelReply,
+  onCaptureSendContext,
   onEditLastOwnMessage,
   onEditSave,
   onSend,
@@ -570,13 +586,26 @@ function MessageComposerImpl({
       return;
     }
 
+    const capturedThreadContext = onCaptureSendContext?.() ?? null;
+    // If a thread-reply composer reported no reply target at submit time,
+    // bail here rather than discovering the null later after async awaits.
+    if (
+      capturedThreadContext !== null &&
+      !capturedThreadContext.parentEventId
+    ) {
+      return;
+    }
+
     await mentionSendFlow.sendMessageWithMentionFlow({
+      capturedChannelId: channelId,
+      capturedThreadContext,
       pendingImeta: currentPendingImeta,
       sentDraftKey: effectiveDraftKeyRef.current,
       spoileredAttachmentUrls,
       trimmed,
     });
   }, [
+    channelId,
     channelLinks.clearChannels,
     customEmoji,
     emojiAutocomplete.clearEmojis,
@@ -590,6 +619,7 @@ function MessageComposerImpl({
     setComposerContent,
     spoileredAttachmentUrls,
     syncComposerContentFromEditor,
+    onCaptureSendContext,
   ]);
   submitMessageRef.current = submitMessage;
 

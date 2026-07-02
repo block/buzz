@@ -396,15 +396,24 @@ export function useAddChannelMembersMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (input: Omit<AddChannelMembersInput, "channelId">) => {
-      if (!channelId) {
+    mutationFn: (
+      input: Omit<AddChannelMembersInput, "channelId"> & {
+        channelId?: string;
+      },
+    ) => {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      return addChannelMembers({ ...input, channelId });
+      return addChannelMembers({ ...rest, channelId: effectiveChannelId });
     },
-    onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId);
+    onSettled: async (_data, _err, variables) => {
+      // Invalidate the effective channel (the one actually mutated) not the
+      // live hook-closure channel, which may have changed mid-send.
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      await invalidateChannelState(queryClient, effectiveChannelId);
     },
   });
 }

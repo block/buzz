@@ -432,15 +432,24 @@ export function useAttachManagedAgentToChannelMutation(
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (input: AttachManagedAgentToChannelInput) => {
-      if (!channelId) {
+    mutationFn: async (
+      input: AttachManagedAgentToChannelInput & { channelId?: string },
+    ) => {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      return attachManagedAgentToChannel(channelId, input);
+      return attachManagedAgentToChannel(effectiveChannelId, rest);
     },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
+    onSettled: (_data, _err, variables) => {
+      // Invalidate the effective channel (the one the server actually mutated)
+      // so its membership/agent state stays fresh. Invalidating the live
+      // hook-closure channelId when the user has already switched away would
+      // leave the compose-time channel stale.
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
     },
   });
 }
@@ -469,13 +478,17 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
 
   return useMutation({
     mutationFn: async (
-      input: CreateChannelManagedAgentInput,
+      input: CreateChannelManagedAgentInput & { channelId?: string },
     ): Promise<CreateChannelManagedAgentResult> => {
-      if (!channelId) {
+      const { channelId: capturedChannelId, ...rest } = input;
+      const effectiveChannelId = capturedChannelId ?? channelId;
+      if (!effectiveChannelId) {
         throw new Error("No channel selected.");
       }
 
-      const result = await createChannelManagedAgents(channelId, [input]);
+      const result = await createChannelManagedAgents(effectiveChannelId, [
+        rest,
+      ]);
       const success = result.successes[0];
       if (success) {
         return success;
@@ -484,8 +497,9 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
       const failure = result.failures[0];
       throw new Error(failure?.error ?? "Could not create agent.");
     },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
+    onSettled: (_data, _err, variables) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
     },
   });
 }

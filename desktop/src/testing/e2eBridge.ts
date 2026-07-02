@@ -91,6 +91,7 @@ type E2eConfig = {
     relayAgents?: MockRelayAgentSeed[];
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
+    addChannelMembersDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
     feedReadError?: string;
@@ -4962,6 +4963,12 @@ async function handleAddChannelMembers(
   },
   config: E2eConfig | undefined,
 ): Promise<RawAddChannelMembersResponse> {
+  const addChannelMembersDelayMs = config?.mock?.addChannelMembersDelayMs ?? 0;
+  if (addChannelMembersDelayMs > 0) {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, addChannelMembersDelayMs),
+    );
+  }
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);

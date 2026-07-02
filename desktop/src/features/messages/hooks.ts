@@ -18,6 +18,7 @@ import {
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { relayClient } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
+import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
@@ -171,6 +172,71 @@ export function createOptimisticMessage(
     content,
     sig: "",
     pending: true,
+  };
+}
+
+/**
+ * Resolves the effective target channel for a send operation.
+ *
+ * When `capturedChannelId` is supplied (non-null), the target is looked up from
+ * `channelsCache` — this pins the send to the compose-time channel regardless
+ * of any subsequent navigation. If the id is supplied but resolves to nothing,
+ * returns `null` (caller should throw — don't silently fall back to the live
+ * channel). When `capturedChannelId` is null, the caller didn't capture one and
+ * the closed-over `fallbackChannel` is the intended target.
+ *
+ * Exported for unit testing.
+ */
+export function resolveEffectiveChannel(
+  capturedChannelId: string | null | undefined,
+  channelsCache: Channel[] | undefined,
+  fallbackChannel: Channel | null,
+): Channel | null {
+  if (capturedChannelId == null) {
+    return fallbackChannel;
+  }
+  return channelsCache?.find((c) => c.id === capturedChannelId) ?? null;
+}
+
+/**
+ * Resolves the thread reply target from a submit-time captured context or,
+ * for callers that predate the capture pattern, from live refs.
+ *
+ * When `threadContext` is supplied (non-null), its values are used exclusively
+ * — no live-ref reads occur. This is the race-free path: the context was
+ * captured synchronously at submit time before any async awaits.
+ *
+ * When `threadContext` is null/undefined (legacy callers), falls back to
+ * `liveReplyTargetId ?? liveThreadHeadId`.
+ *
+ * Returns null when no parentEventId can be resolved (caller should bail).
+ */
+export function resolveThreadReplyTarget(
+  threadContext:
+    | { parentEventId: string | null; threadHeadId: string | null }
+    | null
+    | undefined,
+  liveReplyTargetId: string | null | undefined,
+  liveThreadHeadId: string | null | undefined,
+): { parentEventId: string; threadHeadId: string | null } | null {
+  if (threadContext != null) {
+    // Captured context: use exclusively — no ?? fallback to live refs.
+    if (!threadContext.parentEventId) {
+      return null;
+    }
+    return {
+      parentEventId: threadContext.parentEventId,
+      threadHeadId: threadContext.threadHeadId,
+    };
+  }
+  // Legacy path: read from live refs.
+  const parentEventId = liveReplyTargetId ?? liveThreadHeadId ?? null;
+  if (!parentEventId) {
+    return null;
+  }
+  return {
+    parentEventId,
+    threadHeadId: liveThreadHeadId ?? null,
   };
 }
 
@@ -385,6 +451,7 @@ export function useSendMessageMutation(
     RelayEvent,
     Error,
     {
+      channelId?: string;
       content: string;
       mentionPubkeys?: string[];
       parentEventId?: string | null;
@@ -393,12 +460,28 @@ export function useSendMessageMutation(
     MessageQueryContext | undefined
   >({
     mutationFn: async ({
+      channelId: capturedChannelId,
       content,
       mentionPubkeys,
       parentEventId,
       mediaTags,
     }) => {
-      if (!channel || channel.channelType === "forum") {
+      // Resolve the target channel from the compose-time id when provided, so
+      // a channel switch mid-send does not redirect the message. Fall back to
+      // the closed-over `channel` for callers that don't supply a capturedId.
+      // A supplied-but-unresolvable id throws rather than silently falling back
+      // to the live channel (silent misdelivery is the failure mode we're fixing).
+      const effectiveChannel = resolveEffectiveChannel(
+        capturedChannelId,
+        queryClient.getQueryData<Channel[]>(channelsQueryKey),
+        channel,
+      );
+
+      if (capturedChannelId != null && effectiveChannel == null) {
+        throw new Error("Channel is no longer available.");
+      }
+
+      if (!effectiveChannel || effectiveChannel.channelType === "forum") {
         throw new Error("This channel does not support message sending yet.");
       }
 
@@ -422,10 +505,10 @@ export function useSendMessageMutation(
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(channel.id),
+            channelMessagesKey(effectiveChannel.id),
           ) ?? [];
         const result = await sendChannelMessage(
-          channel.id,
+          effectiveChannel.id,
           content,
           parentEventId ?? null,
           imetaTags,
@@ -440,7 +523,7 @@ export function useSendMessageMutation(
         // For non-replies (media-only), we add them ourselves.
         const replyTags = parentEventId
           ? buildReplyTags(
-              channel.id,
+              effectiveChannel.id,
               identity.pubkey,
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
@@ -450,7 +533,7 @@ export function useSendMessageMutation(
         const baseTags = parentEventId
           ? replyTags // buildReplyTags includes h + author p + mention ps
           : [
-              ["h", channel.id],
+              ["h", effectiveChannel.id],
               ["p", identity.pubkey],
             ]; // non-reply: add ourselves
 
@@ -478,24 +561,44 @@ export function useSendMessageMutation(
       }
 
       return relayClient.sendMessage(
-        channel.id,
+        effectiveChannel.id,
         content,
         mentionPubkeys ?? [],
         mentionTags,
       );
     },
-    onMutate: async ({ content, mentionPubkeys, parentEventId, mediaTags }) => {
-      if (!channel || !identity || channel.channelType === "forum") {
+    onMutate: async ({
+      channelId: capturedChannelId,
+      content,
+      mentionPubkeys,
+      parentEventId,
+      mediaTags,
+    }) => {
+      // Mirror the mutationFn channel resolution so the optimistic message
+      // lands in the same cache key the real send will eventually populate.
+      // A supplied-but-unresolvable id returns undefined (skips optimistic write)
+      // rather than silently writing to the live channel.
+      const effectiveChannel = resolveEffectiveChannel(
+        capturedChannelId,
+        queryClient.getQueryData<Channel[]>(channelsQueryKey),
+        channel,
+      );
+
+      if (
+        !effectiveChannel ||
+        !identity ||
+        effectiveChannel.channelType === "forum"
+      ) {
         return undefined;
       }
 
-      const queryKey = channelMessagesKey(channel.id);
+      const queryKey = channelMessagesKey(effectiveChannel.id);
       await queryClient.cancelQueries({ queryKey });
 
       const previousMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
       const optimisticMessage = createOptimisticMessage(
-        channel.id,
+        effectiveChannel.id,
         content.trim(),
         identity,
         previousMessages,

@@ -6,6 +6,7 @@ import type {
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
+import { resolveThreadReplyTarget } from "@/features/messages/hooks";
 
 /**
  * Stable callback references for ChannelPane so that keystroke-driven
@@ -230,11 +231,13 @@ export function useChannelPaneHandlers({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
     ) => {
       await sendMutateRef.current({
         content,
         mentionPubkeys,
         mediaTags,
+        channelId: channelId ?? undefined,
       });
     },
     [],
@@ -245,13 +248,24 @@ export function useChannelPaneHandlers({
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      channelId?: string | null,
+      threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
     ) => {
-      const activeThreadHeadId = openThreadHeadIdRef.current;
-      const parentEventId =
-        threadReplyTargetIdRef.current ?? activeThreadHeadId;
-      if (!parentEventId) {
+      // Resolve target using captured submit-time context (race-free) or live
+      // refs (legacy path). When threadContext is supplied, no live-ref reads
+      // occur after the mention-flow awaits; the resolution is purely data.
+      const target = resolveThreadReplyTarget(
+        threadContext,
+        threadReplyTargetIdRef.current,
+        openThreadHeadIdRef.current,
+      );
+      if (!target) {
         return;
       }
+      const { parentEventId, threadHeadId: activeThreadHeadId } = target;
 
       if (
         activeThreadHeadId &&
@@ -270,10 +284,17 @@ export function useChannelPaneHandlers({
         mentionPubkeys,
         parentEventId,
         mediaTags,
+        channelId: channelId ?? undefined,
       });
-      setThreadReplyTargetId(activeThreadHeadId);
-      if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {
-        setThreadScrollTargetId(sentMessage.id);
+
+      // Only update thread UI state if the user is still viewing the same
+      // thread. If they navigated away during the async send, don't disrupt
+      // the thread they are currently viewing.
+      if (openThreadHeadIdRef.current === activeThreadHeadId) {
+        setThreadReplyTargetId(activeThreadHeadId);
+        if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {
+          setThreadScrollTargetId(sentMessage.id);
+        }
       }
     },
     [

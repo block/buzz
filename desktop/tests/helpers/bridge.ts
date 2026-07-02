@@ -110,6 +110,7 @@ type MockBridgeOptions = {
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
+  addChannelMembersDelayMs?: number;
   channelsReadError?: string;
   feedReadError?: string;
   canvasReadError?: string;
