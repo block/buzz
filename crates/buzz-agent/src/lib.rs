@@ -40,9 +40,10 @@ struct App {
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
-    /// first `session/new` call. `None` means discovery hasn't run yet or the
-    /// provider is not Databricks; an empty vec means discovery ran but returned
-    /// no models (auth missing or list empty).
+    /// first successful `session/new` discovery call. When discovery fails (e.g.
+    /// auth missing or a transient network error) the cell is intentionally left
+    /// empty so the next `session/new` call retries — a transient failure never
+    /// pins the degraded fallback catalog for the process lifetime.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
@@ -280,6 +281,32 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
     .await;
 }
 
+/// Resolve the Databricks model catalog for one `session/new` call.
+///
+/// Tries to use a previously-cached successful discovery result. If the cache is empty,
+/// runs `discover` and — on success — populates the cache for future calls. On failure
+/// the cell is intentionally left empty so the next session retries; the provider-aware
+/// fallback is returned for the immediate response only.
+///
+/// Extracted from `session_new` so that tests can drive this path with an injected
+/// discovery future without requiring a full `App` / transport stack.
+async fn resolve_models_catalog(
+    cache: &tokio::sync::OnceCell<Vec<ModelEntry>>,
+    provider: crate::config::Provider,
+    model: &str,
+    discover: impl std::future::Future<Output = Result<Vec<ModelEntry>, AgentError>>,
+) -> Vec<ModelEntry> {
+    match cache.get_or_try_init(|| discover).await {
+        Ok(cached) => cached.clone(),
+        Err(e) => {
+            tracing::warn!(
+                "model catalog discovery failed: {e}; using fallback (will retry next session)"
+            );
+            crate::catalog::discovery_failure_fallback(provider, model)
+        }
+    }
+}
+
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
     let p: SessionNewParams = match decode(params, "session/new") {
         Ok(p) => p,
@@ -397,23 +424,13 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         use crate::config::Provider;
         match app.cfg.provider {
             Provider::Databricks | Provider::DatabricksV2 => {
-                // Try to get a previously-cached successful discovery result; if the cell is
-                // empty, run discovery now. `get_or_try_init` only populates the cell on `Ok`
-                // — an `Err` leaves it empty so the next session retries rather than
-                // re-serving a stale transient-failure fallback forever.
-                let models = match app
-                    .models_cache
-                    .get_or_try_init(|| async { discover_databricks_models(&app.cfg).await })
-                    .await
-                {
-                    Ok(cached) => cached.clone(),
-                    Err(e) => {
-                        tracing::warn!(
-                            "model catalog discovery failed: {e}; using fallback (will retry next session)"
-                        );
-                        crate::catalog::discovery_failure_fallback(app.cfg.provider, &app.cfg.model)
-                    }
-                };
+                let models = resolve_models_catalog(
+                    &app.models_cache,
+                    app.cfg.provider,
+                    &app.cfg.model,
+                    discover_databricks_models(&app.cfg),
+                )
+                .await;
                 models
                     .iter()
                     .map(|m| json!({ "modelId": m.id, "name": m.name }))
@@ -744,40 +761,60 @@ fn session_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::{discovery_failure_fallback, DATABRICKS_V2_KNOWN_MODELS};
+    use crate::catalog::{discovery_failure_fallback, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
     use crate::config::Provider;
+    use crate::types::AgentError;
 
-    /// Regression: discovery errors must not pin the models_cache for the process lifetime.
+    /// Regression: a discovery error must not pin the models_cache for the process lifetime.
     ///
-    /// `session_new` uses `get_or_try_init` so an `Err` leaves the `OnceCell` empty and a
-    /// subsequent `session/new` call retries discovery. This test verifies that contract
-    /// directly against `tokio::sync::OnceCell` — the same type used in `AppState`.
+    /// `resolve_models_catalog` uses `get_or_try_init` so an `Err` leaves the `OnceCell`
+    /// empty and the next `session/new` retries discovery. This test calls
+    /// `resolve_models_catalog` directly — the same function `session_new` calls — so
+    /// reverting `session_new` to `get_or_init` (or any other cache-on-error variant) would
+    /// break this test, not just the standalone `OnceCell` semantics.
     #[tokio::test]
     async fn models_cache_does_not_pin_on_discovery_error() {
-        let cell: tokio::sync::OnceCell<Vec<String>> = tokio::sync::OnceCell::new();
+        let cache: tokio::sync::OnceCell<Vec<ModelEntry>> = tokio::sync::OnceCell::new();
+        let provider = Provider::DatabricksV2;
+        let model = "my-configured-model";
 
-        // First call — discovery fails. Cell must remain empty.
-        let first = cell
-            .get_or_try_init(|| async { Err::<Vec<String>, &str>("transient failure") })
-            .await;
-        assert!(first.is_err(), "get_or_try_init must propagate the error");
+        // First call — discovery fails. Cell must remain empty; fallback returned.
+        let first = crate::resolve_models_catalog(&cache, provider, model, async {
+            Err::<Vec<ModelEntry>, AgentError>(AgentError::LlmAuth("transient failure".into()))
+        })
+        .await;
         assert!(
-            cell.get().is_none(),
-            "cell must be empty after an error — discovery retry will be attempted next session"
+            cache.get().is_none(),
+            "cell must be empty after a discovery error — next session must retry"
         );
-
-        // Second call — discovery succeeds. Cell is now populated.
-        let second = cell
-            .get_or_try_init(|| async { Ok::<Vec<String>, &str>(vec!["model-a".to_string()]) })
-            .await;
+        let expected_fallback = discovery_failure_fallback(provider, model);
         assert_eq!(
-            second.unwrap(),
-            &["model-a"],
-            "second call must succeed and populate cell"
+            first, expected_fallback,
+            "error path must return the provider-aware fallback"
+        );
+
+        // Second call — discovery succeeds. Cell is now populated and returned.
+        let discovered = vec![ModelEntry {
+            id: "databricks-meta-llama-3-1-70b-instruct".into(),
+            name: "databricks-meta-llama-3-1-70b-instruct".into(),
+        }];
+        let discovered_clone = discovered.clone();
+        let second = crate::resolve_models_catalog(&cache, provider, model, async move {
+            Ok::<Vec<ModelEntry>, AgentError>(discovered_clone)
+        })
+        .await;
+        assert_eq!(
+            second, discovered,
+            "second call must return the discovered catalog"
         );
         assert!(
-            cell.get().is_some(),
-            "cell must be populated after a successful discovery"
+            cache.get().is_some(),
+            "cell must be populated after successful discovery"
+        );
+        assert_eq!(
+            cache.get().unwrap(),
+            &discovered,
+            "cache must hold the successful discovery result"
         );
     }
 
