@@ -44,6 +44,7 @@ sha2 = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
 buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
 nostr = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
