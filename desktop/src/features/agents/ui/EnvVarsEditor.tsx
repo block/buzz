@@ -60,6 +60,12 @@ type EnvVarsEditorProps = {
    * the user knows the key is covered without needing to add it here.
    */
   fileSatisfiedKeys?: readonly string[];
+  /**
+   * When set, scroll the matching required-key row into view and focus its
+   * value input on mount. One-shot: ignored after the first render in which
+   * it is set. Only acts on keys that appear in `requiredKeys`.
+   */
+  focusKey?: string;
 };
 
 type Row = { id: string; key: string; value: string };
@@ -82,6 +88,7 @@ export function EnvVarsEditor({
   disabled = false,
   requiredKeys = [],
   fileSatisfiedKeys = [],
+  focusKey,
 }: EnvVarsEditorProps) {
   // Local ordered row state. Synced from `value` on mount and when the
   // parent supplies a value we did NOT just emit (e.g., dialog reopened
@@ -97,6 +104,40 @@ export function EnvVarsEditor({
       setRows(toRows(value));
     }
   }, [value]);
+
+  // One-shot focus: scroll the matching required-key row into view and focus
+  // its value input. Only fires when `focusKey` is set and the key is in
+  // `requiredKeys`. Uses a rAF to let the parent Dialog finish its animation
+  // before the imperative DOM operation.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional one-shot — requiredKeys omitted to avoid re-firing on every provider change; focusKey identity is the trigger
+  React.useEffect(() => {
+    if (!focusKey) return;
+    if (!requiredKeys.includes(focusKey)) return;
+
+    const id = requestAnimationFrame(() => {
+      // Each required-key row's value input has data-testid="env-vars-required-value".
+      // There may be multiple required rows; find the one whose adjacent key
+      // element shows the target key text.
+      const keyEls = document.querySelectorAll<HTMLElement>(
+        "[data-testid='env-vars-required-key']",
+      );
+      for (const keyEl of keyEls) {
+        if (keyEl.textContent?.trim() === focusKey) {
+          const row = keyEl.closest<HTMLElement>("[class]");
+          const valueInput = row?.parentElement?.querySelector<HTMLElement>(
+            "[data-testid='env-vars-required-value']",
+          );
+          if (valueInput) {
+            valueInput.scrollIntoView({ block: "nearest" });
+            valueInput.focus();
+          }
+          break;
+        }
+      }
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [focusKey]);
 
   function emit(next: Row[]) {
     setRows(next);
