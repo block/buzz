@@ -2,6 +2,57 @@ use std::time::Duration;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 
+/// Reasoning/thinking effort level for providers that support it.
+///
+/// Set via `BUZZ_AGENT_THINKING_EFFORT` (`low|medium|high`).
+/// When unset the provider's default behaviour is preserved — no thinking
+/// config is sent in the request body.
+///
+/// Mapping to provider wire fields:
+/// - Anthropic Messages: `thinking.budget_tokens` — low=1024, medium=8192, high=32768.
+/// - OpenAI Responses: `reasoning.effort` — "low", "medium", "high".
+/// - OpenAI Chat Completions: `reasoning_effort` — "low", "medium", "high".
+/// - Databricks: routed by model family (Claude → Anthropic mapping, GPT-5 → Responses, MLflow → Chat).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingEffort {
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkingEffort {
+    /// Map level to an Anthropic `budget_tokens` value.
+    pub fn anthropic_budget_tokens(self) -> u32 {
+        match self {
+            ThinkingEffort::Low => 1_024,
+            ThinkingEffort::Medium => 8_192,
+            ThinkingEffort::High => 32_768,
+        }
+    }
+
+    /// Map level to an OpenAI `reasoning.effort` / `reasoning_effort` string.
+    pub fn openai_effort_str(self) -> &'static str {
+        match self {
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+        }
+    }
+}
+
+/// Parse `BUZZ_AGENT_THINKING_EFFORT`. Pure (env-free) for testability.
+pub fn parse_thinking_effort(raw: Option<&str>) -> Result<Option<ThinkingEffort>, String> {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => Ok(None),
+        Some("low") => Ok(Some(ThinkingEffort::Low)),
+        Some("medium") => Ok(Some(ThinkingEffort::Medium)),
+        Some("high") => Ok(Some(ThinkingEffort::High)),
+        Some(other) => Err(format!(
+            "config: BUZZ_AGENT_THINKING_EFFORT={other} not supported (use low|medium|high)"
+        )),
+    }
+}
+
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
 /// Total per-result byte ceiling (text + images). Sized for image-bearing
@@ -94,6 +145,9 @@ pub struct Config {
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
     pub hints_enabled: bool,
+    /// Thinking/reasoning effort level. `None` = use provider default (no
+    /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
+    pub thinking_effort: Option<ThinkingEffort>,
 }
 
 impl Config {
@@ -187,6 +241,7 @@ impl Config {
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
+            thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -226,6 +281,7 @@ impl Config {
             stop_max_rejections: 0,
             hook_servers: HookServers::None,
             hints_enabled: false,
+            thinking_effort: None,
         }
     }
 
@@ -641,5 +697,60 @@ mod tests {
     fn resolve_model_returns_none_when_both_absent() {
         let result = resolve_model(None, None);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_thinking_effort_round_trips_all_values() {
+        for (raw, expected) in [
+            ("low", ThinkingEffort::Low),
+            ("medium", ThinkingEffort::Medium),
+            ("high", ThinkingEffort::High),
+        ] {
+            assert_eq!(
+                parse_thinking_effort(Some(raw)).unwrap(),
+                Some(expected),
+                "raw={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_thinking_effort_none_and_empty_yield_none() {
+        assert_eq!(parse_thinking_effort(None).unwrap(), None);
+        assert_eq!(parse_thinking_effort(Some("")).unwrap(), None);
+        assert_eq!(parse_thinking_effort(Some("   ")).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_thinking_effort_is_case_insensitive() {
+        assert_eq!(
+            parse_thinking_effort(Some("HIGH")).unwrap(),
+            Some(ThinkingEffort::High)
+        );
+        assert_eq!(
+            parse_thinking_effort(Some("  Medium  ")).unwrap(),
+            Some(ThinkingEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn parse_thinking_effort_rejects_unknown_value() {
+        let err = parse_thinking_effort(Some("extreme")).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_THINKING_EFFORT=extreme"), "{err}");
+        assert!(err.contains("low|medium|high"), "{err}");
+    }
+
+    #[test]
+    fn thinking_effort_anthropic_budget_tokens_mapping() {
+        assert_eq!(ThinkingEffort::Low.anthropic_budget_tokens(), 1_024);
+        assert_eq!(ThinkingEffort::Medium.anthropic_budget_tokens(), 8_192);
+        assert_eq!(ThinkingEffort::High.anthropic_budget_tokens(), 32_768);
+    }
+
+    #[test]
+    fn thinking_effort_openai_effort_str_mapping() {
+        assert_eq!(ThinkingEffort::Low.openai_effort_str(), "low");
+        assert_eq!(ThinkingEffort::Medium.openai_effort_str(), "medium");
+        assert_eq!(ThinkingEffort::High.openai_effort_str(), "high");
     }
 }

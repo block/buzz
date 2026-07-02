@@ -33,6 +33,8 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
+        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
     }
 }
@@ -493,5 +495,163 @@ fn extra_env_var_skipped_when_already_in_file_config_extra() {
     assert!(
         !advanced_keys.contains(&"GOOSE_THINKING_EFFORT"),
         "normalized thinking key must not appear in advanced"
+    );
+}
+
+// ── buzz-agent normalized env-var field tests ───────────────────────────────
+//
+// buzz-agent uses env vars (not a config file) for max_output_tokens and
+// context_limit. build_numeric_env_field must surface these as BuzzExplicit
+// when the env var is present in record.env_vars, and must not double-surface
+// them in the advanced tier.
+
+fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
+    &KnownAcpRuntime {
+        id: "buzz-agent",
+        label: "Buzz Agent",
+        commands: &["buzz-agent"],
+        aliases: &[],
+        avatar_url: "",
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        cli_install_commands: &[],
+        adapter_install_commands: &[],
+        install_instructions_url: "",
+        cli_install_hint: "",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: true,
+        model_env_var: Some("BUZZ_AGENT_MODEL"),
+        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
+        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+        required_normalized_fields: &["model", "provider"],
+    }
+}
+
+#[test]
+fn buzz_agent_max_output_tokens_from_env_is_buzz_explicit() {
+    let mut record = test_record();
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(), "8192".to_string());
+    let runtime = buzz_agent_runtime();
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    let field = surface.normalized.max_output_tokens.unwrap();
+    assert_eq!(field.value.as_deref(), Some("8192"));
+    assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
+    assert!(matches!(
+        field.write_via,
+        ConfigWriteMechanism::RespawnWithEnvVar { ref env_key }
+            if env_key == "BUZZ_AGENT_MAX_OUTPUT_TOKENS"
+    ));
+}
+
+#[test]
+fn buzz_agent_context_limit_from_env_is_buzz_explicit() {
+    let mut record = test_record();
+    record.env_vars.insert(
+        "BUZZ_AGENT_MAX_CONTEXT_TOKENS".to_string(),
+        "100000".to_string(),
+    );
+    let runtime = buzz_agent_runtime();
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    let field = surface.normalized.context_limit.unwrap();
+    assert_eq!(field.value.as_deref(), Some("100000"));
+    assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
+    assert!(matches!(
+        field.write_via,
+        ConfigWriteMechanism::RespawnWithEnvVar { ref env_key }
+            if env_key == "BUZZ_AGENT_MAX_CONTEXT_TOKENS"
+    ));
+}
+
+#[test]
+fn buzz_agent_max_tokens_absent_when_no_env_var_or_file() {
+    // buzz-agent has no config file, and env var is not set.
+    let record = test_record();
+    let runtime = buzz_agent_runtime();
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    assert!(
+        surface.normalized.max_output_tokens.is_none(),
+        "max_output_tokens must be None when env var not set and no config file"
+    );
+    assert!(
+        surface.normalized.context_limit.is_none(),
+        "context_limit must be None when env var not set and no config file"
+    );
+}
+
+#[test]
+fn buzz_agent_max_tokens_env_var_not_double_surfaced_in_advanced() {
+    let mut record = test_record();
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(), "4096".to_string());
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_MAX_CONTEXT_TOKENS".to_string(), "50000".to_string());
+    let runtime = buzz_agent_runtime();
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
+    assert!(
+        !advanced_keys.contains(&"BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+        "max_output_tokens must not appear in advanced when normalized"
+    );
+    assert!(
+        !advanced_keys.contains(&"BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+        "context_limit must not appear in advanced when normalized"
+    );
+}
+
+#[test]
+fn buzz_agent_thinking_effort_from_env_is_buzz_explicit() {
+    let mut record = test_record();
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "high".to_string());
+    let runtime = buzz_agent_runtime();
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    let field = surface.normalized.thinking_effort.unwrap();
+    assert_eq!(field.value.as_deref(), Some("high"));
+    assert_eq!(field.origin, ConfigOrigin::BuzzExplicit);
+    assert!(matches!(
+        field.write_via,
+        ConfigWriteMechanism::RespawnWithEnvVar { ref env_key }
+            if env_key == "BUZZ_AGENT_THINKING_EFFORT"
+    ));
+}
+
+#[test]
+fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
+    let mut record = test_record();
+    record
+        .env_vars
+        .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "medium".to_string());
+    let runtime = buzz_agent_runtime();
+
+    let surface = read_config_surface(&record, Some(runtime), None, None);
+
+    let advanced_keys: Vec<&str> = surface.advanced.iter().map(|f| f.key.as_str()).collect();
+    assert!(
+        !advanced_keys.contains(&"BUZZ_AGENT_THINKING_EFFORT"),
+        "thinking_effort must not appear in advanced when normalized"
     );
 }

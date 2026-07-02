@@ -44,6 +44,8 @@ pub(crate) fn read_config_surface(
     let required_fields: &[&str] = runtime_meta
         .map(|m| m.required_normalized_fields)
         .unwrap_or(&[]);
+    let max_tokens_env_var = runtime_meta.and_then(|m| m.max_tokens_env_var);
+    let context_limit_env_var = runtime_meta.and_then(|m| m.context_limit_env_var);
 
     // Tier 1b: ACP configOptions from session cache.
     // For unstable/switchable agents, current_model comes from the `models`
@@ -95,25 +97,16 @@ pub(crate) fn read_config_surface(
             is_pre_spawn,
             session_cache,
         ),
-        max_output_tokens: file_config
-            .max_output_tokens
-            .as_ref()
-            .map(|v| NormalizedField {
-                value: Some(v.clone()),
-                origin: ConfigOrigin::ConfigFile,
-                write_via: ConfigWriteMechanism::ReadOnly,
-                overridden_value: None,
-                overridden_origin: None,
-                is_required: false,
-            }),
-        context_limit: file_config.context_limit.as_ref().map(|v| NormalizedField {
-            value: Some(v.clone()),
-            origin: ConfigOrigin::ConfigFile,
-            write_via: ConfigWriteMechanism::ReadOnly,
-            overridden_value: None,
-            overridden_origin: None,
-            is_required: false,
-        }),
+        max_output_tokens: build_numeric_env_field(
+            max_tokens_env_var,
+            &record.env_vars,
+            &file_config.max_output_tokens,
+        ),
+        context_limit: build_numeric_env_field(
+            context_limit_env_var,
+            &record.env_vars,
+            &file_config.context_limit,
+        ),
         system_prompt: build_system_prompt_field(
             &record
                 .system_prompt
@@ -142,6 +135,8 @@ pub(crate) fn read_config_surface(
         model_env_var,
         provider_env_var,
         thinking_env_var,
+        max_tokens_env_var,
+        context_limit_env_var,
         Some("BUZZ_ACP_SYSTEM_PROMPT"),
     ]
     .into_iter()
@@ -452,8 +447,41 @@ fn build_thinking_field(
     })
 }
 
+/// Numeric fields (max_output_tokens, context_limit) — env-var tier wins over
+/// config-file tier. When an env var key is given and present in the record's
+/// env_vars map the field is BuzzExplicit + RespawnWithEnvVar; otherwise if the
+/// config file supplied a value it is ConfigFile + ReadOnly; otherwise None.
+fn build_numeric_env_field(
+    env_var: Option<&'static str>,
+    record_env: &std::collections::BTreeMap<String, String>,
+    file_value: &Option<String>,
+) -> Option<NormalizedField> {
+    if let Some(key) = env_var {
+        if let Some(v) = record_env.get(key) {
+            return Some(NormalizedField {
+                value: Some(v.clone()),
+                origin: ConfigOrigin::BuzzExplicit,
+                write_via: ConfigWriteMechanism::RespawnWithEnvVar {
+                    env_key: key.to_string(),
+                },
+                overridden_value: file_value.clone(),
+                overridden_origin: file_value.as_ref().map(|_| ConfigOrigin::ConfigFile),
+                is_required: false,
+            });
+        }
+    }
+    file_value.as_ref().map(|v| NormalizedField {
+        value: Some(v.clone()),
+        origin: ConfigOrigin::ConfigFile,
+        write_via: ConfigWriteMechanism::ReadOnly,
+        overridden_value: None,
+        overridden_origin: None,
+        is_required: false,
+    })
+}
+
 /// Record/env prompt wins (BuzzExplicit, respawnable); a config-file prompt it
-/// shadows is reported as the overridden secondary. A config-file-only prompt
+/// shadows is reported as the overridden secondary.
 /// — no record/env value to shadow it — is surfaced directly (read-only)
 /// instead of being dropped: a prompt that drives the agent should always be
 /// visible somewhere in the panel.

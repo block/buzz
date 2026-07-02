@@ -36,6 +36,7 @@ impl RunCtx<'_> {
                 HANDOFF_SYSTEM_PROMPT,
                 &prompt,
                 HANDOFF_MAX_OUTPUT_TOKENS,
+                self.effective_model,
             ) => match r {
                 Ok(s) if !s.trim().is_empty() => s,
                 Ok(_) => {

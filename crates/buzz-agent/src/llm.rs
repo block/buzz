@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, TokenSource};
-use crate::config::{is_openai_host, Config, OpenAiApi, Provider};
+use crate::config::{is_openai_host, Config, OpenAiApi, Provider, ThinkingEffort};
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
 };
@@ -66,11 +66,16 @@ impl Llm {
         system_prompt: &str,
         history: &[HistoryItem],
         tools: &[ToolDef],
+        effective_model: &str,
     ) -> Result<LlmResponse, AgentError> {
+        let effort = cfg.thinking_effort;
         match cfg.provider {
             Provider::Anthropic => {
                 let v = self
-                    .post_anthropic(cfg, &anthropic_body(cfg, system_prompt, history, tools))
+                    .post_anthropic(
+                        cfg,
+                        &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                    )
                     .await?;
                 parse_anthropic(v)
             }
@@ -78,12 +83,26 @@ impl Llm {
                 self.openai_request(cfg, |use_responses| {
                     if use_responses {
                         (
-                            responses_body(cfg, system_prompt, history, tools),
+                            responses_body(
+                                cfg,
+                                system_prompt,
+                                history,
+                                tools,
+                                effective_model,
+                                effort,
+                            ),
                             parse_responses as OpenAiParse,
                         )
                     } else {
                         (
-                            openai_body(cfg, system_prompt, history, tools),
+                            openai_body(
+                                cfg,
+                                system_prompt,
+                                history,
+                                tools,
+                                effective_model,
+                                effort,
+                            ),
                             parse_openai as OpenAiParse,
                         )
                     }
@@ -93,15 +112,36 @@ impl Llm {
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, |route| match route {
                     DatabricksV2Route::OpenAiResponses => (
-                        responses_body(cfg, system_prompt, history, tools),
+                        responses_body(
+                            cfg,
+                            system_prompt,
+                            history,
+                            tools,
+                            effective_model,
+                            effort,
+                        ),
                         parse_responses as OpenAiParse,
                     ),
                     DatabricksV2Route::AnthropicMessages => (
-                        anthropic_body(cfg, system_prompt, history, tools),
+                        anthropic_body(
+                            cfg,
+                            system_prompt,
+                            history,
+                            tools,
+                            effective_model,
+                            effort,
+                        ),
                         parse_anthropic as OpenAiParse,
                     ),
                     DatabricksV2Route::MlflowChatCompletions => (
-                        openai_body(cfg, system_prompt, history, tools),
+                        openai_body(
+                            cfg,
+                            system_prompt,
+                            history,
+                            tools,
+                            effective_model,
+                            effort,
+                        ),
                         parse_openai as OpenAiParse,
                     ),
                 })
@@ -116,11 +156,12 @@ impl Llm {
         system_prompt: &str,
         user_prompt: &str,
         max_output_tokens: u32,
+        effective_model: &str,
     ) -> Result<String, AgentError> {
         match cfg.provider {
             Provider::Anthropic => {
                 let body = json!({
-                    "model": cfg.model,
+                    "model": effective_model,
                     "max_tokens": max_output_tokens,
                     "system": system_prompt,
                     "messages": [{
@@ -136,7 +177,7 @@ impl Llm {
                         if use_responses {
                             (
                                 json!({
-                                    "model": cfg.model,
+                                    "model": effective_model,
                                     "max_output_tokens": max_output_tokens,
                                     "instructions": system_prompt,
                                     "input": user_prompt,
@@ -146,7 +187,7 @@ impl Llm {
                         } else {
                             (
                                 json!({
-                                    "model": cfg.model,
+                                    "model": effective_model,
                                     "stream": false,
                                     "max_completion_tokens": max_output_tokens,
                                     "messages": [
@@ -166,7 +207,7 @@ impl Llm {
                     .databricks_v2_request(cfg, |route| match route {
                         DatabricksV2Route::OpenAiResponses => (
                             json!({
-                                "model": cfg.model,
+                                "model": effective_model,
                                 "max_output_tokens": max_output_tokens,
                                 "instructions": system_prompt,
                                 "input": user_prompt,
@@ -175,7 +216,7 @@ impl Llm {
                         ),
                         DatabricksV2Route::AnthropicMessages => (
                             json!({
-                                "model": cfg.model,
+                                "model": effective_model,
                                 "max_tokens": max_output_tokens,
                                 "system": system_prompt,
                                 "messages": [{
@@ -187,7 +228,7 @@ impl Llm {
                         ),
                         DatabricksV2Route::MlflowChatCompletions => (
                             json!({
-                                "model": cfg.model,
+                                "model": effective_model,
                                 "stream": false,
                                 "max_completion_tokens": max_output_tokens,
                                 "messages": [
@@ -330,6 +371,8 @@ fn anthropic_body(
     system_prompt: &str,
     history: &[HistoryItem],
     tools: &[ToolDef],
+    effective_model: &str,
+    effort: Option<ThinkingEffort>,
 ) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     let mut pending: Vec<Value> = Vec::new();
@@ -377,8 +420,14 @@ fn anthropic_body(
         "name": t.name, "description": t.description, "input_schema": t.input_schema })
         })
         .collect();
-    let mut body = json!({ "model": cfg.model, "max_tokens": cfg.max_output_tokens,
+    let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
         "system": system_prompt, "messages": messages });
+    if let Some(e) = effort {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": e.anthropic_budget_tokens(),
+        });
+    }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
     }
@@ -403,6 +452,8 @@ fn openai_body(
     system_prompt: &str,
     history: &[HistoryItem],
     tools: &[ToolDef],
+    effective_model: &str,
+    effort: Option<ThinkingEffort>,
 ) -> Value {
     let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
     // Images returned from tool calls ride on a trailing `role:"user"`
@@ -463,8 +514,11 @@ fn openai_body(
             "parameters": t.input_schema } })
         })
         .collect();
-    let mut body = json!({ "model": cfg.model, "stream": false,
+    let mut body = json!({ "model": effective_model, "stream": false,
         "max_completion_tokens": cfg.max_output_tokens, "messages": messages });
+    if let Some(e) = effort {
+        body["reasoning_effort"] = json!(e.openai_effort_str());
+    }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
         body["tool_choice"] = json!("auto");
@@ -511,6 +565,8 @@ fn responses_body(
     system_prompt: &str,
     history: &[HistoryItem],
     tools: &[ToolDef],
+    effective_model: &str,
+    effort: Option<ThinkingEffort>,
 ) -> Value {
     let mut input: Vec<Value> = Vec::with_capacity(history.len());
     for item in history {
@@ -574,11 +630,14 @@ fn responses_body(
         .collect();
 
     let mut body = json!({
-        "model": cfg.model,
+        "model": effective_model,
         "instructions": system_prompt,
         "max_output_tokens": cfg.max_output_tokens,
         "input": input,
     });
+    if let Some(e) = effort {
+        body["reasoning"] = json!({ "effort": e.openai_effort_str() });
+    }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
         body["tool_choice"] = json!("auto");
@@ -1106,6 +1165,7 @@ mod tests {
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
             hints_enabled: true,
+            thinking_effort: None,
         }
     }
 
@@ -1136,7 +1196,7 @@ mod tests {
 
     #[test]
     fn anthropic_tool_result_preserves_image_block() {
-        let body = anthropic_body(&cfg(Provider::Anthropic), "system", &image_history(), &[]);
+        let body = anthropic_body(&cfg(Provider::Anthropic), "system", &image_history(), &[], "model", None);
         let content = &body["messages"][2]["content"][0]["content"];
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image");
@@ -1185,6 +1245,8 @@ mod tests {
             "system",
             &[HistoryItem::User("hi".into())],
             &tools,
+            "model",
+            None,
         );
         assert_eq!(body["model"], "model");
         assert_eq!(body["instructions"], "system");
@@ -1213,7 +1275,7 @@ mod tests {
         // function_call item *must* appear in `input[]` before its matching
         // function_call_output, otherwise the API rejects with
         // "No tool call found for call_id ...".
-        let body = responses_body(&cfg_responses(), "system", &tool_call_history(), &[]);
+        let body = responses_body(&cfg_responses(), "system", &tool_call_history(), &[], "model", None);
         let input = body["input"].as_array().unwrap();
 
         // [0] user, [1] assistant text, [2] function_call, [3] function_call_output
@@ -1252,7 +1314,7 @@ mod tests {
                 }],
             },
         ];
-        let body = responses_body(&cfg_responses(), "system", &history, &[]);
+        let body = responses_body(&cfg_responses(), "system", &history, &[], "model", None);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["role"], "user");
@@ -1261,7 +1323,7 @@ mod tests {
 
     #[test]
     fn responses_body_image_tool_result_attaches_input_image() {
-        let body = responses_body(&cfg_responses(), "system", &image_history(), &[]);
+        let body = responses_body(&cfg_responses(), "system", &image_history(), &[], "model", None);
         let input = body["input"].as_array().unwrap();
         // function_call_output carries the text part; image rides on a
         // trailing user message as `input_image`.
@@ -1388,7 +1450,7 @@ mod tests {
 
     #[test]
     fn openai_tool_result_adds_followup_image_user_message() {
-        let body = openai_body(&cfg(Provider::OpenAi), "system", &image_history(), &[]);
+        let body = openai_body(&cfg(Provider::OpenAi), "system", &image_history(), &[], "model", None);
         assert_eq!(body["messages"][3]["role"], "tool");
         assert!(body["messages"][3]["content"]
             .as_str()
@@ -1459,7 +1521,7 @@ mod tests {
                 is_error: false,
             }),
         ];
-        let body = openai_body(&cfg(Provider::OpenAi), "system", &history, &[]);
+        let body = openai_body(&cfg(Provider::OpenAi), "system", &history, &[], "model", None);
         let messages = body["messages"].as_array().unwrap();
         // [0] system, [1] user, [2] assistant(tool_calls), [3] tool A, [4] tool B, [5] user(images)
         assert_eq!(messages.len(), 6, "messages: {messages:#?}");
@@ -1475,6 +1537,135 @@ mod tests {
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0]["image_url"]["url"], "data:image/png;base64,aaa");
         assert_eq!(imgs[1]["image_url"]["url"], "data:image/png;base64,bbb");
+    }
+
+    // ---- ThinkingEffort body-shape tests ----
+
+    #[test]
+    fn anthropic_body_omits_thinking_when_effort_none() {
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_emits_thinking_when_effort_high() {
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-3-7-sonnet-20250219",
+            Some(ThinkingEffort::High),
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 32_768);
+    }
+
+    #[test]
+    fn anthropic_body_emits_thinking_low_budget() {
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-3-7-sonnet-20250219",
+            Some(ThinkingEffort::Low),
+        );
+        assert_eq!(body["thinking"]["budget_tokens"], 1_024);
+    }
+
+    #[test]
+    fn openai_body_omits_reasoning_effort_when_none() {
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "reasoning_effort must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn openai_body_emits_reasoning_effort_medium() {
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Medium),
+        );
+        assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn responses_body_omits_reasoning_when_effort_none() {
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert!(
+            body.get("reasoning").is_none(),
+            "reasoning must be absent when effort is None"
+        );
+    }
+
+    #[test]
+    fn responses_body_emits_reasoning_effort_low() {
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Low),
+        );
+        assert_eq!(body["reasoning"]["effort"], "low");
+    }
+
+    #[test]
+    fn effective_model_overrides_cfg_model_in_anthropic_body() {
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "override-model",
+            None,
+        );
+        assert_eq!(body["model"], "override-model");
+    }
+
+    #[test]
+    fn effective_model_overrides_cfg_model_in_openai_body() {
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "override-model",
+            None,
+        );
+        assert_eq!(body["model"], "override-model");
     }
 
     /// Regression: a connection that is accepted and then dropped before any

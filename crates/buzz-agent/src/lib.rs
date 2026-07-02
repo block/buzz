@@ -31,14 +31,19 @@ use crate::mcp::McpRegistry;
 use crate::types::{ContentBlock, HistoryItem};
 use crate::wire::{
     classify, Inbound, InitializeParams, SessionCancelParams, SessionNewParams,
-    SessionPromptParams, SessionSteerParams, WireMsg, WireSender, INVALID_PARAMS, METHOD_NOT_FOUND,
-    PARSE_ERROR,
+    SessionPromptParams, SessionSetModelParams, SessionSteerParams, WireMsg, WireSender,
+    INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR,
 };
 
 struct App {
     cfg: Config,
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// Cached model catalog for Databricks providers. Populated lazily on the
+    /// first `session/new` call. `None` means discovery hasn't run yet or the
+    /// provider is not Databricks; an empty vec means discovery ran but returned
+    /// no models (auth missing or list empty).
+    models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
 }
 
 struct Session {
@@ -71,6 +76,10 @@ struct Session {
     /// with it so the gate can account for history appended since.
     last_request_history_bytes: Option<usize>,
     effective_system_prompt: Arc<str>,
+    /// Per-session model override set by `session/set_model`. When `Some`,
+    /// overrides `App::cfg.model` for all LLM calls on this session. Persists
+    /// across `session/prompt` calls until changed.
+    effective_model: Option<String>,
 }
 
 fn die(msg: String) -> ! {
@@ -135,6 +144,7 @@ async fn async_main() {
         cfg,
         llm,
         sessions: Mutex::new(HashMap::new()),
+        models_cache: tokio::sync::OnceCell::new(),
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
     let writer = tokio::spawn(wire::writer_task(wire_rx));
@@ -206,6 +216,9 @@ async fn handle_request(
             tokio::spawn(async move { session_new(&app, id, params, &wire_tx).await });
         }
         "session/prompt" => spawn_prompt(app.clone(), id, params, wire_tx.clone()),
+        "session/set_model" => {
+            set_model_session(app, id, params, wire_tx).await;
+        }
         "session/cancel" => {
             cancel_session(app, params).await;
             wire::send(wire_tx, wire::ok(id, Value::Null)).await;
@@ -365,10 +378,63 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             last_request_input_tokens: None,
             last_request_history_bytes: None,
             effective_system_prompt,
+            effective_model: None,
         },
     );
     drop(sessions);
-    wire::send(wire_tx, wire::ok(id, json!({ "sessionId": session_id }))).await;
+
+    // Build a models catalog for the `session/new` response. For Databricks
+    // providers this advertises available models so the desktop ModelPicker and
+    // pool can resolve `session/set_model` switches. For Anthropic/OpenAI we
+    // report only the configured model — live switching on those providers
+    // effectively requires respawn.
+    let available_models: Vec<Value> = {
+        use crate::config::Provider;
+        match app.cfg.provider {
+            Provider::Databricks | Provider::DatabricksV2 => {
+                let entries = app
+                    .models_cache
+                    .get_or_init(|| async {
+                        match discover_databricks_models(&app.cfg).await {
+                            Ok(models) => models,
+                            Err(e) => {
+                                tracing::warn!("model catalog discovery failed: {e}; using known-models fallback");
+                                // Fall back to the statically-known models list so the
+                                // response is never empty even without a browser token.
+                                DATABRICKS_V2_KNOWN_MODELS
+                                    .iter()
+                                    .map(|id| crate::catalog::ModelEntry {
+                                        id: id.to_string(),
+                                        name: id.to_string(),
+                                    })
+                                    .collect()
+                            }
+                        }
+                    })
+                    .await;
+                entries
+                    .iter()
+                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
+                    .collect()
+            }
+            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
+        }
+    };
+
+    wire::send(
+        wire_tx,
+        wire::ok(
+            id,
+            json!({
+                "sessionId": session_id,
+                "models": {
+                    "currentModelId": app.cfg.model,
+                    "availableModels": available_models,
+                },
+            }),
+        ),
+    )
+    .await;
 }
 
 fn decode<T: serde::de::DeserializeOwned>(params: Value, stage: &str) -> Result<T, String> {
@@ -385,6 +451,46 @@ async fn cancel_session(app: &Arc<App>, params: Value) {
             let _ = s.cancel_tx.send(true);
         }
     }
+}
+
+/// Handle `session/set_model`: apply a per-session model override immediately.
+///
+/// Validation:
+/// - Unknown `sessionId` → `invalid_params`.
+/// - Empty `modelId` → `invalid_params`.
+///
+/// On success: stores `model_id` on the session and responds `{ sessionId, modelId }`.
+/// The override is picked up by the next `session/prompt` call on this session.
+async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
+    let p: SessionSetModelParams = match decode(params, "session/set_model") {
+        Ok(p) => p,
+        Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
+    };
+    if p.model_id.trim().is_empty() {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "session/set_model: modelId must not be empty",
+        )
+        .await;
+    }
+    let mut sessions = app.sessions.lock().await;
+    let Some(s) = sessions.get_mut(&p.session_id) else {
+        return reject(wire_tx, id, INVALID_PARAMS, "session/set_model: unknown session").await;
+    };
+    s.effective_model = Some(p.model_id.clone());
+    tracing::info!(
+        session_id = %p.session_id,
+        model_id = %p.model_id,
+        "session/set_model: model overridden"
+    );
+    drop(sessions);
+    wire::send(
+        wire_tx,
+        wire::ok(id, json!({ "sessionId": p.session_id, "modelId": p.model_id })),
+    )
+    .await;
 }
 
 /// Handle `_goose/unstable/session/steer`: queue user input into the in-flight
@@ -487,6 +593,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         mut last_request_history_bytes,
         mut cancel_rx,
         effective_system_prompt,
+        effective_model_override,
         run_id,
         mut steer_rx,
     ) = match acquire_session(&app, &p.session_id).await {
@@ -512,8 +619,13 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         ),
     )
     .await;
+    // Resolve effective model: session override wins over config default.
+    let effective_model_str = effective_model_override
+        .as_deref()
+        .unwrap_or(&app.cfg.model);
     let mut ctx = RunCtx {
         cfg: &app.cfg,
+        effective_model: effective_model_str,
         session_id: &sid,
         system_prompt: &effective_system_prompt,
         llm: &app.llm,
@@ -570,6 +682,7 @@ async fn acquire_session(
         Option<usize>,
         watch::Receiver<bool>,
         Arc<str>,
+        Option<String>,
         String,
         mpsc::UnboundedReceiver<Vec<ContentBlock>>,
     ),
@@ -593,6 +706,7 @@ async fn acquire_session(
     s.active_run_id = Some(run_id.clone());
     let (steer_tx, steer_rx) = mpsc::unbounded_channel();
     s.steer_tx = Some(steer_tx);
+    let effective_model = s.effective_model.clone();
     Ok((
         s.id.clone(),
         s.mcp.clone(),
@@ -605,6 +719,7 @@ async fn acquire_session(
         s.last_request_history_bytes,
         rx,
         Arc::clone(&s.effective_system_prompt),
+        effective_model,
         run_id,
         steer_rx,
     ))
