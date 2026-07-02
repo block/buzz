@@ -85,6 +85,7 @@ async function seedProjects(page: Page) {
             status: "In Progress",
             statusEventId: null,
             updatedAt: 1_782_390_100,
+            comments: [],
           },
           {
             id: "b".repeat(64),
@@ -98,6 +99,7 @@ async function seedProjects(page: Page) {
             status: "Done",
             statusEventId: null,
             updatedAt: 1_782_390_200,
+            comments: [],
           },
         ],
       );
@@ -133,23 +135,37 @@ async function seedProjects(page: Page) {
           [project.repoAddress]: {
             repoAddress: project.repoAddress,
             issueCount: 2,
+            prCount: 1,
+            commitCount: 2,
             activityCount: 5,
             updatedAt: 1_782_390_300,
             participantPubkeys: [brainPubkey, thomasPubkey],
+            latestCommit: {
+              author: brainPubkey,
+              commit: "0123456789abcdef0123456789abcdef01234567",
+              createdAt: 1_782_390_250,
+              title: "Wire trello board columns to git tickets",
+            },
           },
           [secondProject.repoAddress]: {
             repoAddress: secondProject.repoAddress,
             issueCount: 1,
+            prCount: 0,
+            commitCount: 1,
             activityCount: 2,
             updatedAt: 1_782_300_100,
             participantPubkeys: [brainPubkey],
+            latestCommit: null,
           },
           [thirdProject.repoAddress]: {
             repoAddress: thirdProject.repoAddress,
             issueCount: 0,
+            prCount: 0,
+            commitCount: 0,
             activityCount: 0,
             updatedAt: 0,
             participantPubkeys: [],
+            latestCommit: null,
           },
         },
       );
@@ -194,15 +210,23 @@ test.describe("project cards", () => {
 
     const card = page.getByTestId("project-card-git-ticket-trello");
     await expect(card).toBeVisible();
-    await expect(card.getByText("Agent: Brain")).toBeVisible();
+    // The owner (agent) avatar renders in the card footer people stack.
+    await expect(card.getByRole("img", { name: "Brain avatar" })).toBeVisible();
     await expect(
-      card.getByTestId("project-work-owner-avatar-image"),
+      card.getByText("Wire trello board columns to git tickets"),
     ).toBeVisible();
+    await expect(card.getByText("2 commits · 1 PR · 2 issues")).toBeVisible();
 
+    // Terminal and delete actions live in the card's overflow menu.
     await card.hover();
+    await page.getByLabel("More options for Git Ticket Trello Board").click();
     await expect(
-      page.getByLabel("Delete Git Ticket Trello Board"),
+      page.getByRole("menuitem", { name: "Clone & open in Terminal" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("menuitem", { name: "Delete project" }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
 
     await waitForAnimations(page);
     await card.screenshot({ path: `${SHOTS}/01-project-grid-card.png` });
@@ -214,18 +238,22 @@ test.describe("project cards", () => {
     await row.screenshot({ path: `${SHOTS}/02-project-list-row.png` });
 
     await row.click();
+    // The detail view lands on Overview; the file browser lives in Files.
     await expect(page.getByRole("tab", { name: "Files" })).toBeVisible();
-    await expect(
-      page.getByRole("button", {
-        name: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
-      }),
-    ).toBeVisible();
-    await expect(page.getByText("return <WorkspaceTabs")).toBeVisible();
+    await page.getByRole("tab", { name: "Files" }).click();
+    await expect(page.getByLabel("Open directory desktop")).toBeVisible();
     await waitForAnimations(page);
     await page.screenshot({
       path: `${SHOTS}/03-project-detail-files-tab.png`,
       clip: { x: 240, y: 64, width: 880, height: 620 },
     });
+
+    // Walk the tree down to a file and confirm its preview renders.
+    for (const directory of ["desktop", "src", "features", "projects", "ui"]) {
+      await page.getByLabel(`Open directory ${directory}`).click();
+    }
+    await page.getByLabel("Open file ProjectDetailScreen.tsx").click();
+    await expect(page.getByText("return <WorkspaceTabs")).toBeVisible();
 
     await page.getByRole("tab", { name: "Issues" }).click();
     await expect(
