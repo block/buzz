@@ -218,14 +218,17 @@ fn gpt5_token_matches(lower_model: &str, token: &str) -> bool {
     false
 }
 
-/// Like `gpt5_token_matches` but additionally rejects short purely-numeric suffixes — used
-/// for the base `gpt-5` / `gpt5` token to avoid false-matching unrecognized version segments.
+/// Like `gpt5_token_matches` but additionally rejects short version-like numeric suffixes —
+/// used for the base `gpt-5` / `gpt5` token to avoid false-matching unrecognized versions.
 ///
 /// After a `-` separator:
 /// - `-<non-digit>…` e.g. `-pro` → **accepted** (capability suffix, no digits)
-/// - `-<digits><non-digit>…` e.g. `-4o`, `-1106-preview` → **accepted** (digit+variant)
-/// - `-<1-3 digits><end-of-string>` e.g. `-10`, `-5` → **rejected** (bare version number)
-/// - `-<4+ digits><end-of-string>` e.g. `-1106`, `-0514` → **accepted** (date segment)
+/// - `digit_run == 1-3` AND the char right after the digits is a **letter** e.g. `-4o` →
+///   **accepted** (real variant shape: digit + letter)
+/// - `digit_run == 1-3` AND the char after the digits is end-of-string, `-`, `.`, or other
+///   separator e.g. `-10`, `-10-preview` → **rejected** (version-like suffix)
+/// - `digit_run >= 4` regardless of what follows e.g. `-1106`, `-1106-preview`, `-0514` →
+///   **accepted** (date/build segment)
 fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = lower_model[start..].find(token) {
@@ -241,13 +244,17 @@ fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
             if digit_run == 0 {
                 // No leading digit (e.g. '-pro'): capability suffix → accepted.
                 true
-            } else if !tail[digit_run..].is_empty() {
-                // Digit run followed by non-digit (e.g. '-4o', '-1106-preview'): variant → accepted.
+            } else if digit_run >= 4 {
+                // 4+ digit run (e.g. '-1106', '-1106-preview', '-0514'): date/build → accepted.
                 true
             } else {
-                // Pure digit run (nothing after digits). Accept only if it looks like a date
-                // (4+ digits). Short pure-number suffixes (1–3 digits) are version-like → rejected.
-                digit_run >= 4
+                // 1-3 digit run: accepted only if the char right after the digits is a letter
+                // (real variant shape like '-4o'). Separator/EOS after short digits is
+                // version-like (e.g. '-10', '-10-preview') → rejected.
+                tail[digit_run..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
             }
         } else {
             // Dot, letter, or other non-hyphen character directly after token → not base.
@@ -2178,6 +2185,41 @@ mod tests {
         assert!(
             openai_efforts_for_model("databricks-gpt-5-10").is_none(),
             "databricks-gpt-5-10 must pass through (short numeric suffix)"
+        );
+        // Short numeric suffix + textual continuation (e.g. a hypothetical 'gpt-5.10-preview')
+        // must also pass through — the digit count (1-3) determines version-like, regardless of
+        // what follows.
+        assert!(
+            openai_efforts_for_model("gpt-5-10-preview").is_none(),
+            "gpt-5-10-preview must pass through (short numeric version suffix with text tail)"
+        );
+        assert!(
+            openai_efforts_for_model("databricks-gpt-5-10-preview").is_none(),
+            "databricks-gpt-5-10-preview must pass through (short numeric version suffix with text tail)"
+        );
+    }
+
+    #[test]
+    fn openai_efforts_for_model_boundary_date_segment_with_suffix_is_base() {
+        // 4+ digit date segment followed by a textual suffix must still resolve to the base
+        // table — the date length (>=4) determines it's a build/date, not a version number.
+        let result = openai_efforts_for_model("gpt-5-1106-preview");
+        assert!(
+            result.is_some(),
+            "gpt-5-1106-preview must match base table (4-digit date segment)"
+        );
+        let supported = result.unwrap();
+        assert!(
+            supported.contains(&ThinkingEffort::Minimal),
+            "gpt-5-1106-preview (base) must support minimal"
+        );
+        assert!(
+            !supported.contains(&ThinkingEffort::None),
+            "gpt-5-1106-preview (base) must NOT support none"
+        );
+        assert!(
+            !supported.contains(&ThinkingEffort::XHigh),
+            "gpt-5-1106-preview (base) must NOT support xhigh"
         );
     }
 
