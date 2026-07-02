@@ -769,3 +769,63 @@ test("localMode_globalProvider_inherited_globalEnv_satisfies_key", () => {
     "ANTHROPIC_API_KEY must not be missing when globalEnvVars provides it",
   );
 });
+});
+
+// ── Regression: required key stays in requiredEnvKeys when agent fills it ───
+//
+// EnvVarsEditor.requiredKeys is the full locked-row list — it must remain
+// stable while the user is typing in the row. If a key were removed from
+// requiredKeys the moment the local value becomes non-empty, the locked amber
+// row would unmount mid-entry (focus drop, row swap).
+// missingEnvKeys is the gate-state list — it correctly drops the key once
+// the value is present. These are now two separate properties.
+
+test("localMode_requiredKey_stays_in_requiredEnvKeys_when_locally_filled", () => {
+  // Key starts missing.
+  const before = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.ok(
+    before.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "key must start in missingEnvKeys when no value is set",
+  );
+  assert.ok(
+    before.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "key must start in requiredEnvKeys when no value is set",
+  );
+
+  // User types a value — key is now locally filled.
+  const after = computeLocalModeGate({
+    envVars: { ANTHROPIC_API_KEY: "sk-test" },
+    globalEnvVars: {},
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    after.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "key must leave missingEnvKeys once a local value is set (gate satisfied)",
+  );
+  assert.ok(
+    after.requiredEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "key must REMAIN in requiredEnvKeys even when locally filled (locked row stays stable)",
+  );
+  assert.equal(
+    after.satisfied,
+    true,
+    "gate must be satisfied when the key is locally filled",
+  );
+});

@@ -441,8 +441,21 @@ export function computeLocalModeGate({
 }): {
   /** Normalized field names that are required but empty ("provider", "model"). */
   missingNormalizedFields: string[];
-  /** Credential env key names that are required but missing or empty. */
+  /**
+   * Credential env key names that are required but not yet supplied in the
+   * agent-local or global env (gate state — drives the readiness badge).
+   * A key is removed from this list as soon as ANY env value provides it.
+   */
   missingEnvKeys: string[];
+  /**
+   * Full list of credential env keys that need a locked amber row in
+   * EnvVarsEditor — uses the effective provider so an agent inheriting a
+   * global provider shows the correct rows. Excludes keys already satisfied
+   * by global defaults or the runtime config file (those are shown
+   * differently or not at all). Includes locally-filled keys so the locked
+   * row remains stable while the user types a value.
+   */
+  requiredEnvKeys: string[];
   /** Env keys that are not set in Buzz but are satisfied in the runtime's
    *  config file (e.g. "Set in goose config"). */
   fileSatisfiedEnvKeys: string[];
@@ -453,6 +466,7 @@ export function computeLocalModeGate({
     return {
       missingNormalizedFields: [],
       missingEnvKeys: [],
+      requiredEnvKeys: [],
       fileSatisfiedEnvKeys: [],
       satisfied: true,
     };
@@ -494,27 +508,37 @@ export function computeLocalModeGate({
 
   const missingEnvKeys: string[] = [];
   const fileSatisfiedEnvKeys: string[] = [];
+  // requiredEnvKeys: the full locked-row list for EnvVarsEditor. Includes
+  // locally-filled keys so the amber row stays stable while the user types.
+  // Excludes keys satisfied by global defaults (no locked row needed — the
+  // key is already set) or by the runtime config file (shown differently).
+  const requiredEnvKeys: string[] = [];
   for (const key of requiredKeys) {
     const agentValue = envVars[key] ?? "";
     const globalValue = globalEnvVars?.[key] ?? "";
-    if (agentValue.length > 0) {
-      // Set in agent env — satisfied, no action.
+    if (globalValue.length > 0) {
+      // Globally satisfied — not a missing key, and no locked row needed.
     } else if (bakedSatisfiedSet.has(key)) {
-      // Not in agent or global env but covered by the baked build env — silenced.
+      // Not in global env but covered by the baked build env — silenced.
       // Don't add to fileSatisfiedEnvKeys; baked keys produce no info row.
-    } else if (globalValue.length > 0) {
-      // Not in agent or baked env but covered by global defaults — satisfied.
     } else if (fileSatisfiedKeys.has(key)) {
       // Not in Buzz env or global but present in the runtime config file.
       fileSatisfiedEnvKeys.push(key);
     } else {
-      missingEnvKeys.push(key);
+      // Key needs a locked amber row in EnvVarsEditor (whether or not the
+      // agent-local value is already filled — keep the row stable).
+      requiredEnvKeys.push(key);
+      if (agentValue.length === 0) {
+        // Not filled anywhere — also surfaces as missing for gate state.
+        missingEnvKeys.push(key);
+      }
     }
   }
 
   return {
     missingNormalizedFields,
     missingEnvKeys,
+    requiredEnvKeys,
     fileSatisfiedEnvKeys,
     satisfied:
       missingNormalizedFields.length === 0 && missingEnvKeys.length === 0,
