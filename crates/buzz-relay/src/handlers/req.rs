@@ -31,6 +31,12 @@ const MAX_SUBSCRIPTIONS: usize = 1024;
 /// `buffer_unordered`), so dedupe/trace/error semantics are unchanged.
 pub(crate) const FILTER_QUERY_CONCURRENCY: usize = 4;
 
+// Guard: keep the bound a small fraction of any sane Postgres pool size.
+// Raising it past this range requires re-running the relay bench and
+// reconsidering pool contention (see docs above). Compile-time — violating
+// the range fails the build.
+const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
+
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
     sub_id: String,
@@ -1177,15 +1183,6 @@ mod tests {
             (0..n).collect::<Vec<_>>(),
             "buffered pipeline must preserve input (filter) order regardless of completion order"
         );
-    }
-
-    /// Guard: the concurrency bound stays a small fraction of any sane pool
-    /// size. If someone raises it past this, they must re-run the relay bench
-    /// and reconsider pool contention (see FILTER_QUERY_CONCURRENCY docs).
-    #[test]
-    fn filter_query_concurrency_is_bounded() {
-        assert!(FILTER_QUERY_CONCURRENCY >= 2);
-        assert!(FILTER_QUERY_CONCURRENCY <= 8);
     }
 
     #[test]
