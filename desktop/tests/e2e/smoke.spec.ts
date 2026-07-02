@@ -146,7 +146,13 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .getByTestId("persona-provider-api-key")
     .fill("sk-test-api-key-for-e2e");
 
-  await page.getByRole("button", { name: "Advanced", exact: true }).click();
+  // Fix 3 (auto-open Advanced when required keys appear) may have already
+  // opened the section; only click to open if it is currently collapsed.
+  const advancedToggle = page.getByRole("button", { name: "Advanced", exact: true });
+  if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
+    await advancedToggle.click();
+  }
+  await expect(page.locator("#persona-parallelism")).toBeVisible();
   await page.locator("#persona-parallelism").fill("3");
 
   // The start-after-create toggle defaults ON, so submitting mints a running
