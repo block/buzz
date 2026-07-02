@@ -388,55 +388,33 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     // pool can resolve `session/set_model` switches. For Anthropic/OpenAI we
     // report only the configured model — live switching on those providers
     // effectively requires respawn.
+    //
+    // `models_cache` caches only a successful discovery result (`get_or_try_init`
+    // leaves the cell empty on error so the next `session/new` call retries). On
+    // discovery failure the fallback is used for the immediate response without
+    // being written to the cell.
     let available_models: Vec<Value> = {
         use crate::config::Provider;
         match app.cfg.provider {
-            Provider::DatabricksV2 => {
-                // AI Gateway v2 supports model switching across the published catalog.
-                // On discovery failure, fall back to the statically-known v2 model IDs
-                // so the response is never empty even without a browser token.
-                let entries = app
+            Provider::Databricks | Provider::DatabricksV2 => {
+                // Try to get a previously-cached successful discovery result; if the cell is
+                // empty, run discovery now. `get_or_try_init` only populates the cell on `Ok`
+                // — an `Err` leaves it empty so the next session retries rather than
+                // re-serving a stale transient-failure fallback forever.
+                let models = match app
                     .models_cache
-                    .get_or_init(|| async {
-                        match discover_databricks_models(&app.cfg).await {
-                            Ok(models) => models,
-                            Err(e) => {
-                                tracing::warn!("model catalog discovery failed: {e}; using known-models fallback");
-                                crate::catalog::discovery_failure_fallback(
-                                    app.cfg.provider,
-                                    &app.cfg.model,
-                                )
-                            }
-                        }
-                    })
-                    .await;
-                entries
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
-            }
-            Provider::Databricks => {
-                // Legacy Databricks model serving routes to a single endpoint per model.
-                // The DATABRICKS_V2_KNOWN_MODELS list is AI Gateway v2 IDs that
-                // `/serving-endpoints/{model}/invocations` may not serve — do not advertise
-                // them for legacy Databricks. On discovery failure, advertise only the
-                // configured model.
-                let entries = app
-                    .models_cache
-                    .get_or_init(|| async {
-                        match discover_databricks_models(&app.cfg).await {
-                            Ok(models) => models,
-                            Err(e) => {
-                                tracing::warn!("model catalog discovery failed: {e}; advertising configured model only");
-                                crate::catalog::discovery_failure_fallback(
-                                    app.cfg.provider,
-                                    &app.cfg.model,
-                                )
-                            }
-                        }
-                    })
-                    .await;
-                entries
+                    .get_or_try_init(|| async { discover_databricks_models(&app.cfg).await })
+                    .await
+                {
+                    Ok(cached) => cached.clone(),
+                    Err(e) => {
+                        tracing::warn!(
+                            "model catalog discovery failed: {e}; using fallback (will retry next session)"
+                        );
+                        crate::catalog::discovery_failure_fallback(app.cfg.provider, &app.cfg.model)
+                    }
+                };
+                models
                     .iter()
                     .map(|m| json!({ "modelId": m.id, "name": m.name }))
                     .collect()
@@ -768,6 +746,40 @@ fn session_token() -> Result<String, String> {
 mod tests {
     use crate::catalog::{discovery_failure_fallback, DATABRICKS_V2_KNOWN_MODELS};
     use crate::config::Provider;
+
+    /// Regression: discovery errors must not pin the models_cache for the process lifetime.
+    ///
+    /// `session_new` uses `get_or_try_init` so an `Err` leaves the `OnceCell` empty and a
+    /// subsequent `session/new` call retries discovery. This test verifies that contract
+    /// directly against `tokio::sync::OnceCell` — the same type used in `AppState`.
+    #[tokio::test]
+    async fn models_cache_does_not_pin_on_discovery_error() {
+        let cell: tokio::sync::OnceCell<Vec<String>> = tokio::sync::OnceCell::new();
+
+        // First call — discovery fails. Cell must remain empty.
+        let first = cell
+            .get_or_try_init(|| async { Err::<Vec<String>, &str>("transient failure") })
+            .await;
+        assert!(first.is_err(), "get_or_try_init must propagate the error");
+        assert!(
+            cell.get().is_none(),
+            "cell must be empty after an error — discovery retry will be attempted next session"
+        );
+
+        // Second call — discovery succeeds. Cell is now populated.
+        let second = cell
+            .get_or_try_init(|| async { Ok::<Vec<String>, &str>(vec!["model-a".to_string()]) })
+            .await;
+        assert_eq!(
+            second.unwrap(),
+            &["model-a"],
+            "second call must succeed and populate cell"
+        );
+        assert!(
+            cell.get().is_some(),
+            "cell must be populated after a successful discovery"
+        );
+    }
 
     /// Regression: legacy `Provider::Databricks` must not advertise v2 AI Gateway model IDs
     /// on discovery failure (Wes W1). This test calls `discovery_failure_fallback` directly —
