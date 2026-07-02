@@ -112,7 +112,7 @@ pub enum ReactionEventInsertOutcome {
     /// Reaction row and event transaction committed.
     Inserted {
         /// Stored reaction event.
-        stored_event: StoredEvent,
+        stored_event: Box<StoredEvent>,
         /// Whether the event row itself was newly inserted.
         was_inserted: bool,
     },
@@ -1194,6 +1194,7 @@ pub async fn insert_event_with_thread_metadata(
 /// Ordering is load-bearing: resolve target, upsert/reactivate the reaction row,
 /// check `rows_affected`, then insert the kind:7 event. Active duplicates return
 /// before event insertion so duplicate reactions never store a duplicate kind:7.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_reaction_event_with_thread_metadata(
     pool: &PgPool,
     community_id: CommunityId,
@@ -1251,7 +1252,7 @@ pub async fn insert_reaction_event_with_thread_metadata(
     tx.commit().await?;
 
     Ok(ReactionEventInsertOutcome::Inserted {
-        stored_event,
+        stored_event: Box::new(stored_event),
         was_inserted,
     })
 }
