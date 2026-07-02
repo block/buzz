@@ -479,3 +479,66 @@ test("localMode_globalEnvVars_empty_still_fails_gate", () => {
     "ANTHROPIC_API_KEY must be in missingEnvKeys when neither source provides it",
   );
 });
+
+// ── Regression: global provider inherited, no credential key supplied ────────
+//
+// F3 regression from PR #1448 Batch-3 review: the old dialog code derived
+// required keys from the *agent-local* provider only and filtered by
+// globalConfig.env_vars. An agent with no per-agent provider but globalProvider
+// = "anthropic" would show no required-key row (dialog-local provider is ""),
+// even though readiness.rs would flag it as NotReady (credential missing).
+// computeLocalModeGate must surface the key when the effective provider is
+// inherited from globalProvider and neither agent nor global env supplies it.
+
+test("localMode_globalProvider_inherited_no_key_surfacesAsRequired", () => {
+  // Agent has no per-agent provider; global provider is "anthropic".
+  // Neither agent env nor global env has ANTHROPIC_API_KEY.
+  // Expected: the gate must surface ANTHROPIC_API_KEY as missing — the dialog
+  // must show the amber required row so the user knows what to configure.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: {},
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    false,
+    "gate must not be satisfied when inherited global provider requires a key that is not supplied",
+  );
+  assert.ok(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    "ANTHROPIC_API_KEY must be in missingEnvKeys when global provider is anthropic and no key is in env",
+  );
+});
+
+test("localMode_globalProvider_inherited_globalEnv_satisfies_key", () => {
+  // Agent has no per-agent provider; global provider is "anthropic".
+  // Global env has ANTHROPIC_API_KEY — should be satisfied.
+  const result = computeLocalModeGate({
+    envVars: {},
+    globalEnvVars: { ANTHROPIC_API_KEY: "sk-global" },
+    globalProvider: "anthropic",
+    isProviderMode: false,
+    model: "claude-3-5-sonnet-20241022",
+    provider: "",
+    runtimeId: "buzz-agent",
+    useMesh: false,
+  });
+
+  assert.equal(
+    result.satisfied,
+    true,
+    "gate must be satisfied when inherited global provider's key is in globalEnvVars",
+  );
+  assert.equal(
+    result.missingEnvKeys.includes("ANTHROPIC_API_KEY"),
+    false,
+    "ANTHROPIC_API_KEY must not be missing when globalEnvVars provides it",
+  );
+});

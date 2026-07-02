@@ -41,7 +41,7 @@ import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import {
-  requiredCredentialEnvKeys,
+  computeLocalModeGate,
   runtimeSupportsLlmProviderSelection,
   shouldClearKnownModelForSelectionScope,
   getProviderApiKeyEnvVar,
@@ -184,33 +184,38 @@ export function CreateAgentDialog({
     selectedRuntimeId,
     { enabled: open },
   );
-  // Credential keys satisfied by the runtime file config (e.g. goose config.yaml).
-  // These are shown as "Set in goose config" rows rather than amber required rows.
-  const fileSatisfiedEnvKeys = React.useMemo(() => {
-    if (!runtimeFileConfig) return [] as string[];
-    const allKeys = requiredCredentialEnvKeys(
-      selectedRuntimeId,
-      runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
-    );
-    return allKeys.filter(
-      (key) =>
-        (envVars[key] ?? "").length === 0 &&
-        runtimeFileConfig.satisfiedEnvKeys.includes(key),
-    );
-  }, [runtimeFileConfig, selectedRuntimeId, provider, envVars]);
-
-  const requiredEnvKeys = React.useMemo(
-    () =>
-      requiredCredentialEnvKeys(
+  // Derive required/file-satisfied env keys from the shared gate so the dialog
+  // and readiness.rs always agree on which keys are required. Passing global
+  // provider/model/env ensures an agent inheriting a global provider shows the
+  // correct credential rows even before the user sets a per-agent provider.
+  const { missingEnvKeys: requiredEnvKeys, fileSatisfiedEnvKeys } =
+    React.useMemo(
+      () =>
+        computeLocalModeGate({
+          envVars,
+          globalEnvVars: globalConfig.env_vars,
+          globalProvider: globalConfig.provider ?? "",
+          globalModel: globalConfig.model ?? "",
+          isProviderMode,
+          model,
+          provider,
+          runtimeId: selectedRuntimeId,
+          runtimeFileConfig,
+          useMesh,
+        }),
+      [
+        envVars,
+        globalConfig.env_vars,
+        globalConfig.provider,
+        globalConfig.model,
+        isProviderMode,
+        model,
+        provider,
+        runtimeFileConfig,
         selectedRuntimeId,
-        runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
-      ).filter(
-        (key) =>
-          !fileSatisfiedEnvKeys.includes(key) &&
-          (globalConfig.env_vars[key] ?? "").length === 0,
-      ),
-    [selectedRuntimeId, provider, fileSatisfiedEnvKeys, globalConfig.env_vars],
-  );
+        useMesh,
+      ],
+    );
 
   // Clear model when provider scope changes, mirroring EditAgentDialog.
   React.useEffect(() => {
