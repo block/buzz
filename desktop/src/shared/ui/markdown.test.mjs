@@ -656,3 +656,130 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
   assert.equal(kids[0].type, "inlineCode");
   assert.equal(kids[0].value, "buzz://message?channel=c&id=m");
 });
+
+// ── selectProseOrNudge render-level guard ─────────────────────────────────────
+//
+// `MarkdownInner` calls `selectProseOrNudge(configNudge, markdownNode)` —
+// the single production copy of the prose-suppression branch, exported from
+// `computeConfigNudge.ts`. These tests import and call that exact function
+// through a minimal stub so a revert that changes its behavior is caught
+// at unit-test time.
+//
+// (The full `Markdown` component cannot be rendered in this environment:
+// emoji-mart JSON imports crash the module loader before React runs.)
+
+import {
+  computeConfigNudge,
+  selectProseOrNudge,
+} from "../lib/computeConfigNudge.ts";
+import { stripConfigNudgeSentinel } from "../lib/configNudge.ts";
+
+const AGENT_PUBKEY =
+  "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+const HUMAN_PUBKEY =
+  "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+function nudgeBody(agentPubkey) {
+  return [
+    "**Fizz** needs configuration before it can respond:",
+    "- set `ANTHROPIC_API_KEY` in Edit Agent → Environment variables",
+    "",
+    "Open Edit Agent in the Buzz app to set these.",
+    "",
+    "```buzz:config-nudge",
+    JSON.stringify({
+      agent_name: "Fizz",
+      agent_pubkey: agentPubkey,
+      requirements: [{ surface: "env_key", key: "ANTHROPIC_API_KEY" }],
+    }),
+    "```",
+  ].join("\n");
+}
+
+// Minimal wrapper that calls the real production functions from
+// `computeConfigNudge.ts` — `computeConfigNudge` to detect the payload and
+// `selectProseOrNudge` for the prose-suppression branch — without importing
+// any Tauri or context dependencies.
+function GuardStub({ content, configNudgeAuthorPubkey }) {
+  const configNudge = computeConfigNudge(
+    content,
+    true,
+    configNudgeAuthorPubkey,
+  );
+  const stripped =
+    configNudge !== null ? stripConfigNudgeSentinel(content) : content;
+  const markdownNode = React.createElement(
+    "div",
+    { "data-markdown-prose": "" },
+    stripped,
+  );
+  return React.createElement(
+    "div",
+    null,
+    selectProseOrNudge(configNudge, markdownNode),
+    configNudge !== null
+      ? React.createElement("div", { "data-config-nudge": "" })
+      : null,
+  );
+}
+
+test("nudgeGuard_sentinelPresentMatchingAuthor_cardRenderedProseAbsent", () => {
+  const body = nudgeBody(AGENT_PUBKEY);
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: body,
+      configNudgeAuthorPubkey: AGENT_PUBKEY,
+    }),
+  );
+  // Card placeholder rendered.
+  assert.ok(
+    html.includes("data-config-nudge"),
+    "data-config-nudge must be present when sentinel+author match",
+  );
+  // Prose suppressed — the raw fallback text must NOT appear outside the card.
+  assert.ok(
+    !html.includes("needs configuration before it can respond"),
+    "prose must be absent when card renders",
+  );
+  assert.ok(
+    !html.includes("data-markdown-prose"),
+    "markdownNode must be null (not rendered) when configNudge is non-null",
+  );
+});
+
+test("nudgeGuard_sentinelPresentWrongAuthor_proseRenderedCardAbsent", () => {
+  // Sentinel present, but author pubkey is human — auth guard rejects, prose shown.
+  const body = nudgeBody(AGENT_PUBKEY);
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: body,
+      configNudgeAuthorPubkey: HUMAN_PUBKEY,
+    }),
+  );
+  assert.ok(
+    !html.includes("data-config-nudge"),
+    "card must be absent when author pubkey does not match sentinel agent_pubkey",
+  );
+  assert.ok(
+    html.includes("data-markdown-prose"),
+    "markdownNode must render when configNudge is null (auth mismatch)",
+  );
+});
+
+test("nudgeGuard_noSentinel_proseRenderedCardAbsent", () => {
+  const plain = "Hello, this is a normal message with no sentinel.";
+  const html = renderToStaticMarkup(
+    React.createElement(GuardStub, {
+      content: plain,
+      configNudgeAuthorPubkey: AGENT_PUBKEY,
+    }),
+  );
+  assert.ok(
+    !html.includes("data-config-nudge"),
+    "card must be absent when no sentinel is present",
+  );
+  assert.ok(
+    html.includes("data-markdown-prose"),
+    "markdownNode must render when no sentinel is present",
+  );
+});

@@ -12,6 +12,7 @@ pub(crate) mod persona_events;
 mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
+pub(crate) mod readiness;
 #[cfg(feature = "mesh-llm")]
 mod relay_mesh;
 mod repos;
@@ -32,6 +33,9 @@ pub use persona_card::*;
 pub use personas::*;
 #[cfg(windows)]
 pub use process_lifecycle::*;
+pub(crate) use readiness::{
+    agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
+};
 #[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
 pub use repos::{

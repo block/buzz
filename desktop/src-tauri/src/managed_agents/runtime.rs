@@ -1747,6 +1747,92 @@ pub fn spawn_agent_child(
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
+
+    // ── Readiness check: set setup-payload if agent is not ready ─────────────
+    //
+    // Build the effective env the agent would have at start-time, run the
+    // readiness predicate, and if anything is missing, serialize the payload
+    // into BUZZ_ACP_SETUP_PAYLOAD.  buzz-acp detects this env var on startup
+    // and enters the minimal setup-listener mode instead of the agent pool.
+    //
+    // SECURITY: BUZZ_ACP_SETUP_PAYLOAD is in RESERVED_ENV_KEYS so user env
+    // cannot set it, but we also explicitly remove it after writing user env
+    // to guard against the parent-process environment. We then set it only
+    // when desktop has computed NotReady — the desktop is the sole readiness
+    // source and buzz-acp only transports the payload.
+    //
+    // The JSON format mirrors `setup_mode::SetupPayload` in buzz-acp:
+    //   { "agent_name": "...", "agent_pubkey": "...", "requirements": [{ "surface": "...", ... }] }
+    {
+        use crate::managed_agents::{
+            agent_readiness, resolve_effective_agent_env, AgentReadiness, Requirement,
+        };
+
+        let effective = resolve_effective_agent_env(record, &personas, runtime_meta);
+        // Compute the optional payload before touching the command.
+        let setup_payload_json =
+            if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
+                let reqs: Vec<serde_json::Value> = requirements
+                    .into_iter()
+                    .map(|r| match r {
+                        Requirement::NormalizedField { field } => serde_json::json!({
+                            "surface": "normalized_field",
+                            "field": field,
+                        }),
+                        Requirement::EnvKey { key } => serde_json::json!({
+                            "surface": "env_key",
+                            "key": key,
+                        }),
+                        Requirement::CliLogin {
+                            probe_args,
+                            setup_copy,
+                        } => serde_json::json!({
+                            "surface": "cli_login",
+                            "probe_args": probe_args,
+                            "setup_copy": setup_copy,
+                        }),
+                    })
+                    .collect();
+                let payload = serde_json::json!({
+                    "agent_name": record.name,
+                    "agent_pubkey": record.pubkey,
+                    "requirements": reqs,
+                });
+                match serde_json::to_string(&payload) {
+                    Ok(json) => Some(json),
+                    Err(e) => {
+                        eprintln!(
+                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
+                            record.name
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        // Strip the key from the process-spawned command on every path.
+        // Two independent guards protect the invariant:
+        //   1. BUZZ_ACP_SETUP_PAYLOAD is in RESERVED_ENV_KEYS, so
+        //      merged_user_env() can never write it via saved/persona env.
+        //   2. This env_remove() clears any ambient parent-process value
+        //      inherited by std::process::Command before we conditionally
+        //      set the desktop-computed trusted value below.
+        // Note: merged_user_env() is written further below in this function;
+        // ordering relative to that call is NOT what makes this safe — the
+        // reserved-key strip (guard 1) handles user env regardless of order.
+        command.env_remove("BUZZ_ACP_SETUP_PAYLOAD");
+
+        // Set the payload only when desktop computed NotReady.
+        if let Some(json) = setup_payload_json {
+            command.env("BUZZ_ACP_SETUP_PAYLOAD", json);
+            eprintln!(
+                "buzz-desktop: agent {} not ready — spawning in setup-listener mode",
+                record.name
+            );
+        }
+    }
     // Only emit BUZZ_ACP_IDLE_TIMEOUT when the user has explicitly set an
     // override. When unset, the buzz-acp harness applies its own default
     // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/buzz-acp/src/config.rs),

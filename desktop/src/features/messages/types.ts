@@ -17,6 +17,13 @@ export type TimelineMessage = {
   renderKey?: string;
   createdAt: number;
   pubkey?: string;
+  /**
+   * Raw signer pubkey (`event.pubkey`), normalized to lowercase hex.
+   * Distinct from `pubkey`, which is the resolved display-author and may be
+   * overridden by `actor` or `p` tags. Use this field — not `pubkey` — for
+   * security-sensitive checks such as authenticating config-nudge cards.
+   */
+  signerPubkey?: string;
   author: string;
   avatarUrl?: string | null;
   role?: string;

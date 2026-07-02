@@ -495,3 +495,18 @@ fn extra_env_var_skipped_when_already_in_file_config_extra() {
         "normalized thinking key must not appear in advanced"
     );
 }
+
+#[test]
+fn missing_required_provider_still_returns_dropdown_field() {
+    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, true)
+        .expect("required provider field should be surfaced even when empty");
+
+    assert_eq!(provider.value, None);
+    assert_eq!(provider.origin, ConfigOrigin::EnvVar);
+    assert!(provider.is_required);
+}
+
+#[test]
+fn missing_optional_provider_stays_hidden() {
+    assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
+}

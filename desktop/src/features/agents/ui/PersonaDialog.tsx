@@ -41,6 +41,7 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_MODEL_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  computeLocalModeGate,
   formatRuntimeOptionLabel,
   getDefaultLlmProviderLabel,
   getDefaultPersonaRuntime,
@@ -53,6 +54,7 @@ import {
   hasPersonaModelOption,
   NO_RUNTIME_DROPDOWN_VALUE,
   providerRequiresExplicitModel,
+  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -62,10 +64,12 @@ import {
   sortPersonaRuntimes,
 } from "./personaDialogPickers";
 import { shouldClearModelForRuntimeChange } from "./personaRuntimeModel";
+import { RequiredFieldLabel } from "./personaProviderModelFields";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
+import { useRuntimeFileConfigQuery } from "../hooks";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -419,6 +423,35 @@ export function PersonaDialog({
     : "";
   const providerApiKeyFieldVisible =
     llmProviderFieldVisible && providerApiKeyConfig !== null;
+  // Required credential env keys for this runtime + provider combination.
+  // Used to show required markers on the LLM provider label and amber
+  // locked rows in the env vars editor.
+  // File-layer config for the selected runtime (e.g. goose config.yaml).
+  // Used to silence requirements already satisfied there.
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
+    enabled: open,
+  });
+  const localModeGate = computeLocalModeGate({
+    envVars,
+    isProviderMode: false,
+    model,
+    provider: trimmedProvider,
+    runtimeId: runtime,
+    runtimeFileConfig,
+    useMesh: false,
+  });
+  // Required keys for EnvVarsEditor amber rows: exclude file-satisfied keys
+  // so they render in the "Set in goose config" row instead.
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    runtime,
+    trimmedProvider,
+  ).filter((key) => !localModeGate.fileSatisfiedEnvKeys.includes(key));
+  // Provider required-ness is a static property of the runtime — it does not
+  // change based on whether the field is currently filled. Using the dynamic
+  // missingNormalizedFields check would flip the asterisk off once a value is
+  // selected, which is incoherent (required means required, not "required until
+  // satisfied"). runtimeSupportsLlmProviderSelection is the authoritative gate.
+  const providerIsRequired = runtimeSupportsLlmProviderSelection(runtime);
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired =
@@ -863,7 +896,7 @@ export function PersonaDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-runtime"
               >
-                Provider
+                Agent runtime
               </label>
               <PersonaDropdownField
                 disabled={isPending || runtimesLoading}
@@ -878,13 +911,17 @@ export function PersonaDialog({
 
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">
-                <label
-                  className="text-sm font-medium text-foreground"
+                <RequiredFieldLabel
                   htmlFor="persona-llm-provider"
+                  isRequired={providerIsRequired}
                 >
                   LLM provider
-                  <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-                </label>
+                  {!providerIsRequired ? (
+                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                      Optional
+                    </span>
+                  ) : null}
+                </RequiredFieldLabel>
                 <PersonaDropdownField
                   disabled={isPending}
                   id="persona-llm-provider"
@@ -972,9 +1009,11 @@ export function PersonaDialog({
                     <PersonaAdvancedFields
                       disabled={isPending}
                       envVars={advancedEnvVars}
+                      fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                       namePoolText={namePoolText}
                       onEnvVarsChange={handleAdvancedEnvVarsChange}
                       onNamePoolTextChange={setNamePoolText}
+                      requiredEnvKeys={requiredEnvKeys}
                     />
                   </motion.div>
                 ) : null}

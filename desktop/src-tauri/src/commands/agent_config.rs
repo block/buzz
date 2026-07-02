@@ -1,9 +1,11 @@
+use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
         config_bridge::{
+            read_goose_file_config,
             reader::read_config_surface,
             types::{
                 AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
@@ -15,6 +17,24 @@ use crate::{
         sync_managed_agent_processes, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
     },
 };
+
+/// Subset of the goose file config exposed to the frontend for gate evaluation.
+///
+/// Only the fields the dialog gate needs — not the full `RuntimeConfigSurface`.
+/// The gate uses this to know which requirements are already satisfied in the
+/// harness config file, so it can show "Set in goose config" rather than
+/// surfacing a false missing-key marker.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeFileConfigSubset {
+    /// Provider set in the harness config file, if any.
+    pub provider: Option<String>,
+    /// Model set in the harness config file, if any.
+    pub model: Option<String>,
+    /// Flat credential env keys found in the harness config file's `extra` map
+    /// (e.g. `DATABRICKS_HOST`).  Only non-empty values are included.
+    pub satisfied_env_keys: Vec<String>,
+}
 
 /// Resolve the config surface with persona values applied.
 ///
@@ -133,6 +153,34 @@ fn retag_persona_default(field: &mut Option<NormalizedField>) {
         if field.origin == ConfigOrigin::BuzzExplicit {
             field.origin = ConfigOrigin::PersonaDefault;
         }
+    }
+}
+
+/// Get the file-layer config for a runtime — used by the Create/Edit/Persona
+/// dialogs to know which requirements are already satisfied in the harness
+/// config file (e.g. `~/.config/goose/config.yaml`), so they can show
+/// "Set in goose config" instead of surfacing a false required-field marker.
+///
+/// Returns `null` when the runtime has no config file or it cannot be parsed.
+/// Currently only "goose" is supported; other runtimes return `null`.
+#[tauri::command]
+pub fn get_runtime_file_config(runtime_id: String) -> Option<RuntimeFileConfigSubset> {
+    match runtime_id.as_str() {
+        "goose" => {
+            let cfg = read_goose_file_config()?;
+            let satisfied_env_keys = cfg
+                .extra
+                .into_iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|(k, _)| k)
+                .collect();
+            Some(RuntimeFileConfigSubset {
+                provider: cfg.provider,
+                model: cfg.model,
+                satisfied_env_keys,
+            })
+        }
+        _ => None,
     }
 }
 

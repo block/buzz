@@ -795,7 +795,14 @@ pub async fn create_managed_agent(
                     .filter(|value| !value.is_empty())
                     .map(str::to_string)
             }),
-            provider: snapshot_provider,
+            provider: snapshot_provider.or_else(|| {
+                input
+                    .provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            }),
             persona_source_version: snapshot_source_version,
             mcp_toolsets: input
                 .mcp_toolsets
