@@ -904,7 +904,7 @@ async fn no_usage_turn_emits_no_usage_notification() {
     );
 
     // No usage notification must appear in the frames before the response.
-    let found = frames_before.iter().any(|v| is_usage_update(v));
+    let found = frames_before.iter().any(is_usage_update);
     assert!(
         !found,
         "expected NO usage_update notification when provider reports no usage; frames: {frames_before:#?}"
