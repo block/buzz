@@ -23,6 +23,9 @@ const ERROR_REFLECTION_SUFFIX: &str =
 
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
+    /// Effective model for this session. Usually equals `cfg.model`; overridden
+    /// per-session by `session/set_model`. All LLM calls use this value.
+    pub effective_model: &'a str,
     pub session_id: &'a str,
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
@@ -113,7 +116,7 @@ impl RunCtx<'_> {
             let response = tokio::select! {
                 biased;
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
-                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools) => r?,
+                r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools, self.effective_model) => r?,
                 _ = async {
                     // Keepalive ticker: emit a lightweight session update every 30s
                     // while waiting on the LLM provider. This resets the ACP harness

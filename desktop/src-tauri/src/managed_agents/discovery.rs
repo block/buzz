@@ -47,6 +47,11 @@ pub(crate) struct KnownAcpRuntime {
     pub config_file_format: Option<&'static str>,
     pub supports_acp_native_config: bool, // tier 1a: config/read+write
     pub thinking_env_var: Option<&'static str>,
+    /// Env var for normalizing `max_output_tokens`. `None` when the harness
+    /// does not have a first-class env var for this field (config-file only).
+    pub max_tokens_env_var: Option<&'static str>,
+    /// Env var for normalizing `context_limit`. `None` when not applicable.
+    pub context_limit_env_var: Option<&'static str>,
     /// Normalized field keys that must be set for this harness to function.
     /// Used by the config bridge to mark fields as required in the UI.
     /// Keys match the camelCase names used in `NormalizedConfig` (e.g. "model", "provider").
@@ -106,6 +111,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("yaml"),
         supports_acp_native_config: true,
         thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
+        context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
         required_normalized_fields: &["model", "provider"],
     },
     KnownAcpRuntime {
@@ -132,6 +139,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("json"),
         supports_acp_native_config: false,
         thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
         required_normalized_fields: &[],
     },
     KnownAcpRuntime {
@@ -158,6 +167,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_format: Some("toml"),
         supports_acp_native_config: false,
         thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
         required_normalized_fields: &[],
     },
     KnownAcpRuntime {
@@ -183,7 +194,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         config_file_path: None,
         config_file_format: None,
         supports_acp_native_config: false,
-        thinking_env_var: None,
+        thinking_env_var: Some("BUZZ_AGENT_THINKING_EFFORT"),
+        max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+        context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
         required_normalized_fields: &["model", "provider"],
     },
 ];

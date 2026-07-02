@@ -80,6 +80,16 @@ pub struct SessionSteerParams {
     pub expected_run_id: String,
 }
 
+/// Params for `session/set_model`: override the active model for an existing
+/// session without respawning. Applied immediately; subsequent prompts on this
+/// session use `model_id` instead of the configured `BUZZ_AGENT_MODEL`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSetModelParams {
+    pub session_id: String,
+    pub model_id: String,
+}
+
 pub fn classify(msg: &Value) -> Inbound {
     if !msg.is_object() || msg.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
         return Inbound::Invalid {

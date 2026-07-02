@@ -102,7 +102,10 @@ const overrides = new Map([
   // agents keep an installed runtime alias when the primary command is absent.
   // Load-bearing, not generic debt.
   // config-bridge: schema-driven field extraction adds ~26 lines. Queued to split.
-  ["src-tauri/src/managed_agents/discovery.rs", 1111],
+  // config-parity: max_tokens_env_var + context_limit_env_var fields added to
+  // KnownAcpRuntime (2 fields × 4 runtimes + discovery tests = ~13 lines).
+  // Load-bearing — required for buzz-agent normalized config parity.
+  ["src-tauri/src/managed_agents/discovery.rs", 1124],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
