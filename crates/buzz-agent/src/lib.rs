@@ -8,7 +8,6 @@ mod handoff;
 mod hints;
 mod llm;
 mod mcp;
-mod metric;
 pub mod types;
 mod wire;
 
@@ -31,16 +30,15 @@ use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::types::{ContentBlock, HistoryItem};
 use crate::wire::{
-    classify, Inbound, InitializeParams, SessionCancelParams, SessionNewParams,
-    SessionPromptParams, SessionSteerParams, WireMsg, WireSender, INVALID_PARAMS, METHOD_NOT_FOUND,
-    PARSE_ERROR,
+    classify, goose_session_update, Inbound, InitializeParams, SessionCancelParams,
+    SessionNewParams, SessionPromptParams, SessionSteerParams, WireMsg, WireSender, INVALID_PARAMS,
+    METHOD_NOT_FOUND, PARSE_ERROR,
 };
 
 struct App {
     cfg: Config,
     llm: Arc<Llm>,
     sessions: Mutex<HashMap<String, Session>>,
-    metric_publisher: Arc<metric::MetricPublisher>,
 }
 
 struct Session {
@@ -73,9 +71,12 @@ struct Session {
     /// with it so the gate can account for history appended since.
     last_request_history_bytes: Option<usize>,
     effective_system_prompt: Arc<str>,
-    /// Monotonically increasing per-session turn counter for NIP-AM metric events.
-    /// Incremented on each `session/prompt` request.
-    turn_seq: u64,
+    /// Session-cumulative input tokens across all turns. Sent in the
+    /// `_goose/unstable/session/update` usage notification so buzz-acp's
+    /// `UsageTracker` can compute per-turn deltas symmetrically with goose.
+    accumulated_input_tokens: u64,
+    /// Session-cumulative output tokens across all turns.
+    accumulated_output_tokens: u64,
 }
 
 fn die(msg: String) -> ! {
@@ -140,7 +141,6 @@ async fn async_main() {
         cfg,
         llm,
         sessions: Mutex::new(HashMap::new()),
-        metric_publisher: Arc::new(metric::MetricPublisher::from_env()),
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
     let writer = tokio::spawn(wire::writer_task(wire_rx));
@@ -371,7 +371,8 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             last_request_input_tokens: None,
             last_request_history_bytes: None,
             effective_system_prompt,
-            turn_seq: 0,
+            accumulated_input_tokens: 0,
+            accumulated_output_tokens: 0,
         },
     );
     drop(sessions);
@@ -496,7 +497,6 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         effective_system_prompt,
         run_id,
         mut steer_rx,
-        turn_seq,
     ) = match acquire_session(&app, &p.session_id).await {
         Ok(v) => v,
         Err(reason) => {
@@ -554,22 +554,50 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.last_request_input_tokens = last_request_input_tokens;
         s.last_request_history_bytes = last_request_history_bytes;
     }
-    // Best-effort: publish NIP-AM kind 44200 agent turn metric. Never fails
-    // the turn — errors are logged at WARN inside MetricPublisher::publish.
-    let nip_am_stop = match &result {
-        Ok(stop) => agent_stop_to_nip_am(stop),
-        Err(_) => buzz_core::agent_turn_metric::StopReason::Error,
-    };
-    app.metric_publisher
-        .publish(
-            &sid,
-            turn_seq,
-            &run_id,
-            turn_input_tokens,
-            turn_output_tokens,
-            nip_am_stop,
+    // Update session-cumulative token counters and emit the usage notification
+    // BEFORE sending the session/prompt response. buzz-acp's UsageTracker
+    // processes the notification while the turn is still in-flight (i.e. before
+    // the response triggers take_turn_usage()), which is required for the
+    // begin_turn gate to recognise it as publishable.
+    //
+    // Only emit when at least one token count was observed — a turn with no
+    // provider response (validation failure, pre-response cancellation) carries
+    // no information and must not produce a kind 44200 record per NIP-AM.
+    if turn_input_tokens.is_some() || turn_output_tokens.is_some() {
+        let (accumulated_in, accumulated_out) = {
+            let mut sessions = app.sessions.lock().await;
+            if let Some(s) = sessions.get_mut(&sid) {
+                s.accumulated_input_tokens = s
+                    .accumulated_input_tokens
+                    .saturating_add(turn_input_tokens.unwrap_or(0));
+                s.accumulated_output_tokens = s
+                    .accumulated_output_tokens
+                    .saturating_add(turn_output_tokens.unwrap_or(0));
+                (s.accumulated_input_tokens, s.accumulated_output_tokens)
+            } else {
+                (
+                    turn_input_tokens.unwrap_or(0),
+                    turn_output_tokens.unwrap_or(0),
+                )
+            }
+        };
+        wire::send(
+            &wire_tx,
+            goose_session_update(
+                &sid,
+                json!({
+                    "sessionUpdate": "usage_update",
+                    // used: total tokens as a context-usage proxy;
+                    // contextLimit: 0 (buzz-agent has no context limit tracking).
+                    "used": accumulated_in.saturating_add(accumulated_out),
+                    "contextLimit": 0u64,
+                    "accumulatedInputTokens": accumulated_in,
+                    "accumulatedOutputTokens": accumulated_out,
+                }),
+            ),
         )
         .await;
+    }
     match result {
         Ok(stop) => {
             wire::send(
@@ -600,7 +628,6 @@ async fn acquire_session(
         Arc<str>,
         String,
         mpsc::UnboundedReceiver<Vec<ContentBlock>>,
-        u64,
     ),
     &'static str,
 > {
@@ -622,10 +649,6 @@ async fn acquire_session(
     s.active_run_id = Some(run_id.clone());
     let (steer_tx, steer_rx) = mpsc::unbounded_channel();
     s.steer_tx = Some(steer_tx);
-    // Increment turn sequence number before returning so the metric event
-    // gets a monotonically increasing counter starting at 1.
-    s.turn_seq = s.turn_seq.saturating_add(1);
-    let turn_seq = s.turn_seq;
     Ok((
         s.id.clone(),
         s.mcp.clone(),
@@ -640,7 +663,6 @@ async fn acquire_session(
         Arc::clone(&s.effective_system_prompt),
         run_id,
         steer_rx,
-        turn_seq,
     ))
 }
 
@@ -648,17 +670,4 @@ fn session_token() -> Result<String, String> {
     let mut b = [0u8; 8];
     getrandom::fill(&mut b).map_err(|e| format!("rng: getrandom failed: {e}"))?;
     Ok(b.iter().map(|x| format!("{x:02x}")).collect())
-}
-
-/// Map a buzz-agent `StopReason` to the NIP-AM `StopReason` used in kind 44200 payloads.
-fn agent_stop_to_nip_am(r: &crate::types::StopReason) -> buzz_core::agent_turn_metric::StopReason {
-    use crate::types::StopReason;
-    use buzz_core::agent_turn_metric::StopReason as CoreStop;
-    match r {
-        StopReason::EndTurn => CoreStop::EndTurn,
-        StopReason::Cancelled => CoreStop::Cancelled,
-        StopReason::MaxTokens => CoreStop::MaxTokens,
-        StopReason::MaxTurnRequests => CoreStop::Unknown,
-        StopReason::Refusal => CoreStop::Unknown,
-    }
 }

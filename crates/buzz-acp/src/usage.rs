@@ -1,10 +1,10 @@
-//! Goose-specific usage tracking for NIP-AM agent turn metrics.
+//! Usage tracking for NIP-AM agent turn metrics.
 //!
-//! Goose emits a `_goose/unstable/session/update` notification (with
-//! `sessionUpdate: "usage_update"`) at the end of every turn when the client
-//! has advertised `clientCapabilities._meta.goose.customNotifications: true`.
-//! The payload carries session-cumulative token counts from which we derive
-//! per-turn deltas.
+//! Agents that support usage reporting emit a `_goose/unstable/session/update`
+//! notification (with `sessionUpdate: "usage_update"`) at the end of every
+//! turn.  Both goose and buzz-agent use this same wire format.  The payload
+//! carries session-cumulative token counts from which we derive per-turn
+//! deltas.
 //!
 //! # Delta computation
 //!
@@ -19,7 +19,7 @@
 //! 3. **Session restart** (caller supplies a new `session_id` not seen
 //!    before): treated as case 1 — fresh baseline, no delta for this turn.
 //!
-//! The `GooseTurnUsage` produced after each turn is consumed by the
+//! The `TurnUsage` produced after each turn is consumed by the
 //! `TurnCompletionGuard` in `pool.rs` to publish a kind 44200 relay event.
 
 use std::collections::HashMap;
@@ -41,6 +41,9 @@ use std::collections::HashMap;
 ///   }
 /// }
 /// ```
+///
+/// `used` and `contextLimit` are optional because buzz-agent does not track a
+/// context window limit; the fields are present when goose emits them.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GooseSessionUpdateNotification {
@@ -53,17 +56,22 @@ pub(crate) struct GooseSessionUpdateNotification {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "sessionUpdate", rename_all = "snake_case")]
 pub(crate) enum GooseSessionUpdateVariant {
-    UsageUpdate(GooseUsageUpdatePayload),
+    UsageUpdate(UsageUpdatePayload),
     #[serde(other)]
     Other,
 }
 
-/// The `usage_update` payload from goose.
+/// The `usage_update` payload.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GooseUsageUpdatePayload {
+pub(crate) struct UsageUpdatePayload {
+    /// Total tokens used (context-usage proxy). Optional — buzz-agent omits
+    /// this field or sends 0 because it does not track a context window limit.
+    #[serde(default)]
     #[allow(dead_code)]
     pub used: u64,
+    /// Context window size. Optional — buzz-agent omits this field.
+    #[serde(default)]
     #[allow(dead_code)]
     pub context_limit: u64,
     pub accumulated_input_tokens: u64,
@@ -88,9 +96,9 @@ struct SessionState {
 /// Per-turn usage record exposed to `TurnCompletionGuard` for NIP-AM publishing.
 ///
 /// `turn_*` fields are `None` when delta is unreliable (first turn or counter
-/// decrease). `cumulative_*` fields are always present when goose reports them.
+/// decrease). `cumulative_*` fields are always present when the agent reports them.
 #[derive(Debug, Clone)]
-pub struct GooseTurnUsage {
+pub struct TurnUsage {
     /// Goose session id (maps to NIP-AM `sessionId`).
     pub session_id: String,
     /// Per-session monotonic sequence number for this turn (maps to NIP-AM `turnSeq`).
@@ -127,10 +135,10 @@ pub struct GooseTurnUsage {
 ///    cumulative baseline; only produces a publishable record when a turn is
 ///    currently in-flight for the matching session.
 /// 3. **`take()`** — called at turn completion by `TurnCompletionGuard`.
-///    Drains and returns the pending record (or `None` if goose did not emit
-///    usage for this turn) and clears the in-flight marker.
+///    Drains and returns the pending record (or `None` if no usage was emitted
+///    for this turn) and clears the in-flight marker.
 #[derive(Debug, Default)]
-pub(crate) struct GooseUsageTracker {
+pub(crate) struct UsageTracker {
     /// One entry per goose `sessionId` ever seen in this process.
     sessions: HashMap<String, SessionState>,
     /// The session that currently has an in-flight `session/prompt`.
@@ -138,10 +146,10 @@ pub(crate) struct GooseUsageTracker {
     /// the baseline but will not set `pending`.
     in_flight_session: Option<String>,
     /// The most recently computed turn usage, ready for `take()`.
-    pending: Option<GooseTurnUsage>,
+    pending: Option<TurnUsage>,
 }
 
-impl GooseUsageTracker {
+impl UsageTracker {
     /// Mark the start of a new prompt turn for `session_id`.
     ///
     /// Clears any leftover `pending` record and records which session is
@@ -166,7 +174,7 @@ impl GooseUsageTracker {
     ///
     /// When multiple notifications arrive during the same turn, the last one
     /// wins (goose may emit several per turn; each increments `turn_seq`).
-    pub(crate) fn record(&mut self, session_id: &str, payload: &GooseUsageUpdatePayload) {
+    pub(crate) fn record(&mut self, session_id: &str, payload: &UsageUpdatePayload) {
         let current_input = payload.accumulated_input_tokens;
         let current_output = payload.accumulated_output_tokens;
         let current_cost = payload.accumulated_cost;
@@ -220,7 +228,7 @@ impl GooseUsageTracker {
 
         // Only publish a pending record if this session is currently in-flight.
         if self.in_flight_session.as_deref() == Some(session_id) {
-            self.pending = Some(GooseTurnUsage {
+            self.pending = Some(TurnUsage {
                 session_id: session_id.to_string(),
                 turn_seq,
                 delta_reliable,
@@ -238,10 +246,10 @@ impl GooseUsageTracker {
     /// clear the in-flight marker.
     ///
     /// Returns `None` if no `usage_update` arrived during the current in-flight
-    /// turn (goose did not emit usage, or no `begin_turn` was called). The
+    /// turn (the agent did not emit usage, or no `begin_turn` was called). The
     /// caller (`TurnCompletionGuard`) must handle `None`.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn take(&mut self) -> Option<GooseTurnUsage> {
+    pub(crate) fn take(&mut self) -> Option<TurnUsage> {
         self.in_flight_session = None;
         self.pending.take()
     }
@@ -251,10 +259,20 @@ impl GooseUsageTracker {
 mod tests {
     use super::*;
 
-    fn payload(input: u64, output: u64, cost: Option<f64>) -> GooseUsageUpdatePayload {
-        GooseUsageUpdatePayload {
+    fn payload(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
+        UsageUpdatePayload {
             used: input + output,
             context_limit: 200_000,
+            accumulated_input_tokens: input,
+            accumulated_output_tokens: output,
+            accumulated_cost: cost,
+        }
+    }
+
+    fn payload_no_context(input: u64, output: u64, cost: Option<f64>) -> UsageUpdatePayload {
+        UsageUpdatePayload {
+            used: 0,
+            context_limit: 0,
             accumulated_input_tokens: input,
             accumulated_output_tokens: output,
             accumulated_cost: cost,
@@ -268,7 +286,7 @@ mod tests {
         // Regression: setup notifications fire during session/new (before any
         // prompt). They must update the baseline but must NOT produce a
         // publishable record for the next turn.
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
 
         // Simulate a setup notification (no begin_turn called yet).
         tracker.record("sess-setup", &payload(500, 100, Some(0.005)));
@@ -305,7 +323,7 @@ mod tests {
     fn record_outside_in_flight_does_not_clobber_pending() {
         // A notification for a different session_id while another is in-flight
         // must not overwrite the pending record.
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-a");
         tracker.record("sess-a", &payload(1000, 200, None));
 
@@ -320,7 +338,7 @@ mod tests {
 
     #[test]
     fn first_turn_no_prior_delta_unreliable() {
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-1");
         tracker.record("sess-1", &payload(1000, 200, Some(0.01)));
         let usage = tracker.take().expect("should have pending usage");
@@ -342,7 +360,7 @@ mod tests {
 
     #[test]
     fn counter_decrease_delta_unreliable_no_negatives() {
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         // Turn 1 — establish baseline.
         tracker.begin_turn("sess-2");
         tracker.record("sess-2", &payload(5000, 1000, Some(0.05)));
@@ -368,7 +386,7 @@ mod tests {
         // Regression for Thufir fix 2: cost counter decrease must set
         // delta_reliable = false and null all turn fields (not just cost).
         // turn_seq still increments (NIP-AM: seq advances even on unreliable).
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         // Turn 1 — establish baseline with cost.
         tracker.begin_turn("sess-cost");
         tracker.record("sess-cost", &payload(1000, 200, Some(0.10)));
@@ -400,7 +418,7 @@ mod tests {
     #[test]
     fn cost_absent_on_one_side_leaves_tokens_reliable() {
         // Cost merely absent on either side: null cost, reliable tokens.
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-nocost");
         tracker.record("sess-nocost", &payload(1000, 200, Some(0.01)));
         let _ = tracker.take();
@@ -424,7 +442,7 @@ mod tests {
 
     #[test]
     fn session_restart_new_session_id_treated_as_first_turn() {
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         // Original session.
         tracker.begin_turn("sess-a");
         tracker.record("sess-a", &payload(8000, 2000, None));
@@ -448,7 +466,7 @@ mod tests {
 
     #[test]
     fn second_turn_delta_computed_correctly() {
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-3");
         tracker.record("sess-3", &payload(1000, 200, Some(0.01)));
         let _ = tracker.take();
@@ -470,7 +488,7 @@ mod tests {
 
     #[test]
     fn take_returns_none_after_drain() {
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         tracker.begin_turn("sess-4");
         tracker.record("sess-4", &payload(100, 20, None));
         let _ = tracker.take();
@@ -479,7 +497,7 @@ mod tests {
 
     #[test]
     fn last_update_wins_multiple_updates_same_turn() {
-        let mut tracker = GooseUsageTracker::default();
+        let mut tracker = UsageTracker::default();
         // Turn 1 — baseline.
         tracker.begin_turn("sess-5");
         tracker.record("sess-5", &payload(1000, 100, None));
@@ -529,6 +547,31 @@ mod tests {
     }
 
     #[test]
+    fn notification_deserializes_without_used_and_context_limit() {
+        // buzz-agent emits usage_update without used/contextLimit.
+        let raw = serde_json::json!({
+            "sessionId": "buzz-sess",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 500,
+                "accumulatedOutputTokens": 100
+            }
+        });
+        let notif: GooseSessionUpdateNotification =
+            serde_json::from_value(raw).expect("deserialization");
+        match notif.update {
+            GooseSessionUpdateVariant::UsageUpdate(p) => {
+                assert_eq!(p.accumulated_input_tokens, 500);
+                assert_eq!(p.accumulated_output_tokens, 100);
+                assert_eq!(p.used, 0);
+                assert_eq!(p.context_limit, 0);
+                assert!(p.accumulated_cost.is_none());
+            }
+            GooseSessionUpdateVariant::Other => panic!("expected UsageUpdate"),
+        }
+    }
+
+    #[test]
     fn other_variant_deserializes_without_error() {
         let raw = serde_json::json!({
             "sessionId": "xyz",
@@ -562,5 +605,67 @@ mod tests {
             }
             _ => panic!("expected UsageUpdate"),
         }
+    }
+
+    #[test]
+    fn buzz_agent_notification_flows_through_tracker() {
+        // End-to-end: a buzz-agent-shaped usage_update (no used/contextLimit)
+        // deserializes and flows through UsageTracker to produce correct TurnUsage.
+        let raw1 = serde_json::json!({
+            "sessionId": "buzz-s1",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 300,
+                "accumulatedOutputTokens": 80
+            }
+        });
+        let raw2 = serde_json::json!({
+            "sessionId": "buzz-s1",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "accumulatedInputTokens": 700,
+                "accumulatedOutputTokens": 150
+            }
+        });
+
+        let mut tracker = UsageTracker::default();
+
+        // Turn 1 — first turn, delta unreliable.
+        tracker.begin_turn("buzz-s1");
+        let notif1: GooseSessionUpdateNotification = serde_json::from_value(raw1).expect("deser");
+        if let GooseSessionUpdateVariant::UsageUpdate(p) = notif1.update {
+            tracker.record("buzz-s1", &p);
+        }
+        let t1 = tracker.take().expect("turn 1");
+        assert!(!t1.delta_reliable, "first turn: unreliable");
+        assert_eq!(t1.cumulative_input_tokens, 300);
+
+        // Turn 2 — delta reliable.
+        tracker.begin_turn("buzz-s1");
+        let notif2: GooseSessionUpdateNotification = serde_json::from_value(raw2).expect("deser");
+        if let GooseSessionUpdateVariant::UsageUpdate(p) = notif2.update {
+            tracker.record("buzz-s1", &p);
+        }
+        let t2 = tracker.take().expect("turn 2");
+        assert!(t2.delta_reliable, "second turn: reliable");
+        assert_eq!(t2.turn_input_tokens, Some(400)); // 700 - 300
+        assert_eq!(t2.turn_output_tokens, Some(70)); // 150 - 80
+    }
+
+    #[test]
+    fn buzz_agent_payload_no_context_fields_processes_correctly() {
+        // UsageTracker handles payloads with used=0 / context_limit=0 correctly.
+        let mut tracker = UsageTracker::default();
+        tracker.begin_turn("s");
+        tracker.record("s", &payload_no_context(1000, 200, None));
+        let _ = tracker.take();
+
+        tracker.begin_turn("s");
+        tracker.record("s", &payload_no_context(1500, 300, None));
+        let usage = tracker.take().expect("pending");
+
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(500));
+        assert_eq!(usage.turn_output_tokens, Some(100));
     }
 }

@@ -13,8 +13,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
-use crate::goose_usage::{GooseTurnUsage, GooseUsageTracker};
 use crate::observer::{ObserverContext, ObserverHandle};
+use crate::usage::{TurnUsage, UsageTracker};
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
@@ -168,11 +168,11 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Goose usage tracker — accumulates cumulative token counts from
+    /// Usage tracker — accumulates cumulative token counts from
     /// `_goose/unstable/session/update` notifications and computes per-turn
-    /// deltas. Populated only when goose advertises the custom-notifications
-    /// capability; no-op for other harnesses.
-    goose_usage: GooseUsageTracker,
+    /// deltas. Both goose and buzz-agent emit this notification; goose gates
+    /// on client capability advertisement, buzz-agent emits unconditionally.
+    goose_usage: UsageTracker,
 }
 
 impl AcpClient {
@@ -264,7 +264,7 @@ impl AcpClient {
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steer_rx: None,
-            goose_usage: GooseUsageTracker::default(),
+            goose_usage: UsageTracker::default(),
         })
     }
 
@@ -533,7 +533,7 @@ impl AcpClient {
     ///
     /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
     /// publish a kind 44200 NIP-AM event.
-    pub fn take_turn_usage(&mut self) -> Option<GooseTurnUsage> {
+    pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
     }
 
@@ -1359,7 +1359,7 @@ impl AcpClient {
     /// notification is best-effort observability data, not a protocol
     /// requirement. Failures are logged at debug level.
     fn handle_goose_usage_update(&mut self, msg: &serde_json::Value) {
-        use crate::goose_usage::{GooseSessionUpdateNotification, GooseSessionUpdateVariant};
+        use crate::usage::{GooseSessionUpdateNotification, GooseSessionUpdateVariant};
         let params = match msg.get("params") {
             Some(p) => p,
             None => {
