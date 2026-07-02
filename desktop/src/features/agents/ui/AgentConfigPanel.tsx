@@ -13,10 +13,9 @@ import {
   PenOff,
   Server,
 } from "lucide-react";
-import { toast } from "sonner";
-
 import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Spinner } from "@/shared/ui/spinner";
 import type {
   ConfigField,
@@ -30,11 +29,6 @@ type Props = {
   pubkey: string;
   advancedMode?: "collapsed" | "flat";
 };
-
-async function copyToClipboard(value: string, label: string) {
-  await navigator.clipboard.writeText(value);
-  toast.success(`Copied ${label}`);
-}
 
 function isReadOnlyField({
   origin,
@@ -236,7 +230,9 @@ function NormalizedRow({
       <button
         aria-label={`Copy ${label}`}
         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-        onClick={() => void copyToClipboard(field.value ?? "", label)}
+        onClick={() =>
+          copyTextToClipboard(field.value ?? "", `Copied ${label}`)
+        }
         title={`Copy ${label}`}
         type="button"
       >
@@ -317,7 +313,9 @@ function AdvancedRow({
       <button
         aria-label={`Copy ${field.label}`}
         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-        onClick={() => void copyToClipboard(field.value ?? "", field.label)}
+        onClick={() =>
+          copyTextToClipboard(field.value ?? "", `Copied ${field.label}`)
+        }
         title={`Copy ${field.label}`}
         type="button"
       >

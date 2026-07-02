@@ -19,8 +19,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { toast } from "sonner";
-
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -109,17 +108,6 @@ function MoveToSectionSubmenu({
       </ContextMenuSubContent>
     </ContextMenuSub>
   );
-}
-
-function copyToClipboard(text: string, successMessage: string) {
-  void navigator.clipboard
-    .writeText(text)
-    .then(() => {
-      toast.success(successMessage);
-    })
-    .catch(() => {
-      toast.error("Failed to copy to clipboard");
-    });
 }
 
 export function ChannelContextMenuItems({
@@ -229,7 +217,7 @@ export function ChannelContextMenuItems({
       <ContextMenuSeparator />
       <ContextMenuItem
         onClick={() =>
-          copyToClipboard(channel.name, "Channel name copied to clipboard")
+          copyTextToClipboard(channel.name, "Channel name copied to clipboard")
         }
       >
         <Copy className="h-4 w-4" />
@@ -237,7 +225,7 @@ export function ChannelContextMenuItems({
       </ContextMenuItem>
       <ContextMenuItem
         onClick={() =>
-          copyToClipboard(channel.id, "Channel ID copied to clipboard")
+          copyTextToClipboard(channel.id, "Channel ID copied to clipboard")
         }
       >
         <Clipboard className="h-4 w-4" />

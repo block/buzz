@@ -1,6 +1,6 @@
 import { Copy } from "lucide-react";
-import { toast } from "sonner";
 
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Button, type ButtonProps } from "@/shared/ui/button";
 
 export function CopyButton({
@@ -23,10 +23,7 @@ export function CopyButton({
   return (
     <Button
       className={className}
-      onClick={async () => {
-        await navigator.clipboard.writeText(value);
-        toast.success("Copied to clipboard");
-      }}
+      onClick={() => copyTextToClipboard(value)}
       size={size}
       type="button"
       variant={variant}

@@ -11,10 +11,9 @@ import {
   UserRound,
 } from "lucide-react";
 import * as React from "react";
-import { toast } from "sonner";
-
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { truncatePubkey as truncatePubkeyShort } from "@/features/profile/lib/identity";
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type {
   AgentPersona,
@@ -32,11 +31,6 @@ const RUNTIME_LABELS: Record<string, string> = {
 
 function runtimeLabel(command: string): string {
   return RUNTIME_LABELS[command] ?? command;
-}
-
-async function copyToClipboard(value: string, label?: string) {
-  await navigator.clipboard.writeText(value);
-  toast.success(label ? `Copied ${label}` : "Copied to clipboard");
 }
 
 export type ProfileField = {
@@ -512,7 +506,9 @@ function ProfileFieldRow({ field }: { field: ProfileField }) {
         aria-label={`Copy ${field.label}`}
         className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
         data-testid={field.testId}
-        onClick={() => void copyToClipboard(field.copyValue ?? "", field.label)}
+        onClick={() =>
+          copyTextToClipboard(field.copyValue ?? "", `Copied ${field.label}`)
+        }
         title={`Copy ${field.label}`}
         type="button"
       >
