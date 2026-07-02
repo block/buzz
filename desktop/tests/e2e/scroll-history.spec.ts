@@ -63,7 +63,7 @@ async function getMessagePosition(
   }, messageId);
 }
 
-test("first channel load holds skeleton instead of showing older-history spinner", async ({
+test("first channel load paints the first window without waiting for the row-floor top-up", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -93,22 +93,23 @@ test("first channel load holds skeleton instead of showing older-history spinner
 
     window.__BUZZ_E2E__ = {
       ...window.__BUZZ_E2E__,
-      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 1_500 },
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 5_000 },
     };
   });
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
+  // The reply-heavy window renders < MIN_TOP_LEVEL_ROWS_PER_FETCH top-level
+  // rows, which triggers the row-floor top-up — paced at 5s per page above.
+  // First paint must NOT wait for it: rows appear well inside that window,
+  // proving the top-up runs in the background rather than gating the queryFn.
   const timeline = page.getByTestId("message-timeline");
-  await expect(timeline.locator(".t-skel-bar").first()).toBeVisible();
-  await expect(page.getByTestId("message-timeline-fetching-older")).toHaveCount(
-    0,
-  );
-
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible({
-    timeout: 5_000,
+    timeout: 4_000,
   });
+  // And once rows have painted, the cold-load skeleton must be gone.
+  await expect(timeline.locator(".t-skel-bar")).toHaveCount(0);
 });
 
 test("preserves user scroll while older channel history loads", async ({

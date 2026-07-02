@@ -28,12 +28,11 @@ export function workspaceInitials(name: string): string {
 
 /**
  * Presentation decisions for one workspace button, derived from its observed
- * unread state. Pure so it can be unit-tested without a DOM. The `state` guard
- * ensures we NEVER render a "no unread" affordance for a relay we could not
- * observe (`unknown`/`loading`/`error`) — only a `ready` observation is trusted.
+ * mention state. Pure so it can be unit-tested without a DOM. The `state` guard
+ * ensures we NEVER render a mention badge for a relay we could not observe
+ * (`unknown`/`loading`/`error`) — only a `ready` observation is trusted.
  */
 export function workspaceRailIndicators(unread: WorkspaceUnreadState): {
-  showDot: boolean;
   mentionCount: number;
   showBadge: boolean;
   pending: boolean;
@@ -43,7 +42,6 @@ export function workspaceRailIndicators(unread: WorkspaceUnreadState): {
   const mentionCount = observed ? (unread.count ?? 0) : 0;
   const showBadge = mentionCount > 0;
   return {
-    showDot: observed && unread.hasUnread,
     mentionCount,
     showBadge,
     pending: unread.state === "unknown" || unread.state === "loading",
@@ -63,7 +61,7 @@ function WorkspaceButton({
   unread: WorkspaceUnreadState;
   onSwitch: () => void;
 }) {
-  const { showDot, mentionCount, showBadge, pending, badgeLabel } =
+  const { mentionCount, showBadge, pending, badgeLabel } =
     workspaceRailIndicators(unread);
 
   const tooltipLabel = showBadge
@@ -81,18 +79,6 @@ function WorkspaceButton({
           onClick={onSwitch}
           type="button"
         >
-          {/* Active/unread indicator pill on the left edge (Discord-style). */}
-          <span
-            aria-hidden="true"
-            className={cn(
-              "absolute left-[-6px] w-1 rounded-r-full bg-primary transition-all",
-              isActive
-                ? "h-6 opacity-100"
-                : showDot
-                  ? "h-2 opacity-100"
-                  : "h-2 opacity-0",
-            )}
-          />
           <span
             className={cn(
               "flex h-9 w-9 items-center justify-center rounded-2xl text-xs font-semibold transition-all",
@@ -106,7 +92,7 @@ function WorkspaceButton({
           </span>
           {showBadge ? (
             <span
-              className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-2xs font-semibold text-destructive-foreground ring-2 ring-sidebar"
+              className="absolute -bottom-0.5 -right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold text-primary-foreground ring-2 ring-sidebar"
               data-testid={`workspace-rail-mentions-${workspace.id}`}
             >
               {badgeLabel}
@@ -121,8 +107,8 @@ function WorkspaceButton({
 
 /**
  * Discord/Slack-style vertical rail of workspaces on the far left of the app.
- * Shows an unread dot and a mention-count badge for inactive workspaces
- * (observed via `useWorkspaceUnread`) and switches relays on click.
+ * Shows a mention-count badge for inactive workspaces (observed via
+ * `useWorkspaceUnread`) and switches relays on click.
  *
  * Hidden entirely with a single workspace — a rail of one adds no value.
  */
