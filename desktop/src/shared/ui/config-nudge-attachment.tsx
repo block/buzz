@@ -1,6 +1,9 @@
 import { AlertTriangle } from "lucide-react";
 
-import { requestOpenEditAgent } from "@/features/agents/openEditAgentEvent";
+import {
+  requestOpenEditAgent,
+  type EditAgentFocusTarget,
+} from "@/features/agents/openEditAgentEvent";
 import type { ConfigNudgePayload } from "@/shared/lib/configNudge";
 import { cn } from "@/shared/lib/cn";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
@@ -33,6 +36,25 @@ function requirementKey(
 }
 
 /**
+ * Derive a field-focus target from the first actionable requirement.
+ * `cli_login` requirements don't map to a focusable Edit Agent field,
+ * so they are skipped. Returns `undefined` for cli_login-only nudges.
+ */
+function firstFocusTarget(
+  requirements: ConfigNudgePayload["requirements"],
+): EditAgentFocusTarget | undefined {
+  for (const req of requirements) {
+    if (req.surface === "env_key") {
+      return { type: "env_key", key: req.key };
+    }
+    if (req.surface === "normalized_field") {
+      return { type: "normalized_field", field: req.field };
+    }
+  }
+  return undefined;
+}
+
+/**
  * Inline card rendered when the desktop detects a `buzz:config-nudge`
  * sentinel in a kind:9 message body.
  *
@@ -57,7 +79,10 @@ export function ConfigNudgeCard({
 
   const handleOpen = () => {
     openProfilePanel?.(nudge.agent_pubkey);
-    requestOpenEditAgent(nudge.agent_pubkey);
+    requestOpenEditAgent(
+      nudge.agent_pubkey,
+      firstFocusTarget(nudge.requirements),
+    );
   };
 
   return (
