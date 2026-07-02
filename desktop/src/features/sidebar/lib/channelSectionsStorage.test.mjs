@@ -9,6 +9,7 @@ import {
   stripOrphanedAssignments,
   writeChannelSectionsStore,
 } from "./channelSectionsStorage.ts";
+import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
 
 if (typeof globalThis.window === "undefined") {
   const storage = new Map();
@@ -205,11 +206,12 @@ test("storageKey: returns expected format with pubkey", () => {
 
 // ─── Relay-scoped key tests ───────────────────────────────────────────────────
 
-test("storageKey: with relayUrl includes encoded relay in key", () => {
-  const key = storageKey("pk1", "wss://relay.example.com");
+test("storageKey: with relayUrl includes normalized+encoded relay in key", () => {
+  const relay = "wss://relay.example.com";
+  const key = storageKey("pk1", relay);
   assert.equal(
     key,
-    `buzz-channel-sections.v1:pk1:${encodeURIComponent("wss://relay.example.com")}`,
+    `buzz-channel-sections.v1:pk1:${encodeURIComponent(normalizeRelayUrl(relay))}`,
   );
 });
 
@@ -222,6 +224,12 @@ test("storageKey: two different relays produce different keys for same pubkey", 
   const k1 = storageKey("pk1", "wss://relay-a.example.com");
   const k2 = storageKey("pk1", "wss://relay-b.example.com");
   assert.notEqual(k1, k2);
+});
+
+test("storageKey: equivalent relay URLs (case + trailing slash) map to the same key", () => {
+  const k1 = storageKey("pk1", "WSS://Relay.Example/");
+  const k2 = storageKey("pk1", "wss://relay.example");
+  assert.equal(k1, k2);
 });
 
 test("readChannelSectionsStore + writeChannelSectionsStore: scoped write/read roundtrip", () => {
@@ -262,9 +270,31 @@ test("readChannelSectionsStore: migrates legacy unscoped data on first scoped re
   // First scoped read should migrate and return the legacy data.
   const result = readChannelSectionsStore(pubkey, relay);
   assert.deepEqual(result, legacyStore);
+  // Legacy key must be deleted after migration (globally one-time guarantee).
+  const legacyKey = storageKey(pubkey);
+  assert.equal(window.localStorage.getItem(legacyKey), null);
   // Subsequent scoped reads should hit the scoped key directly.
   const result2 = readChannelSectionsStore(pubkey, relay);
   assert.deepEqual(result2, legacyStore);
+});
+
+test("readChannelSectionsStore: migration is globally one-time — relay B sees DEFAULT_STORE after relay A migrates", () => {
+  const pubkey = "pk-migrate-once";
+  const relayA = "wss://relay-migrate-once-a.example.com";
+  const relayB = "wss://relay-migrate-once-b.example.com";
+  const legacyStore = makeStore({
+    sections: [makeSection({ id: "sm", name: "Migrated Section", order: 0 })],
+    assignments: {},
+  });
+  // Write under legacy key then migrate via relay A.
+  writeChannelSectionsStore(pubkey, legacyStore);
+  readChannelSectionsStore(pubkey, relayA); // triggers migration, deletes legacy key
+  // Relay B must see DEFAULT_STORE — legacy data must not bleed in.
+  const resultB = readChannelSectionsStore(pubkey, relayB);
+  assert.deepEqual(resultB, DEFAULT_STORE);
+  // Relay B scoped key must not have been created.
+  const scopedBKey = storageKey(pubkey, relayB);
+  assert.equal(window.localStorage.getItem(scopedBKey), null);
 });
 
 test("readChannelSectionsStore: migration only copies non-empty legacy stores", () => {

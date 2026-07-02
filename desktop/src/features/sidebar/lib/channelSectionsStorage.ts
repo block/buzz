@@ -1,3 +1,5 @@
+import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
+
 const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 
 export type ChannelSection = {
@@ -21,16 +23,17 @@ export const DEFAULT_STORE: ChannelSectionStore = Object.freeze({
 /**
  * Returns the localStorage key for channel sections.
  *
- * When `relayUrl` is provided the key is scoped to that relay so sections
- * from different workspaces/relays don't bleed across each other.  When
- * omitted the legacy pubkey-only key is returned (used only during
+ * When `relayUrl` is provided the key is scoped to that relay (normalized via
+ * the same `normalizeRelayUrl` used by all relay-scoped local stores) so
+ * sections from different workspaces/relays don't bleed across each other.
+ * When omitted the legacy pubkey-only key is returned (used only during
  * one-time migration in `readChannelSectionsStore`).
  */
 export function storageKey(pubkey: string, relayUrl?: string): string {
   if (!relayUrl) return `${STORAGE_KEY_PREFIX}:${pubkey}`;
-  // Encode the relay URL so it can't contain the `:` delimiter we use.
-  const encodedRelay = encodeURIComponent(relayUrl);
-  return `${STORAGE_KEY_PREFIX}:${pubkey}:${encodedRelay}`;
+  const normalized = normalizeRelayUrl(relayUrl);
+  // Encode the normalized relay so it can't contain the `:` delimiter.
+  return `${STORAGE_KEY_PREFIX}:${pubkey}:${encodeURIComponent(normalized)}`;
 }
 
 export function stripOrphanedAssignments(
@@ -91,8 +94,10 @@ function parseRaw(raw: string | null): ChannelSectionStore | null {
  *
  * On first access for a scoped key, migrates any existing data from the
  * legacy pubkey-only key so users don't lose their sections on upgrade.
- * The legacy key is left in place after migration (it is harmless and
- * removing it could break older builds on a downgrade).
+ * After a successful migration write the legacy key is deleted, making
+ * this a globally one-time operation — subsequent empty scoped-key reads
+ * (i.e. a different relay) won't see legacy data and won't trigger
+ * cross-relay contamination via the seed-publish path.
  */
 export function readChannelSectionsStore(
   pubkey: string,
@@ -114,9 +119,11 @@ export function readChannelSectionsStore(
       const legacyRaw = window.localStorage.getItem(legacyKey);
       const migrated = parseRaw(legacyRaw);
       if (migrated && migrated.sections.length > 0) {
-        // Persist under the scoped key so subsequent reads are fast.
+        // Persist under the scoped key and remove the legacy key so this
+        // migration cannot fire again for any other relay scope.
         try {
           window.localStorage.setItem(key, JSON.stringify(migrated));
+          window.localStorage.removeItem(legacyKey);
         } catch {
           // Ignore write failures — we still return the migrated value.
         }
