@@ -11,6 +11,10 @@ import {
   type FileEditDiff,
   type FileEditDiffSummary,
 } from "./agentSessionFileEditDiff";
+import {
+  buildFileReadContent,
+  type FileReadContent,
+} from "./agentSessionFileRead";
 
 export type CompactToolKind =
   | "message"
@@ -33,6 +37,7 @@ export type CompactToolSummary = {
   preview: string | null;
   fileEditSummary: FileEditDiffSummary | null;
   fileEditDiff: FileEditDiff | null;
+  fileReadContent: FileReadContent | null;
   /** When set, the compact row renders a tiny image instead of text preview. */
   thumbnailSrc: string | null;
   presentation: "inline" | "message";
@@ -55,6 +60,7 @@ export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
         deletions: fileEditDiff.deletions,
       }
     : null;
+  const fileReadContent = buildFileReadContent(item, descriptor);
   const thumbnailSrc = getThumbnailSrc(item, descriptor);
   const failed = item.isError || item.status === "failed";
   const running = item.status === "executing" || item.status === "pending";
@@ -65,6 +71,7 @@ export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
     preview: fileEditSummary?.filename ?? descriptor.preview,
     fileEditSummary,
     fileEditDiff,
+    fileReadContent,
     thumbnailSrc,
     presentation: descriptor.renderClass === "message" ? "message" : "inline",
     descriptor,

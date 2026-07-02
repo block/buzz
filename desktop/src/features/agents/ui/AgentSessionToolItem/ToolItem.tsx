@@ -134,6 +134,7 @@ export function ToolItem({
           args={item.args}
           description={buzzTool?.label}
           fileEditDiff={compactSummary.fileEditDiff}
+          fileReadContent={compactSummary.fileReadContent}
           hasArgs={hasArgs}
           hasResult={hasResult}
           imagePreview={
