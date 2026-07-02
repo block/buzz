@@ -35,7 +35,29 @@ function resolveSourcePath(basePath) {
   return `${basePath}.ts`;
 }
 
+// emoji-mart ships a bundled CJS main that node's cjs-module-lexer cannot
+// extract named exports from (`import { init } from "emoji-mart"` throws
+// under node ESM even though the bundler handles it). Tests never exercise
+// the picker, so serve inert stubs for the emoji-mart entrypoints.
+const stubModules = new Map([
+  [
+    "emoji-mart",
+    "export const init = () => {};\n" +
+      "export const SearchIndex = { search: async () => [] };\n" +
+      "export default {};\n",
+  ],
+  ["@emoji-mart/react", "export default function Picker() { return null; }\n"],
+]);
+
+const STUB_URL_PREFIX = "buzz-test-stub:";
+
 export function resolve(specifier, context, nextResolve) {
+  if (stubModules.has(specifier)) {
+    return {
+      shortCircuit: true,
+      url: `${STUB_URL_PREFIX}${specifier}`,
+    };
+  }
   if (specifier === "@features-manifest") {
     const resolved = path.join(repoRoot, "preview-features.json");
     return nextResolve(resolved, context);
@@ -69,6 +91,26 @@ export function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
+  if (url.startsWith(STUB_URL_PREFIX)) {
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: stubModules.get(url.slice(STUB_URL_PREFIX.length)) ?? "",
+    };
+  }
+
+  // The app bundler loads .json imports without attributes (e.g. the bare
+  // `@emoji-mart/data` entrypoint); node's ESM resolver requires
+  // `with { type: "json" }` on every hop. Serve json here so transitive
+  // imports from source under test don't need bundler-only semantics.
+  if (url.endsWith(".json")) {
+    return {
+      format: "json",
+      shortCircuit: true,
+      source: fs.readFileSync(fileURLToPath(url), "utf8"),
+    };
+  }
+
   if (url.endsWith(".tsx")) {
     const source = fs.readFileSync(fileURLToPath(url), "utf8");
     const transpiled = ts.transpileModule(source, {
