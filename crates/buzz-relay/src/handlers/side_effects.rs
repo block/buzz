@@ -1826,11 +1826,16 @@ async fn handle_a_tag_deletion(
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                state
+                let channel_id = state
                     .db
                     .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
                     .await
                     .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
+                if let Some(channel_id) = channel_id {
+                    state
+                        .workflow_engine
+                        .invalidate_channel_workflows(tenant.community(), channel_id);
+                }
                 tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
             } else {
                 // Name-based lookup
@@ -1840,13 +1845,18 @@ async fn handle_a_tag_deletion(
                     .await
                 {
                     Ok(Some(wf)) => {
-                        state
+                        let channel_id = state
                             .db
                             .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
                             })?;
+                        if let Some(channel_id) = channel_id {
+                            state
+                                .workflow_engine
+                                .invalidate_channel_workflows(tenant.community(), channel_id);
+                        }
                         tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
                     }
                     Ok(None) => {
