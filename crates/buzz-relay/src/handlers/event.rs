@@ -1,7 +1,8 @@
 //! EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use axum::body::Bytes;
 use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
@@ -48,6 +49,50 @@ fn bounded_kind_label(kind: u32) -> String {
         49001 => kind.to_string(),
         _ => "other".to_string(),
     }
+}
+
+fn event_frame_for_sub(sub_id: &str, event_json: &str) -> String {
+    format!(r#"["EVENT","{}",{}]"#, sub_id, event_json)
+}
+
+fn event_frame_bytes_for_sub(sub_id: &str, event_json: &str) -> Arc<Bytes> {
+    Arc::new(Bytes::from(event_frame_for_sub(sub_id, event_json)))
+}
+
+fn fanout_frame_cache<'a, I>(sub_ids: I, event_json: &str) -> HashMap<&'a str, Arc<Bytes>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut frames = HashMap::new();
+    for sub_id in sub_ids {
+        frames
+            .entry(sub_id)
+            .or_insert_with(|| event_frame_bytes_for_sub(sub_id, event_json));
+    }
+    frames
+}
+
+fn send_fanout_frames<'a, I>(
+    state: &AppState,
+    recipients: I,
+    frames: &HashMap<&'a str, Arc<Bytes>>,
+) -> u32
+where
+    I: IntoIterator<Item = (crate::subscription::ConnId, &'a str)>,
+{
+    let mut drop_count = 0u32;
+    for (conn_id, sub_id) in recipients {
+        let frame = frames
+            .get(sub_id)
+            .expect("fan-out frame cache covers every recipient subscription id");
+        if !state
+            .conn_manager
+            .send_to_text_bytes(conn_id, Arc::clone(frame))
+        {
+            drop_count += 1;
+        }
+    }
+    drop_count
 }
 
 /// Drop recipients without access before fan-out on a private channel.
@@ -188,13 +233,17 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
             return;
         }
     };
-    let mut drop_count = 0u32;
-    for (conn_id, sub_id) in &matches {
-        let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-        if !state.conn_manager.send_to(*conn_id, msg) {
-            drop_count += 1;
-        }
-    }
+    let frames = fanout_frame_cache(
+        matches.iter().map(|(_, sub_id)| sub_id.as_str()),
+        &event_json,
+    );
+    let drop_count = send_fanout_frames(
+        state,
+        matches
+            .iter()
+            .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str())),
+        &frames,
+    );
     if drop_count > 0 {
         tracing::warn!(
             event_id = %stored.event.id.to_hex(),
@@ -244,13 +293,17 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
             return;
         }
     };
-    let mut drop_count = 0u32;
-    for (conn_id, sub_id) in &matches {
-        let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-        if !state.conn_manager.send_to(*conn_id, msg) {
-            drop_count += 1;
-        }
-    }
+    let frames = fanout_frame_cache(
+        matches.iter().map(|(_, sub_id)| sub_id.as_str()),
+        &event_json,
+    );
+    let drop_count = send_fanout_frames(
+        state,
+        matches
+            .iter()
+            .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str())),
+        &frames,
+    );
     if drop_count > 0 {
         tracing::warn!(
             event_id = %stored.event.id.to_hex(),
@@ -394,23 +447,26 @@ async fn dispatch_persistent_event_inner(
         })
         .flatten();
     // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
-    // filter_fanout_by_access, applied to `matches` above before this loop.
-    let mut drop_count = 0u32;
-    for (target_conn_id, sub_id) in &matches {
-        if let Some(ref owner_hex) = private_event_owner {
-            let is_owner = state
-                .conn_manager
-                .pubkey_for(*target_conn_id)
-                .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-            if !is_owner {
-                continue;
+    // filter_fanout_by_access, applied to `matches` above before this loop. The
+    // private-event owner gate is an additional delivery fence, so build shared
+    // frames only after applying it to the already access-filtered recipient set.
+    let recipients: Vec<_> = matches
+        .iter()
+        .filter_map(|(target_conn_id, sub_id)| {
+            if let Some(ref owner_hex) = private_event_owner {
+                let is_owner = state
+                    .conn_manager
+                    .pubkey_for(*target_conn_id)
+                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
+                if !is_owner {
+                    return None;
+                }
             }
-        }
-        let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
-        if !state.conn_manager.send_to(*target_conn_id, msg) {
-            drop_count += 1;
-        }
-    }
+            Some((*target_conn_id, sub_id.as_str()))
+        })
+        .collect();
+    let frames = fanout_frame_cache(recipients.iter().map(|(_, sub_id)| *sub_id), &event_json);
+    let drop_count = send_fanout_frames(state, recipients, &frames);
     if drop_count > 0 {
         tracing::warn!(
             event_id = %event_id_hex,
@@ -1097,6 +1153,8 @@ fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, S
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use buzz_core::kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
         KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
@@ -1106,6 +1164,42 @@ mod tests {
         OBSERVER_FRAME_TELEMETRY,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn fanout_event_frame_matches_legacy_format_byte_for_byte() {
+        let sub_id = "sub-id";
+        let event_json = r#"{"id":"abc","tags":[["p","target"]],"content":"hello"}"#;
+        let expected = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
+
+        assert_eq!(super::event_frame_for_sub(sub_id, event_json), expected);
+        assert_eq!(
+            super::event_frame_bytes_for_sub(sub_id, event_json)
+                .as_ref()
+                .as_ref(),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    fn fanout_frame_cache_reuses_frames_within_one_cycle_only() {
+        let event_json = r#"{"id":"abc"}"#;
+        let frames = super::fanout_frame_cache(["same", "other", "same"], event_json);
+
+        assert_eq!(frames.len(), 2, "duplicate sub ids share one cached frame");
+        assert_eq!(
+            frames.get("same").expect("same frame").as_ref().as_ref(),
+            format!(r#"["EVENT","same",{}]"#, event_json).as_bytes()
+        );
+
+        let next_cycle = super::fanout_frame_cache(["same"], event_json);
+        assert!(
+            !Arc::ptr_eq(
+                frames.get("same").expect("same frame"),
+                next_cycle.get("same").expect("same frame in next cycle")
+            ),
+            "fan-out frame sharing must not escape a single cycle"
+        );
+    }
 
     #[test]
     fn channel_scoped_content_kinds_require_h_tags() {

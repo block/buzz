@@ -607,6 +607,7 @@ pub fn run() {
             apply_workspace,
             validate_repos_dir,
             get_active_workspace,
+            fetch_workspace_icon,
             set_prevent_sleep_active,
             get_agent_memory,
             relay_reconnect_hook,

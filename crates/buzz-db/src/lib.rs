@@ -41,7 +41,7 @@ pub mod user;
 pub mod workflow;
 
 pub use error::{DbError, Result};
-pub use event::EventQuery;
+pub use event::{EventQuery, ReactionEventInsertOutcome};
 
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
@@ -321,6 +321,49 @@ impl Db {
         .transpose()
     }
 
+    /// Returns the community's workspace icon (NIP-11 `icon`), if set.
+    ///
+    /// Set by relay admins/owners via the kind:9033 command; the value is
+    /// validated and size-capped at that write path.
+    pub async fn get_community_icon(&self, community_id: CommunityId) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT icon
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("icon"))
+            .transpose()?
+            .flatten()
+            .filter(|icon| !icon.is_empty()))
+    }
+
+    /// Sets or clears (`None`) the community's workspace icon.
+    pub async fn set_community_icon(
+        &self,
+        community_id: CommunityId,
+        icon: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET icon = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(icon)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations
@@ -588,6 +631,40 @@ impl Db {
             }
         }
         Ok(result)
+    }
+
+    /// Atomically insert a kind:7 reaction event and its reaction row.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_reaction_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        target_event_id: &[u8],
+        actor_pubkey: &[u8],
+        emoji: &str,
+    ) -> Result<event::ReactionEventInsertOutcome> {
+        let outcome = event::insert_reaction_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            target_event_id,
+            actor_pubkey,
+            emoji,
+        )
+        .await?;
+        if let event::ReactionEventInsertOutcome::Inserted {
+            was_inserted: true, ..
+        } = &outcome
+        {
+            if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(outcome)
     }
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
