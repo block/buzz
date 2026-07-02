@@ -77,6 +77,12 @@ async fn publish_presence(
     Ok(())
 }
 
+fn channel_is_chat(channel_info: &HashMap<Uuid, relay::ChannelInfo>, channel_id: Uuid) -> bool {
+    channel_info
+        .get(&channel_id)
+        .is_some_and(|info| info.channel_type == "chat")
+}
+
 /// Resolve the agent's owner pubkey at startup.
 ///
 /// Priority:
@@ -1356,7 +1362,16 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    for (channel_id, filter) in channel_filters.iter_mut() {
+        config::force_mention_filter_for_chat(
+            filter,
+            channel_info_map
+                .get(channel_id)
+                .map(|info| info.channel_type.as_str()),
+        );
+    }
+    let mut event_channel_info = channel_info_map.clone();
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -1730,7 +1745,24 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        match relay.discover_channels().await {
+                                            Ok(discovered) => {
+                                                event_channel_info.extend(discovered);
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    channel_id = %ch,
+                                                    "membership notification: channel metadata refresh failed: {e}"
+                                                );
+                                            }
+                                        }
+                                        config::force_mention_filter_for_chat(
+                                            &mut filter,
+                                            event_channel_info
+                                                .get(&ch)
+                                                .map(|info| info.channel_type.as_str()),
+                                        );
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
@@ -1752,6 +1784,7 @@ async fn tokio_main() -> Result<()> {
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
+                                    event_channel_info.remove(&ch);
                                     typing_channels.remove(&ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
@@ -1918,6 +1951,17 @@ async fn tokio_main() -> Result<()> {
                                     );
                                     continue;
                                 }
+                            }
+
+                            if channel_is_chat(&event_channel_info, buzz_event.channel_id)
+                                && !event_mentions_agent(&buzz_event.event, &pubkey_hex)
+                            {
+                                tracing::debug!(
+                                    channel_id = %buzz_event.channel_id,
+                                    kind = buzz_event.event.kind.as_u16(),
+                                    "chat event did not mention this agent — dropping"
+                                );
+                                continue;
                             }
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;

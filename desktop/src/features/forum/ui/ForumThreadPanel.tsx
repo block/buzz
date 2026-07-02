@@ -139,7 +139,10 @@ export function ForumThreadPanel({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const { channels } = useChannelNavigation();
   const channelNames = React.useMemo(
-    () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
+    () =>
+      channels
+        .filter((c) => c.channelType !== "dm" && c.channelType !== "chat")
+        .map((c) => c.name),
     [channels],
   );
 

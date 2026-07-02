@@ -51,6 +51,7 @@ type TimelineMessageListProps = {
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  onStartSideConversation?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -99,6 +100,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onMarkUnread,
   onMarkRead,
   onReply,
+  onStartSideConversation,
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
   onToggleReaction,
@@ -206,6 +208,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
               onMarkRead={onMarkRead}
               onMarkUnread={onMarkUnread}
               onReply={onReply}
+              onStartSideConversation={onStartSideConversation}
               onToggleReaction={onToggleReaction}
               profiles={profiles}
               searchActiveMessageId={searchActiveMessageId}
@@ -236,6 +239,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       onMarkRead,
       onMarkUnread,
       onReply,
+      onStartSideConversation,
       onToggleReaction,
       profiles,
       searchActiveMessageId,
@@ -323,6 +327,7 @@ type MessageRowItemProps = Pick<
   | "onMarkUnread"
   | "onMarkRead"
   | "onReply"
+  | "onStartSideConversation"
   | "onToggleReaction"
   | "profiles"
   | "searchActiveMessageId"
@@ -358,6 +363,7 @@ function MessageRowItem({
   onMarkUnread,
   onMarkRead,
   onReply,
+  onStartSideConversation,
   onToggleReaction,
   profiles,
   searchActiveMessageId,
@@ -410,6 +416,7 @@ function MessageRowItem({
           onMarkUnread={onMarkUnread}
           onToggleReaction={onToggleReaction}
           onReply={onReply}
+          onStartSideConversation={onStartSideConversation}
           onUnfollowThread={
             unfollowThreadById
               ? () => unfollowThreadById(message.id)
@@ -458,6 +465,7 @@ function MessageRowItem({
         onMarkUnread={onMarkUnread}
         onToggleReaction={onToggleReaction}
         onReply={onReply}
+        onStartSideConversation={onStartSideConversation}
         profiles={profiles}
         searchQuery={isSearchMatch ? searchQuery : undefined}
         showDepthGuides={false}

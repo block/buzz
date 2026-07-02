@@ -91,6 +91,7 @@ export function ChannelBrowserDialog({
     const filtered = channels.filter(
       (channel) =>
         channel.channelType !== "dm" &&
+        channel.channelType !== "chat" &&
         (channel.archivedAt
           ? channel.isMember
           : channel.visibility === "open" || channel.isMember) &&

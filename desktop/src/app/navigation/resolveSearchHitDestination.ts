@@ -5,6 +5,11 @@ import { KIND_FORUM_COMMENT, KIND_FORUM_POST } from "@/shared/constants/kinds";
 
 export type SearchHitDestination =
   | {
+      kind: "chat";
+      chatId: string;
+      messageId?: string;
+    }
+  | {
       kind: "channel";
       channelId: string;
       messageId?: string;
@@ -22,6 +27,14 @@ export async function resolveSearchHitDestination(
 ): Promise<SearchHitDestination | null> {
   if (!hit.channelId) {
     return null;
+  }
+
+  if (hit.channelType === "chat") {
+    return {
+      kind: "chat",
+      chatId: hit.channelId,
+      messageId: hit.eventId,
+    };
   }
 
   if (hit.kind === KIND_FORUM_POST) {

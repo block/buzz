@@ -83,6 +83,7 @@ type RawChannel = {
   purpose: string | null;
   member_count: number;
   member_pubkeys: string[];
+  created_at?: string | null;
   last_message_at: string | null;
   archived_at: string | null;
   participants: string[];
@@ -160,6 +161,7 @@ type RawSearchHit = {
   pubkey: string;
   channel_id: string | null;
   channel_name: string | null;
+  channel_type?: string | null;
   created_at: number;
   score: number;
 };
@@ -349,6 +351,7 @@ function fromRawChannel(channel: RawChannel): Channel {
     purpose: channel.purpose,
     memberCount: channel.member_count,
     memberPubkeys: channel.member_pubkeys ?? [],
+    createdAt: channel.created_at ?? null,
     lastMessageAt: channel.last_message_at,
     archivedAt: channel.archived_at,
     participants: channel.participants,
@@ -408,6 +411,7 @@ function fromRawSearchHit(hit: RawSearchHit) {
     pubkey: hit.pubkey,
     channelId: hit.channel_id,
     channelName: hit.channel_name,
+    channelType: hit.channel_type,
     createdAt: hit.created_at,
     score: hit.score,
   };

@@ -43,6 +43,7 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-toggle": "^1.1.10",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@shadcn/react": "0.2.0",
     "@tanstack/react-query": "^5.90.21",
     "@tanstack/react-router": "^1.168.10",
     "@tanstack/react-virtual": "^3.14.2",

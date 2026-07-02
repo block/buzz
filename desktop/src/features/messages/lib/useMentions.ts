@@ -10,6 +10,7 @@ import {
   useChannelsQuery,
 } from "@/features/channels/hooks";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
+import { useRelayMembersQuery } from "@/features/relay-members/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
   coalesceAgentAutocompleteCandidates,
@@ -21,61 +22,29 @@ import {
   useUserSearchQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 import type {
   AgentPersona,
   ChannelMember,
-  ChannelRole,
   ChannelType,
-  UserSearchResult,
 } from "@/shared/api/types";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { hasMention } from "./hasMention";
+import {
+  formatOwnerLabel,
+  formatSearchUserDisplayName,
+  formatSearchUserSecondaryLabel,
+  globalSearchIdentityKey,
+  type MentionCandidate,
+  mentionCandidateLabel,
+} from "./mentionCandidates";
 
 const MENTION_DEBOUNCE_MS = 120;
 const MENTION_SUGGESTION_LIMIT = 50;
-
-type MentionCandidate = {
-  kind: "identity" | "persona";
-  pubkey?: string;
-  personaId?: string;
-  displayName: string | null;
-  avatarUrl?: string | null;
-  isMember: boolean;
-  role?: ChannelRole | null;
-  personaName?: string | null;
-  secondaryLabel?: string | null;
-  ownerPubkey?: string | null;
-  isAgent: boolean;
-  isManagedAgent?: boolean;
-  isGlobalSearchResult?: boolean;
-};
-
-function mentionCandidateLabel(candidate: MentionCandidate) {
-  return candidate.displayName ?? candidate.pubkey?.slice(0, 8) ?? "persona";
-}
-
-function globalSearchIdentityKey(candidate: MentionCandidate) {
-  if (
-    !candidate.isGlobalSearchResult ||
-    candidate.isMember ||
-    candidate.isAgent
-  ) {
-    return null;
-  }
-
-  const label = candidate.displayName?.trim().toLowerCase();
-  if (!label) {
-    return null;
-  }
-
-  const secondaryLabel = candidate.secondaryLabel?.trim().toLowerCase() ?? "";
-  return `global-person:${label}:${secondaryLabel}`;
-}
 
 export type PersonaMentionTarget = {
   displayName: string;
@@ -85,37 +54,6 @@ export type PersonaMentionTarget = {
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
 };
-
-function formatSearchUserDisplayName(user: UserSearchResult) {
-  return user.displayName?.trim() || user.nip05Handle?.trim() || null;
-}
-
-function formatSearchUserSecondaryLabel(user: UserSearchResult) {
-  const displayName = user.displayName?.trim();
-  const nip05Handle = user.nip05Handle?.trim();
-
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-
-  return null;
-}
-
-function formatOwnerLabel(
-  ownerPubkey: string | null | undefined,
-  ownerProfiles?: UserProfileLookup,
-) {
-  if (!ownerPubkey) {
-    return null;
-  }
-
-  const owner = ownerProfiles?.[normalizePubkey(ownerPubkey)];
-  return (
-    owner?.displayName?.trim() ||
-    owner?.nip05Handle?.trim() ||
-    `${ownerPubkey.slice(0, 8)}…`
-  );
-}
 
 export function useMentions(
   channelId: string | null,
@@ -138,7 +76,8 @@ export function useMentions(
   const canSearchAllUsers =
     options?.channelType === "dm" ||
     options?.channelType === "stream" ||
-    options?.channelType === "forum";
+    options?.channelType === "forum" ||
+    options?.channelType === "chat";
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
   const canSearchGlobalPeople =
     canSearchAllUsers && mentionSearchQuery.length > 0;
@@ -148,6 +87,7 @@ export function useMentions(
     : null;
   const membersQuery = useChannelMembersQuery(channelId);
   const members = externalMembers ?? membersQuery.data;
+  const relayMembersQuery = useRelayMembersQuery(canSearchAllUsers);
   const isArchivedDiscovery = useIsArchivedPredicate();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -210,6 +150,16 @@ export function useMentions(
       ),
     [managedAgentsQuery.data],
   );
+  const relayMemberPubkeys = React.useMemo(
+    () =>
+      (relayMembersQuery.data ?? []).map((member) =>
+        normalizePubkey(member.pubkey),
+      ),
+    [relayMembersQuery.data],
+  );
+  const relayMemberProfilesQuery = useUsersBatchQuery(relayMemberPubkeys, {
+    enabled: canSearchAllUsers && relayMemberPubkeys.length > 0,
+  });
   const relayAgentNamesByPubkey = React.useMemo(
     () =>
       new Map(
@@ -349,6 +299,43 @@ export function useMentions(
     }
 
     if (canSearchAllUsers) {
+      for (const relayMember of relayMembersQuery.data ?? []) {
+        const pubkey = normalizePubkey(relayMember.pubkey);
+        const agentName =
+          managedAgentNamesByPubkey.get(pubkey) ??
+          relayAgentNamesByPubkey.get(pubkey) ??
+          null;
+        const profile =
+          profiles?.[pubkey] ??
+          relayMemberProfilesQuery.data?.profiles[pubkey] ??
+          null;
+        addCandidate({
+          kind: "identity",
+          pubkey,
+          displayName:
+            agentName ||
+            profile?.displayName?.trim() ||
+            profile?.nip05Handle?.trim() ||
+            null,
+          avatarUrl: profile?.avatarUrl ?? null,
+          isMember: memberPubkeys.has(pubkey),
+          isAgent:
+            profile?.isAgent === true ||
+            managedAgentNamesByPubkey.has(pubkey) ||
+            relayAgentNamesByPubkey.has(pubkey),
+          personaId: managedAgentPersonaIdsByPubkey.get(pubkey),
+          personaName: personaNameByPubkey.get(pubkey) ?? null,
+          secondaryLabel:
+            profile?.displayName?.trim() && profile?.nip05Handle?.trim()
+              ? profile.nip05Handle
+              : null,
+          ownerPubkey: profile?.ownerPubkey ?? null,
+          isManagedAgent: managedAgentNamesByPubkey.has(pubkey),
+        });
+      }
+    }
+
+    if (canSearchAllUsers) {
       for (const agent of relayAgentsQuery.data ?? []) {
         addCandidate({
           kind: "identity",
@@ -443,6 +430,8 @@ export function useMentions(
     profiles,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
+    relayMemberProfilesQuery.data?.profiles,
+    relayMembersQuery.data,
     userSearchQuery.data,
   ]);
 

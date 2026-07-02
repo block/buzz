@@ -53,6 +53,7 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { useComposerContentState } from "./useComposerContentState";
 
 type MessageComposerProps = {
+  autoInviteNonMemberMentions?: boolean;
   channelId?: string | null;
   channelName: string;
   channelType?: ChannelType | null;
@@ -99,12 +100,18 @@ type MessageComposerProps = {
     id: string;
   } | null;
   showTopBorder?: boolean;
+  toolbarControls?: {
+    emoji?: boolean;
+    formatting?: boolean;
+    spoiler?: boolean;
+  };
   toolbarExtraActions?: React.ReactNode;
   typingParentEventId?: string | null;
   typingRootEventId?: string | null;
 };
 
 function MessageComposerImpl({
+  autoInviteNonMemberMentions = false,
   channelId = null,
   channelName,
   channelType = null,
@@ -123,6 +130,7 @@ function MessageComposerImpl({
   replyTarget = null,
   mediaController,
   showTopBorder = false,
+  toolbarControls,
   toolbarExtraActions,
   typingParentEventId = null,
   typingRootEventId = null,
@@ -140,11 +148,33 @@ function MessageComposerImpl({
   const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
     Set<string>
   >(() => new Set());
+  const showEmojiControls = toolbarControls?.emoji ?? true;
+  const showFormattingControls = toolbarControls?.formatting ?? true;
+  const showSpoilerControls = toolbarControls?.spoiler ?? true;
 
-  const handleFormattingToggle = React.useCallback((pressed: boolean) => {
-    if (pressed) setIsEmojiPickerOpen(false);
-    setIsFormattingOpen(pressed);
-  }, []);
+  const handleFormattingToggle = React.useCallback(
+    (pressed: boolean) => {
+      if (!showFormattingControls) {
+        setIsFormattingOpen(false);
+        return;
+      }
+      if (pressed) setIsEmojiPickerOpen(false);
+      setIsFormattingOpen(pressed);
+    },
+    [showFormattingControls],
+  );
+
+  React.useEffect(() => {
+    if (!showFormattingControls) {
+      setIsFormattingOpen(false);
+    }
+  }, [showFormattingControls]);
+
+  React.useEffect(() => {
+    if (!showSpoilerControls) {
+      setSpoileredAttachmentUrls(new Set());
+    }
+  }, [showSpoilerControls]);
 
   const drafts = useDrafts();
   const effectiveDraftKey = draftKey ?? channelId;
@@ -163,6 +193,12 @@ function MessageComposerImpl({
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();
   const emojiAutocomplete = useEmojiAutocomplete(customEmoji);
+  React.useEffect(() => {
+    if (!showEmojiControls) {
+      setIsEmojiPickerOpen(false);
+      emojiAutocomplete.clearEmojis();
+    }
+  }, [emojiAutocomplete.clearEmojis, showEmojiControls]);
   const notifyTyping = useTypingBroadcast(
     channelId,
     typingParentEventId,
@@ -194,7 +230,7 @@ function MessageComposerImpl({
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen ||
     channelLinks.isChannelOpen ||
-    emojiAutocomplete.isEmojiAutocompleteOpen;
+    (showEmojiControls && emojiAutocomplete.isEmojiAutocompleteOpen);
 
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
@@ -247,7 +283,11 @@ function MessageComposerImpl({
 
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
-      emojiAutocomplete.updateEmojiQuery(text, cursor);
+      if (showEmojiControls) {
+        emojiAutocomplete.updateEmojiQuery(text, cursor);
+      } else {
+        emojiAutocomplete.clearEmojis();
+      }
 
       if (text.trim().length > 0) {
         notifyTyping();
@@ -276,6 +316,7 @@ function MessageComposerImpl({
     mentions,
     onSendRef,
     richText,
+    autoInviteNonMemberMentions,
     setContent: setComposerContent,
     setIsEmojiPickerOpen,
     setPendingImeta: media.setPendingImeta,
@@ -601,20 +642,18 @@ function MessageComposerImpl({
     [submitMessage],
   );
 
-  // ── Keyboard handling ───────────────────────────────────────────────
-  // Tiptap handles formatting shortcuts (⌘B, ⌘I, etc.) natively.
-  // Plain Enter → submit is now handled inside the Tiptap `submitOnEnter`
-  // extension (fires before ProseMirror's splitBlock). This wrapper only
-  // handles autocomplete arrow/enter keys and Escape for edit mode.
+  // Plain Enter submits inside Tiptap; this wrapper handles autocomplete keys and Escape.
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       // Let autocomplete handle keys first
-      const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
-      if (emojiResult.handled) {
-        if (emojiResult.suggestion) {
-          applyEmojiInsert(emojiResult.suggestion);
+      if (showEmojiControls) {
+        const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
+        if (emojiResult.handled) {
+          if (emojiResult.suggestion) {
+            applyEmojiInsert(emojiResult.suggestion);
+          }
+          return;
         }
-        return;
       }
 
       const channelResult = channelLinks.handleChannelKeyDown(event);
@@ -651,6 +690,7 @@ function MessageComposerImpl({
     [
       emojiAutocomplete.handleEmojiKeyDown,
       applyEmojiInsert,
+      showEmojiControls,
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
       mentions.handleMentionKeyDown,
@@ -849,15 +889,17 @@ function MessageComposerImpl({
             }}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
-            <EmojiAutocomplete
-              onSelect={applyEmojiInsert}
-              selectedIndex={emojiAutocomplete.emojiSelectedIndex}
-              suggestions={
-                emojiAutocomplete.isEmojiAutocompleteOpen
-                  ? emojiAutocomplete.emojiSuggestions
-                  : []
-              }
-            />
+            {showEmojiControls ? (
+              <EmojiAutocomplete
+                onSelect={applyEmojiInsert}
+                selectedIndex={emojiAutocomplete.emojiSelectedIndex}
+                suggestions={
+                  emojiAutocomplete.isEmojiAutocompleteOpen
+                    ? emojiAutocomplete.emojiSuggestions
+                    : []
+                }
+              />
+            ) : null}
             <ChannelAutocomplete
               onSelect={applyChannelInsert}
               selectedIndex={channelLinks.channelSelectedIndex}
@@ -927,6 +969,9 @@ function MessageComposerImpl({
               onPaperclip={handlePaperclipClick}
               onSpoilerToggle={handleComposerSpoilerToggle}
               sendDisabled={sendDisabled}
+              showEmojiPicker={showEmojiControls}
+              showFormatting={showFormattingControls}
+              showSpoiler={showSpoilerControls}
               spoilerActive={spoileredAttachmentUrls.size > 0}
             />
           </form>

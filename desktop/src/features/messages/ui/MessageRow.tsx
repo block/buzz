@@ -80,6 +80,7 @@ export const MessageRow = React.memo(
     onMarkRead,
     onToggleReaction,
     onReply,
+    onStartSideConversation,
     onUnfollowThread,
     profiles,
     searchQuery,
@@ -127,6 +128,7 @@ export const MessageRow = React.memo(
       remove: boolean,
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
+    onStartSideConversation?: (message: TimelineMessage) => void;
     onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
@@ -201,7 +203,10 @@ export const MessageRow = React.memo(
 
     const { channels } = useChannelNavigation();
     const channelNames = React.useMemo(
-      () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
+      () =>
+        channels
+          .filter((c) => c.channelType !== "dm" && c.channelType !== "chat")
+          .map((c) => c.name),
       [channels],
     );
 
@@ -452,6 +457,7 @@ export const MessageRow = React.memo(
             });
           }}
           onReply={onReply}
+          onStartSideConversation={onStartSideConversation}
           onUnfollowThread={onUnfollowThread}
           reactionErrorMessage={reactionErrorMessage}
           reactions={reactions}

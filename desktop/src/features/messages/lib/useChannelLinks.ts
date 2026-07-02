@@ -27,7 +27,10 @@ export function useChannelLinks() {
 
   /** Channel names (original casing) for overlay highlighting. */
   const knownChannelNames = React.useMemo<string[]>(
-    () => channels.filter((ch) => ch.channelType !== "dm").map((ch) => ch.name),
+    () =>
+      channels
+        .filter((ch) => ch.channelType !== "dm" && ch.channelType !== "chat")
+        .map((ch) => ch.name),
     [channels],
   );
 
@@ -61,7 +64,9 @@ export function useChannelLinks() {
     return channels
       .filter(
         (ch) =>
-          ch.channelType !== "dm" && ch.name.toLowerCase().includes(lowerQuery),
+          ch.channelType !== "dm" &&
+          ch.channelType !== "chat" &&
+          ch.name.toLowerCase().includes(lowerQuery),
       )
       .slice(0, 8)
       .map((ch) => ({

@@ -192,7 +192,7 @@ type RawPresenceLookup = Record<string, PresenceStatus>;
 type RawChannel = {
   id: string;
   name: string;
-  channel_type: "stream" | "forum" | "dm";
+  channel_type: "stream" | "forum" | "dm" | "chat";
   visibility: "open" | "private";
   description: string;
   topic: string | null;
@@ -209,6 +209,18 @@ type RawChannel = {
 
 type RawChannelWithMembership = RawChannel & {
   is_member: boolean;
+};
+
+type RawChatMetadata = {
+  channel_id: string;
+  author_pubkey: string | null;
+  title: string | null;
+  default_agent_pubkey: string | null;
+  template_id: string | null;
+  source_channel_id: string | null;
+  source_event_id: string | null;
+  source_thread_root_id: string | null;
+  updated_at: number;
 };
 
 type RawChannelDetail = RawChannel & {
@@ -2052,6 +2064,7 @@ const mockChannels: MockChannel[] = [
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
+const mockChatMetadataByChannelId = new Map<string, RawChatMetadata>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
@@ -3651,7 +3664,7 @@ async function handleGetChannels(config: E2eConfig | undefined) {
         id: channelId,
         name: getTag("name") ?? "",
         description: getTag("about") ?? "",
-        channel_type: channelType as "stream" | "forum" | "dm",
+        channel_type: channelType as "stream" | "forum" | "dm" | "chat",
         visibility: (isPrivate ? "private" : "open") as "open" | "private",
         topic: getTag("topic") ?? null,
         purpose: getTag("purpose") ?? null,
@@ -4140,6 +4153,202 @@ async function handleCreateChannel(
       ? new Date(ev.created_at * 1000).toISOString()
       : new Date().toISOString(),
   };
+}
+
+type ChatSourceInput = {
+  channelId?: string;
+  eventId?: string;
+  threadRootId?: string;
+};
+
+type CreateChatPayload = {
+  input?: {
+    title?: string;
+    defaultAgentPubkey?: string;
+    templateId?: string;
+    source?: ChatSourceInput;
+  };
+};
+
+type UpdateChatMetadataPayload = {
+  input?: {
+    channelId: string;
+    title?: string;
+    defaultAgentPubkey?: string;
+    templateId?: string;
+    source?: ChatSourceInput;
+  };
+};
+
+function buildMockChatMetadata(
+  channelId: string,
+  input: {
+    authorPubkey?: string;
+    title?: string;
+    defaultAgentPubkey?: string;
+    templateId?: string;
+    source?: ChatSourceInput;
+  } = {},
+): RawChatMetadata {
+  return {
+    channel_id: channelId,
+    author_pubkey: input.authorPubkey?.trim() || null,
+    title: input.title?.trim() || null,
+    default_agent_pubkey: input.defaultAgentPubkey?.trim() || null,
+    template_id: input.templateId?.trim() || null,
+    source_channel_id: input.source?.channelId?.trim() || null,
+    source_event_id: input.source?.eventId?.trim() || null,
+    source_thread_root_id: input.source?.threadRootId?.trim() || null,
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+function chatMetadataTags(metadata: RawChatMetadata) {
+  const tags: string[][] = [
+    ["d", metadata.channel_id],
+    ["h", metadata.channel_id],
+  ];
+  if (metadata.title) tags.push(["title", metadata.title]);
+  if (metadata.default_agent_pubkey) {
+    tags.push(["default_agent", metadata.default_agent_pubkey]);
+  }
+  if (metadata.template_id) tags.push(["template", metadata.template_id]);
+  if (metadata.source_channel_id)
+    tags.push(["source_h", metadata.source_channel_id]);
+  if (metadata.source_event_id)
+    tags.push(["source_e", metadata.source_event_id]);
+  if (metadata.source_thread_root_id) {
+    tags.push(["source_root", metadata.source_thread_root_id]);
+  }
+  return tags;
+}
+
+async function handleCreateChat(
+  payload: CreateChatPayload,
+  config: E2eConfig | undefined,
+) {
+  const input = payload.input ?? {};
+  const title = input.title?.trim() || "New chat";
+  const identity = getIdentity(config);
+  if (!identity) {
+    const owner = createCurrentMember(config, "owner");
+    const channel = createMockChannel({
+      id: crypto.randomUUID(),
+      name: title,
+      channel_type: "chat",
+      visibility: "private",
+      description: "",
+      topic: null,
+      purpose: null,
+      last_message_at: null,
+      archived_at: null,
+      created_by: owner.pubkey,
+      topic_set_by: null,
+      topic_set_at: null,
+      purpose_set_by: null,
+      purpose_set_at: null,
+      ttl_seconds: null,
+      ttl_deadline: null,
+      topic_required: false,
+      max_members: null,
+      nip29_group_id: null,
+      created_minutes_ago: 0,
+      updated_minutes_ago: 0,
+      members: [owner],
+    });
+    mockChannels.push(channel);
+    mockChatMetadataByChannelId.set(
+      channel.id,
+      buildMockChatMetadata(channel.id, {
+        ...input,
+        authorPubkey: owner.pubkey,
+        title,
+      }),
+    );
+    return toRawChannel(channel, config);
+  }
+
+  const channelId = crypto.randomUUID();
+  await submitSignedEvent(config, {
+    kind: 9007,
+    content: "",
+    tags: [
+      ["h", channelId],
+      ["name", title],
+      ["channel_type", "chat"],
+      ["visibility", "private"],
+    ],
+  });
+  const metadata = buildMockChatMetadata(channelId, {
+    ...input,
+    authorPubkey: identity.pubkey,
+    title,
+  });
+  mockChatMetadataByChannelId.set(channelId, metadata);
+  await submitSignedEvent(config, {
+    kind: 30623,
+    content: "",
+    tags: chatMetadataTags(metadata),
+  });
+  const chats = await handleGetChannels(config);
+  return (
+    chats.find((channel) => channel.id === channelId) ?? {
+      id: channelId,
+      name: title,
+      description: "",
+      channel_type: "chat" as const,
+      visibility: "private" as const,
+      topic: null,
+      purpose: null,
+      member_count: 1,
+      member_pubkeys: [identity.pubkey],
+      last_message_at: null,
+      archived_at: null,
+      participants: [identity.pubkey],
+      participant_pubkeys: [identity.pubkey],
+      ttl_seconds: null,
+      ttl_deadline: null,
+      is_member: true,
+    }
+  );
+}
+
+function handleGetChatMetadata(args: { channelId: string }) {
+  return mockChatMetadataByChannelId.get(args.channelId) ?? null;
+}
+
+async function handleUpdateChatMetadata(
+  payload: UpdateChatMetadataPayload,
+  config: E2eConfig | undefined,
+) {
+  if (!payload.input?.channelId) {
+    throw new Error("Missing chat channel id.");
+  }
+  const previous = mockChatMetadataByChannelId.get(payload.input.channelId);
+  const identity = getIdentity(config);
+  const metadata = buildMockChatMetadata(payload.input.channelId, {
+    authorPubkey: identity?.pubkey ?? previous?.author_pubkey ?? undefined,
+    title: payload.input.title ?? previous?.title ?? undefined,
+    defaultAgentPubkey:
+      payload.input.defaultAgentPubkey ??
+      previous?.default_agent_pubkey ??
+      undefined,
+    templateId: payload.input.templateId ?? previous?.template_id ?? undefined,
+    source: payload.input.source ?? {
+      channelId: previous?.source_channel_id ?? undefined,
+      eventId: previous?.source_event_id ?? undefined,
+      threadRootId: previous?.source_thread_root_id ?? undefined,
+    },
+  });
+  mockChatMetadataByChannelId.set(payload.input.channelId, metadata);
+  if (getIdentity(config)) {
+    await submitSignedEvent(config, {
+      kind: 30623,
+      content: "",
+      tags: chatMetadataTags(metadata),
+    });
+  }
+  return metadata;
 }
 
 async function handleOpenDm(
@@ -6187,6 +6396,58 @@ async function handleSendChannelMessage(
   };
 }
 
+async function handleSendChatContextMessage(
+  payload: {
+    input?: {
+      channelId: string;
+      content: string;
+      source?: ChatSourceInput;
+    };
+  },
+  config: E2eConfig | undefined,
+): Promise<RawSendChannelMessageResponse> {
+  const input = payload.input;
+  if (!input?.channelId) {
+    throw new Error("Missing chat channel id.");
+  }
+  const createdAt = Math.floor(Date.now() / 1000);
+  const tags: string[][] = [
+    ["h", input.channelId],
+    ["chat_context", "source"],
+  ];
+  if (input.source?.channelId) tags.push(["source_h", input.source.channelId]);
+  if (input.source?.eventId) tags.push(["source_e", input.source.eventId]);
+  if (input.source?.threadRootId) {
+    tags.push(["source_root", input.source.threadRootId]);
+  }
+
+  if (!getIdentity(config)) {
+    const event = createMockEvent(9, input.content, tags);
+    recordMockMessage(input.channelId, event);
+    emitMockLiveEvent(input.channelId, event);
+    return {
+      event_id: event.id,
+      parent_event_id: null,
+      root_event_id: null,
+      depth: 0,
+      created_at: createdAt,
+    };
+  }
+
+  const event = await submitSignedEvent(config, {
+    kind: 9,
+    content: input.content,
+    tags,
+  });
+  return {
+    event_id: event.event_id,
+    parent_event_id: null,
+    root_event_id: null,
+    depth: 0,
+    created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
 async function handleSendManagedAgentChannelMessage(
   args: {
     agentPubkey: string;
@@ -7194,6 +7455,12 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "get_channels":
         return handleGetChannels(activeConfig);
+      case "list_chats": {
+        const channels = await handleGetChannels(activeConfig);
+        return channels.filter((channel) => channel.channel_type === "chat");
+      }
+      case "list_chat_metadata":
+        return [...mockChatMetadataByChannelId.values()];
       case "get_feed":
         return handleGetFeed(
           (payload as Parameters<typeof handleGetFeed>[0]) ?? {},
@@ -7401,6 +7668,20 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleCreateChannel>[0],
           activeConfig,
         );
+      case "create_chat":
+        return handleCreateChat(
+          payload as Parameters<typeof handleCreateChat>[0],
+          activeConfig,
+        );
+      case "get_chat_metadata":
+        return handleGetChatMetadata(
+          payload as Parameters<typeof handleGetChatMetadata>[0],
+        );
+      case "update_chat_metadata":
+        return handleUpdateChatMetadata(
+          payload as Parameters<typeof handleUpdateChatMetadata>[0],
+          activeConfig,
+        );
       case "open_dm":
         return handleOpenDm(
           payload as Parameters<typeof handleOpenDm>[0],
@@ -7488,6 +7769,11 @@ export function maybeInstallE2eTauriMocks() {
       case "send_channel_message":
         return handleSendChannelMessage(
           payload as Parameters<typeof handleSendChannelMessage>[0],
+          activeConfig,
+        );
+      case "send_chat_context_message":
+        return handleSendChatContextMessage(
+          payload as Parameters<typeof handleSendChatContextMessage>[0],
           activeConfig,
         );
       case "send_managed_agent_channel_message":

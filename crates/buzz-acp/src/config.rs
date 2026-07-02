@@ -436,6 +436,16 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+/// Chat channels are single-agent addressed even when multiple agents are
+/// members: the desktop client writes the default agent as an implicit `p` tag
+/// and explicit @mentions add more `p` tags. Force `#p` filtering so broad
+/// agent configs do not fan every chat turn out to every attached agent.
+pub fn force_mention_filter_for_chat(filter: &mut ChannelFilter, channel_type: Option<&str>) {
+    if channel_type == Some("chat") {
+        filter.require_mention = true;
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -1412,6 +1422,30 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_chat_channels_force_mention_filter() {
+        let mut filter = ChannelFilter {
+            kinds: None,
+            require_mention: false,
+        };
+
+        force_mention_filter_for_chat(&mut filter, Some("chat"));
+
+        assert!(filter.require_mention);
+    }
+
+    #[test]
+    fn test_non_chat_channels_keep_resolved_filter() {
+        let mut filter = ChannelFilter {
+            kinds: None,
+            require_mention: false,
+        };
+
+        force_mention_filter_for_chat(&mut filter, Some("stream"));
+
+        assert!(!filter.require_mention);
     }
 
     #[test]

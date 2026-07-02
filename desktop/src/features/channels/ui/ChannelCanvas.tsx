@@ -17,19 +17,24 @@ import {
 type ChannelCanvasProps = {
   channelId: string | null;
   canEdit: boolean;
+  emptyMessage?: string;
   isArchived: boolean;
 };
 
 export function ChannelCanvas({
   channelId,
   canEdit,
+  emptyMessage = "No canvas set for this channel.",
   isArchived,
 }: ChannelCanvasProps) {
   const canvasQuery = useCanvasQuery(channelId, channelId !== null);
   const setCanvasMutation = useSetCanvasMutation(channelId);
   const { channels } = useChannelNavigation();
   const channelNames = React.useMemo(
-    () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
+    () =>
+      channels
+        .filter((c) => c.channelType !== "dm" && c.channelType !== "chat")
+        .map((c) => c.name),
     [channels],
   );
   const [isEditing, setIsEditing] = React.useState(false);
@@ -130,9 +135,7 @@ export function ChannelCanvas({
           />
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">
-          No canvas set for this channel.
-        </p>
+        <p className="text-sm text-muted-foreground">{emptyMessage}</p>
       )}
       {canEdit && !isArchived ? (
         <Button

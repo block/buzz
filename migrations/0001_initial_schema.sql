@@ -25,7 +25,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ── Custom types ──────────────────────────────────────────────────────────────
 
-CREATE TYPE channel_type AS ENUM ('stream', 'forum', 'dm', 'workflow');
+CREATE TYPE channel_type AS ENUM ('stream', 'forum', 'dm', 'chat', 'workflow');
 CREATE TYPE channel_visibility AS ENUM ('open', 'private');
 CREATE TYPE member_role AS ENUM ('owner', 'admin', 'member', 'guest', 'bot');
 CREATE TYPE workflow_status AS ENUM ('active', 'disabled', 'archived');

@@ -3,6 +3,7 @@ import {
   createManagedAgent,
   getChannelMembers,
   listManagedAgents,
+  startManagedAgent,
 } from "@/shared/api/tauri";
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
@@ -163,4 +164,18 @@ export async function ensureWelcomeGuideIntro(
     markerScope: "channel",
   });
   return agent;
+}
+
+export async function ensureWelcomeGuideAgentInChannel(
+  channelId: string,
+  relayUrl?: string | null,
+) {
+  const agent = await ensureWelcomeGuideAgent(relayUrl);
+  await ensureWelcomeGuideMembership(channelId, agent);
+
+  if (agent.status === "running") {
+    return agent;
+  }
+
+  return startManagedAgent(agent.pubkey);
 }

@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  MessageCircle,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -14,6 +21,7 @@ import {
 type SidebarSelectedView =
   | "home"
   | "channel"
+  | "chats"
   | "agents"
   | "workflows"
   | "pulse"
@@ -28,6 +36,7 @@ type AppSidebarPinnedHeaderProps = {
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onOpenSearchResult: (hit: SearchHit) => void;
   onSelectAgents: () => void;
+  onSelectChats: () => void;
   onSelectChannel: (channelId: string) => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -48,6 +57,7 @@ export function AppSidebarPinnedHeader({
   onOpenDm,
   onOpenSearchResult,
   onSelectAgents,
+  onSelectChats,
   onSelectChannel,
   onSelectHome,
   onSelectProjects,
@@ -95,6 +105,18 @@ export function AppSidebarPinnedHeader({
                 {Math.min(homeBadgeCount, 99)}
               </SidebarMenuBadge>
             ) : null}
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-chats-view"
+              isActive={selectedView === "chats"}
+              onClick={onSelectChats}
+              tooltip="Chats"
+              type="button"
+            >
+              <MessageCircle className="h-4 w-4" />
+              <span>Chats</span>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <FeatureGate feature="pulse">
             <SidebarMenuItem>

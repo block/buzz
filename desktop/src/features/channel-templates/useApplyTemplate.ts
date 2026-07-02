@@ -13,6 +13,7 @@ import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRunti
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
+import { buildChatCanvasContent } from "@/features/chats/lib/chatSetup";
 import { setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
 
@@ -38,15 +39,19 @@ export function useApplyTemplate() {
     templateId: string | undefined,
     channelId: string,
     channelName: string,
+    leadingContent?: string | null,
   ) {
-    if (!templateId) return;
-    const template = channelTemplatesQuery.data?.find(
-      (t) => t.id === templateId,
-    );
-    if (!template?.canvasTemplate) return;
-    const content = template.canvasTemplate
-      .replace(/\{channel\.name\}/g, channelName)
-      .replace(/\{template\.name\}/g, template.name);
+    let template: ChannelTemplate | null = null;
+    if (templateId) {
+      template =
+        channelTemplatesQuery.data?.find((t) => t.id === templateId) ?? null;
+    }
+    const content = buildChatCanvasContent({
+      channelName,
+      leadingContent,
+      template,
+    });
+    if (!content) return;
     try {
       await setCanvas({ channelId, content });
     } catch {

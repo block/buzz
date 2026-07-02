@@ -65,6 +65,7 @@ type MessageTimelineProps = {
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  onStartSideConversation?: (message: TimelineMessage) => void;
   isSendingVideoReviewComment?: boolean;
   onSendVideoReviewComment?: (
     message: TimelineMessage,
@@ -164,6 +165,7 @@ const MessageTimelineBase = React.forwardRef<
     onMarkUnread,
     onMarkRead,
     onReply,
+    onStartSideConversation,
     channelName,
     channelType,
     isSendingVideoReviewComment = false,
@@ -598,6 +600,7 @@ const MessageTimelineBase = React.forwardRef<
                     onMarkUnread={onMarkUnread}
                     onMarkRead={onMarkRead}
                     onReply={onReply}
+                    onStartSideConversation={onStartSideConversation}
                     isSendingVideoReviewComment={isSendingVideoReviewComment}
                     onSendVideoReviewComment={onSendVideoReviewComment}
                     onToggleReaction={onToggleReaction}

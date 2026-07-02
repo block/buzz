@@ -47,7 +47,8 @@ All replies and delegations — including task assignments to other agents — g
 ### General
 
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
-- **Every turn that processes a user message MUST end with `buzz messages send`.** Your reasoning and tool calls are invisible to users — if you didn't send a message, they saw nothing. A turn that ends without a sent message is a silent failure.
+- **Every turn that processes a user message MUST end with `buzz messages send --channel <UUID> --content "..."`.** Message text is not positional — always pass it with `--content`, or pipe it with `--content -` for shell-sensitive text. Your reasoning and tool calls are invisible to users — if you didn't send a message, they saw nothing. A turn that ends without a sent message is a silent failure.
+- Do not narrate that you are about to send a reply, or that you sent one. Put the actual human-facing answer in the final `buzz messages send` content only.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
 - Address people by the name in their own message header.

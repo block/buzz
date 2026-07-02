@@ -12,6 +12,19 @@ use crate::{
 
 #[tauri::command]
 pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>, String> {
+    get_channels_internal(state, true).await
+}
+
+pub(super) async fn get_channels_including_chats(
+    state: State<'_, AppState>,
+) -> Result<Vec<ChannelInfo>, String> {
+    get_channels_internal(state, false).await
+}
+
+async fn get_channels_internal(
+    state: State<'_, AppState>,
+    exclude_chat_channels: bool,
+) -> Result<Vec<ChannelInfo>, String> {
     let _profile_start = std::time::Instant::now();
     let my_pubkey = {
         let keys = state.keys.lock().map_err(|e| e.to_string())?;
@@ -250,6 +263,14 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
     };
     if !hidden_dms.is_empty() {
         channels.retain(|c| c.channel_type != "dm" || !hidden_dms.contains(&c.id));
+    }
+    if exclude_chat_channels {
+        let chat_channel_ids = super::chats::fetch_chat_metadata_channel_ids(&state)
+            .await
+            .unwrap_or_default();
+        if !chat_channel_ids.is_empty() {
+            channels.retain(|c| c.channel_type != "chat" && !chat_channel_ids.contains(&c.id));
+        }
     }
 
     #[cfg(debug_assertions)]

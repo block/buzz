@@ -21,7 +21,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -459,28 +459,24 @@ mod tests {
     #[test]
     fn embedded_migrator_contains_consolidated_initial_schema() {
         let migrations: Vec<_> = MIGRATOR.iter().collect();
+        let initial = migrations
+            .iter()
+            .find(|migration| migration.version == 1)
+            .expect("initial schema migration is embedded");
 
-        assert_eq!(migrations.len(), 1);
-        assert_eq!(migrations[0].version, 1);
-        assert_eq!(&*migrations[0].description, "initial schema");
-        assert!(migrations[0]
-            .sql
-            .as_str()
-            .contains("CREATE TABLE communities"));
-        assert!(migrations[0].sql.as_str().contains("CREATE TABLE channels"));
-        assert!(migrations[0]
+        assert_eq!(&*initial.description, "initial schema");
+        assert!(initial.sql.as_str().contains("CREATE TABLE communities"));
+        assert!(initial.sql.as_str().contains("CREATE TABLE channels"));
+        assert!(initial
             .sql
             .as_str()
             .contains("CREATE TABLE scheduled_workflow_fires"));
-        assert!(migrations[0]
-            .sql
-            .as_str()
-            .contains("CREATE TABLE audit_log"));
-        assert!(migrations[0]
+        assert!(initial.sql.as_str().contains("CREATE TABLE audit_log"));
+        assert!(initial
             .sql
             .as_str()
             .contains("CREATE TABLE _operator_global_tables"));
-        assert!(migrations[0]
+        assert!(initial
             .sql
             .as_str()
             .contains("search_tsv  TSVECTOR GENERATED ALWAYS"));

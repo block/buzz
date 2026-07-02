@@ -80,6 +80,8 @@ pub struct AgentModelCapabilities {
 pub struct SessionState {
     /// channel_id → session_id
     pub sessions: HashMap<Uuid, String>,
+    /// channel_id → cwd used when the session was created.
+    pub channel_cwds: HashMap<Uuid, String>,
     pub heartbeat_session: Option<String>,
     /// Per-channel turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
@@ -110,12 +112,14 @@ impl SessionState {
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
         self.turn_counts.remove(channel_id);
         self.core_sections.remove(channel_id);
+        self.channel_cwds.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
     pub fn invalidate_all(&mut self) {
         self.sessions.clear();
+        self.channel_cwds.clear();
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
@@ -127,6 +131,7 @@ impl SessionState {
         self.sessions.contains_key(channel_id)
             || self.turn_counts.contains_key(channel_id)
             || self.core_sections.contains_key(channel_id)
+            || self.channel_cwds.contains_key(channel_id)
     }
 }
 
@@ -659,6 +664,7 @@ const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    cwd: &str,
     agent_core: Option<&str>,
 ) -> Result<String, AcpError> {
     // Combine base_prompt + system_prompt + agent core into a single
@@ -669,7 +675,7 @@ async fn create_session_and_apply_model(
     // header from `engram_fetch::build_core_section`, so we just append it.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
         with_core(
-            framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+            framed_system_prompt(cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
             agent_core,
         )
     } else {
@@ -679,7 +685,7 @@ async fn create_session_and_apply_model(
     let resp = agent
         .acp
         .session_new_full(
-            &ctx.cwd,
+            cwd,
             ctx.mcp_servers.clone(),
             combined_system_prompt.as_deref(),
         )
@@ -1093,6 +1099,27 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
+    let session_cwd = match &source {
+        PromptSource::Channel(cid) => resolve_channel_session_cwd(*cid, &ctx)
+            .await
+            .unwrap_or_else(|| ctx.cwd.clone()),
+        PromptSource::Heartbeat => ctx.cwd.clone(),
+    };
+    if let PromptSource::Channel(cid) = &source {
+        let has_session = agent.state.sessions.contains_key(cid);
+        let previous_cwd = agent.state.channel_cwds.get(cid).map(String::as_str);
+        if has_session && previous_cwd != Some(session_cwd.as_str()) {
+            tracing::info!(
+                target: "pool::session",
+                channel = %cid,
+                cwd = %session_cwd,
+                "channel session cwd changed — recreating session"
+            );
+            agent.state.invalidate_channel(cid);
+        }
+        agent.state.channel_cwds.insert(*cid, session_cwd.clone());
+    }
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `[System]` user-message
@@ -1170,7 +1197,13 @@ pub async fn run_prompt_task(
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx, agent_core.as_deref()).await
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    &session_cwd,
+                    agent_core.as_deref(),
+                )
+                .await
                 {
                     Ok(sid) => {
                         tracing::info!(
@@ -1208,7 +1241,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None).await {
+                match create_session_and_apply_model(&mut agent, &ctx, &session_cwd, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -1398,6 +1431,11 @@ pub async fn run_prompt_task(
         } else {
             None
         };
+        let project_cwd = if session_cwd != ctx.cwd {
+            Some(session_cwd.as_str())
+        } else {
+            None
+        };
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
@@ -1424,6 +1462,7 @@ pub async fn run_prompt_task(
                 agent_core: agent_core.as_deref(),
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
+                project_cwd,
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.protocol_version >= 2,
                 base_prompt: ctx.base_prompt,
@@ -1831,17 +1870,24 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
                 let mut name = None;
                 let mut is_hidden = false;
                 let mut is_private = false;
+                let mut explicit_channel_type = None;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
                         match arr.first().and_then(|v| v.as_str()) {
                             Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
                             Some("hidden") => is_hidden = true,
                             Some("private") => is_private = true,
+                            Some("t") => {
+                                explicit_channel_type =
+                                    arr.get(1).and_then(|v| v.as_str()).map(str::to_string);
+                            }
                             _ => {}
                         }
                     }
                 }
-                let channel_type = if is_hidden {
+                let channel_type = if let Some(channel_type) = explicit_channel_type {
+                    channel_type
+                } else if is_hidden {
                     "dm".to_string()
                 } else if is_private {
                     "private".to_string()
@@ -1872,6 +1918,234 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
     .await
 }
 
+async fn resolve_channel_session_cwd(channel_id: Uuid, ctx: &PromptContext) -> Option<String> {
+    let channel_info = match ctx.channel_info.get(&channel_id) {
+        Some(ci) => Some(PromptChannelInfo {
+            name: ci.name.clone(),
+            channel_type: ci.channel_type.clone(),
+        }),
+        None => fetch_channel_info(channel_id, &ctx.rest_client).await,
+    };
+    let is_chat = channel_info
+        .as_ref()
+        .map(|ci| ci.channel_type == "chat")
+        .unwrap_or(false);
+    let project_path = fetch_chat_project_path(channel_id, &ctx.rest_client).await;
+    if !is_chat && project_path.is_none() {
+        return None;
+    }
+    project_path.and_then(|path| usable_project_cwd(&path))
+}
+
+async fn fetch_chat_project_path(channel_id: Uuid, rest: &RestClient) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    const LEGACY_CHAT_METADATA_KIND: u16 = 30078;
+    const LEGACY_CHAT_METADATA_D_PREFIX: &str = "buzz:chat:";
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let channel_id_string = channel_id.to_string();
+    let legacy_d = format!("{LEGACY_CHAT_METADATA_D_PREFIX}{channel_id_string}");
+    let native_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_CHAT_METADATA as u16,
+        ))
+        .custom_tags(d_tag.clone(), [channel_id_string.as_str()])
+        .limit(1);
+    let legacy_filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(LEGACY_CHAT_METADATA_KIND))
+        .custom_tags(d_tag, [legacy_d.as_str()])
+        .limit(1);
+
+    let metadata_path = fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query(&[native_filter.clone(), legacy_filter.clone()]),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_chat_project_path(json),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project metadata fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project metadata fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await;
+    if metadata_path.is_some() {
+        return metadata_path;
+    }
+
+    if let Some(canvas_path) = fetch_chat_project_path_from_canvas(channel_id, rest).await {
+        return Some(canvas_path);
+    }
+
+    fetch_chat_project_path_from_messages(channel_id, rest).await
+}
+
+async fn fetch_chat_project_path_from_canvas(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel_id_string = channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16))
+        .custom_tags(h_tag, [channel_id_string.as_str()])
+        .limit(1);
+
+    fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query(std::slice::from_ref(&filter)),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_chat_project_path_from_canvas(json),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project canvas fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project canvas fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await
+}
+
+fn parse_chat_project_path(events: serde_json::Value) -> Option<String> {
+    events.as_array()?.iter().find_map(|event| {
+        event.get("tags")?.as_array()?.iter().find_map(|tag| {
+            let arr = tag.as_array()?;
+            if arr.first().and_then(|v| v.as_str()) == Some("project_path") {
+                arr.get(1)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn parse_chat_project_path_from_canvas(events: serde_json::Value) -> Option<String> {
+    events.as_array()?.iter().find_map(|event| {
+        event
+            .get("content")
+            .and_then(|value| value.as_str())
+            .and_then(extract_project_path_from_canvas)
+    })
+}
+
+async fn fetch_chat_project_path_from_messages(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let channel_id_string = channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .custom_tags(h_tag, [channel_id_string.as_str()])
+        .limit(50);
+
+    fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            rest.query(std::slice::from_ref(&filter)),
+        )
+        .await
+        {
+            Ok(Ok(json)) => parse_chat_project_path_from_messages(json),
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project setup message fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "chat project setup message fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await
+}
+
+fn parse_chat_project_path_from_messages(events: serde_json::Value) -> Option<String> {
+    events.as_array()?.iter().find_map(|event| {
+        event
+            .get("content")
+            .and_then(|value| value.as_str())
+            .and_then(extract_project_path_from_canvas)
+    })
+}
+
+fn extract_project_path_from_canvas(content: &str) -> Option<String> {
+    let mut in_project_setup = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("Project setup") {
+            in_project_setup = true;
+            continue;
+        }
+        if in_project_setup && trimmed.is_empty() {
+            break;
+        }
+        if in_project_setup {
+            if let Some(path) = trimmed.strip_prefix("Folder:") {
+                let path = path.trim();
+                if !path.is_empty() {
+                    return Some(path.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn usable_project_cwd(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('/') || trimmed == "/" {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(trimmed).ok()?;
+    if !canonical.is_dir() {
+        return None;
+    }
+    canonical.to_str().map(str::to_string)
+}
+
 /// Fetch conversation context (thread or DM) for a batch before prompting.
 ///
 /// Returns `None` if:
@@ -1887,9 +2161,9 @@ async fn fetch_conversation_context(
     ctx: &PromptContext,
 ) -> Option<ConversationContext> {
     let limit = ctx.context_message_limit;
-    let is_dm = channel_info
+    let is_linear_chat = channel_info
         .as_ref()
-        .map(|ci| ci.channel_type == "dm")
+        .map(|ci| ci.channel_type == "dm" || ci.channel_type == "chat")
         .unwrap_or(false);
 
     // Check thread tags on the last event first — this applies to both
@@ -1901,8 +2175,8 @@ async fn fetch_conversation_context(
         return fetch_thread_context(batch.channel_id, &root_id, limit, &ctx.rest_client).await;
     }
 
-    // DM non-reply: fetch recent conversation history.
-    if is_dm {
+    // DM/chat non-reply: fetch recent conversation history.
+    if is_linear_chat {
         return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
     }
 
@@ -2832,6 +3106,58 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_chat_project_path_extracts_trimmed_tag() {
+        let path = parse_chat_project_path(json!([
+            {
+                "tags": [
+                    ["d", "chat-id"],
+                    ["project_path", "  /Users/me/Development/sprout  "]
+                ]
+            }
+        ]));
+
+        assert_eq!(path.as_deref(), Some("/Users/me/Development/sprout"));
+    }
+
+    #[test]
+    fn test_parse_chat_project_path_from_canvas_extracts_folder_line() {
+        let path = parse_chat_project_path_from_canvas(json!([
+            {
+                "content": "Project setup\nProject: Buzz\nFolder: /Users/me/Development/sprout\n\n# Notes"
+            }
+        ]));
+
+        assert_eq!(path.as_deref(), Some("/Users/me/Development/sprout"));
+    }
+
+    #[test]
+    fn test_parse_chat_project_path_from_messages_extracts_folder_line() {
+        let path = parse_chat_project_path_from_messages(json!([
+            {
+                "kind": 9,
+                "content": "hello"
+            },
+            {
+                "kind": 9,
+                "content": "Project setup\nProject: Buzz\nFolder: /Users/me/Development/sprout\nAgent: Fizz"
+            }
+        ]));
+
+        assert_eq!(path.as_deref(), Some("/Users/me/Development/sprout"));
+    }
+
+    #[test]
+    fn test_extract_project_path_from_canvas_requires_project_setup_block() {
+        assert!(extract_project_path_from_canvas("Folder: /tmp/nope").is_none());
+    }
+
+    #[test]
+    fn test_usable_project_cwd_rejects_relative_and_root_paths() {
+        assert!(usable_project_cwd("relative/path").is_none());
+        assert!(usable_project_cwd("/").is_none());
+    }
+
+    #[test]
     fn test_with_core_appends_below_framed() {
         let framed = with_core(
             Some("[System]\npersona".to_string()),
@@ -3238,6 +3564,8 @@ mod tests {
         let mut s = SessionState::default();
         s.sessions.insert(ch_a, "sess-a".into());
         s.sessions.insert(ch_b, "sess-b".into());
+        s.channel_cwds.insert(ch_a, "/tmp/a".into());
+        s.channel_cwds.insert(ch_b, "/tmp/b".into());
         s.turn_counts.insert(ch_a, 5);
         s.turn_counts.insert(ch_b, 3);
         s.core_sections.insert(ch_a, "core-a".into());
@@ -3279,6 +3607,7 @@ mod tests {
         );
 
         assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
+        assert_eq!(s.channel_cwds.get(&ch_a).unwrap(), "/tmp/a");
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
         assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
@@ -3323,6 +3652,7 @@ mod tests {
         s.invalidate_all();
 
         assert!(s.sessions.is_empty());
+        assert!(s.channel_cwds.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
         assert!(s.heartbeat_session.is_none());
@@ -3349,6 +3679,7 @@ mod tests {
         let mut s = SessionState::default();
         s.invalidate_all(); // should not panic
         assert!(s.sessions.is_empty());
+        assert!(s.channel_cwds.is_empty());
         assert!(s.turn_counts.is_empty());
         assert!(s.core_sections.is_empty());
     }
@@ -3377,6 +3708,7 @@ mod tests {
         assert!(!s.invalidate_channel(&ghost));
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
+        assert_eq!(s.channel_cwds.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
     }
 

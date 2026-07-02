@@ -14,11 +14,9 @@ import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import {
-  parseMessageLink,
-  resolveMessageLinkRenderTarget,
-  type ParsedMessageLink,
-} from "@/features/messages/lib/messageLink";
+import type { ParsedChatLink } from "@/features/chats/lib/chatLink";
+import remarkChatLinks from "@/features/chats/lib/remarkChatLinks";
+import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -68,7 +66,11 @@ import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
 import { MarkdownTable } from "./markdown/MarkdownTable";
-import { MessageLinkPill } from "./markdown/MessageLinkPill";
+import {
+  MarkdownChatLinkNode,
+  MarkdownMessageLinkNode,
+  renderMarkdownAppLink,
+} from "./markdown/AppLink";
 import { resolveFileCard } from "./markdownFileCard";
 import type {
   ImetaEntry,
@@ -1557,7 +1559,7 @@ function createMarkdownComponents(
       </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
-      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
+      const { imetaByUrl } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -1593,37 +1595,15 @@ function createMarkdownComponents(
       // in-app instead of opening the URL in the OS browser. http(s) links
       // continue to use the existing target="_blank" behavior.
       if (href) {
-        const messageLinkTarget = resolveMessageLinkRenderTarget({
+        const appLink = renderMarkdownAppLink({
+          children,
           href,
+          interactive,
           label,
+          props,
+          runtimeRef,
         });
-        if (messageLinkTarget.kind !== "none") {
-          if (messageLinkTarget.kind === "pill") {
-            return (
-              <MessageLinkPill
-                channels={runtimeRef.current.channels}
-                href={href}
-                interactive={interactive}
-                link={messageLinkTarget.link}
-                onOpenMessageLink={onOpenMessageLink}
-              />
-            );
-          }
-
-          return (
-            <a
-              {...props}
-              className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
-              href={href}
-              onClick={(event) => {
-                event.preventDefault();
-                onOpenMessageLink(messageLinkTarget.link);
-              }}
-            >
-              {children}
-            </a>
-          );
-        }
+        if (appLink) return appLink;
         // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
       }
@@ -1885,6 +1865,7 @@ function createMarkdownComponents(
       const channel = channels.find(
         (c) =>
           c.channelType !== "dm" &&
+          c.channelType !== "chat" &&
           c.name.toLowerCase() === channelName.toLowerCase(),
       );
 
@@ -1915,23 +1896,20 @@ function createMarkdownComponents(
       );
     },
     "message-link": ({ children }: { children?: React.ReactNode }) => {
-      const { channels, onOpenMessageLink } = runtimeRef.current;
-      const href = String(children ?? "");
-      const parsed = parseMessageLink(href);
-      if (!parsed.ok) {
-        // Malformed `buzz://message?…` — render the raw URL as plain text
-        // rather than a misleading clickable pill.
-        return <span data-message-link="">{href}</span>;
-      }
-
       return (
-        <MessageLinkPill
-          channels={channels}
-          href={href}
+        <MarkdownMessageLinkNode
           interactive={interactive}
-          link={parsed.value}
-          onOpenMessageLink={onOpenMessageLink}
-        />
+          runtimeRef={runtimeRef}
+        >
+          {children}
+        </MarkdownMessageLinkNode>
+      );
+    },
+    "chat-link": ({ children }: { children?: React.ReactNode }) => {
+      return (
+        <MarkdownChatLinkNode interactive={interactive} runtimeRef={runtimeRef}>
+          {children}
+        </MarkdownChatLinkNode>
       );
     },
   } as Components;
@@ -1955,7 +1933,7 @@ function MarkdownInner({
 }: MarkdownProps) {
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
-  const { goChannel } = useAppNavigation();
+  const { goChannel, goChat } = useAppNavigation();
   const onOpenChannel = React.useCallback(
     (channelId: string) => {
       void goChannel(channelId);
@@ -1978,6 +1956,12 @@ function MarkdownInner({
     },
     [goChannel],
   );
+  const onOpenChatLink = React.useCallback(
+    (link: ParsedChatLink) => {
+      void goChat(link.chatId);
+    },
+    [goChat],
+  );
   const linkPreviews = React.useMemo(
     () => (interactive ? extractSupportedLinkPreviews(content) : []),
     [content, interactive],
@@ -1987,6 +1971,7 @@ function MarkdownInner({
     channels,
     imetaByUrl,
     mentionPubkeysByName,
+    onOpenChatLink,
     onOpenChannel,
     onOpenMessageLink,
   });
@@ -2009,6 +1994,7 @@ function MarkdownInner({
       remarkGfm,
       remarkBreaks,
       remarkSpoilers,
+      remarkChatLinks,
       remarkMessageLinks,
       [remarkMentions, { mentionNames }],
       [remarkChannelLinks, { channelNames }],

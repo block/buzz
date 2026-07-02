@@ -237,6 +237,12 @@ pub const KIND_MESH_LLM_RELAY_STATUS: u32 = 30621;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
+/// Buzz Chat metadata (parameterized replaceable, d=chat channel UUID).
+///
+/// Channel-scoped with an `h` tag so private chat titles, default agent
+/// pointers, template ids, and source refs stay behind channel membership.
+pub const KIND_CHAT_METADATA: u32 = 30623;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -492,6 +498,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRESENCE_SNAPSHOT,
     KIND_MESH_LLM_RELAY_STATUS,
     KIND_DM_VISIBILITY,
+    KIND_CHAT_METADATA,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,
@@ -632,6 +639,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MESH_LLM_RELAY_STATUS)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_CHAT_METADATA)); // 30623 ∈ 30000–39999
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(

@@ -13,8 +13,6 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
-// ── Constants ────────────────────────────────────────────────────────────────
-
 /// Maximum content size — matches buzz-sdk (64 KiB).
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
 

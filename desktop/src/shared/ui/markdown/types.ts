@@ -1,3 +1,4 @@
+import type { ParsedChatLink } from "@/features/chats/lib/chatLink";
 import type { ParsedMessageLink } from "@/features/messages/lib/messageLink";
 import type { Channel } from "@/shared/api/types";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
@@ -23,11 +24,20 @@ export type MessageLinkPillProps = {
   onOpenMessageLink: (link: ParsedMessageLink) => void;
 };
 
+export type ChatLinkCardProps = {
+  channels: Channel[];
+  href: string;
+  interactive: boolean;
+  link: ParsedChatLink;
+  onOpenChatLink: (link: ParsedChatLink) => void;
+};
+
 export type MarkdownRuntime = {
   agentMentionPubkeysByName?: Record<string, string>;
   channels: Channel[];
   imetaByUrl?: ImetaLookup;
   mentionPubkeysByName?: Record<string, string>;
+  onOpenChatLink: (link: ParsedChatLink) => void;
   onOpenChannel: (channelId: string) => void;
   onOpenMessageLink: (link: ParsedMessageLink) => void;
 };

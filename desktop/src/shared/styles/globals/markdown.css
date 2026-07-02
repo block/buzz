@@ -21,6 +21,14 @@
   --buzz-link-preview-icon-color: hsl(var(--foreground));
 }
 
+.message-markdown [data-chat-link-card] {
+  box-sizing: border-box;
+}
+
+.message-markdown p:has(> [data-chat-link-card]:only-child) {
+  max-width: 100%;
+}
+
 .dark .message-markdown [data-link-preview] {
   --buzz-link-preview-icon-bg: #24292f;
 }

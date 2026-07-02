@@ -8,6 +8,7 @@ import {
   Hash,
   House,
   Lock,
+  MessageCircle,
   Zap,
 } from "lucide-react";
 import type * as React from "react";
@@ -29,7 +30,14 @@ type ChatHeaderProps = {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
   leadingContent?: React.ReactNode;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
+  mode?:
+    | "home"
+    | "channel"
+    | "chats"
+    | "agents"
+    | "workflows"
+    | "pulse"
+    | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
   /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
@@ -46,7 +54,14 @@ function ChannelIcon({
 }: {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
+  mode?:
+    | "home"
+    | "channel"
+    | "chats"
+    | "agents"
+    | "workflows"
+    | "pulse"
+    | "projects";
 }) {
   if (mode === "home") {
     return <House className={HEADER_ICON_CLASS} />;
@@ -54,6 +69,10 @@ function ChannelIcon({
 
   if (mode === "agents") {
     return <Bot className={HEADER_ICON_CLASS} />;
+  }
+
+  if (mode === "chats") {
+    return <MessageCircle className={HEADER_ICON_CLASS} />;
   }
 
   if (mode === "workflows") {
@@ -114,7 +133,10 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 min-w-0 shrink-0 cursor-default select-none bg-transparent px-5 py-2 transition-[margin,padding] duration-200 ease-linear",
+        "pointer-events-auto relative z-30 min-w-0 shrink-0 cursor-default select-none px-5 py-2 transition-[margin,padding] duration-200 ease-linear",
+        !belowSystemChrome && transparentChrome
+          ? "bg-background/75 backdrop-blur-md supports-backdrop-filter:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/35"
+          : "bg-transparent",
         overlaysContent && !belowSystemChrome && "-mb-14",
       )}
       data-testid="chat-header"

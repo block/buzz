@@ -8,6 +8,7 @@ import {
   Link2,
   MailCheck,
   MailOpen,
+  MessageCircle,
   Pencil,
   SmilePlus,
   Trash2,
@@ -78,6 +79,7 @@ function MoreActionsMenu({
   onMarkRead,
   onOpenChange,
   onRemindLater,
+  onStartSideConversation,
   onUnfollowThread,
   open,
   isFollowingThread,
@@ -94,6 +96,7 @@ function MoreActionsMenu({
   onMarkRead?: (message: TimelineMessage) => void;
   onOpenChange: (open: boolean) => void;
   onRemindLater?: (message: TimelineMessage) => void;
+  onStartSideConversation?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
   open: boolean;
   isFollowingThread?: boolean;
@@ -215,6 +218,18 @@ function MoreActionsMenu({
             >
               <Clock className="h-4 w-4" />
               Remind me later
+            </DropdownMenuItem>
+          ) : null}
+
+          {hasCopyActions && onStartSideConversation ? (
+            <DropdownMenuItem
+              data-testid={`side-conversation-${message.id}`}
+              onClick={() => {
+                onStartSideConversation(message);
+              }}
+            >
+              <MessageCircle className="h-4 w-4" />
+              Side conversation
             </DropdownMenuItem>
           ) : null}
 
@@ -346,6 +361,7 @@ export function MessageActionBar({
   onReactionSelect,
   onRemindLater,
   onReply,
+  onStartSideConversation,
   onUnfollowThread,
   reactionErrorMessage = null,
   reactions,
@@ -365,6 +381,7 @@ export function MessageActionBar({
   onReactionSelect?: (emoji: string) => Promise<void>;
   onRemindLater?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  onStartSideConversation?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
@@ -400,6 +417,7 @@ export function MessageActionBar({
     Boolean(onFollowThread) ||
     Boolean(onUnfollowThread) ||
     Boolean(onRemindLater) ||
+    Boolean(onStartSideConversation) ||
     !message.pending;
 
   const wouldAddReaction = React.useCallback(
@@ -547,6 +565,7 @@ export function MessageActionBar({
               onMarkRead={onMarkRead}
               onOpenChange={setIsDropdownOpen}
               onRemindLater={onRemindLater}
+              onStartSideConversation={onStartSideConversation}
               onUnfollowThread={onUnfollowThread}
               open={isDropdownOpen}
               isFollowingThread={isFollowingThread}
