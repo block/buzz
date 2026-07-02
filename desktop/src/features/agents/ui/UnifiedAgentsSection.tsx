@@ -27,6 +27,7 @@ import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
+import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
@@ -57,6 +58,11 @@ type UnifiedAgentsSectionProps = {
   isPersonasPending: boolean;
   onCreatePersona: () => void;
   onChooseCatalog: () => void;
+  onDuplicatePersona: (persona: AgentPersona) => void;
+  onEditPersona: (persona: AgentPersona) => void;
+  onSharePersona: (persona: AgentPersona) => void;
+  onDeactivatePersona: (persona: AgentPersona) => void;
+  onDeletePersona: (persona: AgentPersona) => void;
   onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
 };
 
@@ -89,6 +95,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     isPersonasPending,
     onCreatePersona,
     onChooseCatalog,
+    onDuplicatePersona,
+    onEditPersona,
+    onSharePersona,
+    onDeactivatePersona,
+    onDeletePersona,
     onImportPersonaFile,
   } = props;
 
@@ -170,6 +181,18 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               const profileAgent = pickProfileAgent(group.agents);
               return (
                 <AgentPersonaCard
+                  actions={
+                    <PersonaActionsMenu
+                      isActionPending={isActionPending}
+                      isPending={isPersonasPending}
+                      persona={group.persona}
+                      onDeactivate={onDeactivatePersona}
+                      onDelete={onDeletePersona}
+                      onDuplicate={onDuplicatePersona}
+                      onEdit={onEditPersona}
+                      onShare={onSharePersona}
+                    />
+                  }
                   agent={profileAgent}
                   key={group.persona.id}
                   persona={group.persona}
@@ -250,6 +273,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 }
 
 function AgentPersonaCard({
+  actions,
   agent,
   persona,
   startingAgentPubkey,
@@ -259,6 +283,7 @@ function AgentPersonaCard({
   onStartAgent,
   onStartPersona,
 }: {
+  actions?: React.ReactNode;
   agent: ManagedAgent | undefined;
   persona: AgentPersona;
   startingAgentPubkey: string | null;
@@ -285,6 +310,7 @@ function AgentPersonaCard({
 
   return (
     <AgentIdentityCard
+      actions={actions}
       ariaLabel={`${title} agent profile`}
       avatar={
         agent ? (

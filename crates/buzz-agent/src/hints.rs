@@ -157,12 +157,24 @@ fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<Skill
 /// are treated as separate skills and are not descended into.
 fn collect_supporting_files(skill_dir: &Path) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    collect_supporting_files_impl(skill_dir, &mut result);
+    let mut visited_dirs = HashSet::new();
+    collect_supporting_files_impl(skill_dir, &mut result, &mut visited_dirs);
     result.sort();
     result
 }
 
-fn collect_supporting_files_impl(current: &Path, out: &mut Vec<PathBuf>) {
+fn collect_supporting_files_impl(
+    current: &Path,
+    out: &mut Vec<PathBuf>,
+    visited_dirs: &mut HashSet<PathBuf>,
+) {
+    let Ok(canonical_current) = current.canonicalize() else {
+        return;
+    };
+    if !visited_dirs.insert(canonical_current) {
+        return;
+    }
+
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
@@ -182,7 +194,7 @@ fn collect_supporting_files_impl(current: &Path, out: &mut Vec<PathBuf>) {
             if path.join("SKILL.md").is_file() {
                 continue;
             }
-            collect_supporting_files_impl(&path, out);
+            collect_supporting_files_impl(&path, out, visited_dirs);
         } else if ft.is_file() && path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
             out.push(path);
         }
@@ -667,6 +679,23 @@ mod tests {
             !names.contains(&"secret.md".to_owned()),
             "nested skill's files should not appear: {names:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_supporting_files_skips_symlink_cycles() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+
+        let refs = skill_dir.join("references");
+        std::fs::create_dir_all(&refs).unwrap();
+        let guide = refs.join("guide.md");
+        std::fs::write(&guide, "guide").unwrap();
+        std::os::unix::fs::symlink(&refs, refs.join("loop")).unwrap();
+
+        let files = collect_supporting_files(skill_dir);
+        assert_eq!(files, vec![guide]);
     }
 
     #[test]

@@ -65,6 +65,16 @@ type MockRelayAgentSeed = {
   status?: PresenceStatus;
 };
 
+type MockPersonaSeed = {
+  id?: string;
+  displayName: string;
+  avatarUrl?: string | null;
+  systemPrompt: string;
+  isActive?: boolean;
+  sourceTeam?: string | null;
+  envVars?: Record<string, string>;
+};
+
 type MockSearchProfileSeed = {
   pubkey: string;
   displayName: string | null;
@@ -86,6 +96,7 @@ type E2eConfig = {
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    personas?: MockPersonaSeed[];
     relayAgents?: MockRelayAgentSeed[];
     agentListDelayMs?: number;
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
@@ -469,6 +480,7 @@ type RawPersona = {
   name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
+  source_team?: string | null;
   env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
@@ -1574,23 +1586,104 @@ function resetMockManagedAgents(config?: E2eConfig) {
   syncMockRelayAgentsFromManagedAgents();
 }
 
+const BUILT_IN_PERSONA_AVATAR_URLS = {
+  productStrategist:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjMmY2ZjczIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNkZmY3ZjQiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNkZmY3ZjQiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2RmZjdmNCI+UFM8L3RleHQ+PC9zdmc+",
+  implementationPartner:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjNmY0ZTlhIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmMGU4ZmYiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmMGU4ZmYiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2YwZThmZiI+SVA8L3RleHQ+PC9zdmc+",
+  qaReviewer:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjOWE1YTFmIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmZmYwZGMiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYwZGMiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2ZmZjBkYyI+UUE8L3RleHQ+PC9zdmc+",
+  workCoordinator:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjMzQ1ZjhjIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNlM2YwZmYiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNlM2YwZmYiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2UzZjBmZiI+V0M8L3RleHQ+PC9zdmc+",
+  supportGuide:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjNmE3MDMxIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmMmY2ZDciIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmMmY2ZDciIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2YyZjZkNyI+U0c8L3RleHQ+PC9zdmc+",
+  experimentDesigner:
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMyIiBmaWxsPSIjOGIzZjVlIi8+PGNpcmNsZSBjeD0iOTYiIGN5PSIzMiIgcj0iMTYiIGZpbGw9IiNmZmU3ZjAiIGZpbGwtb3BhY2l0eT0iLjI4Ii8+PHBhdGggZD0iTTI0IDk0YzE0LTI1IDI3LTM3IDQwLTM3czI2IDEyIDQwIDM3IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZmU3ZjAiIHN0cm9rZS13aWR0aD0iOCIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+PHRleHQgeD0iNjQiIHk9IjcyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsQXJpYWwsc2Fucy1zZXJpZiIgZm9udC1zaXplPSIzNCIgZm9udC13ZWlnaHQ9IjcwMCIgZmlsbD0iI2ZmZTdmMCI+RUQ8L3RleHQ+PC9zdmc+",
+} as const;
+
 function resetMockPersonas(config?: E2eConfig) {
   const now = new Date().toISOString();
   const activePersonaIds = new Set(config?.mock?.activePersonaIds ?? []);
-  mockPersonas = [
+  const builtInPersonas = [
+    {
+      id: "builtin:product-strategist",
+      display_name: "Product Strategist",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.productStrategist,
+      system_prompt:
+        "You are a product strategy agent. You help turn broad ideas into clear product and design direction.\n\n# Focus\n\nClarify the goal, identify the audience, and call out the tradeoffs that matter.",
+    },
+    {
+      id: "builtin:implementation-partner",
+      display_name: "Implementation Partner",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.implementationPartner,
+      system_prompt:
+        "You are an implementation partner agent. You help turn scoped plans into working changes.\n\n# Focus\n\nPrefer small, direct edits that follow the existing codebase.",
+    },
+    {
+      id: "builtin:qa-reviewer",
+      display_name: "QA Reviewer",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.qaReviewer,
+      system_prompt:
+        "You are a QA reviewer agent. You look for the ways a change might break.\n\n# Focus\n\nInspect state transitions, empty states, permissions, accessibility, and failure paths.",
+    },
     {
       id: "builtin:fizz",
       display_name: "Fizz",
       avatar_url: null,
       system_prompt: "You are Fizz.",
-      runtime: "goose",
-      model: null,
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:fizz"),
-      created_at: now,
-      updated_at: now,
+    },
+    {
+      id: "builtin:work-coordinator",
+      display_name: "Work Coordinator",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.workCoordinator,
+      system_prompt:
+        "You are a work coordination agent. You keep multi-step work organized and grounded.\n\n# Focus\n\nTrack goals, dependencies, and follow-ups.",
+    },
+    {
+      id: "builtin:support-guide",
+      display_name: "Support Guide",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.supportGuide,
+      system_prompt:
+        "You are a support and onboarding agent. You help people feel oriented quickly.\n\n# Focus\n\nExplain unfamiliar flows plainly, surface the next useful step, and keep guidance reassuring without becoming verbose.",
+    },
+    {
+      id: "builtin:experiment-designer",
+      display_name: "Experiment Designer",
+      avatar_url: BUILT_IN_PERSONA_AVATAR_URLS.experimentDesigner,
+      system_prompt:
+        "You are an experiment design agent. You help turn uncertainty into experiments.\n\n# Focus\n\nBreak big questions into small trials, name what would prove or disprove an idea, and keep momentum through ambiguity.",
     },
   ];
+  mockPersonas = builtInPersonas.map((persona) => ({
+    id: persona.id,
+    display_name: persona.display_name,
+    avatar_url: persona.avatar_url,
+    system_prompt: persona.system_prompt,
+    runtime: persona.id === "builtin:fizz" ? "goose" : null,
+    model: null,
+    provider: null,
+    name_pool: [],
+    is_builtin: true,
+    is_active: activePersonaIds.has(persona.id),
+    source_team: null,
+    created_at: now,
+    updated_at: now,
+  }));
+
+  for (const persona of config?.mock?.personas ?? []) {
+    mockPersonas.push({
+      id: persona.id ?? crypto.randomUUID(),
+      display_name: persona.displayName,
+      avatar_url: persona.avatarUrl ?? null,
+      system_prompt: persona.systemPrompt,
+      is_builtin: false,
+      is_active: persona.isActive ?? true,
+      source_team: persona.sourceTeam ?? null,
+      env_vars: { ...(persona.envVars ?? {}) },
+      created_at: now,
+      updated_at: now,
+    });
+  }
 }
 
 function resetMockTeams() {
@@ -5653,6 +5746,7 @@ async function handleCreatePersona(args: {
     system_prompt: args.input.systemPrompt.trim(),
     is_builtin: false,
     is_active: true,
+    source_team: null,
     env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,
@@ -5758,7 +5852,7 @@ function ensureMockPersonaIsActive(personaId: string) {
   }
   if (!persona.is_active) {
     throw new Error(
-      `${persona.display_name} is not in My Agents. Choose it from Persona Catalog first.`,
+      `${persona.display_name} is not in My Agents. Choose it from Agent Catalog first.`,
     );
   }
 }

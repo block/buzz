@@ -33,15 +33,34 @@ fn merge_personas_adds_missing_built_ins() {
     assert!(changed);
     assert_eq!(records.len(), BUILT_IN_PERSONAS.len());
     assert!(records.iter().all(|record| record.is_builtin));
-    assert!(records.iter().all(|record| record.is_active));
     assert!(records
         .iter()
         .any(|record| record.id == "builtin:fizz" && record.runtime.as_deref() == Some("goose")));
+    assert!(records
+        .iter()
+        .any(|record| record.id == "builtin:product-strategist" && !record.is_active));
     let display_names: Vec<&str> = records
         .iter()
         .map(|record| record.display_name.as_str())
         .collect();
-    assert_eq!(display_names, vec!["Fizz"]);
+    assert_eq!(
+        display_names,
+        vec![
+            "Fizz",
+            "Product Strategist",
+            "Implementation Partner",
+            "QA Reviewer",
+            "Work Coordinator",
+            "Support Guide",
+            "Experiment Designer"
+        ]
+    );
+    let active_ids: Vec<&str> = records
+        .iter()
+        .filter(|record| record.is_active)
+        .map(|record| record.id.as_str())
+        .collect();
+    assert_eq!(active_ids, vec!["builtin:fizz"]);
 }
 
 #[test]
@@ -204,7 +223,7 @@ fn ensure_persona_is_active_rejects_inactive_personas() {
 
     assert_eq!(
         err,
-        "Fizz is not in My Agents. Choose it from Persona Catalog first."
+        "Fizz is not in My Agents. Choose it from Agent Catalog first."
     );
 }
 

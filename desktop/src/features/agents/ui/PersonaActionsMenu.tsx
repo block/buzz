@@ -1,4 +1,4 @@
-import { CopyPlus, Download, Ellipsis, Pencil, Trash2 } from "lucide-react";
+import { BookUser, CopyPlus, Ellipsis, Pencil, Trash2 } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
 import {
@@ -15,7 +15,7 @@ export function PersonaActionsMenu({
   persona,
   onDuplicate,
   onEdit,
-  onExport,
+  onShare,
   onDeactivate,
   onDelete,
 }: {
@@ -24,11 +24,12 @@ export function PersonaActionsMenu({
   persona: AgentPersona;
   onDuplicate: (persona: AgentPersona) => void;
   onEdit: (persona: AgentPersona) => void;
-  onExport: (persona: AgentPersona) => void;
+  onShare: (persona: AgentPersona) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
   const disabled = isActionPending || isPending;
+  const canEdit = !persona.isBuiltIn && !persona.sourceTeam;
 
   return (
     <DropdownMenu modal={false}>
@@ -45,7 +46,11 @@ export function PersonaActionsMenu({
         align="end"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        {!persona.isBuiltIn ? (
+        <DropdownMenuItem disabled={disabled} onClick={() => onShare(persona)}>
+          <BookUser className="h-4 w-4" />
+          Catalog options
+        </DropdownMenuItem>
+        {canEdit ? (
           <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
             <Pencil className="h-4 w-4" />
             Edit
@@ -58,21 +63,8 @@ export function PersonaActionsMenu({
           <CopyPlus className="h-4 w-4" />
           Duplicate
         </DropdownMenuItem>
-        <DropdownMenuItem disabled={disabled} onClick={() => onExport(persona)}>
-          <Download className="h-4 w-4" />
-          Export
-        </DropdownMenuItem>
         <DropdownMenuSeparator />
-        {persona.isBuiltIn ? (
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            disabled={disabled}
-            onClick={() => onDeactivate(persona)}
-          >
-            <Trash2 className="h-4 w-4" />
-            Remove from My Agents
-          </DropdownMenuItem>
-        ) : persona.sourceTeam ? (
+        {persona.sourceTeam ? (
           <DropdownMenuItem disabled>
             <Trash2 className="h-4 w-4" />
             Managed by team
@@ -81,10 +73,17 @@ export function PersonaActionsMenu({
           <DropdownMenuItem
             className="text-destructive focus:text-destructive"
             disabled={disabled}
-            onClick={() => onDelete(persona)}
+            onClick={() => {
+              if (persona.isBuiltIn) {
+                onDeactivate(persona);
+                return;
+              }
+
+              onDelete(persona);
+            }}
           >
             <Trash2 className="h-4 w-4" />
-            Delete
+            Remove from My Agents
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

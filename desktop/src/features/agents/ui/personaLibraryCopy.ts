@@ -8,22 +8,21 @@ export const personaLibraryCopy = {
   import: "Import",
   emptyTitle: "No agents yet",
   emptyDescription:
-    "Create a new agent, choose one from the catalog, or import one to get started.",
+    "Choose one from Agent Catalog, add your own persona, or import one to get started.",
   emptyImportHint:
     "Or drop a .persona.md, .persona.json, .persona.png, or .zip file here to import.",
 } as const;
 
 export const personaCatalogCopy = {
-  title: "Persona Catalog",
-  description: "Choose which built-in personas belong in My Agents.",
-  dialogTitle: "Choose from Persona Catalog",
-  dialogDescription:
-    "Select the built-in personas you want available in My Agents.",
+  title: "Agent Catalog",
+  description: "Browse built-in agents and add them to My Agents.",
+  dialogTitle: "Agent Catalog",
+  dialogDescription: "Browse built-in agents and add them to My Agents.",
   emptyTitle: "You're all set",
-  emptyDescription: "Everything in Persona Catalog is already in My Agents.",
+  emptyDescription: "Everything in Agent Catalog is already in My Agents.",
   emptyCatalogDescription:
-    "New personas will show up here when the app ships more options.",
-  emptyCatalogTitle: "No personas in the catalog yet",
+    "New agents will show up here when the app ships more options.",
+  emptyCatalogTitle: "No agents in the catalog yet",
   detailsAction: "View details",
   selectAction: "Choose",
   deselectAction: "Selected",
@@ -32,11 +31,13 @@ export const personaCatalogCopy = {
   detailSelectedTitle: "Selected for My Agents",
   detailSelectedDescription:
     "Turn this off to remove the persona from teams and agent creation in this app.",
-  detailAvailableTitle: "Available in Persona Catalog",
+  detailAvailableTitle: "Available in Agent Catalog",
   detailAvailableDescription:
     "Turn this on to make the persona available for teams and agent creation.",
+  useAction: "Add agent",
+  addedAction: "Added to My Agents",
   teamEmptyState:
-    "No personas in My Agents yet. Create one or choose one from Persona Catalog first.",
+    "No personas in My Agents yet. Create one or choose one from Agent Catalog first.",
 } as const;
 
 export function getPersonaCatalogSelectionActionCopy(isActive: boolean) {

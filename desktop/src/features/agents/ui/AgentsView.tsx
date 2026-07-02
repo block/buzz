@@ -11,6 +11,7 @@ import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDialog } from "./PersonaDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
+import { PersonaShareDialog } from "./PersonaShareDialog";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -118,6 +119,13 @@ export function AgentsView() {
               isPersonasPending={personas.isPending}
               onCreatePersona={personas.openCreate}
               onChooseCatalog={personas.openCatalog}
+              onDuplicatePersona={personas.openDuplicate}
+              onEditPersona={personas.openEdit}
+              onSharePersona={personas.openShare}
+              onDeactivatePersona={(persona) => {
+                void personas.handleSetActive(persona, false, "library");
+              }}
+              onDeletePersona={personas.openDelete}
               onImportPersonaFile={(fileBytes, fileName) => {
                 void personas.handleImportFile(fileBytes, fileName);
               }}
@@ -248,6 +256,35 @@ export function AgentsView() {
           }}
           open={personas.personaToDelete !== null}
           persona={personas.personaToDelete}
+        />
+      ) : null}
+      {personas.personaToShare ? (
+        <PersonaShareDialog
+          isCatalogVisible={
+            personas.personaToShare.isBuiltIn ||
+            personas.sharedCatalogPersonaIdSet.has(personas.personaToShare.id)
+          }
+          isPending={personas.isPending}
+          onCatalogVisibilityChange={(visible) => {
+            if (personas.personaToShare) {
+              personas.setPersonaCatalogVisibility(
+                personas.personaToShare,
+                visible,
+              );
+            }
+          }}
+          onExport={() => {
+            if (personas.personaToShare) {
+              personas.handleExport(personas.personaToShare);
+            }
+          }}
+          onOpenChange={(open) => {
+            if (!open) {
+              personas.setPersonaToShare(null);
+            }
+          }}
+          open={personas.personaToShare !== null}
+          persona={personas.personaToShare}
         />
       ) : null}
       {personas.isCatalogDialogOpen ? (
