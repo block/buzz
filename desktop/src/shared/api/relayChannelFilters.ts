@@ -40,6 +40,12 @@ export function buildChannelFilter(
   return filter;
 }
 
+export function buildChannelLiveFilter(
+  channelId: string,
+): RelaySubscriptionFilter {
+  return buildChannelFilter(channelId, 0);
+}
+
 /**
  * History filter for cold-load and scrollback: message kinds *only*, so the
  * `limit` budget buys visible message depth. Auxiliary events (reactions,

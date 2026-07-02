@@ -17,6 +17,12 @@ import {
 } from "@/features/messages/lib/threading";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { relayClient } from "@/shared/api/relayClient";
+import { buildChannelLiveFilter } from "@/shared/api/relayChannelFilters";
+import {
+  frontierBridge,
+  newestEventFrontier,
+  type EventFrontier,
+} from "@/shared/api/relayFrontierBridge";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
@@ -269,23 +275,56 @@ export function useChannelSubscription(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
-  const syncLatestHistory = useEffectEvent(async () => {
-    if (!channelId) {
-      return;
-    }
+  const bridgeFromFrontier = useEffectEvent(
+    async (
+      capturedFrontier?: EventFrontier | null,
+      isActive: () => boolean = () => true,
+    ) => {
+      if (!channelId) {
+        return;
+      }
 
-    const history = await relayClient.fetchChannelHistory(
-      channelId,
-      CHANNEL_HISTORY_LIMIT,
-    );
+      const queryKey = channelMessagesKey(channelId);
+      const current = queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+      const frontier = capturedFrontier ?? newestEventFrontier(current);
 
-    queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
-      (current = []) => mergeTimelineHistoryMessages(current, history),
-    );
+      if (!frontier) {
+        const history = await relayClient.fetchChannelHistory(
+          channelId,
+          CHANNEL_HISTORY_LIMIT,
+        );
+        if (!isActive()) {
+          return;
+        }
+        queryClient.setQueryData<RelayEvent[]>(queryKey, (latest = []) =>
+          mergeTimelineHistoryMessages(latest, history),
+        );
+        void backfillAuxForMessages(queryClient, channelId, history);
+        return;
+      }
 
-    void backfillAuxForMessages(queryClient, channelId, history);
-  });
+      const bridgedEvents: RelayEvent[] = [];
+      await frontierBridge({
+        frontier,
+        isActive,
+        knownEventIds: new Set(current.map((event) => event.id)),
+        targetFilter: buildChannelLiveFilter(channelId),
+        requestHistory: (filter) => relayClient.fetchEvents(filter),
+        onEvent: (event) => {
+          bridgedEvents.push(event);
+        },
+      });
+
+      if (bridgedEvents.length === 0 || !isActive()) {
+        return;
+      }
+
+      queryClient.setQueryData<RelayEvent[]>(queryKey, (latest = []) =>
+        mergeTimelineHistoryMessages(latest, bridgedEvents),
+      );
+      void backfillAuxForMessages(queryClient, channelId, bridgedEvents);
+    },
+  );
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
     if (!channelId) {
@@ -327,16 +366,21 @@ export function useChannelSubscription(channel: Channel | null) {
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
-      void syncLatestHistory().catch((error) => {
+      void bridgeFromFrontier(undefined, () => !isDisposed).catch((error) => {
         if (!isDisposed) {
           console.error(
-            "Failed to refresh channel history after reconnecting",
+            "Failed to bridge channel history after reconnecting",
             channelId,
             error,
           );
         }
       });
     });
+
+    const queryKey = channelMessagesKey(channelId);
+    const subscriptionFrontier = newestEventFrontier(
+      queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [],
+    );
 
     relayClient
       .subscribeToChannel(channelId, (event) => {
@@ -351,15 +395,21 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
-        // No post-subscribe history refetch: useChannelMessagesQuery already
-        // loaded the latest CHANNEL_HISTORY_LIMIT events, and the live
-        // subscription itself backfills up to 50 most-recent events via its
-        // initial REQ (buildChannelFilter(id, 50)). Both write into the same
-        // channelMessagesKey cache, so any window between the two REQs is
-        // covered by the live sub's overlap unless >50 messages land in
-        // <1s — vanishingly rare in practice. The reconnect listener above
-        // still bridges gaps from connection drops, where the gap *is*
-        // unbounded.
+        // The live sub is registered with limit:0, so channel switches no
+        // longer replay the same 50 historical events that the query path just
+        // loaded. Once EOSE confirms the live sub is installed, explicitly
+        // bridge from the cache frontier to close the history→live race.
+        void bridgeFromFrontier(subscriptionFrontier, () => !isDisposed).catch(
+          (error) => {
+            if (!isDisposed) {
+              console.error(
+                "Failed to bridge channel history",
+                channelId,
+                error,
+              );
+            }
+          },
+        );
       })
       .catch((error) => {
         console.error("Failed to subscribe to channel", channelId, error);
@@ -372,7 +422,7 @@ export function useChannelSubscription(channel: Channel | null) {
         void cleanup();
       }
     };
-  }, [channelId, channelType]);
+  }, [channelId, channelType, queryClient]);
 }
 
 export function useSendMessageMutation(

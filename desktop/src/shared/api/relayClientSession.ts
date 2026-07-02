@@ -22,8 +22,8 @@ import {
 import {
   AUX_BACKFILL_CHUNK_SIZE,
   buildChannelAuxDeletionFilter,
-  buildChannelFilter,
   buildChannelHistoryFilter,
+  buildChannelLiveFilter,
   buildChannelMentionFilter,
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
@@ -330,7 +330,7 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
+    return this.subscribe(buildChannelLiveFilter(channelId), onEvent);
   }
 
   /**

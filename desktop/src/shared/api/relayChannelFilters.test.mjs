@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildChannelAuxDeletionFilter,
   buildChannelAuxFilter,
+  buildChannelLiveFilter,
   buildChannelReactionAuxFilter,
   buildChannelStructuralAuxFilter,
 } from "./relayChannelFilters.ts";
@@ -42,4 +43,10 @@ test("buildChannelStructuralAuxFilter excludes reactions", () => {
   assert.deepEqual(filter.kinds, [5, 9005, 40003]);
   assert.deepEqual(filter["#e"], IDS);
   assert.equal("#h" in filter, false);
+});
+
+test("buildChannelLiveFilter subscribes with limit 0 to avoid historical replay", () => {
+  const filter = buildChannelLiveFilter(CHANNEL);
+  assert.equal(filter.limit, 0);
+  assert.deepEqual(filter["#h"], [CHANNEL]);
 });
