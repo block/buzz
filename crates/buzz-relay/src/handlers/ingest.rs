@@ -1429,6 +1429,26 @@ async fn ingest_event_inner(
         Some(ch_id) => state.db.get_channel(tenant.community(), ch_id).await.ok(),
         None => None,
     };
+    // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
+    // here, through the same `channel_visibility_cached` gate fan-out uses
+    // (fence 2: cached `private` wins over the prefetched row; a `private`
+    // read still populates the cache). The value travels to fan-out bundled
+    // with the (community, channel) it was resolved under (fence 3). When the
+    // row is missing (global event, kind:9007 pre-create) this is `None` and
+    // fan-out performs its own fresh fail-closed lookup — `None` is never
+    // "assume open" (fence 1).
+    let threaded_visibility = match (channel_id, &channel_row) {
+        (Some(ch_id), Some(row)) => state
+            .channel_visibility_cached(tenant.community(), ch_id, Some(row))
+            .await
+            .ok()
+            .map(|visibility| crate::state::ThreadedChannelVisibility {
+                community_id: tenant.community(),
+                channel_id: ch_id,
+                visibility,
+            }),
+        _ => None,
+    };
     if let Some(ch_id) = channel_id {
         // kind:9021 (join) doesn't require prior membership.
         // kind:9007 (create) — channel doesn't exist yet; creator becomes owner in step 16.
@@ -1971,7 +1991,15 @@ async fn ingest_event_inner(
             }
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
-        dispatch_persistent_event(tenant, state, &stored_event, kind_u32, &pubkey_hex).await;
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored_event,
+            kind_u32,
+            &pubkey_hex,
+            threaded_visibility.clone(),
+        )
+        .await;
 
         info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
@@ -2097,7 +2125,15 @@ async fn ingest_event_inner(
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
     }
-    dispatch_persistent_event(tenant, state, &stored_event, kind_u32, &pubkey_hex).await;
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored_event,
+        kind_u32,
+        &pubkey_hex,
+        threaded_visibility.clone(),
+    )
+    .await;
 
     info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 

@@ -620,10 +620,18 @@ impl AppState {
     /// only `private` keeps the cache fail-safe: the worst stale entry is an
     /// over-restrictive `private` (drops non-members on a now-open channel for
     /// <=10s), never a leak.
+    ///
+    /// `prefetched` lets a caller that already holds the channel row for this
+    /// request (ingest's once-per-request fetch, E1 §4.8) reuse it instead of
+    /// re-SELECTing. The gate is unchanged: a cached `private` still wins over
+    /// the prefetched row (the cache is fail-safe by design), and a `private`
+    /// read from the row still populates the cache. With `Some(row)` this
+    /// method performs no DB I/O and cannot error.
     pub async fn channel_visibility_cached(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
+        prefetched: Option<&buzz_db::channel::ChannelRecord>,
     ) -> Result<String, buzz_db::DbError> {
         if let Some(cached) = self
             .channel_visibility_cache
@@ -631,17 +639,40 @@ impl AppState {
         {
             return Ok(cached);
         }
-        let visibility = self
-            .db
-            .get_channel(community_id, channel_id)
-            .await?
-            .visibility;
+        let visibility = match prefetched {
+            Some(row) => row.visibility.clone(),
+            None => {
+                self.db
+                    .get_channel(community_id, channel_id)
+                    .await?
+                    .visibility
+            }
+        };
         if visibility == "private" {
             self.channel_visibility_cache
                 .insert((community_id, channel_id), visibility.clone());
         }
         Ok(visibility)
     }
+}
+
+/// A channel-visibility read resolved at ingest and threaded through to
+/// fan-out within the same request (E1 phase-2, §4.8 phase-2 addendum).
+///
+/// The community and channel ids the visibility was resolved under travel
+/// with the value so it can never be consulted for a different channel or
+/// community's fan-out (channel UUIDs collide across communities —
+/// `Inv_LabelPropagation`). Consumers must treat a missing/mismatched bundle
+/// as "no threaded visibility" and fall back to a fresh fail-closed lookup —
+/// never as "assume open".
+#[derive(Debug, Clone)]
+pub struct ThreadedChannelVisibility {
+    /// Community the visibility was resolved under (server-resolved tenant).
+    pub community_id: CommunityId,
+    /// Channel the visibility was resolved for.
+    pub channel_id: Uuid,
+    /// The visibility string read at ingest (`"open"` / `"private"` / ...).
+    pub visibility: String,
 }
 
 /// Handle for graceful audit worker shutdown.

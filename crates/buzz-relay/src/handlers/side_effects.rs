@@ -810,7 +810,7 @@ async fn emit_addressable_discovery_event(
         .await?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
-        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex).await;
+        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
     }
     Ok(())
 }
@@ -2552,6 +2552,7 @@ pub async fn publish_nip43_membership_list(
             &stored,
             KIND_NIP43_MEMBERSHIP_LIST,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }
@@ -2727,6 +2728,7 @@ pub async fn publish_nipia_archival_list(
             &stored,
             KIND_IA_ARCHIVED_LIST,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }
@@ -2813,6 +2815,7 @@ pub async fn publish_dm_visibility_snapshot(
             &stored,
             KIND_DM_VISIBILITY,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }
@@ -2876,7 +2879,7 @@ async fn publish_nipia_delta(
         return Ok(());
     }
 
-    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex).await;
+    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
 
     info!(
         target = %target_pubkey_hex,
