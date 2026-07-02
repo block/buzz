@@ -45,21 +45,21 @@ pub struct GlobalAgentConfig {
     /// Lowest user-settable layer — per-agent and persona values win on any
     /// key collision. Reserved and derived keys are rejected at save time and
     /// stripped at spawn time.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
 
     /// Global fallback provider (e.g. `"databricks_v2"`, `"anthropic"`).
     ///
     /// Used only when neither the agent record nor the linked persona specifies
     /// a provider. `None` = no global default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub provider: Option<String>,
 
     /// Global fallback model identifier.
     ///
     /// Used only when neither the agent record nor the linked persona specifies
     /// a model. `None` = no global default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub model: Option<String>,
 }
 
