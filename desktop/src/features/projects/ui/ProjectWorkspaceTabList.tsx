@@ -18,7 +18,7 @@ export function ProjectTabsList() {
         <BookOpen className="h-3.5 w-3.5" />
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="activity">
-        Activity
+        Commits
       </TabsTrigger>
       <TabsTrigger className={PROJECT_TAB_TRIGGER_CLASS} value="prs">
         PRs

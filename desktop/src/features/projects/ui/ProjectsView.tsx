@@ -4,11 +4,9 @@ import {
   FolderGit2,
   GitCommit,
   GitFork,
-  MessageSquare,
   MoreHorizontal,
   TerminalSquare,
   Trash2,
-  Users,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -38,7 +36,6 @@ import {
   ProjectsToolbar,
   ProjectsViewModeToggle,
 } from "@/features/projects/ui/ProjectsToolbar";
-import { getDiscussionLabel } from "@/features/projects/lib/projectLabels";
 import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
 import {
   formatCreatedDate,
@@ -48,7 +45,6 @@ import {
   getProjectUpdatedAt,
   isProjectMine,
   isProjectOwnedByCurrentUser,
-  pluralize,
   projectHasAgent,
   projectOwnerIsUser,
   projectPeople,
@@ -114,6 +110,23 @@ function ClonePathLabel({ project }: { project: Project }) {
         <span className="relative z-10 flex min-w-0 font-mono">
           <span className="min-w-0 truncate">{head}</span>
           <span className="shrink-0">{tail}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-96 break-all font-mono">
+        {fullUrl}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+function ClonePathIcon({ project }: { project: Project }) {
+  const fullUrl = project.cloneUrls[0] ?? getClonePathLabel(project);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="relative z-10 flex shrink-0 items-center text-muted-foreground/80">
+          <GitFork className="h-3.5 w-3.5" />
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-96 break-all font-mono">
@@ -463,22 +476,20 @@ function ProjectGridCard({
           {project.description || "A shared space for internal git work."}
         </p>
 
-        <div className="flex min-w-0 items-center gap-1.5 rounded-xl bg-muted/50 px-2.5 py-1.5 text-xs text-muted-foreground/80">
-          <GitFork className="h-3.5 w-3.5 shrink-0" />
-          <ClonePathLabel project={project} />
-        </div>
-
-        <div className="mt-auto space-y-2 rounded-xl bg-muted/60 px-2.5 py-2">
+        <div className="mt-auto rounded-xl bg-muted/60 px-2.5 py-2">
           <div className="flex min-w-0 items-center justify-between gap-2">
-            <p className="truncate text-xs font-medium text-muted-foreground">
-              {getActivityLabel(summary)}
-            </p>
             <div className="relative z-10 flex shrink-0 items-center gap-1">
               <ProjectPeopleStack
                 profiles={profiles}
                 pubkeys={people}
                 workOwnerPubkey={project.owner}
               />
+            </div>
+            <div className="flex min-w-0 items-center gap-2">
+              <p className="truncate text-xs font-medium text-muted-foreground">
+                {getActivityLabel(summary)}
+              </p>
+              <ClonePathIcon project={project} />
             </div>
           </div>
         </div>
@@ -516,7 +527,7 @@ function ProjectListRow({
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_17rem_16rem] lg:items-center">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_16rem] lg:items-center">
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-2">
             <FolderGit2 className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -531,20 +542,6 @@ function ProjectListRow({
           <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/75">
             <GitFork className="h-3.5 w-3.5 shrink-0" />
             <ClonePathLabel project={project} />
-          </div>
-        </div>
-
-        <div className="min-w-0 justify-self-end space-y-1 lg:w-68">
-          <div className="flex flex-wrap items-center justify-start gap-x-3 gap-y-1 text-left text-xs text-muted-foreground">
-            <MetadataItem icon={Users}>
-              {pluralize(people.length, "person", "people")}
-            </MetadataItem>
-            <MetadataItem icon={MessageSquare}>
-              {getDiscussionLabel(project)}
-            </MetadataItem>
-            <MetadataItem icon={CalendarDays}>
-              {formatCreatedDate(project.createdAt)}
-            </MetadataItem>
           </div>
         </div>
 
@@ -869,7 +866,7 @@ export function ProjectsView() {
                 <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <span className="sr-only">Sort projects</span>
                   <select
-                    className="h-7 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
+                    className="h-8 rounded-md bg-background px-2 text-xs text-foreground outline-hidden focus:ring-1 focus:ring-ring"
                     onChange={(event) =>
                       handleSortChange(event.target.value as ProjectsSort)
                     }

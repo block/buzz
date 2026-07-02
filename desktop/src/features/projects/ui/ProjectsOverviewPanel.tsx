@@ -13,6 +13,7 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { OverviewRailSection } from "./ProjectOverviewPanel";
 
 export type ProjectsOverviewSection =
   | "repositories"
@@ -121,7 +122,7 @@ export function ProjectsOverviewPanel({
   const people = overviewPeople(projects, summaries);
 
   return (
-    <section className="mb-4">
+    <section className="mb-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="overflow-hidden rounded-2xl border border-border/50 bg-muted/20 p-4">
         <div className="flex min-w-0 items-start gap-3">
           <WorkspaceEmojiIcon className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted/60 text-2xl" />
@@ -161,28 +162,32 @@ export function ProjectsOverviewPanel({
             value={pluralize(stats.issues, "issue")}
           />
         </div>
-        <div className="mt-4 flex flex-wrap gap-1.5">
-          {people.slice(0, 18).map((pubkey) => {
-            const profile = profiles?.[normalizePubkey(pubkey)];
-            const label = resolveUserLabel({ pubkey, profiles });
-            return (
-              <Tooltip key={pubkey}>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex">
-                    <UserAvatar
-                      accent={profile?.isAgent === true}
-                      avatarUrl={profile?.avatarUrl ?? null}
-                      displayName={label}
-                      size="sm"
-                    />
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>{label}</TooltipContent>
-              </Tooltip>
-            );
-          })}
-        </div>
       </div>
+      <aside className="space-y-4 rounded-xl border border-border/50 bg-card/60 p-4">
+        <OverviewRailSection title="People">
+          <div className="flex flex-wrap gap-1.5">
+            {people.slice(0, 18).map((pubkey) => {
+              const profile = profiles?.[normalizePubkey(pubkey)];
+              const label = resolveUserLabel({ pubkey, profiles });
+              return (
+                <Tooltip key={pubkey}>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <UserAvatar
+                        accent={profile?.isAgent === true}
+                        avatarUrl={profile?.avatarUrl ?? null}
+                        displayName={label}
+                        size="sm"
+                      />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>{label}</TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </div>
+        </OverviewRailSection>
+      </aside>
     </section>
   );
 }

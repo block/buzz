@@ -20,7 +20,7 @@ export function ProjectsViewModeToggle({
   onViewModeChange: (viewMode: ProjectsViewMode) => void;
 }) {
   return (
-    <fieldset className="flex items-center rounded-lg border border-border/60 bg-muted/30 p-1">
+    <fieldset className="flex items-center rounded-lg bg-muted/30 p-0.5">
       <legend className="sr-only">Project layout</legend>
       <Button
         aria-pressed={viewMode === "grid"}
@@ -54,7 +54,7 @@ export function ProjectsToolbar({
   onFilterChange,
 }: ProjectsToolbarProps) {
   const filterOptions: Array<{ label: string; value: ProjectsFilter }> = [
-    { label: "All", value: "all" },
+    { label: "Overview", value: "all" },
     { label: "Mine", value: "mine" },
     { label: "Local", value: "local" },
     { label: "Repositories", value: "repositories" },

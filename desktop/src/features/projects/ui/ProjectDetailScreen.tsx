@@ -5,6 +5,7 @@ import {
   ExternalLink,
   FolderGit2,
   MessageSquare,
+  TerminalSquare,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -114,12 +115,14 @@ function WorkspaceTabs({
   onSelectedIssueIdChange,
   onSelectedPullRequestIdChange,
   onBranchChange,
+  onOpenTerminal,
   snapshot,
   snapshotError,
   snapshotLoading,
   profiles,
   repoContributors,
   repoSource,
+  terminalTitle,
 }: {
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
@@ -136,12 +139,14 @@ function WorkspaceTabs({
   onSelectedIssueIdChange: (id: string | null) => void;
   onSelectedPullRequestIdChange: (id: string | null) => void;
   onBranchChange: (branch: string | null) => void;
+  onOpenTerminal?: () => void;
   snapshot: ProjectRepoSnapshot | null | undefined;
   snapshotError: unknown;
   snapshotLoading: boolean;
   profiles?: UserProfileLookup;
   repoContributors: ProjectRepoContributor[];
   repoSource: "remote" | "local";
+  terminalTitle?: string;
 }) {
   const localCheckoutSnapshot = localSnapshot?.snapshot ?? null;
   const displayedSnapshot =
@@ -214,7 +219,21 @@ function WorkspaceTabs({
           />
         </div>
       ) : (
-        <ProjectTabsList />
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <ProjectTabsList />
+          {onOpenTerminal ? (
+            <Button
+              className="h-8 shrink-0 gap-1.5 rounded-full px-3 text-muted-foreground hover:text-foreground"
+              onClick={onOpenTerminal}
+              size="sm"
+              title={terminalTitle}
+              variant="ghost"
+            >
+              <TerminalSquare className="h-3.5 w-3.5" />
+              Terminal
+            </Button>
+          ) : null}
+        </div>
       )}
 
       <TabsContent className="m-0" value="overview">
@@ -226,7 +245,6 @@ function WorkspaceTabs({
           project={project}
           pullRequests={pullRequests}
           readmeFile={readmeFile}
-          repoSource={repoSource}
           snapshot={displayedSnapshot}
         />
       </TabsContent>
@@ -797,9 +815,6 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       localRepoSnapshotQuery.data?.path
                     }
                     onBranchChange={setSelectedBranch}
-                    onOpenTerminal={() => {
-                      void handleOpenTerminal();
-                    }}
                     onPush={() => {
                       void handlePushLocalRepo();
                     }}
@@ -824,6 +839,14 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 localSnapshotError={localRepoSnapshotQuery.error}
                 localSnapshotLoading={localRepoSnapshotQuery.isLoading}
                 onBranchChange={setSelectedBranch}
+                onOpenTerminal={() => {
+                  void handleOpenTerminal();
+                }}
+                terminalTitle={
+                  hasLocalCheckout
+                    ? "Open in Terminal"
+                    : "Clone & open in Terminal"
+                }
                 onSelectedIssueIdChange={setSelectedIssueId}
                 onSelectedPullRequestIdChange={setSelectedPullRequestId}
                 profiles={profiles}

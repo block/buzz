@@ -1,10 +1,4 @@
-import {
-  Eye,
-  FileCode2,
-  GitBranch,
-  GitCommitHorizontal,
-  Users,
-} from "lucide-react";
+import { FileCode2, GitBranch, GitCommitHorizontal, Users } from "lucide-react";
 import type * as React from "react";
 
 import type {
@@ -27,7 +21,6 @@ type ProjectOverviewPanelProps = {
   profiles?: UserProfileLookup;
   pullRequests: ProjectPullRequest[];
   readmeFile: ProjectRepoFile | null;
-  repoSource: "remote" | "local";
   snapshot: ProjectRepoSnapshot | null | undefined;
 };
 
@@ -56,10 +49,6 @@ const LANGUAGE_DOT_CLASSES = [
   "bg-orange-500",
   "bg-pink-500",
 ];
-
-function pluralize(count: number, singular: string, plural = `${singular}s`) {
-  return `${count} ${count === 1 ? singular : plural}`;
-}
 
 function shortHash(hash: string | undefined) {
   return hash ? hash.slice(0, 7) : "None";
@@ -123,7 +112,7 @@ function PeopleAvatars({
   );
 }
 
-function OverviewRailSection({
+export function OverviewRailSection({
   children,
   title,
 }: {
@@ -148,7 +137,6 @@ export function ProjectOverviewPanel({
   profiles,
   pullRequests,
   readmeFile,
-  repoSource,
   snapshot,
 }: ProjectOverviewPanelProps) {
   const languages = topLanguages(files);
@@ -171,22 +159,9 @@ export function ProjectOverviewPanel({
         )}
       </div>
       <aside className="space-y-4 rounded-xl border border-border/50 bg-card/60 p-4">
-        <OverviewRailSection title="View">
-          <div className="flex items-start gap-2 text-sm text-muted-foreground">
-            <Eye className="mt-0.5 h-4 w-4 shrink-0" />
-            <p>
-              Showing {repoSource === "local" ? "local checkout" : "remote"}{" "}
-              repository data.
-            </p>
-          </div>
-        </OverviewRailSection>
         <OverviewRailSection title="People">
-          <PeopleAvatars people={people} profiles={profiles} />
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">
-              {pluralize(people.length, "person", "people")} connected to this
-              project.
-            </p>
+            <PeopleAvatars people={people} profiles={profiles} />
             <button
               className="shrink-0 rounded-md text-xs font-medium text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               onClick={onViewContributors}
