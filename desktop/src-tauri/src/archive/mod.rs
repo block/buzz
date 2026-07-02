@@ -917,360 +917,372 @@ mod tests {
 
     // ── Real-relay integration tests ──────────────────────────────────────────
     //
-    // These tests require a live relay at `RELAY_URL` (default ws://localhost:3000).
-    // They are `#[ignore]` and run with:
+    // Gated on `#[cfg(not(target_os = "windows"))]` because `build_app_state()`
+    // and `reqwest::Client` pull in native Windows DLLs (SChannel/WinHTTP) that
+    // are not available in the CI runner, causing STATUS_ENTRYPOINT_NOT_FOUND at
+    // test-binary launch before any test runs. The guard compiles the whole
+    // cluster out of the Windows test binary. These tests are `#[ignore]` and
+    // require a live relay anyway — there is no Windows relay in CI.
+    //
+    // Run (Linux/macOS only):
     //
     //   RELAY_URL=ws://localhost:3000 cargo test -p buzz-desktop \
-    //       archive::tests::test_real_relay -- --ignored --nocapture
+    //       archive::tests::real_relay -- --ignored --nocapture
     //
     // The relay must be running with a Postgres backend (same docker compose
     // as the existing e2e suite). Each test creates its own keypair + channel so
     // concurrent runs don't interfere.
 
-    use crate::app_state::build_app_state;
-    use std::path::Path;
+    #[cfg(not(target_os = "windows"))]
+    mod real_relay {
+        use super::*;
+        use crate::app_state::build_app_state;
+        use std::path::Path;
 
-    fn relay_ws_url_from_env() -> String {
-        std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
-    }
+        fn relay_ws_url_from_env() -> String {
+            std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
+        }
 
-    fn relay_http_base() -> String {
-        relay_ws_url_from_env()
-            .replace("wss://", "https://")
-            .replace("ws://", "http://")
-            .trim_end_matches('/')
-            .to_string()
-    }
+        fn relay_http_base() -> String {
+            relay_ws_url_from_env()
+                .replace("wss://", "https://")
+                .replace("ws://", "http://")
+                .trim_end_matches('/')
+                .to_string()
+        }
 
-    /// Build a test AppState wired with specific identity keys and relay URL.
-    /// Mirrors production `archive_events`: the same `query_buckets` call path
-    /// is exercised, including NIP-98 signing inside `query_relay`.
-    fn make_test_app_state(keys: Keys, relay_url: &str) -> AppState {
-        let state = build_app_state();
-        *state.keys.lock().unwrap() = keys;
-        *state.relay_url_override.lock().unwrap() = Some(relay_url.to_string());
-        state
-    }
+        /// Build a test AppState wired with specific identity keys and relay URL.
+        /// Mirrors production `archive_events`: the same `query_buckets` call path
+        /// is exercised, including NIP-98 signing inside `query_relay`.
+        fn make_test_app_state(keys: Keys, relay_url: &str) -> AppState {
+            let state = build_app_state();
+            *state.keys.lock().unwrap() = keys;
+            *state.relay_url_override.lock().unwrap() = Some(relay_url.to_string());
+            state
+        }
 
-    /// Submit a signed event to the relay via `POST /events`.
-    /// The staging relay accepts events without NIP-98; this is only used for
-    /// test setup (publishing events that the archive pipeline will later query).
-    async fn submit_event_to_relay(ev: &Event) -> serde_json::Value {
-        let http = reqwest::Client::new();
-        let resp = http
-            .post(format!("{}/events", relay_http_base()))
-            .header("X-Pubkey", ev.pubkey.to_hex())
-            .header("Content-Type", "application/json")
-            .body(ev.as_json())
-            .send()
-            .await
-            .expect("submit event to relay");
-        assert!(
-            resp.status().is_success(),
-            "relay event submit failed: {}",
-            resp.status()
-        );
-        resp.json().await.expect("parse submit response")
-    }
+        /// Submit a signed event to the relay via `POST /events`.
+        /// The staging relay accepts events without NIP-98; this is only used for
+        /// test setup (publishing events that the archive pipeline will later query).
+        async fn submit_event_to_relay(ev: &Event) -> serde_json::Value {
+            let http = reqwest::Client::new();
+            let resp = http
+                .post(format!("{}/events", relay_http_base()))
+                .header("X-Pubkey", ev.pubkey.to_hex())
+                .header("Content-Type", "application/json")
+                .body(ev.as_json())
+                .send()
+                .await
+                .expect("submit event to relay");
+            assert!(
+                resp.status().is_success(),
+                "relay event submit failed: {}",
+                resp.status()
+            );
+            resp.json().await.expect("parse submit response")
+        }
 
-    /// Create an open channel on the relay.  Returns the channel UUID string.
-    async fn create_relay_channel(keys: &Keys) -> String {
-        let channel_id = Uuid::new_v4().to_string();
-        let ev = EventBuilder::new(Kind::Custom(9007), "")
-            .tags(vec![
-                Tag::parse(["h", &channel_id]).unwrap(),
-                Tag::parse(["name", &format!("archive-e2e-{channel_id}")]).unwrap(),
-                Tag::parse(["channel_type", "stream"]).unwrap(),
-                Tag::parse(["visibility", "open"]).unwrap(),
-            ])
-            .sign_with_keys(keys)
-            .unwrap();
-        let resp = submit_event_to_relay(&ev).await;
-        assert!(
-            resp["accepted"].as_bool().unwrap_or(false),
-            "channel creation not accepted: {resp}"
-        );
-        channel_id
-    }
-
-    /// Open a file-backed archive DB at `path` and insert one save subscription.
-    fn file_db_with_subscription(
-        path: &Path,
-        identity_pk: &str,
-        relay_url: &str,
-        scope_type: &str,
-        scope_value: &str,
-        kinds_json: &str,
-    ) {
-        let conn = store::open_archive_db(path).expect("open file archive db");
-        add_sub(
-            &conn,
-            identity_pk,
-            relay_url,
-            scope_type,
-            scope_value,
-            kinds_json,
-        );
-        // conn drops here — file is flushed before the caller reopens it
-    }
-
-    /// Run plan → real relay query (via the production `query_buckets` path,
-    /// including NIP-98 signing) → commit, using a file-backed archive DB.
-    ///
-    /// Mirrors the open/drop/query/reopen pattern of production `archive_events`:
-    ///   1. Open DB, run `plan_archive`, drop connection (no conn across `.await`).
-    ///   2. Call `query_buckets(plan.buckets, &state).await` — NIP-98 signed.
-    ///   3. Reopen DB for `commit_archive`.
-    ///
-    /// Returns `ArchiveBatchResult`; caller reopens the file for row assertions.
-    async fn run_batch_real_relay(
-        candidates: Vec<ArchiveCandidate>,
-        state: &AppState,
-        db_path: &Path,
-    ) -> ArchiveBatchResult {
-        let identity_pk = state.keys.lock().unwrap().public_key().to_hex();
-        let relay_url = crate::relay::relay_ws_url_with_override(state);
-
-        // Phase 1: plan (sync). Connection dropped before any .await.
-        let plan = {
-            let conn = store::open_archive_db(db_path).expect("open archive db for plan");
-            plan_archive(candidates, &identity_pk, &relay_url, &conn).unwrap()
-            // conn drops here
-        };
-
-        // Phase 2: relay queries (async) — no Connection in scope.
-        // Uses the real `query_buckets` path: query_relay → NIP-98 signed /query.
-        let bucket_results = query_buckets(plan.buckets, state).await;
-
-        // Phase 3: persist (sync). Fresh connection, same file.
-        let conn = store::open_archive_db(db_path).expect("open archive db for commit");
-        commit_archive(
-            bucket_results,
-            plan.ephemeral,
-            plan.pre_dropped,
-            &identity_pk,
-            &relay_url,
-            0,
-            &conn,
-        )
-        .unwrap()
-    }
-
-    /// Happy path: publish a kind:9 message to a channel, then run the archive
-    /// pipeline against the real relay. Asserts exact event + scope rows in a
-    /// file-backed SQLite archive, reopened after commit to prove persistence.
-    #[tokio::test]
-    #[ignore]
-    async fn test_real_relay_channel_h_happy_path_persists_event() {
-        let keys = Keys::generate();
-        let relay_url = relay_ws_url_from_env();
-        let state = make_test_app_state(keys.clone(), &relay_url);
-        let identity_pk = keys.public_key().to_hex();
-
-        // Create a channel and publish a kind:9 message.
-        let channel_id = create_relay_channel(&keys).await;
-        let msg_ev = EventBuilder::new(Kind::Custom(9), "hello archive")
-            .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        let submit_resp = submit_event_to_relay(&msg_ev).await;
-        assert!(
-            submit_resp["accepted"].as_bool().unwrap_or(false),
-            "message not accepted: {submit_resp}"
-        );
-
-        // Give the relay a moment to persist.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        // File-backed archive DB with a channel_h subscription.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("archive.db");
-        file_db_with_subscription(
-            &db_path,
-            &identity_pk,
-            &relay_url,
-            "channel_h",
-            &channel_id,
-            "[9]",
-        );
-
-        let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
-        let result = run_batch_real_relay(cands, &state, &db_path).await;
-
-        assert_eq!(result.persisted, 1, "expected 1 persisted, got {result:?}");
-        assert_eq!(result.dropped, 0, "expected 0 dropped, got {result:?}");
-
-        // Reopen the same file to assert exact row counts — proves file-backed persistence.
-        let read_conn = store::open_archive_db(&db_path).expect("reopen archive db");
-
-        let event_count: i64 = read_conn
-            .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(event_count, 1, "archived_events should have 1 row");
-
-        let scope_count: i64 = read_conn
-            .query_row(
-                "SELECT COUNT(*) FROM archived_event_scopes \
-                 WHERE scope_type = 'channel_h' AND scope_value = ?1",
-                [&channel_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(scope_count, 1, "archived_event_scopes should have 1 row");
-
-        // Confirm the stored raw_json round-trips to the original event.
-        let raw_json: String = read_conn
-            .query_row("SELECT raw_json FROM archived_events", [], |r| r.get(0))
-            .unwrap();
-        let stored_ev = Event::from_json(&raw_json).unwrap();
-        assert_eq!(stored_ev.id.to_hex(), msg_ev.id.to_hex());
-
-        println!(
-            "✓ real relay: event {} archived under channel_h:{}",
-            msg_ev.id.to_hex(),
+        /// Create an open channel on the relay.  Returns the channel UUID string.
+        async fn create_relay_channel(keys: &Keys) -> String {
+            let channel_id = Uuid::new_v4().to_string();
+            let ev = EventBuilder::new(Kind::Custom(9007), "")
+                .tags(vec![
+                    Tag::parse(["h", &channel_id]).unwrap(),
+                    Tag::parse(["name", &format!("archive-e2e-{channel_id}")]).unwrap(),
+                    Tag::parse(["channel_type", "stream"]).unwrap(),
+                    Tag::parse(["visibility", "open"]).unwrap(),
+                ])
+                .sign_with_keys(keys)
+                .unwrap();
+            let resp = submit_event_to_relay(&ev).await;
+            assert!(
+                resp["accepted"].as_bool().unwrap_or(false),
+                "channel creation not accepted: {resp}"
+            );
             channel_id
-        );
-        println!("  archived_events:       {event_count} row(s)");
-        println!("  archived_event_scopes: {scope_count} row(s)");
-    }
+        }
 
-    /// Kind-mismatch drop: subscription allows only kinds=[1059] but we publish a kind:9
-    /// channel message. The relay stores the event, but the archive's kind filter drops it
-    /// because 9 ∉ {1059}.
-    #[tokio::test]
-    #[ignore]
-    async fn test_real_relay_kind_mismatch_drops_event() {
-        let keys = Keys::generate();
-        let relay_url = relay_ws_url_from_env();
-        let state = make_test_app_state(keys.clone(), &relay_url);
-        let identity_pk = keys.public_key().to_hex();
+        /// Open a file-backed archive DB at `path` and insert one save subscription.
+        fn file_db_with_subscription(
+            path: &Path,
+            identity_pk: &str,
+            relay_url: &str,
+            scope_type: &str,
+            scope_value: &str,
+            kinds_json: &str,
+        ) {
+            let conn = store::open_archive_db(path).expect("open file archive db");
+            add_sub(
+                &conn,
+                identity_pk,
+                relay_url,
+                scope_type,
+                scope_value,
+                kinds_json,
+            );
+            // conn drops here — file is flushed before the caller reopens it
+        }
 
-        let channel_id = create_relay_channel(&keys).await;
-        // Publish a kind:9 channel message — relay accepts it, but the subscription's
-        // kind filter is [1059] so the archive pipeline must drop it.
-        let msg_ev = EventBuilder::new(Kind::Custom(9), "kind-mismatch-msg")
-            .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        let submit_resp = submit_event_to_relay(&msg_ev).await;
-        assert!(
-            submit_resp["accepted"].as_bool().unwrap_or(false),
-            "message not accepted: {submit_resp}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        /// Run plan → real relay query (via the production `query_buckets` path,
+        /// including NIP-98 signing) → commit, using a file-backed archive DB.
+        ///
+        /// Mirrors the open/drop/query/reopen pattern of production `archive_events`:
+        ///   1. Open DB, run `plan_archive`, drop connection (no conn across `.await`).
+        ///   2. Call `query_buckets(plan.buckets, &state).await` — NIP-98 signed.
+        ///   3. Reopen DB for `commit_archive`.
+        ///
+        /// Returns `ArchiveBatchResult`; caller reopens the file for row assertions.
+        async fn run_batch_real_relay(
+            candidates: Vec<ArchiveCandidate>,
+            state: &AppState,
+            db_path: &Path,
+        ) -> ArchiveBatchResult {
+            let identity_pk = state.keys.lock().unwrap().public_key().to_hex();
+            let relay_url = crate::relay::relay_ws_url_with_override(state);
 
-        // Subscription allows kinds=[1059] only — kind:9 must be dropped.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("archive.db");
-        file_db_with_subscription(
-            &db_path,
-            &identity_pk,
-            &relay_url,
-            "channel_h",
-            &channel_id,
-            "[1059]",
-        );
+            // Phase 1: plan (sync). Connection dropped before any .await.
+            let plan = {
+                let conn = store::open_archive_db(db_path).expect("open archive db for plan");
+                plan_archive(candidates, &identity_pk, &relay_url, &conn).unwrap()
+                // conn drops here
+            };
 
-        let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
-        let result = run_batch_real_relay(cands, &state, &db_path).await;
+            // Phase 2: relay queries (async) — no Connection in scope.
+            // Uses the real `query_buckets` path: query_relay → NIP-98 signed /query.
+            let bucket_results = query_buckets(plan.buckets, state).await;
 
-        assert_eq!(result.persisted, 0, "kind-mismatch: should be dropped");
-        assert_eq!(result.dropped, 1, "kind-mismatch: drop count should be 1");
-
-        println!("✓ real relay: kind-mismatch correctly dropped kind:9 event (subscription is kinds=[1059])");
-    }
-
-    /// No-subscription drop: event arrives but no save_subscription row exists.
-    #[tokio::test]
-    #[ignore]
-    async fn test_real_relay_no_subscription_drops_event() {
-        let keys = Keys::generate();
-        let relay_url = relay_ws_url_from_env();
-        let state = make_test_app_state(keys.clone(), &relay_url);
-
-        let channel_id = create_relay_channel(&keys).await;
-        let msg_ev = EventBuilder::new(Kind::Custom(9), "should be dropped")
-            .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
-            .sign_with_keys(&keys)
-            .unwrap();
-        submit_event_to_relay(&msg_ev).await;
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        // Empty file-backed archive DB — no subscription row.
-        // plan_archive drops the whole group because no subscription matches.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("archive.db");
-        store::open_archive_db(&db_path).expect("init empty archive db");
-        // conn from init drops here; DB file exists but has no subscription rows
-
-        let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
-        let result = run_batch_real_relay(cands, &state, &db_path).await;
-
-        assert_eq!(result.persisted, 0, "no-sub: should be dropped");
-        assert_eq!(result.dropped, 1, "no-sub: drop count should be 1");
-
-        println!("✓ real relay: no-subscription correctly dropped event");
-    }
-
-    /// Owner_p ephemeral path: a locally-built valid 24200 frame is archived
-    /// without a relay query (ephemeral events are never stored on the relay).
-    #[tokio::test]
-    #[ignore]
-    async fn test_real_relay_owner_p_ephemeral_path_persists_valid_frame() {
-        let owner_keys = Keys::generate();
-        let agent_keys = Keys::generate();
-        let relay_url = relay_ws_url_from_env();
-        let state = make_test_app_state(owner_keys.clone(), &relay_url);
-        let identity_pk = owner_keys.public_key().to_hex();
-
-        // Build a valid kind:24200 observer frame addressed to the owner.
-        let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
-
-        // File-backed archive DB with an owner_p subscription for kind 24200.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let db_path = tmp.path().join("archive.db");
-        file_db_with_subscription(
-            &db_path,
-            &identity_pk,
-            &relay_url,
-            "owner_p",
-            &identity_pk,
-            "[24200]",
-        );
-
-        // owner_p candidates bypass the relay entirely — query_buckets gets an
-        // empty bucket list and the ephemeral path handles the frame locally.
-        let cands = vec![candidate(&ev, ScopeType::OwnerP, &identity_pk)];
-        let result = run_batch_real_relay(cands, &state, &db_path).await;
-
-        assert_eq!(
-            result.persisted, 1,
-            "owner_p: valid frame should be persisted"
-        );
-        assert_eq!(result.dropped, 0, "owner_p: nothing should be dropped");
-
-        // Reopen the same file to assert exact row counts.
-        let read_conn = store::open_archive_db(&db_path).expect("reopen archive db");
-
-        let event_count: i64 = read_conn
-            .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(event_count, 1);
-
-        let scope_count: i64 = read_conn
-            .query_row(
-                "SELECT COUNT(*) FROM archived_event_scopes WHERE scope_type = 'owner_p'",
-                [],
-                |r| r.get(0),
+            // Phase 3: persist (sync). Fresh connection, same file.
+            let conn = store::open_archive_db(db_path).expect("open archive db for commit");
+            commit_archive(
+                bucket_results,
+                plan.ephemeral,
+                plan.pre_dropped,
+                &identity_pk,
+                &relay_url,
+                0,
+                &conn,
             )
-            .unwrap();
-        assert_eq!(scope_count, 1);
+            .unwrap()
+        }
 
-        println!(
-            "✓ real relay: owner_p ephemeral frame {} archived",
-            ev.id.to_hex()
-        );
-        println!("  archived_events:       {event_count} row(s)");
-        println!("  archived_event_scopes: {scope_count} row(s)");
+        /// Happy path: publish a kind:9 message to a channel, then run the archive
+        /// pipeline against the real relay. Asserts exact event + scope rows in a
+        /// file-backed SQLite archive, reopened after commit to prove persistence.
+        #[tokio::test]
+        #[ignore]
+        async fn test_real_relay_channel_h_happy_path_persists_event() {
+            let keys = Keys::generate();
+            let relay_url = relay_ws_url_from_env();
+            let state = make_test_app_state(keys.clone(), &relay_url);
+            let identity_pk = keys.public_key().to_hex();
+
+            // Create a channel and publish a kind:9 message.
+            let channel_id = create_relay_channel(&keys).await;
+            let msg_ev = EventBuilder::new(Kind::Custom(9), "hello archive")
+                .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
+                .sign_with_keys(&keys)
+                .unwrap();
+            let submit_resp = submit_event_to_relay(&msg_ev).await;
+            assert!(
+                submit_resp["accepted"].as_bool().unwrap_or(false),
+                "message not accepted: {submit_resp}"
+            );
+
+            // Give the relay a moment to persist.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            // File-backed archive DB with a channel_h subscription.
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let db_path = tmp.path().join("archive.db");
+            file_db_with_subscription(
+                &db_path,
+                &identity_pk,
+                &relay_url,
+                "channel_h",
+                &channel_id,
+                "[9]",
+            );
+
+            let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
+            let result = run_batch_real_relay(cands, &state, &db_path).await;
+
+            assert_eq!(result.persisted, 1, "expected 1 persisted, got {result:?}");
+            assert_eq!(result.dropped, 0, "expected 0 dropped, got {result:?}");
+
+            // Reopen the same file to assert exact row counts — proves file-backed persistence.
+            let read_conn = store::open_archive_db(&db_path).expect("reopen archive db");
+
+            let event_count: i64 = read_conn
+                .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(event_count, 1, "archived_events should have 1 row");
+
+            let scope_count: i64 = read_conn
+                .query_row(
+                    "SELECT COUNT(*) FROM archived_event_scopes \
+                     WHERE scope_type = 'channel_h' AND scope_value = ?1",
+                    [&channel_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(scope_count, 1, "archived_event_scopes should have 1 row");
+
+            // Confirm the stored raw_json round-trips to the original event.
+            let raw_json: String = read_conn
+                .query_row("SELECT raw_json FROM archived_events", [], |r| r.get(0))
+                .unwrap();
+            let stored_ev = Event::from_json(&raw_json).unwrap();
+            assert_eq!(stored_ev.id.to_hex(), msg_ev.id.to_hex());
+
+            println!(
+                "✓ real relay: event {} archived under channel_h:{}",
+                msg_ev.id.to_hex(),
+                channel_id
+            );
+            println!("  archived_events:       {event_count} row(s)");
+            println!("  archived_event_scopes: {scope_count} row(s)");
+        }
+
+        /// Kind-mismatch drop: subscription allows only kinds=[1059] but we publish a kind:9
+        /// channel message. The relay stores the event, but the archive's kind filter drops it
+        /// because 9 ∉ {1059}.
+        #[tokio::test]
+        #[ignore]
+        async fn test_real_relay_kind_mismatch_drops_event() {
+            let keys = Keys::generate();
+            let relay_url = relay_ws_url_from_env();
+            let state = make_test_app_state(keys.clone(), &relay_url);
+            let identity_pk = keys.public_key().to_hex();
+
+            let channel_id = create_relay_channel(&keys).await;
+            // Publish a kind:9 channel message — relay accepts it, but the subscription's
+            // kind filter is [1059] so the archive pipeline must drop it.
+            let msg_ev = EventBuilder::new(Kind::Custom(9), "kind-mismatch-msg")
+                .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
+                .sign_with_keys(&keys)
+                .unwrap();
+            let submit_resp = submit_event_to_relay(&msg_ev).await;
+            assert!(
+                submit_resp["accepted"].as_bool().unwrap_or(false),
+                "message not accepted: {submit_resp}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            // Subscription allows kinds=[1059] only — kind:9 must be dropped.
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let db_path = tmp.path().join("archive.db");
+            file_db_with_subscription(
+                &db_path,
+                &identity_pk,
+                &relay_url,
+                "channel_h",
+                &channel_id,
+                "[1059]",
+            );
+
+            let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
+            let result = run_batch_real_relay(cands, &state, &db_path).await;
+
+            assert_eq!(result.persisted, 0, "kind-mismatch: should be dropped");
+            assert_eq!(result.dropped, 1, "kind-mismatch: drop count should be 1");
+
+            println!(
+                "✓ real relay: kind-mismatch correctly dropped kind:9 event (subscription is kinds=[1059])"
+            );
+        }
+
+        /// No-subscription drop: event arrives but no save_subscription row exists.
+        #[tokio::test]
+        #[ignore]
+        async fn test_real_relay_no_subscription_drops_event() {
+            let keys = Keys::generate();
+            let relay_url = relay_ws_url_from_env();
+            let state = make_test_app_state(keys.clone(), &relay_url);
+
+            let channel_id = create_relay_channel(&keys).await;
+            let msg_ev = EventBuilder::new(Kind::Custom(9), "should be dropped")
+                .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
+                .sign_with_keys(&keys)
+                .unwrap();
+            submit_event_to_relay(&msg_ev).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            // Empty file-backed archive DB — no subscription row.
+            // plan_archive drops the whole group because no subscription matches.
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let db_path = tmp.path().join("archive.db");
+            store::open_archive_db(&db_path).expect("init empty archive db");
+            // conn from init drops here; DB file exists but has no subscription rows
+
+            let cands = vec![candidate(&msg_ev, ScopeType::ChannelH, &channel_id)];
+            let result = run_batch_real_relay(cands, &state, &db_path).await;
+
+            assert_eq!(result.persisted, 0, "no-sub: should be dropped");
+            assert_eq!(result.dropped, 1, "no-sub: drop count should be 1");
+
+            println!("✓ real relay: no-subscription correctly dropped event");
+        }
+
+        /// Owner_p ephemeral path: a locally-built valid 24200 frame is archived
+        /// without a relay query (ephemeral events are never stored on the relay).
+        #[tokio::test]
+        #[ignore]
+        async fn test_real_relay_owner_p_ephemeral_path_persists_valid_frame() {
+            let owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let relay_url = relay_ws_url_from_env();
+            let state = make_test_app_state(owner_keys.clone(), &relay_url);
+            let identity_pk = owner_keys.public_key().to_hex();
+
+            // Build a valid kind:24200 observer frame addressed to the owner.
+            let ev = make_observer_frame(&owner_keys, &agent_keys, OBSERVER_FRAME_TELEMETRY);
+
+            // File-backed archive DB with an owner_p subscription for kind 24200.
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let db_path = tmp.path().join("archive.db");
+            file_db_with_subscription(
+                &db_path,
+                &identity_pk,
+                &relay_url,
+                "owner_p",
+                &identity_pk,
+                "[24200]",
+            );
+
+            // owner_p candidates bypass the relay entirely — query_buckets gets an
+            // empty bucket list and the ephemeral path handles the frame locally.
+            let cands = vec![candidate(&ev, ScopeType::OwnerP, &identity_pk)];
+            let result = run_batch_real_relay(cands, &state, &db_path).await;
+
+            assert_eq!(
+                result.persisted, 1,
+                "owner_p: valid frame should be persisted"
+            );
+            assert_eq!(result.dropped, 0, "owner_p: nothing should be dropped");
+
+            // Reopen the same file to assert exact row counts.
+            let read_conn = store::open_archive_db(&db_path).expect("reopen archive db");
+
+            let event_count: i64 = read_conn
+                .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(event_count, 1);
+
+            let scope_count: i64 = read_conn
+                .query_row(
+                    "SELECT COUNT(*) FROM archived_event_scopes WHERE scope_type = 'owner_p'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(scope_count, 1);
+
+            println!(
+                "✓ real relay: owner_p ephemeral frame {} archived",
+                ev.id.to_hex()
+            );
+            println!("  archived_events:       {event_count} row(s)");
+            println!("  archived_event_scopes: {scope_count} row(s)");
+        }
     }
 }
