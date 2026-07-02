@@ -1244,8 +1244,13 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
-    let event_clone = event.clone();
-    let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
+    // Share the event with the verify task via Arc instead of deep-cloning it
+    // (tags + up to 256 KB of content). spawn_blocking only needs 'static, not
+    // ownership; once it completes its Arc is dropped, so try_unwrap returns
+    // the original event without ever having copied it.
+    let event = std::sync::Arc::new(event);
+    let event_for_verify = std::sync::Arc::clone(&event);
+    let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_for_verify)).await;
     match verify_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -1258,6 +1263,7 @@ async fn ingest_event_inner(
             ));
         }
     }
+    let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
