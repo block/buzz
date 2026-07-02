@@ -69,6 +69,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
+import { useRuntimeFileConfigQuery } from "../hooks";
 
 type PersonaDialogProps = {
   open: boolean;
@@ -425,17 +426,32 @@ export function PersonaDialog({
   // Required credential env keys for this runtime + provider combination.
   // Used to show required markers on the LLM provider label and amber
   // locked rows in the env vars editor.
+  // File-layer config for the selected runtime (e.g. goose config.yaml).
+  // Used to silence requirements already satisfied there.
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
+    enabled: open,
+  });
   const localModeGate = computeLocalModeGate({
     envVars,
     isProviderMode: false,
     model,
     provider: trimmedProvider,
     runtimeId: runtime,
+    runtimeFileConfig,
     useMesh: false,
   });
-  const requiredEnvKeys = requiredCredentialEnvKeys(runtime, trimmedProvider);
-  const providerIsRequired =
-    localModeGate.missingNormalizedFields.includes("provider");
+  // Required keys for EnvVarsEditor amber rows: exclude file-satisfied keys
+  // so they render in the "Set in goose config" row instead.
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    runtime,
+    trimmedProvider,
+  ).filter((key) => !localModeGate.fileSatisfiedEnvKeys.includes(key));
+  // Provider required-ness is a static property of the runtime — it does not
+  // change based on whether the field is currently filled. Using the dynamic
+  // missingNormalizedFields check would flip the asterisk off once a value is
+  // selected, which is incoherent (required means required, not "required until
+  // satisfied"). runtimeSupportsLlmProviderSelection is the authoritative gate.
+  const providerIsRequired = runtimeSupportsLlmProviderSelection(runtime);
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired =
@@ -880,7 +896,7 @@ export function PersonaDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="persona-runtime"
               >
-                Provider
+                Agent runtime
               </label>
               <PersonaDropdownField
                 disabled={isPending || runtimesLoading}
@@ -993,6 +1009,7 @@ export function PersonaDialog({
                     <PersonaAdvancedFields
                       disabled={isPending}
                       envVars={advancedEnvVars}
+                      fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
                       namePoolText={namePoolText}
                       onEnvVarsChange={handleAdvancedEnvVarsChange}
                       onNamePoolTextChange={setNamePoolText}

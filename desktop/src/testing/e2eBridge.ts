@@ -7755,6 +7755,11 @@ export function maybeInstallE2eTauriMocks() {
         const configArgs = payload as { pubkey: string };
         return buildMockConfigSurface(configArgs.pubkey);
       }
+      case "get_runtime_file_config": {
+        // No harness config file in the E2E environment — return null so
+        // dialogs fall back to normal required-field evaluation.
+        return null;
+      }
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

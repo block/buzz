@@ -302,3 +302,111 @@ test("localMode_providerSelection_drives_requiredKey", () => {
     "different providers must require different keys",
   );
 });
+
+// ── File-config bridge tests ──────────────────────────────────────────────
+
+test("localMode_goose_databricksHost_satisfiedByFileConfig_notRequired", () => {
+  // Scenario: goose runtime, databricks_v2 provider, DATABRICKS_HOST in file.
+  // The gate should NOT flag DATABRICKS_HOST as missing — it's satisfied in goose config.
+  const fileConfig = {
+    provider: "databricks_v2",
+    model: "goose-claude-4-6-opus",
+    satisfiedEnvKeys: ["DATABRICKS_HOST"],
+  };
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "goose-claude-4-6-opus",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: fileConfig,
+    useMesh: false,
+  });
+
+  assert.ok(
+    !result.missingEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must NOT appear in missingEnvKeys when satisfied by file config",
+  );
+  assert.ok(
+    result.fileSatisfiedEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must appear in fileSatisfiedEnvKeys when set in goose config",
+  );
+  assert.equal(
+    result.satisfied,
+    true,
+    "gate must be satisfied when all requirements are covered by env or file config",
+  );
+});
+
+test("localMode_goose_databricksHost_noFileConfig_stillRequired", () => {
+  // Scenario: goose + databricks_v2, no file config present.
+  // DATABRICKS_HOST must still be required.
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "some-model",
+    provider: "databricks_v2",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+
+  assert.ok(
+    result.missingEnvKeys.includes("DATABRICKS_HOST"),
+    "DATABRICKS_HOST must be required when absent from both env and file config",
+  );
+  assert.equal(
+    result.satisfied,
+    false,
+    "gate must NOT be satisfied when DATABRICKS_HOST is missing from env and file",
+  );
+});
+
+test("localMode_goose_providerSatisfiedByFileConfig_noNormalizedFieldRequired", () => {
+  // Scenario: goose, no provider in Buzz env but file config has provider + model.
+  // Neither 'provider' nor 'model' should be required.
+  const fileConfig = {
+    provider: "anthropic",
+    model: "claude-opus-4-5",
+    satisfiedEnvKeys: [],
+  };
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "goose",
+    runtimeFileConfig: fileConfig,
+    useMesh: false,
+  });
+
+  assert.deepEqual(
+    result.missingNormalizedFields,
+    [],
+    "normalized fields must be empty when provider + model are in file config",
+  );
+});
+
+test("localMode_goose_envPlusFileConfig_bothEmpty_stillRequired", () => {
+  // Scenario: goose, empty env, file config is null (no file).
+  // Both provider and model must be required.
+  const result = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "goose",
+    runtimeFileConfig: null,
+    useMesh: false,
+  });
+
+  assert.ok(
+    result.missingNormalizedFields.includes("provider"),
+    "provider must be required when absent from both env and file",
+  );
+  assert.ok(
+    result.missingNormalizedFields.includes("model"),
+    "model must be required when absent from both env and file",
+  );
+  assert.equal(result.satisfied, false, "gate must not be satisfied");
+});
