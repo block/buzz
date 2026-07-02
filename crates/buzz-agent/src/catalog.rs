@@ -32,6 +32,39 @@ pub struct ModelEntry {
 pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
     &["databricks-gpt-5-5", "databricks-claude-opus-4-7"];
 
+/// Returns the discovery-failure fallback catalog for a Databricks provider.
+///
+/// This is the list of models advertised by `session/new` when
+/// `discover_databricks_models` returns an error (e.g., no token available).
+///
+/// - `DatabricksV2` falls back to [`DATABRICKS_V2_KNOWN_MODELS`] so the
+///   model-picker is always populated for AI Gateway v2 users.
+/// - Legacy `Databricks` falls back to only the configured model — the
+///   `DATABRICKS_V2_KNOWN_MODELS` IDs are AI Gateway v2 endpoints that the
+///   `/serving-endpoints/{model}/invocations` API may not serve.
+///
+/// Extracting this as a pure function makes the split testable without
+/// spawning an async runtime or making network calls.
+pub fn discovery_failure_fallback(provider: Provider, configured_model: &str) -> Vec<ModelEntry> {
+    match provider {
+        Provider::DatabricksV2 => DATABRICKS_V2_KNOWN_MODELS
+            .iter()
+            .map(|id| ModelEntry {
+                id: id.to_string(),
+                name: id.to_string(),
+            })
+            .collect(),
+        Provider::Databricks => vec![ModelEntry {
+            id: configured_model.to_string(),
+            name: configured_model.to_string(),
+        }],
+        _ => vec![ModelEntry {
+            id: configured_model.to_string(),
+            name: configured_model.to_string(),
+        }],
+    }
+}
+
 /// Discover available models for a Databricks provider.
 ///
 /// Returns a non-empty `Vec<ModelEntry>` on success. Returns

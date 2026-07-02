@@ -402,13 +402,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                             Ok(models) => models,
                             Err(e) => {
                                 tracing::warn!("model catalog discovery failed: {e}; using known-models fallback");
-                                DATABRICKS_V2_KNOWN_MODELS
-                                    .iter()
-                                    .map(|id| crate::catalog::ModelEntry {
-                                        id: id.to_string(),
-                                        name: id.to_string(),
-                                    })
-                                    .collect()
+                                crate::catalog::discovery_failure_fallback(
+                                    app.cfg.provider,
+                                    &app.cfg.model,
+                                )
                             }
                         }
                     })
@@ -431,10 +428,10 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                             Ok(models) => models,
                             Err(e) => {
                                 tracing::warn!("model catalog discovery failed: {e}; advertising configured model only");
-                                vec![crate::catalog::ModelEntry {
-                                    id: app.cfg.model.clone(),
-                                    name: app.cfg.model.clone(),
-                                }]
+                                crate::catalog::discovery_failure_fallback(
+                                    app.cfg.provider,
+                                    &app.cfg.model,
+                                )
                             }
                         }
                     })
@@ -769,30 +766,75 @@ fn session_token() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::catalog::DATABRICKS_V2_KNOWN_MODELS;
+    use crate::catalog::{discovery_failure_fallback, DATABRICKS_V2_KNOWN_MODELS};
+    use crate::config::Provider;
 
     /// Regression: legacy `Provider::Databricks` must not advertise v2 AI Gateway model IDs
-    /// as its discovery fallback. The `DATABRICKS_V2_KNOWN_MODELS` list contains AI Gateway
-    /// v2 endpoint IDs that `/serving-endpoints/{model}/invocations` may not serve.
-    ///
-    /// This test verifies that the v2 fallback list is non-empty (so there IS a distinction
-    /// between the two providers' fallback behavior to protect) and that each entry looks like
-    /// an AI Gateway v2 ID format (not a legacy serving endpoint name). The actual split is
-    /// in `session_new`; this documents the invariant that justifies it.
+    /// on discovery failure (Wes W1). This test calls `discovery_failure_fallback` directly —
+    /// the same helper used by `session_new` — and verifies the split behavior. It FAILS if
+    /// the arm is un-split (i.e., if both providers return the v2 catalog on failure).
     #[test]
-    fn databricks_v2_known_models_nonempty_and_not_legacy_format() {
-        assert!(
-            !DATABRICKS_V2_KNOWN_MODELS.is_empty(),
-            "DATABRICKS_V2_KNOWN_MODELS must be non-empty — it is the v2 discovery fallback"
+    fn databricks_discovery_failure_fallback_legacy_returns_configured_model_only() {
+        let configured = "my-serving-endpoint";
+        let result = discovery_failure_fallback(Provider::Databricks, configured);
+
+        // Legacy Databricks must advertise exactly the configured model — nothing more.
+        assert_eq!(
+            result.len(),
+            1,
+            "legacy Databricks fallback must contain exactly one entry, got: {result:?}"
         );
-        // v2 model IDs include family name + version (e.g. "databricks-claude-opus-4-7",
-        // "databricks-meta-llama-4-maverick"). None should look like a bare serving endpoint
-        // name (which would not include a vendor/family prefix like "databricks-").
-        for id in DATABRICKS_V2_KNOWN_MODELS {
+        assert_eq!(
+            result[0].id, configured,
+            "legacy Databricks fallback must be the configured model"
+        );
+
+        // Crucially: must NOT contain any DATABRICKS_V2_KNOWN_MODELS entry.
+        let v2_ids: Vec<&str> = DATABRICKS_V2_KNOWN_MODELS.to_vec();
+        for id in &result {
             assert!(
-                id.contains('-'),
-                "v2 model ID {id:?} must contain a hyphen (AI Gateway v2 format)"
+                !v2_ids.contains(&id.id.as_str()),
+                "legacy Databricks fallback must not include v2 ID '{}' — that endpoint \
+                 may not be served by /serving-endpoints/{{model}}/invocations",
+                id.id
             );
         }
+    }
+
+    #[test]
+    fn databricks_discovery_failure_fallback_v2_returns_known_models_catalog() {
+        let configured = "my-configured-model";
+        let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
+
+        // DatabricksV2 must return the full DATABRICKS_V2_KNOWN_MODELS list.
+        assert_eq!(
+            result.len(),
+            DATABRICKS_V2_KNOWN_MODELS.len(),
+            "DatabricksV2 fallback must return all known models"
+        );
+        let result_ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
+        for known_id in DATABRICKS_V2_KNOWN_MODELS {
+            assert!(
+                result_ids.contains(known_id),
+                "DatabricksV2 fallback must include known model '{known_id}'"
+            );
+        }
+    }
+
+    #[test]
+    fn databricks_discovery_failure_fallback_split_verified() {
+        // This test FAILS if the v1/v2 arms are merged back into one — it directly verifies
+        // that the two providers' error-path behavior diverges (Wes W1 protection).
+        let v1 = discovery_failure_fallback(Provider::Databricks, "my-endpoint");
+        let v2 = discovery_failure_fallback(Provider::DatabricksV2, "my-endpoint");
+
+        let v1_ids: Vec<&str> = v1.iter().map(|m| m.id.as_str()).collect();
+        let v2_ids: Vec<&str> = v2.iter().map(|m| m.id.as_str()).collect();
+
+        assert_ne!(
+            v1_ids, v2_ids,
+            "Provider::Databricks and Provider::DatabricksV2 must return different \
+             fallback catalogs — if they are equal, the W1 arm split has been reverted"
+        );
     }
 }

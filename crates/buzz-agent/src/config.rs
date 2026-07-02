@@ -28,7 +28,7 @@ pub enum ThinkingEffort {
 
 impl ThinkingEffort {
     /// Map level to an Anthropic `budget_tokens` value for legacy Claude 3.x / Opus 4.5 models.
-    /// `XHigh` and `Max` clamp to the high budget value; the API cap at `max_output_tokens-1`
+    /// `XHigh` and `Max` clamp to the high budget value; the answer-room reserve of 1024 tokens
     /// is applied separately in `anthropic_thinking_config`.
     pub fn anthropic_budget_tokens(self) -> u32 {
         match self {
@@ -191,6 +191,76 @@ pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEff
     clamped
 }
 
+/// Returns true if `lower_model` contains `token` as a bounded family segment — i.e., the
+/// token is immediately followed by end-of-string or a `-` separator (not a digit or letter).
+///
+/// This prevents:
+/// - `gpt-5.1` from matching `gpt-5.10` (digit follows the `1`)
+/// - `gpt-5-1` from matching `gpt-5-1106` (digit follows the `1`)
+/// - `gpt-5-4` from matching `gpt-5-4o` (letter follows the `4`)
+///
+/// Gateway prefixes (`databricks-`) and date/build suffixes (`-2025-04-01`) are allowed
+/// because they start with `-` which is the only permitted boundary character.
+fn gpt5_token_matches(lower_model: &str, token: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = lower_model[start..].find(token) {
+        let abs = start + pos;
+        let after = abs + token.len();
+        // The character immediately after the token must be end-of-string or '-'.
+        // Any alphanumeric character (digit OR letter) means this is a longer token, not
+        // the family we're looking for.
+        let safe_suffix = lower_model[after..].chars().next().is_none_or(|c| c == '-');
+        if safe_suffix {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Like `gpt5_token_matches` but additionally rejects short purely-numeric suffixes — used
+/// for the base `gpt-5` / `gpt5` token to avoid false-matching unrecognized version segments.
+///
+/// After a `-` separator:
+/// - `-<non-digit>…` e.g. `-pro` → **accepted** (capability suffix, no digits)
+/// - `-<digits><non-digit>…` e.g. `-4o`, `-1106-preview` → **accepted** (digit+variant)
+/// - `-<1-3 digits><end-of-string>` e.g. `-10`, `-5` → **rejected** (bare version number)
+/// - `-<4+ digits><end-of-string>` e.g. `-1106`, `-0514` → **accepted** (date segment)
+fn gpt5_base_matches(lower_model: &str, token: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = lower_model[start..].find(token) {
+        let abs = start + pos;
+        let after = abs + token.len();
+        let rest = &lower_model[after..];
+        let safe_suffix = if rest.is_empty() {
+            // End of string — clean boundary.
+            true
+        } else if let Some(tail) = rest.strip_prefix('-') {
+            // Count leading digits in the suffix component.
+            let digit_run: usize = tail.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digit_run == 0 {
+                // No leading digit (e.g. '-pro'): capability suffix → accepted.
+                true
+            } else if !tail[digit_run..].is_empty() {
+                // Digit run followed by non-digit (e.g. '-4o', '-1106-preview'): variant → accepted.
+                true
+            } else {
+                // Pure digit run (nothing after digits). Accept only if it looks like a date
+                // (4+ digits). Short pure-number suffixes (1–3 digits) are version-like → rejected.
+                digit_run >= 4
+            }
+        } else {
+            // Dot, letter, or other non-hyphen character directly after token → not base.
+            false
+        };
+        if safe_suffix {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
 /// Returns the set of `reasoning.effort` values supported by a given OpenAI model family.
 ///
 /// Doc-verified availability (OpenAI model pages, July 2025):
@@ -213,6 +283,9 @@ pub fn clamp_adaptive_effort(model: &str, effort: ThinkingEffort) -> ThinkingEff
 ///
 /// `model` is a raw model name (may include Databricks gateway prefixes or date suffixes).
 /// Unknown models return `None` — caller treats `None` as "server-validated pass-through".
+/// Versioned tokens use `gpt5_token_matches` (end-of-string or `-` boundary, blocking digit
+/// and letter continuations). The base token uses `gpt5_base_matches`, which additionally
+/// rejects short `-<1-3 digit>` suffixes that look like two-digit version numbers.
 fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     // Effort ordered from lowest to highest for each family.
     const GPT5_PRO: &[ThinkingEffort] = &[ThinkingEffort::High];
@@ -239,26 +312,26 @@ fn openai_efforts_for_model(model: &str) -> Option<&'static [ThinkingEffort]> {
     let lower = model.to_ascii_lowercase();
     // Check gpt-5-pro before gpt-5.5 / gpt-5.4 etc. to avoid the `-pro` name
     // matching the base "gpt-5" prefix first.
-    if lower.contains("gpt-5-pro") || lower.contains("gpt5-pro") {
+    if gpt5_token_matches(&lower, "gpt-5-pro") || gpt5_token_matches(&lower, "gpt5-pro") {
         Some(GPT5_PRO)
-    } else if lower.contains("gpt-5.5")
-        || lower.contains("gpt5.5")
-        || lower.contains("gpt-5-5")
-        || lower.contains("gpt5-5")
-        || lower.contains("gpt-5.4")
-        || lower.contains("gpt5.4")
-        || lower.contains("gpt-5-4")
-        || lower.contains("gpt5-4")
+    } else if gpt5_token_matches(&lower, "gpt-5.5")
+        || gpt5_token_matches(&lower, "gpt5.5")
+        || gpt5_token_matches(&lower, "gpt-5-5")
+        || gpt5_token_matches(&lower, "gpt5-5")
+        || gpt5_token_matches(&lower, "gpt-5.4")
+        || gpt5_token_matches(&lower, "gpt5.4")
+        || gpt5_token_matches(&lower, "gpt-5-4")
+        || gpt5_token_matches(&lower, "gpt5-4")
     {
         // gpt-5.5 and gpt-5.4 share the same effort availability table.
         Some(GPT5_5_AND_5_4)
-    } else if lower.contains("gpt-5.1")
-        || lower.contains("gpt5.1")
-        || lower.contains("gpt-5-1")
-        || lower.contains("gpt5-1")
+    } else if gpt5_token_matches(&lower, "gpt-5.1")
+        || gpt5_token_matches(&lower, "gpt5.1")
+        || gpt5_token_matches(&lower, "gpt-5-1")
+        || gpt5_token_matches(&lower, "gpt5-1")
     {
         Some(GPT5_1)
-    } else if lower.contains("gpt-5") || lower.contains("gpt5") {
+    } else if gpt5_base_matches(&lower, "gpt-5") || gpt5_base_matches(&lower, "gpt5") {
         // Base gpt-5 (no version suffix matching any of the above).
         Some(GPT5_BASE)
     } else {
@@ -2038,6 +2111,96 @@ mod tests {
         assert!(openai_efforts_for_model("llama-4").is_none());
         assert!(openai_efforts_for_model("claude-opus-4-8").is_none());
         assert!(openai_efforts_for_model("gpt-4o").is_none());
+    }
+
+    // ---- Boundary-safe matching: version digits must not false-match longer versions ----
+
+    #[test]
+    fn openai_efforts_for_model_boundary_dated_base_ids_are_not_versioned() {
+        // gpt-5-1106: the "-1" is not version 5.1 — it's a date segment on the base model.
+        // Must fall through to base table, not gpt-5.1.
+        let result = openai_efforts_for_model("gpt-5-1106");
+        let base = openai_efforts_for_model("gpt-5").unwrap();
+        assert_eq!(
+            result,
+            Some(base),
+            "gpt-5-1106 must match base table (not gpt-5.1): got {result:?}"
+        );
+        // Crucially, must NOT support None (that's a gpt-5.1 property, not base).
+        assert!(
+            !result.unwrap().contains(&ThinkingEffort::None),
+            "gpt-5-1106 must NOT support none — base table only has minimal"
+        );
+    }
+
+    #[test]
+    fn openai_efforts_for_model_boundary_gpt5_4o_is_base_not_5_4() {
+        // gpt-5-4o: the "-4" could false-match the gpt-5.4 family, but "4o" is a
+        // capability suffix on the base gpt-5 model, not version 5.4.
+        // Must fall through to base table.
+        let result = openai_efforts_for_model("gpt-5-4o");
+        let base = openai_efforts_for_model("gpt-5").unwrap();
+        assert_eq!(
+            result,
+            Some(base),
+            "gpt-5-4o must match base table (not gpt-5.4): got {result:?}"
+        );
+        // Crucially, must NOT support XHigh (that's a gpt-5.4 property, not base).
+        assert!(
+            !result.unwrap().contains(&ThinkingEffort::XHigh),
+            "gpt-5-4o must NOT support xhigh — that's a gpt-5.4 property and would 400"
+        );
+    }
+
+    #[test]
+    fn openai_efforts_for_model_boundary_multi_digit_versions_pass_through() {
+        // Dotted two-digit versions (gpt-5.10, gpt5.10, gpt-5.50) must not match any known
+        // single-digit family — the digit boundary check on dotted tokens blocks them.
+        // These return None (server-validated pass-through).
+        assert!(
+            openai_efforts_for_model("gpt-5.10").is_none(),
+            "gpt-5.10 must pass through (unknown future model)"
+        );
+        assert!(
+            openai_efforts_for_model("gpt5.10").is_none(),
+            "gpt5.10 must pass through (unknown future model)"
+        );
+        assert!(
+            openai_efforts_for_model("gpt-5.50").is_none(),
+            "gpt-5.50 must pass through (not gpt-5.5)"
+        );
+        // Dash two-digit versions (gpt-5-10, databricks-gpt-5-10) look like short numeric
+        // version segments and must also pass through as unknown — not bucketed as base.
+        assert!(
+            openai_efforts_for_model("gpt-5-10").is_none(),
+            "gpt-5-10 must pass through (short numeric suffix = potential unrecognized version)"
+        );
+        assert!(
+            openai_efforts_for_model("databricks-gpt-5-10").is_none(),
+            "databricks-gpt-5-10 must pass through (short numeric suffix)"
+        );
+    }
+
+    #[test]
+    fn openai_efforts_for_model_boundary_databricks_prefixed_still_matches() {
+        // Databricks-prefixed names (gateway forwarding) must still resolve to the right table.
+        let result = openai_efforts_for_model("databricks-gpt-5-5");
+        assert_eq!(
+            result,
+            openai_efforts_for_model("gpt-5.5"),
+            "databricks-gpt-5-5 must match gpt-5.5 family table"
+        );
+    }
+
+    #[test]
+    fn openai_efforts_for_model_boundary_date_suffixed_still_matches() {
+        // Date-suffixed names (e.g. gpt-5.1-2025-04-01) must still resolve to the right family.
+        let result = openai_efforts_for_model("gpt-5.1-2025-04-01");
+        assert_eq!(
+            result,
+            openai_efforts_for_model("gpt-5.1"),
+            "gpt-5.1-2025-04-01 must match gpt-5.1 family table"
+        );
     }
 
     #[test]
