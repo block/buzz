@@ -15,12 +15,15 @@ import {
   setGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
+import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
 } from "@/features/agents/ui/personaDialogPickers";
+import { AgentModelField } from "@/features/agents/ui/personaProviderModelFields";
+import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -42,6 +45,7 @@ export function GlobalAgentConfigSettingsCard() {
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState(false);
   const [isCustomProvider, setIsCustomProvider] = React.useState(false);
+  const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const savedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -66,6 +70,32 @@ export function GlobalAgentConfigSettingsCard() {
       cancelled = true;
     };
   }, []);
+
+  // Resolve the buzz-agent runtime catalog entry for model discovery.
+  // The card is always visible (open=true), so the query is always enabled.
+  const runtimesQuery = useAcpRuntimesQuery();
+  const buzzAgentRuntime = React.useMemo(
+    () => (runtimesQuery.data ?? []).find((r) => r.id === "buzz-agent"),
+    [runtimesQuery.data],
+  );
+
+  // Provider value used for discovery — empty string when custom provider text
+  // field is being edited (discovery can't run against a partial/uncommitted value).
+  const providerValue = config.provider ?? "";
+  const providerForDiscovery = isCustomProvider ? "" : providerValue;
+
+  const {
+    discoveredModelOptions,
+    modelDiscoveryLoading,
+    modelDiscoveryStatus,
+  } = usePersonaModelDiscovery({
+    envVars: config.env_vars,
+    isCustomProviderEditing: isCustomProvider,
+    modelFieldVisible: true,
+    open: true,
+    provider: providerForDiscovery,
+    selectedRuntime: buzzAgentRuntime,
+  });
 
   function handleEnvVarsChange(next: Record<string, string>) {
     setConfig((prev) => ({ ...prev, env_vars: next }));
@@ -121,7 +151,6 @@ export function GlobalAgentConfigSettingsCard() {
     }
   }
 
-  const providerValue = config.provider ?? "";
   const providerOptions = getPersonaProviderOptions(providerValue, "goose");
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
@@ -188,15 +217,16 @@ export function GlobalAgentConfigSettingsCard() {
 
           {/* Model field */}
           <div className="space-y-1.5 p-3">
-            <label className="text-sm font-medium" htmlFor="global-agent-model">
-              Default model
-            </label>
-            <Input
-              autoCorrect="off"
-              id="global-agent-model"
-              onChange={(e) => handleModelChange(e.target.value)}
-              placeholder="e.g. claude-opus-4 (leave blank for no global default)"
-              value={config.model ?? ""}
+            <AgentModelField
+              disabled={false}
+              discoveredModelOptions={discoveredModelOptions}
+              isCustomModelEditing={isCustomModelEditing}
+              isRequired={false}
+              model={config.model ?? ""}
+              modelDiscoveryLoading={modelDiscoveryLoading}
+              modelDiscoveryStatus={modelDiscoveryStatus}
+              onIsCustomModelEditingChange={setIsCustomModelEditing}
+              onModelChange={(value) => handleModelChange(value)}
             />
             <p className="text-xs text-muted-foreground">
               Applies to all agents that don't have a per-agent model set.
