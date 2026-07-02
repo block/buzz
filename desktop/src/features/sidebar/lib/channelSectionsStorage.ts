@@ -18,8 +18,19 @@ export const DEFAULT_STORE: ChannelSectionStore = Object.freeze({
   assignments: {},
 });
 
-export function storageKey(pubkey: string): string {
-  return `${STORAGE_KEY_PREFIX}:${pubkey}`;
+/**
+ * Returns the localStorage key for channel sections.
+ *
+ * When `relayUrl` is provided the key is scoped to that relay so sections
+ * from different workspaces/relays don't bleed across each other.  When
+ * omitted the legacy pubkey-only key is returned (used only during
+ * one-time migration in `readChannelSectionsStore`).
+ */
+export function storageKey(pubkey: string, relayUrl?: string): string {
+  if (!relayUrl) return `${STORAGE_KEY_PREFIX}:${pubkey}`;
+  // Encode the relay URL so it can't contain the `:` delimiter we use.
+  const encodedRelay = encodeURIComponent(relayUrl);
+  return `${STORAGE_KEY_PREFIX}:${pubkey}:${encodedRelay}`;
 }
 
 export function stripOrphanedAssignments(
@@ -62,17 +73,58 @@ export function parseChannelSectionPayload(
   return stripOrphanedAssignments({ version: 1, sections, assignments });
 }
 
-export function readChannelSectionsStore(pubkey: string): ChannelSectionStore {
+function parseRaw(raw: string | null): ChannelSectionStore | null {
+  if (!raw) return null;
   try {
-    const raw = window.localStorage.getItem(storageKey(pubkey));
-    if (!raw) {
-      return DEFAULT_STORE;
-    }
     const parsed = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || parsed.version !== 1) {
-      return DEFAULT_STORE;
+      return null;
     }
-    return parseChannelSectionPayload(parsed) ?? DEFAULT_STORE;
+    return parseChannelSectionPayload(parsed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the section store for `pubkey` scoped to `relayUrl`.
+ *
+ * On first access for a scoped key, migrates any existing data from the
+ * legacy pubkey-only key so users don't lose their sections on upgrade.
+ * The legacy key is left in place after migration (it is harmless and
+ * removing it could break older builds on a downgrade).
+ */
+export function readChannelSectionsStore(
+  pubkey: string,
+  relayUrl?: string,
+): ChannelSectionStore {
+  try {
+    const key = storageKey(pubkey, relayUrl);
+    const raw = window.localStorage.getItem(key);
+
+    // Scoped key already has data — use it directly.
+    if (raw !== null) {
+      return parseRaw(raw) ?? DEFAULT_STORE;
+    }
+
+    // No scoped data yet.  If we were given a relay scope, attempt a
+    // one-time migration from the legacy pubkey-only key.
+    if (relayUrl) {
+      const legacyKey = storageKey(pubkey);
+      const legacyRaw = window.localStorage.getItem(legacyKey);
+      const migrated = parseRaw(legacyRaw);
+      if (migrated && migrated.sections.length > 0) {
+        // Persist under the scoped key so subsequent reads are fast.
+        try {
+          window.localStorage.setItem(key, JSON.stringify(migrated));
+        } catch {
+          // Ignore write failures — we still return the migrated value.
+        }
+        return migrated;
+      }
+    }
+
+    return DEFAULT_STORE;
   } catch {
     return DEFAULT_STORE;
   }
@@ -81,9 +133,13 @@ export function readChannelSectionsStore(pubkey: string): ChannelSectionStore {
 export function writeChannelSectionsStore(
   pubkey: string,
   store: ChannelSectionStore,
+  relayUrl?: string,
 ): boolean {
   try {
-    window.localStorage.setItem(storageKey(pubkey), JSON.stringify(store));
+    window.localStorage.setItem(
+      storageKey(pubkey, relayUrl),
+      JSON.stringify(store),
+    );
     return true;
   } catch {
     return false;
