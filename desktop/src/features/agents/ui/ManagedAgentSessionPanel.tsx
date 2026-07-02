@@ -253,6 +253,7 @@ function SessionBody({
             agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
             agentPubkey={agentPubkey}
+            channelId={channelId}
             emptyDescription={emptyDescription}
             emptyState={emptyState}
             items={transcript}
