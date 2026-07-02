@@ -17,6 +17,7 @@ export function EditAgentAdvancedFields({
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
+  focusKey,
   inheritedEnvVars,
   inheritHarness,
   linkedPersona,
@@ -44,6 +45,8 @@ export function EditAgentAdvancedFields({
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
+  /** When set, EnvVarsEditor scrolls and focuses this key's input on mount. */
+  focusKey?: string;
   inheritedEnvVars: Record<string, string>;
   inheritHarness: boolean;
   linkedPersona: AgentPersona | null;
@@ -322,6 +325,7 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
+        focusKey={focusKey}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}
         inheritedLabel="template / global defaults"

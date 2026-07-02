@@ -13,6 +13,7 @@ import {
   intentForStartToggle,
   type AgentCreateIntent,
 } from "./agentCreateIntent";
+import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
 import { createPersonaDialogState } from "./personaDialogState";
 import { AgentDefinitionDialog } from "./AgentDefinitionDialog";
@@ -43,6 +44,7 @@ type AgentDialogInstanceEditProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
+  initialFocus?: EditAgentFocusTarget;
 };
 
 type AgentDialogDefinitionEditProps = {
@@ -89,6 +91,7 @@ export function AgentDialog(props: AgentDialogProps) {
         onOpenChange={props.onOpenChange}
         onUpdated={props.onUpdated}
         open={props.open}
+        initialFocus={props.initialFocus}
       />
     );
   }

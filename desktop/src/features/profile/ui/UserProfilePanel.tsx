@@ -41,6 +41,7 @@ import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { AgentDialog } from "@/features/agents/ui/AgentDialog";
 import {
   consumePendingOpenEditAgent,
+  type EditAgentFocusTarget,
   subscribeOpenEditAgent,
 } from "@/features/agents/openEditAgentEvent";
 import {
@@ -154,6 +155,9 @@ export function UserProfilePanel({
     [onTabChange],
   );
   const [editAgentOpen, setEditAgentOpen] = React.useState(false);
+  const [editAgentFocus, setEditAgentFocus] = React.useState<
+    EditAgentFocusTarget | undefined
+  >(undefined);
 
   // Open the Edit Agent dialog when `requestOpenEditAgent(pubkey)` fires from
   // a card or other non-panel surface (e.g. `ConfigNudgeCard`). Mirrors the
@@ -161,11 +165,14 @@ export function UserProfilePanel({
   React.useEffect(() => {
     if (!pubkey) return;
     // Consume any pending request that arrived before this panel mounted.
-    if (consumePendingOpenEditAgent(pubkey)) {
+    const pending = consumePendingOpenEditAgent(pubkey);
+    if (pending !== false) {
+      setEditAgentFocus(pending === true ? undefined : pending);
       setEditAgentOpen(true);
     }
     // Subscribe for events that arrive while the panel is mounted.
-    return subscribeOpenEditAgent(pubkey, () => {
+    return subscribeOpenEditAgent(pubkey, (focus) => {
+      setEditAgentFocus(focus);
       setEditAgentOpen(true);
     });
   }, [pubkey]);
@@ -909,7 +916,11 @@ export function UserProfilePanel({
       <AgentDialog
         agent={managedAgent}
         mode="instance-edit"
-        onOpenChange={setEditAgentOpen}
+        initialFocus={editAgentFocus}
+        onOpenChange={(next) => {
+          setEditAgentOpen(next);
+          if (!next) setEditAgentFocus(undefined);
+        }}
         open={editAgentOpen}
       />
     ) : null;

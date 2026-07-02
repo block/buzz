@@ -17,6 +17,7 @@ import type {
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
+import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -74,11 +75,14 @@ const ADVANCED_FIELDS_MOTION_TRANSITION = {
 
 export function AgentInstanceEditDialog({
   agent,
+  initialFocus,
   open,
   onOpenChange,
   onUpdated,
 }: {
   agent: ManagedAgent;
+  /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
+  initialFocus?: EditAgentFocusTarget;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
@@ -188,6 +192,34 @@ export function AgentInstanceEditDialog({
     }
   }, [open, runtimes, agent.agentCommand]);
 
+  // One-shot focus: when the dialog opens from a card deep-link, scroll and
+  // focus the relevant field. Runs once per open, keyed on `open` and the
+  // focus target so a second open with a different target re-fires correctly.
+  // Uses a short rAF delay to allow Radix Dialog to finish mounting the DOM
+  // before the imperative focus runs.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional one-shot — agent.pubkey included so focus re-fires when the dialog switches agents while staying open
+  React.useEffect(() => {
+    if (!open || !initialFocus) return;
+
+    const id = requestAnimationFrame(() => {
+      if (initialFocus.type === "normalized_field") {
+        // "provider" → focus the LLM provider dropdown; anything else
+        // (model / runtime) → focus the model dropdown.
+        const targetId =
+          initialFocus.field === "provider" ? "agent-provider" : "agent-model";
+        const el = document.getElementById(targetId);
+        if (el instanceof HTMLSelectElement) {
+          el.scrollIntoView({ block: "nearest" });
+          el.focus();
+        }
+      }
+      // env_key is handled by EnvVarsEditor via focusKey prop below.
+    });
+
+    return () => cancelAnimationFrame(id);
+  }, [open, initialFocus, agent.pubkey]);
+
+  // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
     [runtimes],
@@ -934,6 +966,9 @@ export function AgentInstanceEditDialog({
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
+                      focusKey={
+                        initialFocus?.type === "env_key" ? initialFocus.key : undefined
+                      }
                       inheritedEnvVars={inheritedWithGlobal}
                       inheritHarness={inheritHarness}
                       linkedPersona={linkedPersona}
