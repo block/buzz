@@ -325,6 +325,8 @@ export function EditAgentDialog({
     prospectiveRuntimeId,
     { enabled: open },
   );
+  const { globalConfig } = useGlobalAgentConfig();
+
   // Credential keys satisfied by the runtime file config — shown as
   // "Set in goose config" rows rather than amber required rows.
   const fileSatisfiedEnvKeys = React.useMemo(() => {
@@ -350,8 +352,17 @@ export function EditAgentDialog({
       requiredCredentialEnvKeys(
         prospectiveRuntimeId,
         providerForRequiredKeys,
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
+      ).filter(
+        (key) =>
+          !fileSatisfiedEnvKeys.includes(key) &&
+          (globalConfig.env_vars[key] ?? "").length === 0,
+      ),
+    [
+      prospectiveRuntimeId,
+      providerForRequiredKeys,
+      fileSatisfiedEnvKeys,
+      globalConfig.env_vars,
+    ],
   );
 
   const {
@@ -366,8 +377,6 @@ export function EditAgentDialog({
     provider: providerForDiscovery,
     selectedRuntime,
   });
-
-  const { globalConfig } = useGlobalAgentConfig();
 
   // Merge global + persona env for the inherited display hint in EnvVarsEditor.
   // Persona wins over global on collision (higher precedence), so persona keys
