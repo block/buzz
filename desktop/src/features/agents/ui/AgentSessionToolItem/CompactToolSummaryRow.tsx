@@ -16,7 +16,7 @@ import {
 } from "../activityRenderClasses/ActivityRow";
 
 export function compactSummaryTone() {
-  return "text-muted-foreground/60 group-open:text-foreground";
+  return "text-muted-foreground/60 transition-colors group-hover/row:text-foreground group-open:text-foreground";
 }
 
 export function CompactToolSummaryRow({

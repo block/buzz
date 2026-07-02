@@ -113,7 +113,7 @@ export function ToolItem({
       >
         <summary
           className={cn(
-            "flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5",
+            "group/row flex min-h-6 max-w-full cursor-pointer list-none items-center gap-1.5",
             compactSummaryTone(),
           )}
         >

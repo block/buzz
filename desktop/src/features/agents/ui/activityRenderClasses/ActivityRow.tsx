@@ -72,7 +72,7 @@ export function ActivityRow({
     >
       <summary
         className={cn(
-          "flex min-h-6 w-full max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
+          "group/row flex min-h-6 w-full max-w-full cursor-pointer list-none items-center gap-1.5 text-muted-foreground",
           openToneScope === "summary"
             ? "group-open/summary:text-foreground"
             : "group-open:text-foreground",
@@ -81,7 +81,7 @@ export function ActivityRow({
         {summaryChildren}
         <ChevronDown
           className={cn(
-            "h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform",
+            "h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform group-hover/row:text-foreground",
             openToneScope === "summary"
               ? "group-open/summary:rotate-180 group-open/summary:text-foreground"
               : "group-open:rotate-180 group-open:text-foreground",
@@ -129,8 +129,8 @@ export function ActivityRowLabel({
           openToneScope === "none"
             ? null
             : openToneScope === "summary"
-              ? "group-open/summary:text-foreground"
-              : "group-open:text-foreground",
+              ? "transition-colors group-hover/row:text-foreground group-open/summary:text-foreground"
+              : "transition-colors group-hover/row:text-foreground group-open:text-foreground",
         )}
       >
         {verb}
@@ -143,8 +143,8 @@ export function ActivityRowLabel({
             openToneScope === "none"
               ? null
               : openToneScope === "summary"
-                ? "group-open/summary:text-foreground"
-                : "group-open:text-foreground",
+                ? "transition-colors group-hover/row:text-foreground group-open/summary:text-foreground"
+                : "transition-colors group-hover/row:text-foreground group-open:text-foreground",
           )}
         >
           {object}
