@@ -409,8 +409,11 @@ export function useAddChannelMembersMutation(channelId: string | null) {
 
       return addChannelMembers({ ...rest, channelId: effectiveChannelId });
     },
-    onSettled: async () => {
-      await invalidateChannelState(queryClient, channelId);
+    onSettled: async (_data, _err, variables) => {
+      // Invalidate the effective channel (the one actually mutated) not the
+      // live hook-closure channel, which may have changed mid-send.
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      await invalidateChannelState(queryClient, effectiveChannelId);
     },
   });
 }

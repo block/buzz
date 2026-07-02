@@ -248,10 +248,21 @@ export function useChannelPaneHandlers({
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
     ) => {
-      const activeThreadHeadId = openThreadHeadIdRef.current;
+      // Use the submit-time-captured thread context when available so a channel
+      // or thread switch during the async mention-flow awaits does not send the
+      // reply to the wrong thread. Fall back to the live refs only when no
+      // context was captured (direct callers that bypass the mention flow).
+      const activeThreadHeadId =
+        threadContext?.threadHeadId ?? openThreadHeadIdRef.current;
       const parentEventId =
-        threadReplyTargetIdRef.current ?? activeThreadHeadId;
+        threadContext?.parentEventId ??
+        threadReplyTargetIdRef.current ??
+        activeThreadHeadId;
       if (!parentEventId) {
         return;
       }
@@ -275,9 +286,15 @@ export function useChannelPaneHandlers({
         mediaTags,
         channelId: channelId ?? undefined,
       });
-      setThreadReplyTargetId(activeThreadHeadId);
-      if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {
-        setThreadScrollTargetId(sentMessage.id);
+
+      // Only update thread UI state if the user is still viewing the same
+      // thread. If they navigated away during the async send, don't disrupt
+      // the thread they are currently viewing.
+      if (openThreadHeadIdRef.current === activeThreadHeadId) {
+        setThreadReplyTargetId(activeThreadHeadId);
+        if (activeThreadHeadId && parentEventId !== activeThreadHeadId) {
+          setThreadScrollTargetId(sentMessage.id);
+        }
       }
     },
     [

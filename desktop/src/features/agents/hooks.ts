@@ -443,8 +443,13 @@ export function useAttachManagedAgentToChannelMutation(
 
       return attachManagedAgentToChannel(effectiveChannelId, rest);
     },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
+    onSettled: (_data, _err, variables) => {
+      // Invalidate the effective channel (the one the server actually mutated)
+      // so its membership/agent state stays fresh. Invalidating the live
+      // hook-closure channelId when the user has already switched away would
+      // leave the compose-time channel stale.
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
     },
   });
 }
@@ -492,8 +497,9 @@ export function useCreateChannelManagedAgentMutation(channelId: string | null) {
       const failure = result.failures[0];
       throw new Error(failure?.error ?? "Could not create agent.");
     },
-    onSettled: () => {
-      invalidateAgentQueriesInBackground(queryClient, channelId);
+    onSettled: (_data, _err, variables) => {
+      const effectiveChannelId = variables?.channelId ?? channelId;
+      invalidateAgentQueriesInBackground(queryClient, effectiveChannelId);
     },
   });
 }

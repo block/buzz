@@ -70,6 +70,10 @@ type MessageThreadPanelProps = {
     mentionPubkeys: string[],
     mediaTags?: string[][],
     channelId?: string | null,
+    threadContext?: {
+      parentEventId: string | null;
+      threadHeadId: string | null;
+    } | null,
   ) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -339,6 +343,21 @@ export function MessageThreadPanel({
     threadBodyRef,
     threadComposerWrapperRef,
     isSinglePanelView,
+  );
+
+  // Live refs so onCaptureSendContext can read thread state at submit time
+  // (before any async mention-flow awaits change navigation state).
+  const replyTargetMessageRef = React.useRef(replyTargetMessage);
+  replyTargetMessageRef.current = replyTargetMessage;
+  const threadHeadRef = React.useRef(threadHead);
+  threadHeadRef.current = threadHead;
+
+  const onCaptureSendContext = React.useCallback(
+    () => ({
+      parentEventId: replyTargetMessageRef.current?.id ?? threadHeadId,
+      threadHeadId,
+    }),
+    [threadHeadId],
   );
 
   const collapseThreadHeadReplies = React.useCallback(() => {
@@ -850,6 +869,7 @@ export function MessageThreadPanel({
             isSending={isSending}
             onCancelEdit={onCancelEdit}
             onCancelReply={composerReplyTarget ? onCancelReply : undefined}
+            onCaptureSendContext={onCaptureSendContext}
             onEditLastOwnMessage={onEditLastOwnMessage}
             onEditSave={onEditSave}
             onSend={onSend}

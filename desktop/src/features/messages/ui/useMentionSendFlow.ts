@@ -28,6 +28,11 @@ import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 
 type PendingNonMemberMentionSend = {
   capturedChannelId: string | null;
+  /** Thread context captured at submit time — null for main-timeline sends. */
+  capturedThreadContext: {
+    parentEventId: string | null;
+    threadHeadId: string | null;
+  } | null;
   finalContent: string;
   mentionPubkeys: string[];
   nonMemberPubkeys: string[];
@@ -41,6 +46,11 @@ type PendingNonMemberMentionSend = {
 
 type SendMessageWithMentionFlowInput = {
   capturedChannelId: string | null;
+  /** Thread context captured at submit time — null for main-timeline sends. */
+  capturedThreadContext?: {
+    parentEventId: string | null;
+    threadHeadId: string | null;
+  } | null;
   pendingImeta: ImetaMedia[];
   sentDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
@@ -62,6 +72,10 @@ type UseMentionSendFlowOptions = {
       mentionPubkeys: string[],
       mediaTags?: string[][],
       channelId?: string | null,
+      threadContext?: {
+        parentEventId: string | null;
+        threadHeadId: string | null;
+      } | null,
     ) => Promise<void>
   >;
   richText: Pick<UseRichTextEditorResult, "clearContent" | "setContent">;
@@ -380,6 +394,7 @@ export function useMentionSendFlow({
             mentionPubkeys,
             outgoingTags,
             draft.capturedChannelId,
+            draft.capturedThreadContext,
           );
           if (draft.sentDraftKey) {
             drafts.clearDraft(draft.sentDraftKey);
@@ -435,6 +450,7 @@ export function useMentionSendFlow({
   const sendMessageWithMentionFlow = React.useCallback(
     async ({
       capturedChannelId,
+      capturedThreadContext = null,
       pendingImeta,
       sentDraftKey,
       spoileredAttachmentUrls = new Set(),
@@ -501,6 +517,7 @@ export function useMentionSendFlow({
 
         const pendingDraft: PendingNonMemberMentionSend = {
           capturedChannelId,
+          capturedThreadContext,
           finalContent,
           mentionPubkeys: pubkeys,
           nonMemberPubkeys: promptNonMemberPubkeys,
