@@ -318,32 +318,31 @@ export function EditAgentDialog({
   // and readiness.rs always agree on which keys are required. Passing global
   // provider/model/env ensures an agent inheriting a global provider shows the
   // correct credential rows even before the user sets a per-agent provider.
-  const { missingEnvKeys: requiredEnvKeys, fileSatisfiedEnvKeys } =
-    React.useMemo(
-      () =>
-        computeLocalModeGate({
-          envVars,
-          globalEnvVars: globalConfig.env_vars,
-          globalProvider: globalConfig.provider ?? "",
-          globalModel: globalConfig.model ?? "",
-          isProviderMode: false,
-          model,
-          provider,
-          runtimeId: prospectiveRuntimeId,
-          runtimeFileConfig,
-          useMesh: false,
-        }),
-      [
+  const { requiredEnvKeys, fileSatisfiedEnvKeys } = React.useMemo(
+    () =>
+      computeLocalModeGate({
         envVars,
-        globalConfig.env_vars,
-        globalConfig.provider,
-        globalConfig.model,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
+        isProviderMode: false,
         model,
         provider,
-        prospectiveRuntimeId,
+        runtimeId: prospectiveRuntimeId,
         runtimeFileConfig,
-      ],
-    );
+        useMesh: false,
+      }),
+    [
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      model,
+      provider,
+      prospectiveRuntimeId,
+      runtimeFileConfig,
+    ],
+  );
 
   const {
     discoveredModelOptions,

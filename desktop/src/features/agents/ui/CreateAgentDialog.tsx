@@ -179,7 +179,8 @@ export function CreateAgentDialog({
   });
 
   // Full required credential key list for EnvVarsEditor amber locked rows —
-  // includes already-satisfied keys, not just missing ones.
+  // `requiredEnvKeys` includes locally-filled keys (row stays stable while
+  // typing), excludes globally/file-satisfied keys shown differently.
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
     selectedRuntimeId,
     { enabled: open },
@@ -188,34 +189,33 @@ export function CreateAgentDialog({
   // and readiness.rs always agree on which keys are required. Passing global
   // provider/model/env ensures an agent inheriting a global provider shows the
   // correct credential rows even before the user sets a per-agent provider.
-  const { missingEnvKeys: requiredEnvKeys, fileSatisfiedEnvKeys } =
-    React.useMemo(
-      () =>
-        computeLocalModeGate({
-          envVars,
-          globalEnvVars: globalConfig.env_vars,
-          globalProvider: globalConfig.provider ?? "",
-          globalModel: globalConfig.model ?? "",
-          isProviderMode,
-          model,
-          provider,
-          runtimeId: selectedRuntimeId,
-          runtimeFileConfig,
-          useMesh,
-        }),
-      [
+  const { requiredEnvKeys, fileSatisfiedEnvKeys } = React.useMemo(
+    () =>
+      computeLocalModeGate({
         envVars,
-        globalConfig.env_vars,
-        globalConfig.provider,
-        globalConfig.model,
+        globalEnvVars: globalConfig.env_vars,
+        globalProvider: globalConfig.provider ?? "",
+        globalModel: globalConfig.model ?? "",
         isProviderMode,
         model,
         provider,
+        runtimeId: selectedRuntimeId,
         runtimeFileConfig,
-        selectedRuntimeId,
         useMesh,
-      ],
-    );
+      }),
+    [
+      envVars,
+      globalConfig.env_vars,
+      globalConfig.provider,
+      globalConfig.model,
+      isProviderMode,
+      model,
+      provider,
+      runtimeFileConfig,
+      selectedRuntimeId,
+      useMesh,
+    ],
+  );
 
   // Clear model when provider scope changes, mirroring EditAgentDialog.
   React.useEffect(() => {
