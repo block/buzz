@@ -7,6 +7,7 @@ import {
   sortEvents,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
+import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 
 const AUTH_TIMEOUT_MS = 8_000;
 const HISTORY_TIMEOUT_MS = 8_000;
@@ -62,9 +63,7 @@ export class ReadOnlyRelayClient {
     this.generation++;
 
     if (this.wsId !== null) {
-      void invoke("plugin:websocket|disconnect", { id: this.wsId }).catch(
-        () => {},
-      );
+      void closeWebSocket(this.wsId, "observer disconnected");
       this.wsId = null;
     }
 

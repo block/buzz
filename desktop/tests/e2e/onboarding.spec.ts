@@ -1316,15 +1316,29 @@ test("membership denial can import a different invited key", async ({
 
   // Alice already has a relay profile with a display name, so after the
   // identity swap the onboarding gate auto-completes.
+  // The identity swap must tear down the old relay socket. There is no
+  // `plugin:websocket|disconnect` command in tauri-plugin-websocket — closing
+  // is a Close frame sent through `plugin:websocket|send`.
   await expect
     .poll(() =>
       page.evaluate(
         () =>
-          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
-            .__BUZZ_E2E_COMMANDS__ ?? [],
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
+                command: string;
+                payload: unknown;
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_PAYLOADS__?.some(
+            (entry) =>
+              entry.command === "plugin:websocket|send" &&
+              (entry.payload as { message?: { type?: string } })?.message
+                ?.type === "Close",
+          ) ?? false,
       ),
     )
-    .toEqual(expect.arrayContaining(["plugin:websocket|disconnect"]));
+    .toBe(true);
   await expect
     .poll(() =>
       page.evaluate((storageKey) => {

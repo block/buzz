@@ -7985,14 +7985,6 @@ export function maybeInstallE2eTauriMocks() {
         return sendToMockSocket(
           payload as Parameters<typeof sendToMockSocket>[0],
         );
-      case "plugin:websocket|disconnect":
-        if (isRelayMode(activeConfig)) {
-          realSockets.get((payload as { id: number }).id)?.close();
-          realSockets.delete((payload as { id: number }).id);
-          return;
-        }
-
-        return disconnectMockSocket((payload as { id: number }).id);
       case "plugin:window|show":
       case "plugin:window|unminimize":
       case "plugin:window|set_focus":
