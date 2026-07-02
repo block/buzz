@@ -1648,7 +1648,28 @@ mod tests {
 
     #[test]
     fn anthropic_body_emits_adaptive_thinking_for_opus_4() {
-        // Adaptive Claude (claude-opus-4-*) → thinking:{type:"adaptive"} + output_config.effort.
+        // Adaptive Claude (claude-opus-4-6/4.7/4.8) → thinking:{type:"adaptive"} + output_config.effort.
+        // Note: Opus 4.5 is NOT adaptive — it uses manual budget.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-7",
+            Some(ThinkingEffort::High),
+        );
+        assert_eq!(
+            body["thinking"]["type"], "adaptive",
+            "thinking must be {{type:adaptive}} for claude-opus-4-7"
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_body_emits_manual_budget_for_opus_4_5() {
+        // Opus 4.5 uses manual budget (effort page: "uses manual thinking").
         let mut c = cfg(Provider::Anthropic);
         c.max_output_tokens = 32_768;
         let body = anthropic_body(
@@ -1659,11 +1680,12 @@ mod tests {
             "claude-opus-4-5",
             Some(ThinkingEffort::High),
         );
-        assert_eq!(
-            body["thinking"]["type"], "adaptive",
-            "thinking must be {{type:adaptive}} for claude-opus-4-5"
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 32_767); // capped: min(32768, 32768-1)
+        assert!(
+            body.get("output_config").is_none(),
+            "output_config must be absent for claude-opus-4-5 (manual budget)"
         );
-        assert_eq!(body["output_config"]["effort"], "high");
     }
 
     #[test]
@@ -1766,6 +1788,96 @@ mod tests {
             None,
         );
         assert_eq!(body["model"], "override-model");
+    }
+
+    #[test]
+    fn anthropic_body_opus_4_8_xhigh_emits_xhigh_effort() {
+        // Body-shape regression: xhigh on Opus 4.8 must emit output_config.effort="xhigh".
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-8",
+            Some(ThinkingEffort::XHigh),
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn anthropic_body_opus_4_8_max_emits_max_effort() {
+        // Body-shape regression: max on Opus 4.8 must emit output_config.effort="max".
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-8",
+            Some(ThinkingEffort::Max),
+        );
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn openai_body_emits_xhigh_effort() {
+        // xhigh is a valid OpenAI effort value — must pass through.
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::XHigh),
+        );
+        assert_eq!(body["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn openai_body_emits_none_effort() {
+        // none is a valid OpenAI effort value.
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::None),
+        );
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn responses_body_emits_xhigh_effort() {
+        // xhigh is a valid Responses API effort value.
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::XHigh),
+        );
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn responses_body_emits_minimal_effort() {
+        // minimal is a valid Responses API effort value.
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            Some(ThinkingEffort::Minimal),
+        );
+        assert_eq!(body["reasoning"]["effort"], "minimal");
     }
 
     /// Regression: a connection that is accepted and then dropped before any
