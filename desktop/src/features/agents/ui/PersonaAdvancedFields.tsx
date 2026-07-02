@@ -16,6 +16,7 @@ export function PersonaAdvancedFields({
   onEnvVarsChange,
   onNamePoolTextChange,
   requiredEnvKeys = [],
+  fileSatisfiedEnvKeys = [],
 }: {
   disabled: boolean;
   envVars: EnvVarsValue;
@@ -23,6 +24,7 @@ export function PersonaAdvancedFields({
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onNamePoolTextChange: (value: string) => void;
   requiredEnvKeys?: readonly string[];
+  fileSatisfiedEnvKeys?: readonly string[];
 }) {
   return (
     <div className="space-y-5 pt-2">
@@ -59,6 +61,7 @@ export function PersonaAdvancedFields({
 
       <EnvVarsEditor
         disabled={disabled}
+        fileSatisfiedKeys={fileSatisfiedEnvKeys}
         onChange={onEnvVarsChange}
         requiredKeys={requiredEnvKeys}
         value={envVars}

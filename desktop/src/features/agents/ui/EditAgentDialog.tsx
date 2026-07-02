@@ -4,6 +4,7 @@ import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
   usePersonasQuery,
+  useRuntimeFileConfigQuery,
   useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
 import type {
@@ -277,10 +278,37 @@ export function EditAgentDialog({
   // validates what will actually be saved — in particular, on the inherit
   // transition (claude→buzz-agent or buzz-agent→claude) the gate reflects
   // the inherited runtime's requirements, not the old pin's.
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    prospectiveRuntimeId,
+    { enabled: open },
+  );
+  // Credential keys satisfied by the runtime file config — shown as
+  // "Set in goose config" rows rather than amber required rows.
+  const fileSatisfiedEnvKeys = React.useMemo(() => {
+    if (!runtimeFileConfig) return [] as string[];
+    const allKeys = requiredCredentialEnvKeys(
+      prospectiveRuntimeId,
+      providerForRequiredKeys,
+    );
+    return allKeys.filter(
+      (key) =>
+        (envVars[key] ?? "").length === 0 &&
+        runtimeFileConfig.satisfiedEnvKeys.includes(key),
+    );
+  }, [
+    runtimeFileConfig,
+    prospectiveRuntimeId,
+    providerForRequiredKeys,
+    envVars,
+  ]);
+
   const requiredEnvKeys = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
-    [prospectiveRuntimeId, providerForRequiredKeys],
+      requiredCredentialEnvKeys(
+        prospectiveRuntimeId,
+        providerForRequiredKeys,
+      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
+    [prospectiveRuntimeId, providerForRequiredKeys, fileSatisfiedEnvKeys],
   );
 
   const {
@@ -726,6 +754,7 @@ export function EditAgentDialog({
 
             <EnvVarsEditor
               disabled={updateMutation.isPending}
+              fileSatisfiedKeys={fileSatisfiedEnvKeys}
               helperText="Per-agent env vars. Override the persona's vars on collision."
               inheritedFrom={inheritedEnvVars}
               inheritedLabel="persona"

@@ -16,6 +16,7 @@ import {
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
   getManagedAgentLog,
+  getRuntimeFileConfig,
   installAcpRuntime,
   listManagedAgents,
   listRelayAgents,
@@ -617,6 +618,32 @@ export function useAgentConfigSurface(pubkey: string | null) {
     enabled: !!pubkey,
     staleTime: 10_000,
     refetchInterval: 30_000,
+  });
+}
+
+export const runtimeFileConfigQueryKey = (runtimeId: string) =>
+  ["runtime-file-config", runtimeId] as const;
+
+/**
+ * Query the file-layer config for a runtime (e.g. `~/.config/goose/config.yaml`).
+ *
+ * Used by Create/Edit/Persona dialogs to know which requirements are already
+ * satisfied in the harness config file, so they can show "Set in goose config"
+ * rather than surfacing a false required-field marker.
+ *
+ * Enabled only when `runtimeId` is non-empty and the dialog is open.
+ */
+export function useRuntimeFileConfigQuery(
+  runtimeId: string,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: runtimeFileConfigQueryKey(runtimeId),
+    queryFn: () => getRuntimeFileConfig(runtimeId),
+    enabled: (options?.enabled ?? true) && runtimeId.trim().length > 0,
+    staleTime: 30_000,
+    // File config rarely changes mid-session; no aggressive refetch needed.
+    refetchInterval: false,
   });
 }
 

@@ -1,4 +1,5 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
@@ -372,6 +373,7 @@ export function computeLocalModeGate({
   model,
   provider,
   runtimeId,
+  runtimeFileConfig,
   useMesh,
 }: {
   envVars: Record<string, string>;
@@ -379,38 +381,78 @@ export function computeLocalModeGate({
   model: string;
   provider: string;
   runtimeId: string;
+  /** Optional file-layer config for the runtime (e.g. goose config.yaml).
+   *  When provided, requirements already satisfied there are silenced. */
+  runtimeFileConfig?: RuntimeFileConfigSubset | null;
   useMesh: boolean;
 }): {
   /** Normalized field names that are required but empty ("provider", "model"). */
   missingNormalizedFields: string[];
   /** Credential env key names that are required but missing or empty. */
   missingEnvKeys: string[];
+  /** Env keys that are not set in Buzz but are satisfied in the runtime's
+   *  config file (e.g. "Set in goose config"). */
+  fileSatisfiedEnvKeys: string[];
   /** True when the create button may be enabled (from this gate's perspective). */
   satisfied: boolean;
 } {
   if (isProviderMode || useMesh) {
-    return { missingNormalizedFields: [], missingEnvKeys: [], satisfied: true };
+    return {
+      missingNormalizedFields: [],
+      missingEnvKeys: [],
+      fileSatisfiedEnvKeys: [],
+      satisfied: true,
+    };
   }
 
   const needsProviderSelection = runtimeSupportsLlmProviderSelection(runtimeId);
 
+  // A normalized field is satisfied by the runtime file config when the file
+  // provides the value (provider or model). The file layer silences the
+  // requirement; the value is not injected into the Buzz env.
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  const fileModel = runtimeFileConfig?.model?.trim() ?? "";
+  const fileSatisfiedKeys = new Set(runtimeFileConfig?.satisfiedEnvKeys ?? []);
+
   const missingNormalizedFields: string[] = [];
   if (needsProviderSelection) {
-    if (provider.trim().length === 0) missingNormalizedFields.push("provider");
-    if (model.trim().length === 0) missingNormalizedFields.push("model");
+    if (provider.trim().length === 0 && fileProvider.length === 0) {
+      missingNormalizedFields.push("provider");
+    }
+    if (model.trim().length === 0 && fileModel.length === 0) {
+      missingNormalizedFields.push("model");
+    }
   }
 
   // Credential keys depend on the selected provider (empty provider → no keys
   // required beyond the normalized field gate above).
-  const providerForKeys = needsProviderSelection ? provider : "";
+  // Use the file provider as fallback when the env provider is empty, so
+  // credential requirements are computed correctly for file-config runtimes.
+  const effectiveProviderForKeys = needsProviderSelection
+    ? provider.trim() || fileProvider
+    : "";
+  const providerForKeys = needsProviderSelection
+    ? effectiveProviderForKeys
+    : "";
   const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
-  const missingEnvKeys = requiredKeys.filter(
-    (key) => (envVars[key] ?? "").length === 0,
-  );
+
+  const missingEnvKeys: string[] = [];
+  const fileSatisfiedEnvKeys: string[] = [];
+  for (const key of requiredKeys) {
+    if ((envVars[key] ?? "").length > 0) {
+      // Set in Buzz env — satisfied, no action.
+    } else if (fileSatisfiedKeys.has(key)) {
+      // Not in Buzz env but present in the runtime config file — silenced.
+      fileSatisfiedEnvKeys.push(key);
+    } else {
+      missingEnvKeys.push(key);
+    }
+  }
 
   return {
     missingNormalizedFields,
     missingEnvKeys,
+    fileSatisfiedEnvKeys,
     satisfied:
       missingNormalizedFields.length === 0 && missingEnvKeys.length === 0,
   };

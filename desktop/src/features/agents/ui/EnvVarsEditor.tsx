@@ -36,6 +36,13 @@ type EnvVarsEditorProps = {
    * fill it in.
    */
   requiredKeys?: readonly string[];
+  /**
+   * Env var keys that are required but already satisfied by the runtime's
+   * config file (e.g. `~/.config/goose/config.yaml`). These are shown as
+   * read-only informational rows with a "Set in goose config" annotation so
+   * the user knows the key is covered without needing to add it here.
+   */
+  fileSatisfiedKeys?: readonly string[];
 };
 
 type Row = { id: string; key: string; value: string };
@@ -57,6 +64,7 @@ export function EnvVarsEditor({
   helperText,
   disabled = false,
   requiredKeys = [],
+  fileSatisfiedKeys = [],
 }: EnvVarsEditorProps) {
   // Local ordered row state. Synced from `value` on mount and when the
   // parent supplies a value we did NOT just emit (e.g., dialog reopened
@@ -179,8 +187,52 @@ export function EnvVarsEditor({
           );
         })}
 
+        {/* File-satisfied keys — required but set in the runtime config file */}
+        {fileSatisfiedKeys.map((key) => (
+          <div key={key} className="space-y-1">
+            <div className="flex items-center gap-2">
+              <div
+                className={cn(
+                  "flex min-h-11 flex-1 items-center gap-1.5 px-3",
+                  PERSONA_FIELD_SHELL_CLASS,
+                  "border-muted-foreground/20 bg-muted/20",
+                )}
+              >
+                <Lock
+                  className="h-3 w-3 shrink-0 text-muted-foreground/40"
+                  aria-hidden
+                />
+                <span
+                  className="font-mono text-sm leading-6 text-foreground/60"
+                  data-testid="env-vars-file-satisfied-key"
+                >
+                  {key}
+                </span>
+                <span className="ml-1 rounded-sm bg-muted px-1 py-0.5 text-2xs font-medium text-muted-foreground">
+                  Set in goose config
+                </span>
+              </div>
+              {/* Spacer columns to align with required-key rows */}
+              <div
+                className={cn(
+                  "flex min-h-11 flex-[2] items-center px-3",
+                  PERSONA_FIELD_SHELL_CLASS,
+                  "opacity-40",
+                )}
+              >
+                <span className="font-mono text-sm text-muted-foreground">
+                  ••••••••
+                </span>
+              </div>
+              <div className="h-9 w-9 shrink-0" aria-hidden />
+            </div>
+          </div>
+        ))}
+
         {/* User-managed rows */}
-        {rows.length === 0 && requiredKeys.length === 0 ? (
+        {rows.length === 0 &&
+        requiredKeys.length === 0 &&
+        fileSatisfiedKeys.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">
             No variables set.
           </p>

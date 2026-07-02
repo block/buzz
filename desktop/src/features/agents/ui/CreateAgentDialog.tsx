@@ -7,6 +7,7 @@ import {
   useBackendProvidersQuery,
   useCreateManagedAgentMutation,
   useManagedAgentPrereqsQuery,
+  useRuntimeFileConfigQuery,
 } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 import type {
@@ -177,13 +178,32 @@ export function CreateAgentDialog({
 
   // Full required credential key list for EnvVarsEditor amber locked rows —
   // includes already-satisfied keys, not just missing ones.
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    selectedRuntimeId,
+    { enabled: open },
+  );
+  // Credential keys satisfied by the runtime file config (e.g. goose config.yaml).
+  // These are shown as "Set in goose config" rows rather than amber required rows.
+  const fileSatisfiedEnvKeys = React.useMemo(() => {
+    if (!runtimeFileConfig) return [] as string[];
+    const allKeys = requiredCredentialEnvKeys(
+      selectedRuntimeId,
+      runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
+    );
+    return allKeys.filter(
+      (key) =>
+        (envVars[key] ?? "").length === 0 &&
+        runtimeFileConfig.satisfiedEnvKeys.includes(key),
+    );
+  }, [runtimeFileConfig, selectedRuntimeId, provider, envVars]);
+
   const requiredEnvKeys = React.useMemo(
     () =>
       requiredCredentialEnvKeys(
         selectedRuntimeId,
         runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
-      ),
-    [selectedRuntimeId, provider],
+      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
+    [selectedRuntimeId, provider, fileSatisfiedEnvKeys],
   );
 
   // Clear model when provider scope changes, mirroring EditAgentDialog.
@@ -814,6 +834,7 @@ export function CreateAgentDialog({
 
             <EnvVarsEditor
               disabled={createMutation.isPending}
+              fileSatisfiedKeys={fileSatisfiedEnvKeys}
               helperText="Injected at spawn. Overrides the persona's env vars on collision."
               onChange={setEnvVars}
               requiredKeys={requiredEnvKeys}
