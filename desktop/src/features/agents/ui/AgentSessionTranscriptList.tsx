@@ -1,4 +1,5 @@
 import * as React from "react";
+import { motion, useReducedMotion } from "motion/react";
 import { CheckCheck, Radio } from "lucide-react";
 
 import {
@@ -23,6 +24,7 @@ import {
   type AgentSessionTranscriptVariant,
   useAgentSessionTranscriptVariant,
 } from "./agentSessionTranscriptContext";
+import { useTranscriptAnimationEnabled } from "./transcriptAnimationPreference";
 import { TranscriptActivityItem } from "./activityRenderClasses/TranscriptActivityItem";
 import {
   ActivityRow,
@@ -120,6 +122,16 @@ export function AgentSessionTranscriptList({
   });
 
   const isCompactPreview = variant === "compactPreview";
+  const animationPreferenceEnabled = useTranscriptAnimationEnabled();
+  const shouldReduceMotion = useReducedMotion();
+  const animationsDisabled =
+    Boolean(shouldReduceMotion) || !animationPreferenceEnabled;
+  // Rows mounted on first render (history load) must not animate in; only
+  // blocks appended afterwards get the enter transition.
+  const hasCompletedInitialRenderRef = React.useRef(false);
+  React.useEffect(() => {
+    hasCompletedInitialRenderRef.current = true;
+  }, []);
   const hasRenderableContent =
     items.length > 0 && hasRenderableDisplayContent(displayBlocks, variant);
 
@@ -166,7 +178,7 @@ export function AgentSessionTranscriptList({
         aria-live="polite"
         className={cn(
           "flex w-full flex-col",
-          isCompactPreview ? "gap-2" : "gap-4",
+          isCompactPreview ? "gap-1" : "gap-4",
           autoTail && "pb-4",
           contentContainerClassName,
         )}
@@ -174,22 +186,37 @@ export function AgentSessionTranscriptList({
         role="log"
       >
         <AgentSessionTranscriptVariantProvider value={variant}>
-          {displayBlocks.map((block) => (
-            <div
-              className="content-visibility-auto"
-              data-message-id={getDisplayBlockKey(block)}
-              key={getDisplayBlockKey(block)}
-            >
-              <TranscriptDisplayBlockView
-                agentAvatarUrl={agentAvatarUrl}
-                agentName={agentName}
-                agentPubkey={agentPubkey}
-                block={block}
-                profiles={profiles}
-              />
-            </div>
-          ))}
-          {isTurnLive ? <TurnLivenessIndicator /> : null}
+          {displayBlocks.map((block) => {
+            const blockKey = getDisplayBlockKey(block);
+            return (
+              <motion.div
+                animate={{ opacity: 1, y: 0 }}
+                data-message-id={blockKey}
+                initial={
+                  animationsDisabled || !hasCompletedInitialRenderRef.current
+                    ? false
+                    : { opacity: 0, y: 12 }
+                }
+                key={blockKey}
+                layout={animationsDisabled ? false : "position"}
+                transition={{ damping: 38, stiffness: 480, type: "spring" }}
+              >
+                {/* content-visibility stays on a non-animated child: motion
+                    measures the outer wrapper for layout animations, which
+                    would otherwise force skipped offscreen rows to render. */}
+                <div className="content-visibility-auto">
+                  <TranscriptDisplayBlockView
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentName={agentName}
+                    agentPubkey={agentPubkey}
+                    block={block}
+                    profiles={profiles}
+                  />
+                </div>
+              </motion.div>
+            );
+          })}
+          {isTurnLive && !isCompactPreview ? <TurnLivenessIndicator /> : null}
         </AgentSessionTranscriptVariantProvider>
       </div>
     </div>

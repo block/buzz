@@ -498,7 +498,7 @@ function ProfileLiveActivityEmbed({
         <div className="pointer-events-none absolute inset-0 z-20">
           <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/90 to-transparent px-3 pb-3 pt-24">
             <div className="min-w-0">
-              <span className="block text-base font-semibold text-muted-foreground">
+              <span className="block text-sm font-semibold text-muted-foreground">
                 Latest Activity
               </span>
             </div>
@@ -509,91 +509,93 @@ function ProfileLiveActivityEmbed({
   }
 
   return (
-    <section
-      aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
-      className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
-    >
-      <button
+    <div>
+      <section
         aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
-        className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        onClick={openSelectedActivity}
-        type="button"
-      />
-      <LiveActivityOpenButton
-        activeChannelId={activeChannelId}
-        lastLiveAt={lastLiveAt}
-        onOpenActivity={onOpenActivity}
-      />
-      <Carousel
-        className="relative z-0 flex min-h-0 flex-1 flex-col"
-        opts={{
-          align: "start",
-          containScroll: "trimSnaps",
-          dragFree: false,
-          watchDrag: false,
-        }}
-        setApi={setCarouselApi}
+        className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
       >
-        <CarouselContent className="ml-0 h-full flex-1">
-          {slides.map((channelId) => {
-            const isMounted = mountedChannelIds.has(channelId);
+        <button
+          aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
+          className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onClick={openSelectedActivity}
+          type="button"
+        />
+        <LiveActivityOpenButton
+          activeChannelId={activeChannelId}
+          lastLiveAt={lastLiveAt}
+          onOpenActivity={onOpenActivity}
+        />
+        <Carousel
+          className="relative z-0 flex min-h-0 flex-1 flex-col"
+          opts={{
+            align: "start",
+            containScroll: "trimSnaps",
+            dragFree: false,
+            watchDrag: false,
+          }}
+          setApi={setCarouselApi}
+        >
+          <CarouselContent className="ml-0 h-full flex-1">
+            {slides.map((channelId) => {
+              const isMounted = mountedChannelIds.has(channelId);
 
-            return (
-              <CarouselItem
-                className="h-full basis-full pl-0"
-                data-mounted={isMounted ? "true" : "false"}
-                data-testid={`user-profile-activity-slide-${channelId}`}
-                key={channelId}
-              >
-                {isMounted ? (
-                  <ManagedAgentSessionPanel
-                    agent={activityAgent}
-                    autoTail={true}
-                    channelId={channelId}
-                    className="h-full min-h-0 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
-                    emptyDescription={emptyDescription}
-                    emptyState={emptyState}
-                    panelPadding={false}
-                    rawLayout="responsive"
-                    showHeader={false}
-                    showRaw={false}
-                    transcriptContentClassName="py-4"
-                    transcriptVariant="compactPreview"
-                  />
-                ) : (
-                  <div aria-hidden="true" className="h-full" />
-                )}
-              </CarouselItem>
-            );
-          })}
-        </CarouselContent>
-      </Carousel>
-      <div className="pointer-events-none absolute inset-0 z-20">
-        <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/80 to-transparent px-3 pb-3 pt-16">
-          <div className="min-w-0">
-            <span className="block text-sm font-semibold text-muted-foreground">
-              Latest Activity
-            </span>
-            {activeChannelName ? (
-              <span
-                className="block truncate text-sm font-medium text-muted-foreground/75"
-                data-testid="user-profile-activity-channel-label"
-                title={`#${activeChannelName}`}
-              >
-                #{activeChannelName}
+              return (
+                <CarouselItem
+                  className="h-full basis-full pl-0"
+                  data-mounted={isMounted ? "true" : "false"}
+                  data-testid={`user-profile-activity-slide-${channelId}`}
+                  key={channelId}
+                >
+                  {isMounted ? (
+                    <ManagedAgentSessionPanel
+                      agent={activityAgent}
+                      autoTail={true}
+                      channelId={channelId}
+                      className="h-full min-h-0 border-0 bg-transparent px-4 text-xs shadow-none **:data-message-id:pointer-events-none"
+                      emptyDescription={emptyDescription}
+                      emptyState={emptyState}
+                      panelPadding={false}
+                      rawLayout="responsive"
+                      showHeader={false}
+                      showRaw={false}
+                      transcriptContentClassName="py-4"
+                      transcriptVariant="compactPreview"
+                    />
+                  ) : (
+                    <div aria-hidden="true" className="h-full" />
+                  )}
+                </CarouselItem>
+              );
+            })}
+          </CarouselContent>
+        </Carousel>
+        <div className="pointer-events-none absolute inset-0 z-20">
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/80 to-transparent px-3 pb-3 pt-16">
+            <div className="min-w-0">
+              <span className="block text-xs font-semibold text-muted-foreground">
+                Latest Activity
               </span>
-            ) : null}
+              {activeChannelName ? (
+                <span
+                  className="block truncate text-xs font-medium text-muted-foreground/75"
+                  data-testid="user-profile-activity-channel-label"
+                  title={`#${activeChannelName}`}
+                >
+                  #{activeChannelName}
+                </span>
+              ) : null}
+            </div>
           </div>
-          <ActivityCarouselDots
-            channelIdToName={channelIdToName}
-            onSelect={handleDotSelect}
-            selectedIndex={selectedIndex}
-            slides={slides}
-          />
         </div>
-      </div>
-    </section>
+      </section>
+      <ActivityCarouselDots
+        channelIdToName={channelIdToName}
+        onSelect={handleDotSelect}
+        selectedIndex={selectedIndex}
+        slides={slides}
+      />
+    </div>
   );
 }
 
@@ -615,7 +617,7 @@ function ActivityCarouselDots({
   return (
     <div
       aria-label="Choose active channel feed"
-      className="pointer-events-auto mt-2 flex items-center gap-1.5"
+      className="mt-2 flex items-center justify-center gap-1.5"
       role="tablist"
     >
       {slides.map((channelId, index) => {
@@ -639,10 +641,10 @@ function ActivityCarouselDots({
             <span
               aria-hidden="true"
               className={cn(
-                "relative z-10 block rounded-full transition-all",
+                "relative z-10 block rounded-full bg-foreground transition-all",
                 isSelected
-                  ? "h-1.5 w-4 bg-primary"
-                  : "h-1.5 w-1.5 bg-muted-foreground/40 group-hover:bg-muted-foreground/70",
+                  ? "h-1 w-4"
+                  : "h-1 w-1 opacity-30 group-hover:opacity-60",
               )}
             />
           </button>
