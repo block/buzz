@@ -91,6 +91,81 @@ test("destroy: cancels pending publish without flushing to the relay", () => {
   }
 });
 
+// Regression guard for the timer-fired race: debounce fires → doPublish starts
+// awaiting fetchOwnBlobBeforePublish → destroy() is called (relayUrl dep
+// change) → publishEvent must never be called even though the timer already
+// fired and cleared itself before destroy() ran.
+test("destroy: aborts in-flight doPublish after fetchOwnBlobBeforePublish resolves", async () => {
+  // fetchEvents is held until we release it — simulates the latency window.
+  let releaseFetch = null;
+  const publishCalls = [];
+
+  mock.method(relayClient, "fetchEvents", () => {
+    return new Promise((resolve) => {
+      // resolve with empty so fetchOwnBlobBeforePublish returns the local store
+      releaseFetch = () => resolve([]);
+    });
+  });
+  mock.method(relayClient, "publishEvent", (...args) => {
+    publishCalls.push(args);
+    return Promise.resolve();
+  });
+
+  if (typeof globalThis.window === "undefined") {
+    globalThis.window = {};
+  }
+  let capturedCallback = null;
+  let nextId = 1;
+  const origSetTimeout = globalThis.window.setTimeout;
+  const origClearTimeout = globalThis.window.clearTimeout;
+  globalThis.window.setTimeout = (fn, _ms) => {
+    capturedCallback = fn;
+    return nextId++;
+  };
+  globalThis.window.clearTimeout = (_id) => {
+    capturedCallback = null;
+  };
+
+  try {
+    const manager = new ChannelSectionSyncManager("pk-race");
+    const store = makeStore({
+      sections: [{ id: "s1", name: "Work", order: 0 }],
+    });
+
+    // Queue the publish — captures the debounce callback.
+    manager.publishSections(store);
+    assert.ok(capturedCallback !== null, "debounce timer should be set");
+
+    // Fire the debounce manually — this starts doPublish() and nulls
+    // debounceTimer inside publishSections' callback, leaving the async
+    // doPublish running and awaiting fetchOwnBlobBeforePublish.
+    const timerFn = capturedCallback;
+    capturedCallback = null; // timer cleared itself inside the callback
+    timerFn();
+
+    // Now destroy() — debounceTimer is already null (timer fired), so only
+    // the destroyed flag can stop doPublish.
+    manager.destroy();
+
+    // Release the held fetchEvents — fetchOwnBlobBeforePublish resolves with
+    // the local store, then doPublish should check destroyed and abort.
+    releaseFetch();
+
+    // Drain microtasks so doPublish fully runs through to its abort point.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(
+      publishCalls.length,
+      0,
+      "publishEvent must not be called after destroy() even when timer already fired",
+    );
+  } finally {
+    globalThis.window.setTimeout = origSetTimeout;
+    globalThis.window.clearTimeout = origClearTimeout;
+    mock.reset();
+  }
+});
+
 test("destroy: is safe to call with no pending publish", () => {
   const manager = new ChannelSectionSyncManager("pk-no-pending");
   // Should not throw even with nothing queued.
