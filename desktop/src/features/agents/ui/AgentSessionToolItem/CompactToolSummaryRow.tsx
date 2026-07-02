@@ -2,11 +2,13 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import type { AgentActivityAction } from "../agentSessionTypes";
-import type { CompactFileEditSummary } from "../agentSessionToolSummary";
-import { isInlineImageData } from "../agentSessionUtils";
+import type {
+  CompactFileEditSummary,
+  CompactToolKind,
+} from "../agentSessionToolSummary";
+import { resolveToolImageSrc } from "../agentSessionUtils";
 import {
   ActivityRowLabel,
   splitActivityRowLabel,
@@ -21,6 +23,7 @@ export function CompactToolSummaryRow({
   action,
   duration,
   fileEditSummary,
+  kind,
   label,
   preview,
   thumbnailSrc,
@@ -28,6 +31,7 @@ export function CompactToolSummaryRow({
   action: AgentActivityAction | null;
   duration: string | null;
   fileEditSummary: CompactFileEditSummary | null;
+  kind: CompactToolKind;
   label: string;
   preview: string | null;
   thumbnailSrc: string | null;
@@ -38,11 +42,11 @@ export function CompactToolSummaryRow({
   const mutedTone = compactSummaryTone();
   const resolvedThumbnail = React.useMemo(() => {
     if (!thumbnailSrc || thumbnailFailed) return null;
-    return resolveImageSrc(thumbnailSrc);
+    return resolveToolImageSrc(thumbnailSrc);
   }, [thumbnailFailed, thumbnailSrc]);
   const actionLabel = fileEditSummary
     ? null
-    : getCompactToolActionLabel(action, label, preview);
+    : getCompactToolActionLabel(action, kind, label, preview);
 
   return (
     <>
@@ -103,6 +107,7 @@ export function CompactToolSummaryRow({
 
 function getCompactToolActionLabel(
   action: AgentActivityAction | null,
+  kind: CompactToolKind,
   label: string,
   preview: string | null,
 ): (ActivityRowLabelParts & { title?: string }) | null {
@@ -121,10 +126,10 @@ function getCompactToolActionLabel(
   if (!preview) return parts;
 
   if (
-    label === "Ran command" ||
-    label === "Read file" ||
-    label === "Updated todos" ||
-    label === "Viewed image"
+    kind === "shell" ||
+    kind === "file-read" ||
+    kind === "plan" ||
+    kind === "image"
   ) {
     return { verb: parts.verb, object: preview, title: preview };
   }
@@ -150,8 +155,4 @@ function CompactFileEditSummaryView({
       verb="Edited"
     />
   );
-}
-
-function resolveImageSrc(source: string): string {
-  return isInlineImageData(source) ? source : rewriteRelayUrl(source);
 }
