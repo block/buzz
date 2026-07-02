@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::managed_agents::{
     agent_env::baked_build_env,
+    config_bridge::read_goose_file_config,
     discovery::{known_acp_runtime, KnownAcpRuntime},
     effective_agent_command,
     env_vars::merged_user_env,
@@ -237,7 +238,12 @@ fn collect_missing_requirements(
 
     match rt.id {
         "buzz-agent" => buzz_agent_requirements(effective),
-        "goose" => goose_requirements(effective),
+        "goose" => {
+            // Read the file config once at the call site so the inner fn is
+            // pure and unit-testable by injection.
+            let file_cfg = read_goose_file_config();
+            goose_requirements(effective, file_cfg.as_ref())
+        }
         "claude" => cli_login_requirements(
             &["claude", "auth", "status"],
             "complete Claude Code authentication by running the Claude CLI",
@@ -321,7 +327,18 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
 /// Requirements for goose (provider + model + provider-specific creds).
 ///
 /// Mirrors buzz-agent requirements but uses GOOSE_PROVIDER / GOOSE_MODEL.
-fn goose_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
+///
+/// File-config tier: goose reads `~/.config/goose/config.yaml` at startup.
+/// Requirements already satisfied there are silenced — we don't need to
+/// require them from Buzz's env layer.  The file layer only *silences*
+/// requirements; it never injects values into the spawn env.
+///
+/// `file_cfg` is injected by the caller (read once at `collect_missing_requirements`)
+/// so this function is pure and unit-testable without touching disk.
+fn goose_requirements(
+    effective: &EffectiveAgentEnv,
+    file_cfg: Option<&crate::managed_agents::config_bridge::RuntimeFileConfig>,
+) -> Vec<Requirement> {
     let mut missing = Vec::new();
 
     // Empty string treated as absent — same as buzz_agent_requirements.
@@ -330,10 +347,27 @@ fn goose_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         .get("GOOSE_PROVIDER")
         .filter(|v| !v.is_empty())
         .map(String::as_str);
+
+    // Effective provider for credential checking: prefer env layer, then file.
+    let effective_provider = provider.or_else(|| {
+        file_cfg
+            .as_ref()
+            .and_then(|c| c.provider.as_deref())
+            .filter(|v| !v.is_empty())
+    });
+
     if provider.is_none() {
-        missing.push(Requirement::NormalizedField {
-            field: "provider".to_string(),
-        });
+        // Silenced if the file config provides a provider.
+        let file_provides_provider = file_cfg
+            .as_ref()
+            .and_then(|c| c.provider.as_deref())
+            .filter(|v| !v.is_empty())
+            .is_some();
+        if !file_provides_provider {
+            missing.push(Requirement::NormalizedField {
+                field: "provider".to_string(),
+            });
+        }
     }
 
     let model = effective
@@ -342,30 +376,50 @@ fn goose_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         .filter(|v| !v.is_empty())
         .map(String::as_str);
     if model.is_none() {
-        missing.push(Requirement::NormalizedField {
-            field: "model".to_string(),
-        });
+        // Silenced if the file config provides a model.
+        let file_provides_model = file_cfg
+            .as_ref()
+            .and_then(|c| c.model.as_deref())
+            .filter(|v| !v.is_empty())
+            .is_some();
+        if !file_provides_model {
+            missing.push(Requirement::NormalizedField {
+                field: "model".to_string(),
+            });
+        }
     }
 
     // Provider-specific credentials — same empty-string semantics as buzz-agent.
     let env_key_missing = |key: &str| effective.env.get(key).map_or(true, |v| v.is_empty());
-    match provider {
+    // A credential key is also satisfied when the file config's `extra` map
+    // contains it (e.g. DATABRICKS_HOST set in the goose config file).
+    let file_key_present = |key: &str| -> bool {
+        file_cfg
+            .as_ref()
+            .map(|c| {
+                c.extra
+                    .get(key)
+                    .map_or(false, |v| !v.is_empty())
+            })
+            .unwrap_or(false)
+    };
+    match effective_provider {
         Some("anthropic") => {
-            if env_key_missing("ANTHROPIC_API_KEY") {
+            if env_key_missing("ANTHROPIC_API_KEY") && !file_key_present("ANTHROPIC_API_KEY") {
                 missing.push(Requirement::EnvKey {
                     key: "ANTHROPIC_API_KEY".to_string(),
                 });
             }
         }
         Some("openai") => {
-            if env_key_missing("OPENAI_COMPAT_API_KEY") {
+            if env_key_missing("OPENAI_COMPAT_API_KEY") && !file_key_present("OPENAI_COMPAT_API_KEY") {
                 missing.push(Requirement::EnvKey {
                     key: "OPENAI_COMPAT_API_KEY".to_string(),
                 });
             }
         }
         Some("databricks") | Some("databricks_v2") => {
-            if env_key_missing("DATABRICKS_HOST") {
+            if env_key_missing("DATABRICKS_HOST") && !file_key_present("DATABRICKS_HOST") {
                 missing.push(Requirement::EnvKey {
                     key: "DATABRICKS_HOST".to_string(),
                 });
@@ -571,14 +625,22 @@ mod tests {
 
     #[test]
     fn goose_missing_provider_returns_not_ready() {
+        // Call goose_requirements directly with None file config so the test is
+        // deterministic — the `agent_readiness` path reads the real
+        // ~/.config/goose/config.yaml which may silence requirements on
+        // developer machines.
         let env = make_env("goose", env_with(&[("GOOSE_MODEL", "claude-opus-4-5")]));
-        let result = agent_readiness(&env);
-        assert!(!result.is_ready());
-        assert!(result
-            .requirements()
-            .contains(&Requirement::NormalizedField {
+        let reqs = goose_requirements(&env, None);
+        assert!(
+            !reqs.is_empty(),
+            "missing GOOSE_PROVIDER with no file config must produce requirements"
+        );
+        assert!(
+            reqs.contains(&Requirement::NormalizedField {
                 field: "provider".to_string()
-            }));
+            }),
+            "requirements must include NormalizedField(provider); got {reqs:?}"
+        );
     }
 
     #[test]
@@ -684,24 +746,33 @@ mod tests {
 
     #[test]
     fn goose_empty_string_provider_is_not_ready() {
+        // Call goose_requirements directly with None file config so the test is
+        // deterministic — the `agent_readiness` path reads the real
+        // ~/.config/goose/config.yaml which may silence requirements on
+        // developer machines.
         let env = make_env(
             "goose",
             env_with(&[("GOOSE_PROVIDER", ""), ("GOOSE_MODEL", "claude-opus-4-5")]),
         );
-        let result = agent_readiness(&env);
+        let reqs = goose_requirements(&env, None);
         assert!(
-            !result.is_ready(),
+            !reqs.is_empty(),
             "empty-string GOOSE_PROVIDER must be treated as missing"
         );
-        assert!(result
-            .requirements()
-            .contains(&Requirement::NormalizedField {
+        assert!(
+            reqs.contains(&Requirement::NormalizedField {
                 field: "provider".to_string()
-            }));
+            }),
+            "requirements must include NormalizedField(provider); got {reqs:?}"
+        );
     }
 
     #[test]
     fn goose_empty_string_anthropic_key_is_not_ready() {
+        // Call goose_requirements directly with None file config so the test is
+        // deterministic — the `agent_readiness` path reads the real
+        // ~/.config/goose/config.yaml which may silence requirements on
+        // developer machines.
         let env = make_env(
             "goose",
             env_with(&[
@@ -710,14 +781,17 @@ mod tests {
                 ("ANTHROPIC_API_KEY", ""),
             ]),
         );
-        let result = agent_readiness(&env);
+        let reqs = goose_requirements(&env, None);
         assert!(
-            !result.is_ready(),
+            !reqs.is_empty(),
             "empty-string ANTHROPIC_API_KEY must be treated as missing (goose)"
         );
-        assert!(result.requirements().contains(&Requirement::EnvKey {
-            key: "ANTHROPIC_API_KEY".to_string()
-        }));
+        assert!(
+            reqs.contains(&Requirement::EnvKey {
+                key: "ANTHROPIC_API_KEY".to_string()
+            }),
+            "requirements must include ANTHROPIC_API_KEY; got {reqs:?}"
+        );
     }
 
     // ── codex tests ───────────────────────────────────────────────────────
@@ -881,6 +955,141 @@ mod tests {
         assert_eq!(
             effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
             Some("claude-opus-4-5")
+        );
+    }
+}
+
+// ── goose file-config–aware requirement tests ─────────────────────────────
+//
+// These tests call `goose_requirements` directly, injecting a synthetic
+// `RuntimeFileConfig` so there is no disk I/O and tests are deterministic.
+
+#[cfg(test)]
+mod goose_file_config_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::managed_agents::config_bridge::RuntimeFileConfig;
+
+    fn empty_env() -> EffectiveAgentEnv {
+        EffectiveAgentEnv {
+            env: BTreeMap::new(),
+            config_file_path: Some("~/.config/goose/config.yaml"),
+            effective_command: "goose".to_string(),
+        }
+    }
+
+    fn env_with(pairs: &[(&str, &str)]) -> EffectiveAgentEnv {
+        EffectiveAgentEnv {
+            env: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            config_file_path: Some("~/.config/goose/config.yaml"),
+            effective_command: "goose".to_string(),
+        }
+    }
+
+    fn databricks_file_config() -> RuntimeFileConfig {
+        let mut extra = BTreeMap::new();
+        extra.insert("DATABRICKS_HOST".to_string(), "https://dbc.example.com".to_string());
+        RuntimeFileConfig {
+            provider: Some("databricks_v2".to_string()),
+            model: Some("goose-claude-4-6-opus".to_string()),
+            extra,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn goose_file_config_silences_databricks_host_requirement() {
+        // File has provider, model, and DATABRICKS_HOST — all requirements silenced.
+        let env = empty_env();
+        let cfg = databricks_file_config();
+        let result = goose_requirements(&env, Some(&cfg));
+        assert!(
+            result.is_empty(),
+            "all requirements should be silenced by goose file config; \
+             got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn goose_env_empty_file_absent_still_not_ready() {
+        // No env, no file config → provider and model both required.
+        let env = empty_env();
+        let result = goose_requirements(&env, None);
+        assert!(
+            result.contains(&Requirement::NormalizedField {
+                field: "provider".to_string()
+            }),
+            "provider must be required when absent from both env and file"
+        );
+        assert!(
+            result.contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }),
+            "model must be required when absent from both env and file"
+        );
+    }
+
+    #[test]
+    fn goose_file_config_silences_provider_and_model_but_not_anthropic_key() {
+        // File has provider=anthropic and model, but ANTHROPIC_API_KEY is not
+        // in the file's `extra` map — it must still be required.
+        let cfg = RuntimeFileConfig {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-opus-4-5".to_string()),
+            extra: BTreeMap::new(),
+            ..Default::default()
+        };
+        let env = empty_env();
+        let result = goose_requirements(&env, Some(&cfg));
+        // Provider and model silenced.
+        assert!(
+            !result.contains(&Requirement::NormalizedField {
+                field: "provider".to_string()
+            }),
+            "provider silenced by file config"
+        );
+        assert!(
+            !result.contains(&Requirement::NormalizedField {
+                field: "model".to_string()
+            }),
+            "model silenced by file config"
+        );
+        // ANTHROPIC_API_KEY not in file extra → still required.
+        assert!(
+            result.contains(&Requirement::EnvKey {
+                key: "ANTHROPIC_API_KEY".to_string()
+            }),
+            "ANTHROPIC_API_KEY must remain required when not in file extra"
+        );
+    }
+
+    #[test]
+    fn goose_env_provider_wins_over_file_provider_for_cred_check() {
+        // Env has GOOSE_PROVIDER=anthropic (different from file's databricks_v2).
+        // The env provider must win for credential checking.
+        let env = env_with(&[
+            ("GOOSE_PROVIDER", "anthropic"),
+            ("GOOSE_MODEL", "claude-opus-4-5"),
+        ]);
+        let cfg = databricks_file_config(); // has provider=databricks_v2
+        let result = goose_requirements(&env, Some(&cfg));
+        // anthropic requires ANTHROPIC_API_KEY, not DATABRICKS_HOST.
+        assert!(
+            result.contains(&Requirement::EnvKey {
+                key: "ANTHROPIC_API_KEY".to_string()
+            }),
+            "env provider=anthropic must require ANTHROPIC_API_KEY"
+        );
+        assert!(
+            !result.contains(&Requirement::EnvKey {
+                key: "DATABRICKS_HOST".to_string()
+            }),
+            "env provider=anthropic must NOT require DATABRICKS_HOST"
         );
     }
 }

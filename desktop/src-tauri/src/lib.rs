@@ -525,6 +525,7 @@ pub fn run() {
             get_agent_models,
             discover_agent_models,
             get_agent_config_surface,
+            get_runtime_file_config,
             put_agent_session_config,
             mesh_availability,
             mesh_start_node,

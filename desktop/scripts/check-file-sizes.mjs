@@ -88,6 +88,11 @@ const overrides = new Map([
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
+  // config-bridge-aware requirements: goose_requirements + injection tests
+  // (4 new tests in goose_file_config_tests module) + test-determinism fixes
+  // for the 3 existing goose tests that previously read real disk config.
+  // New file in this PR; queued to split.
+  ["src-tauri/src/managed_agents/readiness.rs", 1096],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -98,12 +103,15 @@ const overrides = new Map([
   // #1418 read-path fix: +3 doc-only lines correcting the getThreadReplies
   // contract (replies-only, root excluded — the query keys on root_event_id,
   // which root rows lack). Documentation accuracy, not code growth.
+  // config-bridge-aware requirements: getRuntimeFileConfig command adds ~15 lines.
   ["src/shared/api/tauri.ts", 1340],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
   // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
-  ["src/features/agents/ui/PersonaDialog.tsx", 1016],
+  // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
+  // ~16 lines. Queued to split.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1032],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
