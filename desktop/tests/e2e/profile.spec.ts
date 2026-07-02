@@ -843,7 +843,7 @@ test("declared owner sees runtime tab for a remote relay agent", async ({
 
   // Declared ownership grants read visibility only; local-management write UI
   // stays hidden because this relay agent is not in the managed-agents list.
-  await expect(panel.getByText("Model").first()).toHaveCount(0);
+  await expect(panel.getByText("Model")).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
   ).toHaveCount(0);
@@ -881,7 +881,7 @@ test("declared owner sees runtime tab without a relay-agent record", async ({
 
   // No relay/managed runtime record means no write or management affordance —
   // only the truthful NIP-OA profile signal is rendered in Runtime.
-  await expect(panel.getByText("Model").first()).toHaveCount(0);
+  await expect(panel.getByText("Model")).toHaveCount(0);
   await expect(
     panel.getByRole("button", { name: /Start|Stop|Deploy/ }),
   ).toHaveCount(0);
