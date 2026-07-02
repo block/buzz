@@ -13,7 +13,7 @@ export type FileContentLine = {
 export function ScrollFadeMonoPanel({
   children,
   className,
-  fadeFromClassName = "from-muted/40",
+  fadeFromClassName = "from-muted",
   maxHeightClassName = "max-h-64",
 }: {
   children: React.ReactNode;
@@ -22,21 +22,26 @@ export function ScrollFadeMonoPanel({
   maxHeightClassName?: string;
 }) {
   return (
-    <div className={cn("relative", maxHeightClassName, className)}>
-      <div className="h-full overflow-auto font-mono text-xs leading-5">
-        <div className="px-0 py-2">{children}</div>
+    <div className={cn("relative", className)}>
+      <div
+        className={cn(
+          "overflow-auto font-mono text-xs leading-5",
+          maxHeightClassName,
+        )}
+      >
+        <div className="px-3 py-2">{children}</div>
       </div>
       <div
         aria-hidden
         className={cn(
-          "pointer-events-none absolute inset-x-0 top-0 h-4 bg-gradient-to-b to-transparent",
+          "pointer-events-none absolute inset-x-0 top-0 h-4 bg-linear-to-b to-transparent",
           fadeFromClassName,
         )}
       />
       <div
         aria-hidden
         className={cn(
-          "pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t to-transparent",
+          "pointer-events-none absolute inset-x-0 bottom-0 h-4 bg-linear-to-t to-transparent",
           fadeFromClassName,
         )}
       />
