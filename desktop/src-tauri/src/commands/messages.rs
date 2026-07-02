@@ -473,6 +473,23 @@ async fn resolve_thread_ref(
     })
 }
 
+/// Build a [`events::ThreadRef`] without the relay round-trip, from a root the
+/// caller already resolved out of its local timeline cache. The cached root is
+/// trusted only for tag construction — the relay still validates the reply
+/// e-tags on submit, so a stale cache cannot produce an accepted-but-invalid
+/// event, only a rejection identical to any other bad reply.
+fn thread_ref_from_cached_root(
+    parent_event_id: &str,
+    root_event_id: &str,
+) -> Result<events::ThreadRef, String> {
+    Ok(events::ThreadRef {
+        root_event_id: EventId::from_hex(root_event_id)
+            .map_err(|e| format!("invalid root event ID: {e}"))?,
+        parent_event_id: EventId::from_hex(parent_event_id)
+            .map_err(|e| format!("invalid parent event ID: {e}"))?,
+    })
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn send_channel_message(
@@ -484,6 +501,7 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
+    cached_root_event_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -509,7 +527,10 @@ pub async fn send_channel_message(
             let parent_id = parent_event_id
                 .as_deref()
                 .ok_or("forum comment requires parent_event_id")?;
-            let thread_ref = resolve_thread_ref(parent_id, &state).await?;
+            let thread_ref = match cached_root_event_id.as_deref() {
+                Some(root) => thread_ref_from_cached_root(parent_id, root)?,
+                None => resolve_thread_ref(parent_id, &state).await?,
+            };
             resolved_root = Some(thread_ref.root_event_id.to_hex());
             events::build_forum_comment(
                 channel_uuid,
@@ -523,7 +544,10 @@ pub async fn send_channel_message(
         _ => {
             let thread_ref = match parent_event_id.as_deref() {
                 Some(pid) => {
-                    let tr = resolve_thread_ref(pid, &state).await?;
+                    let tr = match cached_root_event_id.as_deref() {
+                        Some(root) => thread_ref_from_cached_root(pid, root)?,
+                        None => resolve_thread_ref(pid, &state).await?,
+                    };
                     resolved_root = Some(tr.root_event_id.to_hex());
                     Some(tr)
                 }

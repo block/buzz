@@ -1,4 +1,21 @@
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  KIND_FORUM_COMMENT,
+  KIND_FORUM_POST,
+  KIND_HUDDLE_STARTED,
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
+} from "@/shared/constants/kinds";
+
+// Kinds `resolve_thread_ref` (commands/messages.rs) accepts as reply parents.
+// Keep in sync — a kind outside this set must fall back to relay resolution.
+const CACHED_REPLY_PARENT_KINDS: readonly number[] = [
+  KIND_STREAM_MESSAGE, // 9
+  KIND_STREAM_MESSAGE_V2, // 40002
+  KIND_FORUM_POST, // 45001
+  KIND_FORUM_COMMENT, // 45003
+  KIND_HUDDLE_STARTED, // 48100
+];
 
 export type ThreadReference = {
   parentId: string | null;
@@ -135,4 +152,43 @@ export function resolveReplyRootId(
 
   const thread = getThreadReference(parent.tags);
   return thread.rootId ?? parent.id;
+}
+
+/**
+ * Resolve the thread root for a reply from the local timeline cache, or
+ * `null` when the relay must be consulted.
+ *
+ * This mirrors `resolve_thread_ref` in `commands/messages.rs` exactly — last
+ * `root` marker wins, else last `reply` marker, else the parent itself — so a
+ * non-null result is byte-identical to what the Rust side would fetch from
+ * the relay. Returns `null` (⇒ caller falls back to relay resolution) when
+ * the parent is not cached or its kind is outside the set the Rust resolver
+ * queries; note {@link resolveReplyRootId}'s parent-id fallback is NOT safe
+ * here, as it would silently mislabel a nested reply as a thread root.
+ */
+export function resolveCachedReplyRoot(
+  parentEventId: string,
+  events: RelayEvent[],
+): string | null {
+  const parent = events.find((event) => event.id === parentEventId);
+  if (!parent) {
+    return null;
+  }
+  if (!CACHED_REPLY_PARENT_KINDS.includes(parent.kind)) {
+    return null;
+  }
+
+  let root: string | null = null;
+  let reply: string | null = null;
+  for (const tag of parent.tags) {
+    if (tag[0] === "e" && typeof tag[1] === "string" && tag.length >= 4) {
+      if (tag[3] === "root") {
+        root = tag[1];
+      } else if (tag[3] === "reply") {
+        reply = tag[1];
+      }
+    }
+  }
+  const rootHex = root ?? reply;
+  return rootHex && rootHex !== parentEventId ? rootHex : parent.id;
 }

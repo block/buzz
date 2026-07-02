@@ -13,6 +13,7 @@ import {
   getChannelIdFromTags,
   getThreadReference,
   normalizeMentionPubkeys,
+  resolveCachedReplyRoot,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
@@ -424,6 +425,12 @@ export function useSendMessageMutation(
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(channel.id),
           ) ?? [];
+        // Resolve the thread root from the local timeline cache so the Rust
+        // command can skip its pre-send relay read of the parent (a full RTT
+        // on every reply). Null ⇒ cache miss ⇒ Rust falls back to the relay.
+        const cachedRootEventId = parentEventId
+          ? resolveCachedReplyRoot(parentEventId, cachedMessages)
+          : null;
         const result = await sendChannelMessage(
           channel.id,
           content,
@@ -433,6 +440,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          cachedRootEventId,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
