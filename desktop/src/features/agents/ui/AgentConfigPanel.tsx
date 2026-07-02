@@ -91,7 +91,15 @@ function shouldOfferCopy({
     return true;
   }
 
-  return value.includes("/") || value.startsWith("~") || value.includes(":");
+  // Heuristic for machine-y values worth copying: filesystem paths ("/" or
+  // "~"), and URI-ish strings (scheme:rest). The colon rule requires the
+  // value to be space-free so prose like "Extension: developer" doesn't
+  // grow a surprising copy affordance.
+  return (
+    value.includes("/") ||
+    value.startsWith("~") ||
+    (value.includes(":") && !value.includes(" "))
+  );
 }
 
 type RowVariant = "compact" | "profile";
