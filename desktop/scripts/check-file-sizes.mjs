@@ -121,7 +121,9 @@ const overrides = new Map([
   // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
   // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
   // ~16 lines. Queued to split.
-  ["src/features/agents/ui/PersonaDialog.tsx", 1032],
+  // +2 lines: filter managed provider key from requiredEnvKeys at the
+  // PersonaAdvancedFields call site to suppress the dead-input locked row.
+  ["src/features/agents/ui/PersonaDialog.tsx", 1034],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
