@@ -481,7 +481,7 @@ fn build_numeric_env_field(
 }
 
 /// Record/env prompt wins (BuzzExplicit, respawnable); a config-file prompt it
-/// shadows is reported as the overridden secondary.
+/// shadows is reported as the overridden secondary. A config-file-only prompt
 /// — no record/env value to shadow it — is surfaced directly (read-only)
 /// instead of being dropped: a prompt that drives the agent should always be
 /// visible somewhere in the panel.
