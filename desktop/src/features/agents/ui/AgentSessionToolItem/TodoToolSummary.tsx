@@ -1,5 +1,7 @@
+import { cn } from "@/shared/lib/cn";
 import type { TranscriptItem } from "../agentSessionTypes";
 import type { CompactToolSummary } from "../agentSessionToolSummary";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import {
   asRecord,
   formatTranscriptTimestampTitle,
@@ -27,6 +29,8 @@ export function TodoToolSummary({
   item: Extract<TranscriptItem, { type: "tool" }>;
 }) {
   const todos = buildTodoDisplayItems(item.args, item.result, fallbackPreview);
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
   const actionLabel = {
     verb: "Updated",
     object: fallbackPreview ?? "todos",
@@ -57,7 +61,14 @@ export function TodoToolSummary({
             ))}
           </div>
         ) : (
-          <p className="text-sm text-muted-foreground/80">No todos.</p>
+          <p
+            className={cn(
+              "text-muted-foreground/80",
+              isCompactPreview ? "text-xs" : "text-sm",
+            )}
+          >
+            No todos.
+          </p>
         )}
       </ActivityRowContent>
     </ActivityRow>
@@ -72,8 +83,16 @@ export function isTodoSummary(summary: CompactToolSummary) {
 }
 
 function TodoCheckboxRow({ todo }: { todo: TodoDisplayItem }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
+
   return (
-    <div className="flex min-w-0 items-start gap-2 text-sm leading-5 text-muted-foreground">
+    <div
+      className={cn(
+        "flex min-w-0 items-start gap-2 leading-5 text-muted-foreground",
+        isCompactPreview ? "text-xs" : "text-sm",
+      )}
+    >
       <input
         checked={todo.checked}
         className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-default accent-primary"

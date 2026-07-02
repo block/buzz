@@ -2,7 +2,12 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const CHANNEL_HISTORY_PREPEND_SETTLE_PX = 28;
+// First-pass settle budget for a full channel-history prepend. CI Linux font
+// rasterization can leave the restored anchor a subpixel off the local value
+// (observed 28.5 vs 28), so keep headroom above the exact settle while staying
+// well below a row-sized jump (~46px), which is what the real anchor-shove bug
+// produces.
+const CHANNEL_HISTORY_PREPEND_SETTLE_PX = 32;
 
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {

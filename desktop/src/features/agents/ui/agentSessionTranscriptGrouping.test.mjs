@@ -216,9 +216,9 @@ test("buildTranscriptDisplayBlocks groups same-kind tool runs within a turn", ()
   const items = [1, 2, 3].map((index) => ({
     id: `tool:${index}`,
     type: "tool",
-    renderClass: "generic",
+    renderClass: "file-read",
     descriptor: {
-      renderClass: "generic",
+      renderClass: "file-read",
       label: "Read file",
       preview: `file-${index}.ts`,
       groupKey: "read_file",
@@ -313,10 +313,10 @@ test("buildTranscriptDisplayBlocks keeps non-contiguous same-kind runs expanded"
   });
 
   const [block] = buildTranscriptDisplayBlocks([
-    mkTool("read-1", "Read file", "generic", "read_file"),
+    mkTool("read-1", "Read file", "file-read", "read_file"),
     mkTool("shell-1", "Ran command", "shell", "shell:command"),
-    mkTool("read-2", "Read file", "generic", "read_file"),
-    mkTool("read-3", "Read file", "generic", "read_file"),
+    mkTool("read-2", "Read file", "file-read", "read_file"),
+    mkTool("read-3", "Read file", "file-read", "read_file"),
   ]);
 
   assert.equal(block.kind, "turn");

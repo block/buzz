@@ -1,17 +1,11 @@
-import {
-  resolveUserLabel,
-  type UserProfileLookup,
-} from "@/features/profile/lib/identity";
-import { normalizePubkey } from "@/shared/lib/pubkey";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Markdown } from "@/shared/ui/markdown";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
+import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import type { TranscriptItem } from "../agentSessionTypes";
 import { ToolActivity } from "./ToolActivity";
 import { TranscriptTimestamp } from "./TranscriptTimestamp";
-import type {
-  ActivityRenderClassItemProps,
-  AgentTranscriptIdentityProps,
-} from "./types";
+import type { ActivityRenderClassItemProps } from "./types";
 import { UserMessageBubble } from "./UserMessageBubble";
 
 export function MessageActivity(props: ActivityRenderClassItemProps) {
@@ -22,38 +16,21 @@ export function MessageActivity(props: ActivityRenderClassItemProps) {
     return null;
   }
 
-  return (
-    <MessageItem
-      agentAvatarUrl={props.agentAvatarUrl}
-      agentName={props.agentName}
-      agentPubkey={props.agentPubkey}
-      item={props.item}
-      profiles={props.profiles}
-    />
-  );
+  return <MessageItem item={props.item} profiles={props.profiles} />;
 }
 
 function MessageItem({
-  agentAvatarUrl,
-  agentName,
-  agentPubkey,
   item,
   profiles,
-}: AgentTranscriptIdentityProps & {
+}: {
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
+  const variant = useAgentSessionTranscriptVariant();
+  const isCompactPreview = variant === "compactPreview";
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
   const messageLink = getTranscriptMessageLink(item);
-  const agentProfile = profiles?.[normalizePubkey(agentPubkey)] ?? null;
-  const assistantLabel = resolveUserLabel({
-    pubkey: agentPubkey,
-    fallbackName: agentName,
-    profiles,
-    preferResolvedSelfLabel: true,
-  });
-  const assistantAvatarUrl = agentProfile?.avatarUrl ?? agentAvatarUrl;
 
   if (!isAssistant) {
     return (
@@ -77,24 +54,18 @@ function MessageItem({
       data-testid="transcript-assistant-message"
     >
       <div className="group relative flex w-full min-w-0 flex-col items-start gap-1">
-        <div className="mb-0.5 flex items-center gap-1.5 text-xs">
-          <UserAvatar
-            avatarUrl={assistantAvatarUrl}
-            className="shrink-0"
-            displayName={assistantLabel}
-            size="xs"
-            testId="transcript-assistant-avatar"
+        <div
+          className={
+            isCompactPreview
+              ? "w-full min-w-0 text-xs leading-4"
+              : "w-full min-w-0 text-sm"
+          }
+          title={formatTranscriptTimestampTitle(item.timestamp)}
+        >
+          <Markdown
+            className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
+            content={text || " "}
           />
-          <span className="text-sm font-semibold text-foreground">
-            {assistantLabel}
-          </span>
-          <TranscriptTimestamp
-            messageLink={messageLink}
-            timestamp={item.timestamp}
-          />
-        </div>
-        <div className="w-full min-w-0 text-sm">
-          <Markdown content={text || " "} tight />
         </div>
       </div>
     </div>

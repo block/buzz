@@ -22,8 +22,11 @@ export function ThoughtActivity(props: ActivityRenderClassItemProps) {
       title={formatTranscriptTimestampTitle(props.item.timestamp)}
     >
       <ActivityRowLabel openToneScope="tool" verb={props.item.title} />
-      <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-6 text-muted-foreground">
-        <Markdown compact content={props.item.text.trim() || " "} />
+      <ActivityRowContent className="pt-1 pb-1.5 text-sm leading-5 text-muted-foreground">
+        <Markdown
+          className="leading-5"
+          content={props.item.text.trim() || " "}
+        />
       </ActivityRowContent>
     </ActivityRow>
   );

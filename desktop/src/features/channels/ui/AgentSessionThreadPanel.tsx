@@ -1,37 +1,52 @@
 import * as React from "react";
-import { Octagon, Settings, TerminalSquare } from "lucide-react";
+import { Octagon, Settings, Sparkles, TerminalSquare } from "lucide-react";
 import { toast } from "sonner";
 
-import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
+import type {
+  ObserverEvent,
+  TranscriptItem,
+} from "@/features/agents/ui/agentSessionTypes";
+import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import {
+  useAgentTranscript,
+  useObserverEvents,
+} from "@/features/agents/ui/useObserverEvents";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
+import { useNow } from "@/shared/lib/useNow";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderActions,
   AuxiliaryPanelHeaderGroup,
-  AuxiliaryPanelTitle,
+  AuxiliaryPanelHeaderTitleBlock,
 } from "@/shared/layout/AuxiliaryPanel";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
   DropdownMenu,
-  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { Switch } from "@/shared/ui/switch";
+import {
+  setTranscriptAnimationEnabled,
+  useTranscriptAnimationEnabled,
+} from "@/features/agents/ui/transcriptAnimationPreference";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
   channel: Channel | null;
+  channelId?: string | null;
   canInterruptTurn: boolean;
   isWorking: boolean;
   layout?: "standalone" | "split";
@@ -47,6 +62,7 @@ export function AgentSessionThreadPanel({
   agent,
   canInterruptTurn,
   channel,
+  channelId = null,
   isWorking,
   layout = "standalone",
   isSinglePanelView = false,
@@ -62,7 +78,32 @@ export function AgentSessionThreadPanel({
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
-  const rawFeedScopeKey = `${agent.pubkey}:${channel?.id ?? "all"}`;
+  const sessionChannelId = channelId ?? channel?.id ?? null;
+  const now = useNow(1000);
+  const { events } = useObserverEvents(isLive, agent.pubkey);
+  const transcript = useAgentTranscript(isLive, agent.pubkey);
+  const scopedEvents = React.useMemo(
+    () => scopeByChannel(events, sessionChannelId),
+    [events, sessionChannelId],
+  );
+  const scopedTranscript = React.useMemo(
+    () => scopeByChannel(transcript, sessionChannelId),
+    [sessionChannelId, transcript],
+  );
+  const latestActivityAt = React.useMemo(
+    () =>
+      getLatestActivityTimestamp({
+        events: scopedEvents,
+        transcript: scopedTranscript,
+      }),
+    [scopedEvents, scopedTranscript],
+  );
+  const lastUpdatedLabel = formatLastUpdatedLabel(latestActivityAt, now);
+  const lastUpdatedTitle =
+    latestActivityAt === null
+      ? undefined
+      : `Last updated ${new Date(latestActivityAt).toLocaleString()}`;
+  const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
   const [rawFeedState, setRawFeedState] = React.useState(() => ({
     scopeKey: rawFeedScopeKey,
     show: false,
@@ -75,6 +116,7 @@ export function AgentSessionThreadPanel({
     },
     [rawFeedScopeKey],
   );
+  const animateActivity = useTranscriptAnimationEnabled();
   async function handleInterruptTurn() {
     if (!channel) {
       return;
@@ -123,11 +165,13 @@ export function AgentSessionThreadPanel({
             className="min-w-56"
             onCloseAutoFocus={(event) => event.preventDefault()}
           >
-            <DropdownMenuCheckboxItem
-              checked={showRawFeed}
+            <DropdownMenuItem
               className="items-start gap-3"
               data-testid="agent-session-toggle-raw-feed"
-              onCheckedChange={handleRawFeedChange}
+              onSelect={(event) => {
+                event.preventDefault();
+                handleRawFeedChange(!showRawFeed);
+              }}
               title={
                 showRawFeed
                   ? "Hide raw JSON-RPC payloads."
@@ -145,7 +189,45 @@ export function AgentSessionThreadPanel({
                   Show raw JSON-RPC activity.
                 </span>
               </span>
-            </DropdownMenuCheckboxItem>
+              <Switch
+                aria-hidden="true"
+                checked={showRawFeed}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="items-start gap-3"
+              data-testid="agent-session-toggle-animate-activity"
+              disabled={showRawFeed}
+              onSelect={(event) => {
+                event.preventDefault();
+                setTranscriptAnimationEnabled(!animateActivity);
+              }}
+              title={
+                showRawFeed
+                  ? "Raw activity rows don't animate in."
+                  : animateActivity
+                    ? "Stop animating new activity rows."
+                    : "Animate new activity rows as they arrive."
+              }
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Sparkles className="h-4 w-4 text-muted-foreground" />
+                  Show Animations
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  Slide new activity rows in as they arrive.
+                </span>
+              </span>
+              <Switch
+                aria-hidden="true"
+                checked={animateActivity && !showRawFeed}
+                className="pointer-events-none mt-0.5"
+                tabIndex={-1}
+              />
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="items-start gap-3"
@@ -185,13 +267,16 @@ export function AgentSessionThreadPanel({
   const agentHeaderContent = (
     <>
       <AuxiliaryPanelHeaderGroup
+        align="start"
         backButtonAriaLabel="Back from activity"
         backButtonTestId="agent-session-back"
         onBack={onBackToProfile}
       >
-        <AuxiliaryPanelTitle>
-          {showRawFeed ? "Raw ACP Activity" : "Activity"}
-        </AuxiliaryPanelTitle>
+        <AuxiliaryPanelHeaderTitleBlock
+          subtitle={lastUpdatedLabel}
+          subtitleTitle={lastUpdatedTitle}
+          title={showRawFeed ? "Raw ACP Activity" : "Activity"}
+        />
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>
@@ -223,10 +308,10 @@ export function AgentSessionThreadPanel({
       >
         <ManagedAgentSessionPanel
           agent={agent}
-          channelId={channel?.id ?? null}
+          channelId={sessionChannelId}
           className="border-0 bg-transparent p-0 shadow-none"
           emptyDescription={
-            channel
+            sessionChannelId
               ? `Mention ${agent.name} in the channel to see its work here.`
               : `Mention ${agent.name} in any channel to see its work here.`
           }
@@ -238,4 +323,70 @@ export function AgentSessionThreadPanel({
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>
   );
+}
+
+function getLatestActivityTimestamp({
+  events,
+  transcript,
+}: {
+  events: readonly ObserverEvent[];
+  transcript: readonly TranscriptItem[];
+}): number | null {
+  let latest: number | null = null;
+
+  const record = (timestamp: string) => {
+    const parsed = Date.parse(timestamp);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+
+    if (latest === null || parsed > latest) {
+      latest = parsed;
+    }
+  };
+
+  for (const event of events) {
+    record(event.timestamp);
+  }
+
+  for (const item of transcript) {
+    record(item.timestamp);
+  }
+
+  return latest;
+}
+
+function formatLastUpdatedLabel(timestamp: number | null, now: number): string {
+  if (timestamp === null) {
+    return "No updates yet";
+  }
+
+  return `Last updated ${formatRelativeActivityTime(timestamp, now)}`;
+}
+
+function formatRelativeActivityTime(timestamp: number, now: number): string {
+  const elapsedMs = Math.max(0, now - timestamp);
+  const totalSeconds = Math.floor(elapsedMs / 1_000);
+
+  if (totalSeconds < 60) {
+    return "just now";
+  }
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ago`;
+  }
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) {
+    return `${totalHours}h ago`;
+  }
+
+  const totalDays = Math.floor(totalHours / 24);
+  if (totalDays < 7) {
+    return `${totalDays}d ago`;
+  }
+
+  const totalWeeks = Math.floor(totalDays / 7);
+  return `${totalWeeks}w ago`;
 }
