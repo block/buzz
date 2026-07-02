@@ -72,7 +72,12 @@ async function seedActiveTurns(
 // The agent's avatar is the popover trigger inside its message row; clicking it
 // opens the profile panel, hovering opens the popover.
 function agentAvatar(page: import("@playwright/test").Page) {
-  return page.getByTestId("message-row").last().getByRole("button").first();
+  return page
+    .getByTestId("message-row")
+    .filter({ has: page.locator('[data-testid^="message-avatar-"]') })
+    .last()
+    .getByRole("button")
+    .first();
 }
 
 test.describe("profile active turn indicator", () => {

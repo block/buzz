@@ -91,7 +91,6 @@ export type ProfileSummaryViewProps = {
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
-  modelLabel: string;
   agentInfoFields: ProfileField[];
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
@@ -200,7 +199,6 @@ export function ProfileSummaryView({
   managedAgent,
   memoriesLoading,
   memoryCount,
-  modelLabel,
   agentInfoFields,
   agentSettingsFields,
   diagnosticsFields,
@@ -240,7 +238,6 @@ export function ProfileSummaryView({
     (runtimeConfigurationFields.length > 0 ||
       runtimeSettingsFields.length > 0 ||
       managedAgent !== undefined ||
-      modelLabel.trim().length > 0 ||
       diagnosticsFields.length > 0 ||
       canOpenAgentLogs ||
       showInstructionBlock);
@@ -412,8 +409,6 @@ export function ProfileSummaryView({
                 agentInstruction={agentInstruction}
                 diagnosticsFields={diagnosticsFields}
                 diagnosticsSummary={diagnosticsTrailing}
-                managedAgent={managedAgent}
-                modelLabel={modelLabel}
                 onOpenDiagnostics={onOpenDiagnostics}
                 onOpenInstructions={onOpenInstructions}
                 runtimeConfigurationFields={runtimeConfigurationFields}
@@ -423,7 +418,10 @@ export function ProfileSummaryView({
               />
               {isOwner === true && managedAgent !== undefined ? (
                 <div className="overflow-hidden rounded-2xl bg-muted/20">
-                  <AgentConfigPanel pubkey={managedAgent.pubkey} />
+                  <AgentConfigPanel
+                    advancedMode="flat"
+                    pubkey={managedAgent.pubkey}
+                  />
                 </div>
               ) : null}
             </>

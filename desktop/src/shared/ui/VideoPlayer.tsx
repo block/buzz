@@ -23,9 +23,9 @@ import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-
 import { Spinner } from "./spinner";
 import {
   getInlinePlaybackPosition,
@@ -707,6 +707,7 @@ export function VideoPlayer({
   const videoRef = React.useRef<HTMLVideoElement>(null);
   const inlineSurfaceRef = React.useRef<HTMLDivElement | null>(null);
   const reviewVideoRef = React.useRef<HTMLVideoElement>(null);
+  useSmoothCorners(inlineSurfaceRef);
   const [started, setStarted] = React.useState(false);
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isBuffering, setIsBuffering] = React.useState(false);
@@ -845,7 +846,6 @@ export function VideoPlayer({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-
   const handlePlaybackSpeedChange = React.useCallback((speed: number) => {
     if (isPlaybackSpeedOption(speed)) {
       setPlaybackSpeed(speed);

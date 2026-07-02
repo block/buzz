@@ -13,6 +13,8 @@ import {
   InboxMessageRow,
 } from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
+import { formatTime } from "@/features/messages/lib/dateFormatters";
+import { hasSameMessageAuthor } from "@/features/messages/lib/messageGrouping";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import type { Channel } from "@/shared/api/types";
@@ -195,6 +197,7 @@ export function InboxDetailPane({
             id: item.id,
             isSelected: true,
             mentionNames: item.mentionNames,
+            timeLabel: formatTime(item.item.createdAt),
           },
           ...pendingReplyMessages,
         ];
@@ -320,22 +323,33 @@ export function InboxDetailPane({
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
         >
           <div>
-            {displayMessages.map((message, index) => (
-              <React.Fragment key={message.id}>
-                {index === 1 ? (
-                  <div className="mx-6 my-3 border-t border-border/60" />
-                ) : null}
-                <InboxMessageRow
-                  agentPubkeys={agentPubkeys}
-                  canReply={canReply}
-                  channelId={item.item.channelId}
-                  isFocusHighlightVisible={isFocusHighlightVisible}
-                  message={message}
-                  onSelectReplyTarget={handleSelectReplyTarget}
-                  onToggleReaction={onToggleReaction}
-                />
-              </React.Fragment>
-            ))}
+            {displayMessages.map((message, index) => {
+              const isAfterSeparator = index === 1;
+              const isContinuation =
+                !isAfterSeparator &&
+                hasSameMessageAuthor(
+                  { pubkey: displayMessages[index - 1]?.authorPubkey },
+                  { pubkey: message.authorPubkey },
+                );
+
+              return (
+                <React.Fragment key={message.id}>
+                  {isAfterSeparator ? (
+                    <div className="mx-6 my-3 border-t border-border/60" />
+                  ) : null}
+                  <InboxMessageRow
+                    agentPubkeys={agentPubkeys}
+                    canReply={canReply}
+                    channelId={item.item.channelId}
+                    isContinuation={isContinuation}
+                    isFocusHighlightVisible={isFocusHighlightVisible}
+                    message={message}
+                    onSelectReplyTarget={handleSelectReplyTarget}
+                    onToggleReaction={onToggleReaction}
+                  />
+                </React.Fragment>
+              );
+            })}
           </div>
         </div>
 

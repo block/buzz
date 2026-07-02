@@ -4,7 +4,8 @@
 #
 #   PRODUCTION (default) — external Postgres/Redis/S3, existingSecret
 #   refs everywhere, no chart-side autogeneration, GitOps-safe (ArgoCD/Flux).
-#   HA-ready: replicaCount >= 2 (requires Redis and RWX storage for git).
+#   HA-ready: replicaCount >= 2 (requires Redis; git state is object-store-
+#   backed, so no ReadWriteMany volume is needed — RWO per replica is fine).
 #
 #   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO and
 #   auto-generates relay secrets via the `lookup` pattern (NOT GitOps-safe —
@@ -28,9 +29,11 @@ image:
   pullSecrets: []
 
 # ── Topology ────────────────────────────────────────────────────────────────
-# replicaCount > 1 hard-requires:
-#   - Redis for buzz-pubsub (in-cluster or external)
-#   - ReadWriteMany storage for the git PVC (or shared FS via existingClaim)
+# replicaCount > 1 hard-requires Redis for buzz-pubsub (in-cluster or external).
+# It does NOT require ReadWriteMany git storage: git ref/object state is
+# object-store-backed (each request hydrates an ephemeral repo from S3; writer
+# serialization is the object-store pointer CAS), and repo-name uniqueness lives
+# in Postgres. Each replica can use its own ReadWriteOnce volume (or none).
 replicaCount: 1
 
 # ── Public URL ───────────────────────────────────────────────────────────────
@@ -170,13 +173,24 @@ httproute:
   hostnames: []
   rules: []                      # empty → default match-all → service
 
-# ── Git on-disk state ────────────────────────────────────────────────────────
+# ── Git scratch volume ───────────────────────────────────────────────────────
+# Ephemeral working space only. No persistent git state lives here — reads/writes
+# hydrate ephemeral repos from object storage per request, and repo-name
+# uniqueness lives in Postgres.
+#
+# enabled: true  → mount a PVC at mountPath (durable across pod restarts, but a
+#   single ReadWriteOnce PVC binds to one node, so it does NOT support multi-pod
+#   scheduling across nodes on a Deployment).
+# enabled: false → mount a per-pod emptyDir at mountPath (pure scratch). This is
+#   the correct choice for multi-replica HA: each pod gets its own local working
+#   space, nothing is shared, and there is no volume to multi-attach. Safe
+#   because the object store + Postgres are the sources of truth, not this disk.
 persistence:
   git:
     enabled: true
     mountPath: /var/lib/buzz/git
     storageClass: ""
-    accessMode: ReadWriteOnce    # MUST be ReadWriteMany if replicaCount > 1
+    accessMode: ReadWriteOnce
     size: 10Gi
     annotations: {}
     existingClaim: ""

@@ -75,10 +75,6 @@
     Kubernetes Secret and reference it via secrets.existingSecret — see
     examples/secret-sample.yaml.
 {{- end }}
-{{- if and (gt (.Values.replicaCount | int) 1) (eq .Values.persistence.git.accessMode "ReadWriteOnce") }}
-  ⚠ replicaCount > 1 with ReadWriteOnce git PVC will fail at template time
-    (this message should never appear — file a bug).
-{{- end }}
 {{- if not .Values.secrets.existingSecret }}
 {{- if not (or .Values.postgresql.enabled .Values.redis.enabled) }}
   ⚠ Chart-managed Secret is in use (no secrets.existingSecret). This is fine

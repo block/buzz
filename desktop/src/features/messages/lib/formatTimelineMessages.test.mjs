@@ -191,6 +191,211 @@ test("deletion target with non-hex `e` tag value is ignored", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Reaction pill ordering — pills must sort left→right by when each emoji was
+// first added (ascending created_at), independent of input event order.
+// ---------------------------------------------------------------------------
+
+test("reaction pills sort by earliest created_at ascending", () => {
+  const MSG_ID =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+  const message = {
+    id: MSG_ID,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "hello",
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+  };
+
+  // 🎉 was added first (t=1001), 👍 was added second (t=1002).
+  function reactionEvent(id, emoji, createdAt) {
+    return {
+      id,
+      pubkey: PUBKEY_B,
+      kind: 7,
+      created_at: createdAt,
+      content: emoji,
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", MSG_ID],
+      ],
+      sig: "sig",
+    };
+  }
+
+  const confetti = reactionEvent(`d${"d".repeat(63)}`, "🎉", 1_700_001_001);
+  const thumbsUp = reactionEvent(`e${"e".repeat(63)}`, "👍", 1_700_001_002);
+
+  // Feed ascending (🎉 first) — pills should be [🎉, 👍]
+  const ascending = formatTimelineMessages(
+    [message, confetti, thumbsUp],
+    null,
+    undefined,
+    null,
+  );
+  assert.deepEqual(
+    ascending[0].reactions?.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "ascending input: 🎉 must come before 👍",
+  );
+
+  // Feed descending (👍 first in array) — order must be identical
+  const descending = formatTimelineMessages(
+    [message, thumbsUp, confetti],
+    null,
+    undefined,
+    null,
+  );
+  assert.deepEqual(
+    descending[0].reactions?.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "descending input: pill order must be invariant to event array order",
+  );
+});
+
+test("reaction pills with equal created_at tiebreak deterministically on emoji string", () => {
+  const MSG_ID =
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+  const message = {
+    id: MSG_ID,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "hello",
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+  };
+  const SAME_TS = 1_700_001_000;
+  const reactionA = {
+    id: `f${"f".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: SAME_TS,
+    content: "👍",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+  const reactionB = {
+    id: `a${"a".repeat(63)}`,
+    pubkey: PUBKEY_A,
+    kind: 7,
+    created_at: SAME_TS,
+    content: "🎉",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+
+  const out1 = formatTimelineMessages(
+    [message, reactionA, reactionB],
+    null,
+    undefined,
+    null,
+  );
+  const out2 = formatTimelineMessages(
+    [message, reactionB, reactionA],
+    null,
+    undefined,
+    null,
+  );
+
+  assert.deepEqual(
+    out1[0].reactions?.map((r) => r.emoji),
+    out2[0].reactions?.map((r) => r.emoji),
+    "equal timestamps: pill order must be identical regardless of input order",
+  );
+});
+
+test("reaction pill order is invariant to duplicate same-actor same-emoji delivery order", () => {
+  // Nostr can deliver the same reaction event twice (or relay redelivery can
+  // produce two events with the same target/actor/emoji but different ids/timestamps).
+  // The pill sort key must be the EARLIEST createdAt seen, not the last-written.
+  const MSG_ID =
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const message = {
+    id: MSG_ID,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "hello",
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+  };
+  // 🎉 first at t=1001 (the canonical earliest), then a duplicate at t=1005.
+  // 👍 arrives at t=1003 — must still be to the right of 🎉.
+  const confettiFirst = {
+    id: `c${"c".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_001,
+    content: "🎉",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+  const confettiDupe = {
+    id: `d${"d".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_005,
+    content: "🎉",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+  const thumbsUp = {
+    id: `e${"e".repeat(63)}`,
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_001_003,
+    content: "👍",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", MSG_ID],
+    ],
+    sig: "sig",
+  };
+
+  // Dupe arrives BEFORE canonical — naive last-write-wins would store t=1001
+  // (from confettiFirst which comes second), giving correct order by accident.
+  const dupeFirst = formatTimelineMessages(
+    [message, confettiDupe, confettiFirst, thumbsUp],
+    null,
+    undefined,
+    null,
+  );
+  // Dupe arrives AFTER canonical — last-write-wins stores t=1005 (the dupe),
+  // which would make 🎉's sort key t=1005 > 👍's t=1003, incorrectly reversing order.
+  const dupeLast = formatTimelineMessages(
+    [message, confettiFirst, thumbsUp, confettiDupe],
+    null,
+    undefined,
+    null,
+  );
+
+  assert.deepEqual(
+    dupeFirst[0].reactions?.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "🎉 (earliest at t=1001) must stay left of 👍 (t=1003) when dupe arrives first",
+  );
+  assert.deepEqual(
+    dupeLast[0].reactions?.map((r) => r.emoji),
+    ["🎉", "👍"],
+    "🎉 (earliest at t=1001) must stay left of 👍 (t=1003) when dupe arrives last",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // countTopLevelTimelineRows — the unit fetch-older pages by. Must match the
 // rows `buildMainTimelineEntries` would actually render: top-level content
 // events, minus deletions, with thread replies collapsed into their parent.

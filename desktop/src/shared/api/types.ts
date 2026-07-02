@@ -139,6 +139,11 @@ export type UserSearchResult = {
   isAgent: boolean;
 };
 
+export type UserSearchPage = {
+  users: UserSearchResult[];
+  nextCursor: string | null;
+};
+
 export type UpdateProfileInput = {
   displayName?: string;
   avatarUrl?: string;
@@ -871,4 +876,46 @@ export type ForumThreadResponse = {
   replies: ThreadReply[];
   totalReplies: number;
   nextCursor: string | null;
+};
+
+/**
+ * Forward keyset cursor for the server-side thread read (`get_thread_replies`).
+ *
+ * The event-id tiebreak is load-bearing: thread replies routinely share a
+ * `createdAt` second (bursty threads), so a timestamp-only cursor would skip
+ * every tied reply past the page limit. The pair `(createdAt, eventId)` orders
+ * replies unambiguously and lets paging resume strictly after the last event.
+ */
+export type ThreadCursor = {
+  createdAt: number;
+  eventId: string;
+};
+
+export type ThreadRepliesResponse = {
+  /** The reply subtree (chronological, oldest first), depth >= 1. Excludes the root event (relay keys on `root_event_id`, which a root row lacks); the caller already holds the root. */
+  events: RelayEvent[];
+  /** Present only when a full page was returned — pass back to fetch the next page. */
+  nextCursor: ThreadCursor | null;
+};
+
+/**
+ * Composite backward keyset cursor for channel-timeline paging via the bridge
+ * (`getChannelMessagesBefore`).
+ *
+ * The event-id tiebreak is load-bearing for the dense-second case: the relay
+ * orders `created_at DESC, id ASC` and advances past a second denser than one
+ * page with `id > eventId`. A bare `createdAt` (`until`) cursor cannot escape
+ * such a second — it re-returns the same slice forever, leaving older history
+ * unreachable. `(createdAt, eventId)` moves strictly older every page.
+ */
+export type ChannelPageCursor = {
+  createdAt: number;
+  eventId: string;
+};
+
+export type ChannelMessagesPageResponse = {
+  /** One keyset page of top-level history, relay order (newest first). */
+  events: RelayEvent[];
+  /** Present only when a full page was returned — pass back to fetch the next (older) page. */
+  nextCursor: ChannelPageCursor | null;
 };

@@ -60,6 +60,7 @@ export type InboxReply = {
   reactions?: TimelineReaction[];
   rootId?: string | null;
   tags?: string[][];
+  timeLabel?: string;
 };
 
 export type InboxContextMessage = InboxReply & {

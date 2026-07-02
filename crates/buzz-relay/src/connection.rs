@@ -10,6 +10,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
@@ -423,7 +424,11 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
 
     match msg {
         ClientMessage::Auth(event) => {
-            handlers::auth::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+            // Auth is synchronous in the WS loop — no span context is lost.
+            let span = tracing::info_span!("ws.auth", conn_id = %conn.conn_id);
+            handlers::auth::handle_auth(event, Arc::clone(&conn), Arc::clone(&state))
+                .instrument(span)
+                .await;
         }
         ClientMessage::Event(event) => {
             let conn = Arc::clone(&conn);
@@ -437,10 +442,21 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
-            tokio::spawn(async move {
-                handlers::event::handle_event(event, conn, state).await;
-                drop(permit);
-            });
+            // Capture the parent span BEFORE the spawn so it is propagated into
+            // the spawned future.  A bare `tokio::spawn` drops tracing context.
+            let span = tracing::info_span!(
+                "ws.event",
+                conn_id = %conn.conn_id,
+                event_id = tracing::field::Empty,
+                kind = tracing::field::Empty,
+            );
+            tokio::spawn(
+                async move {
+                    handlers::event::handle_event(event, conn, state).await;
+                    drop(permit);
+                }
+                .instrument(span),
+            );
         }
         ClientMessage::Req { sub_id, filters } => {
             let conn = Arc::clone(&conn);
@@ -454,10 +470,14 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
-            tokio::spawn(async move {
-                handlers::req::handle_req(sub_id, filters, conn, state).await;
-                drop(permit);
-            });
+            let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
+            tokio::spawn(
+                async move {
+                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    drop(permit);
+                }
+                .instrument(span),
+            );
         }
         ClientMessage::Count { sub_id, filters } => {
             let conn = Arc::clone(&conn);
@@ -471,10 +491,14 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
-            tokio::spawn(async move {
-                handlers::count::handle_count(sub_id, filters, conn, state).await;
-                drop(permit);
-            });
+            let span = tracing::info_span!("ws.count", conn_id = %conn.conn_id, sub_id = %sub_id);
+            tokio::spawn(
+                async move {
+                    handlers::count::handle_count(sub_id, filters, conn, state).await;
+                    drop(permit);
+                }
+                .instrument(span),
+            );
         }
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;

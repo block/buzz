@@ -1,8 +1,4 @@
-import {
-  nip44EncryptToSelf,
-  nip44DecryptFromSelf,
-  signRelayEvent,
-} from "@/shared/api/tauri";
+import { nip44EncryptToSelf, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { RelayEvent } from "@/shared/api/types";
 import { KIND_READ_STATE } from "@/shared/constants/kinds";
@@ -14,12 +10,10 @@ import {
   READ_STATE_MAX_SLOTS,
   MSG_PREFIX,
   THREAD_PREFIX,
-  isValidBlob,
-  isValidReadStateDTag,
-  sanitizeContexts,
   localExtraSlotIdsKey,
   type ReadStateBlob,
 } from "@/features/channels/readState/readStateFormat";
+import { parseReadStateEvent } from "@/features/channels/readState/readStateSnapshot";
 import {
   readStoredReadState,
   writeStoredReadState,
@@ -484,48 +478,21 @@ export class ReadStateManager {
     >();
 
     for (const event of events) {
-      if (event.pubkey !== this.pubkey) continue;
-
-      const dTags = event.tags.filter((t) => t[0] === "d");
-      if (dTags.length !== 1) continue;
-      const dTag = dTags[0];
-      if (!isValidReadStateDTag(dTag[1])) continue;
-
-      const tTags = event.tags.filter(
-        (t) => t[0] === "t" && t[1] === "read-state",
-      );
-      if (tTags.length !== 1) continue;
+      const parsed = await parseReadStateEvent(event, this.pubkey);
+      if (!parsed) continue;
 
       this.maxFetchedCreatedAt = Math.max(
         this.maxFetchedCreatedAt,
-        event.created_at,
+        parsed.createdAt,
       );
 
-      let blob: ReadStateBlob;
-      try {
-        const plaintext = await nip44DecryptFromSelf(event.content);
-        const parsed = JSON.parse(plaintext);
-        if (!isValidBlob(parsed)) continue;
-        blob = {
-          v: 1,
-          client_id: parsed.client_id,
-          contexts: sanitizeContexts(parsed.contexts),
-        };
-      } catch (error) {
-        console.debug(
-          `[ReadStateManager] mergeEvents decrypt failed event=${event.id.substring(0, 8)}…:`,
-          error,
-        );
-        continue;
-      }
-
-      for (const [ctx, ts] of Object.entries(blob.contexts)) {
+      for (const [ctx, ts] of Object.entries(parsed.blob.contexts)) {
         const result = applyRemoteContextTimestamp({
           effectiveState: this.effectiveState,
           contextSourceCreatedAt: this.contextSourceCreatedAt,
           contextId: ctx,
           timestamp: ts,
-          eventCreatedAt: event.created_at,
+          eventCreatedAt: parsed.createdAt,
         });
         if (result !== "unchanged") {
           this.pendingSyncedAdvances.add(ctx);
@@ -533,11 +500,13 @@ export class ReadStateManager {
         }
       }
 
-      if (blob.client_id === this.clientId) {
-        const slotKey = dTag[1];
-        const existing = ownBlobsBySlot.get(slotKey);
-        if (!existing || event.created_at > existing.createdAt) {
-          ownBlobsBySlot.set(slotKey, { blob, createdAt: event.created_at });
+      if (parsed.blob.client_id === this.clientId) {
+        const existing = ownBlobsBySlot.get(parsed.dTag);
+        if (!existing || parsed.createdAt > existing.createdAt) {
+          ownBlobsBySlot.set(parsed.dTag, {
+            blob: parsed.blob,
+            createdAt: parsed.createdAt,
+          });
         }
       }
     }
@@ -545,25 +514,12 @@ export class ReadStateManager {
     // Conflict detection: check if another client_id is squatting on our
     // d-tag coordinate. If so, rotate our slotId to avoid clobbering.
     for (const event of events) {
-      if (event.pubkey !== this.pubkey) continue;
-      const dTag = event.tags.find(
-        (t) => t[0] === "d" && t[1] === `read-state:${this.slotId}`,
-      );
-      if (!dTag) continue;
-      try {
-        const plaintext = await nip44DecryptFromSelf(event.content);
-        const parsed = JSON.parse(plaintext);
-        if (isValidBlob(parsed) && parsed.client_id !== this.clientId) {
-          this.slotId = generateHex(16);
-          localStorage.setItem(slotIdKey(this.pubkey), this.slotId);
-          break;
-        }
-      } catch (error) {
-        console.debug(
-          `[ReadStateManager] conflict check decrypt failed event=${event.id.substring(0, 8)}…:`,
-          error,
-        );
-        // Decrypt failure — skip this event
+      const parsed = await parseReadStateEvent(event, this.pubkey);
+      if (!parsed || parsed.dTag !== `read-state:${this.slotId}`) continue;
+      if (parsed.blob.client_id !== this.clientId) {
+        this.slotId = generateHex(16);
+        localStorage.setItem(slotIdKey(this.pubkey), this.slotId);
+        break;
       }
     }
 
@@ -617,39 +573,15 @@ export class ReadStateManager {
       `[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.created_at}`,
     );
 
-    const dTags = event.tags.filter((t) => t[0] === "d");
-    if (dTags.length !== 1) return;
-    const dTag = dTags[0];
-    if (!isValidReadStateDTag(dTag[1])) return;
-
-    const tTags = event.tags.filter(
-      (t) => t[0] === "t" && t[1] === "read-state",
-    );
-    if (tTags.length !== 1) return;
+    const parsed = await parseReadStateEvent(event, this.pubkey);
+    if (!parsed) return;
 
     this.maxFetchedCreatedAt = Math.max(
       this.maxFetchedCreatedAt,
-      event.created_at,
+      parsed.createdAt,
     );
 
-    let blob: ReadStateBlob;
-    try {
-      const plaintext = await nip44DecryptFromSelf(event.content);
-      const parsed = JSON.parse(plaintext);
-      if (!isValidBlob(parsed)) return;
-      blob = {
-        v: 1,
-        client_id: parsed.client_id,
-        contexts: sanitizeContexts(parsed.contexts),
-      };
-    } catch (error) {
-      console.debug(
-        `[ReadStateManager] incoming event decrypt/parse failed event=${event.id.substring(0, 8)}…:`,
-        error,
-      );
-      return;
-    }
-
+    const { blob } = parsed;
     let anyAdvanced = false;
     for (const [ctx, ts] of Object.entries(blob.contexts)) {
       const result = applyRemoteContextTimestamp({
@@ -657,7 +589,7 @@ export class ReadStateManager {
         contextSourceCreatedAt: this.contextSourceCreatedAt,
         contextId: ctx,
         timestamp: ts,
-        eventCreatedAt: event.created_at,
+        eventCreatedAt: parsed.createdAt,
       });
       if (result === "advanced") {
         this.pendingSyncedAdvances.add(ctx);

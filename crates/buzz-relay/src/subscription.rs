@@ -261,6 +261,7 @@ impl SubscriptionRegistry {
 
     /// Return all (conn_id, sub_id) pairs whose filters match the given event in
     /// one server-resolved community.
+    #[tracing::instrument(skip_all)]
     pub fn fan_out_scoped(
         &self,
         community_id: CommunityId,

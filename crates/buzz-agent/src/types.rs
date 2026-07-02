@@ -139,6 +139,15 @@ pub struct LlmResponse {
     /// tokens, so reading it alone would undercount). Used to gate handoff on
     /// the real token budget rather than a byte estimate.
     pub input_tokens: Option<u64>,
+    /// Reasoning/thinking content emitted by the model before its answer, if
+    /// any. Non-empty when the provider returns extended-thinking tokens:
+    ///
+    /// - Responses API: concatenated `summary[].text` from `type == "reasoning"` output items.
+    /// - Anthropic: concatenated `thinking` from `type == "thinking"` content blocks.
+    /// - OpenAI chat/completions: not exposed; always empty.
+    ///
+    /// Empty string when the provider returned no reasoning content.
+    pub reasoning: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

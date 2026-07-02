@@ -413,12 +413,17 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
 
 /// Check channel membership: member OR open-visibility channel.
 ///
+/// `channel` is the request's already-fetched channel row, when the caller has
+/// one (E1 within-request threading; correctness ruling §4.8). Callers without
+/// a row pass `None` and the open-visibility fallback reads the DB directly.
+///
 /// Returns `Ok(())` if allowed, `Err(reason)` if denied.
 pub(crate) async fn check_channel_membership(
     tenant: &TenantContext,
     state: &AppState,
     ch_id: Uuid,
     pubkey_bytes: &[u8],
+    channel: Option<&buzz_db::channel::ChannelRecord>,
 ) -> Result<(), String> {
     match state
         .is_member_cached(tenant.community(), ch_id, pubkey_bytes)
@@ -429,12 +434,15 @@ pub(crate) async fn check_channel_membership(
         Err(e) => return Err(format!("error: database error: {e}")),
     }
     // Not a member — check if channel is open.
-    let is_open = state
-        .db
-        .get_channel(tenant.community(), ch_id)
-        .await
-        .map(|ch| ch.visibility == "open")
-        .unwrap_or(false);
+    let is_open = match channel {
+        Some(ch) => ch.visibility == "open",
+        None => state
+            .db
+            .get_channel(tenant.community(), ch_id)
+            .await
+            .map(|ch| ch.visibility == "open")
+            .unwrap_or(false),
+    };
     if is_open {
         Ok(())
     } else {
@@ -1244,8 +1252,13 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected("restricted: relay-only kind".into()));
     }
 
-    let event_clone = event.clone();
-    let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_clone)).await;
+    // Share the event with the verify task via Arc instead of deep-cloning it
+    // (tags + up to 256 KB of content). spawn_blocking only needs 'static, not
+    // ownership; once it completes its Arc is dropped, so try_unwrap returns
+    // the original event without ever having copied it.
+    let event = std::sync::Arc::new(event);
+    let event_for_verify = std::sync::Arc::clone(&event);
+    let verify_result = tokio::task::spawn_blocking(move || verify_event(&event_for_verify)).await;
     match verify_result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -1258,6 +1271,7 @@ async fn ingest_event_inner(
             ));
         }
     }
+    let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
     const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
@@ -1405,6 +1419,36 @@ async fn ingest_event_inner(
     }
 
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
+    // E1 (§4.8): fetch the community-scoped channel row once per request and
+    // thread it through the gates below (membership open-fallback, archived
+    // check, join visibility) instead of re-SELECTing it at each. `None` when
+    // the event is global or the channel doesn't exist yet (kind:9007 creates
+    // it later in this request); each gate keeps its existing missing-row
+    // behavior.
+    let channel_row = match channel_id {
+        Some(ch_id) => state.db.get_channel(tenant.community(), ch_id).await.ok(),
+        None => None,
+    };
+    // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
+    // here, through the same `channel_visibility_cached` gate fan-out uses
+    // (fence 2: cached `private` wins over the prefetched row; a `private`
+    // read still populates the cache). The value travels to fan-out bundled
+    // with the (community, channel) it was resolved under (fence 3). When the
+    // row is missing (global event, kind:9007 pre-create) this is `None` and
+    // fan-out performs its own fresh fail-closed lookup — `None` is never
+    // "assume open" (fence 1).
+    let threaded_visibility = match (channel_id, &channel_row) {
+        (Some(ch_id), Some(row)) => state
+            .channel_visibility_cached(tenant.community(), ch_id, Some(row))
+            .await
+            .ok()
+            .map(|visibility| crate::state::ThreadedChannelVisibility {
+                community_id: tenant.community(),
+                channel_id: ch_id,
+                visibility,
+            }),
+        _ => None,
+    };
     if let Some(ch_id) = channel_id {
         // kind:9021 (join) doesn't require prior membership.
         // kind:9007 (create) — channel doesn't exist yet; creator becomes owner in step 16.
@@ -1428,7 +1472,9 @@ async fn ingest_event_inner(
             // at `check_channel_membership`'s `is_member_cached(tenant
             // .community(), …)` call (see crates/buzz-relay/src/handlers
             // /ingest.rs:424).
-            let auth_result = check_channel_membership(tenant, state, ch_id, &pubkey_bytes).await;
+            let auth_result =
+                check_channel_membership(tenant, state, ch_id, &pubkey_bytes, channel_row.as_ref())
+                    .await;
             let claimed = claimed_community_from_event(&event);
             let verdict = if auth_result.is_ok() {
                 Verdict::Allow
@@ -1568,7 +1614,7 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    if let Some(ch_id) = channel_id {
+    if channel_id.is_some() {
         // Allow kind:9002 with archived=false (unarchive operation)
         let is_unarchive = kind_u32 == KIND_NIP29_EDIT_METADATA
             && event.tags.iter().any(|t| {
@@ -1577,7 +1623,7 @@ async fn ingest_event_inner(
             });
 
         if !is_unarchive {
-            if let Ok(channel) = state.db.get_channel(tenant.community(), ch_id).await {
+            if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(IngestError::Rejected("invalid: channel is archived".into()));
                 }
@@ -1734,14 +1780,14 @@ async fn ingest_event_inner(
                 "invalid: join request must include an h tag".into(),
             ));
         }
-        if let Some(ch_id) = channel_id {
-            match state.db.get_channel(tenant.community(), ch_id).await {
-                Ok(ch) if ch.visibility == "private" => {
+        if channel_id.is_some() {
+            match &channel_row {
+                Some(ch) if ch.visibility == "private" => {
                     return Err(IngestError::Rejected(
                         "restricted: channel is private".into(),
                     ));
                 }
-                Err(_) => {
+                None => {
                     return Err(IngestError::Rejected("invalid: channel not found".into()));
                 }
                 _ => {} // open — OK
@@ -1945,7 +1991,15 @@ async fn ingest_event_inner(
             }
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
-        dispatch_persistent_event(tenant, state, &stored_event, kind_u32, &pubkey_hex).await;
+        dispatch_persistent_event(
+            tenant,
+            state,
+            &stored_event,
+            kind_u32,
+            &pubkey_hex,
+            threaded_visibility.clone(),
+        )
+        .await;
 
         info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
@@ -2071,7 +2125,15 @@ async fn ingest_event_inner(
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
     }
-    dispatch_persistent_event(tenant, state, &stored_event, kind_u32, &pubkey_hex).await;
+    dispatch_persistent_event(
+        tenant,
+        state,
+        &stored_event,
+        kind_u32,
+        &pubkey_hex,
+        threaded_visibility.clone(),
+    )
+    .await;
 
     info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 

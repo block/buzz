@@ -89,6 +89,14 @@ export PGUSER=buzz
 export PGPASSWORD=buzz_dev
 export PGDATABASE=buzz
 
+# Use the already-running docker postgres for desired-state planning instead of
+# downloading an embedded Postgres from Maven Central (transient-fetch flake source).
+export PGSCHEMA_PLAN_HOST=localhost
+export PGSCHEMA_PLAN_PORT=5432
+export PGSCHEMA_PLAN_DB=buzz
+export PGSCHEMA_PLAN_USER=buzz
+export PGSCHEMA_PLAN_PASSWORD=buzz_dev
+
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
   psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/attach-schema-partitions.sql

@@ -22,12 +22,16 @@ export function selectTimelineLoadingState(
   if (status.isPending) {
     return true;
   }
-  // Before the first settle, hold the skeleton for the whole cold load — the
-  // row-floor top-up keeps `isFetching` true after the cache already has rows,
-  // and dropping the skeleton there exposes the older-fetch spinner on first
-  // load. After settle, the latch protects against refetch blips, so once real
-  // rows are present we are loaded even mid-refetch.
   if (!hasSettled) {
+    // Placeholder rows are a previously-settled timeline (React-Query cache on
+    // revisit, or a persisted snapshot) — paint them stale-then-revalidate
+    // instead of holding a skeleton over known content.
+    if (status.isPlaceholderData && (status.dataLength ?? 0) > 0) {
+      return false;
+    }
+    // Otherwise hold the skeleton for the whole cold load: the live
+    // subscription can seed a few rows before the history fetch settles, and
+    // painting those as if loaded flashes a near-empty timeline.
     return status.isFetching;
   }
   return (

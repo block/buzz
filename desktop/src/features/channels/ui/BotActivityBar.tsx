@@ -5,6 +5,7 @@ import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
   getActivityHeadline,
   isMeaningfulItem,
+  isSpineItem,
 } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
@@ -67,9 +68,15 @@ export function BotActivityComposerAction({
       ? transcript.filter((item) => item.channelId === channelId)
       : transcript;
 
+    // Two-tier scan: spine items first (reads recede when real work is present).
+    // If no spine headlines are found (session start / idle), fall back to all
+    // meaningful items so the bar isn't left empty.
+    const passFilter: (item: (typeof scopedTranscript)[number]) => boolean =
+      scopedTranscript.some(isSpineItem) ? isSpineItem : isMeaningfulItem;
+
     for (let i = scopedTranscript.length - 1; i >= 0; i--) {
       const item = scopedTranscript[i];
-      if (!isMeaningfulItem(item)) {
+      if (!passFilter(item)) {
         continue;
       }
       const headline = getActivityHeadline(item);

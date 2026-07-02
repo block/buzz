@@ -92,6 +92,14 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // Install the ring CryptoProvider for rustls. The workspace redis TLS
+    // feature compiles both aws-lc-rs and ring in transitively, so rustls can't
+    // auto-select a provider and would panic on the first rediss:// (ElastiCache)
+    // Redis TLS connection without this. Mirrors buzz-relay's main().
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
 
     let code = match run(cli).await {

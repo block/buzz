@@ -14,6 +14,7 @@ use buzz_relay::config::Config;
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
+use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
 
 fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
@@ -27,11 +28,41 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install the ring CryptoProvider for rustls. Required before any rustls
+    // TLS connection (rediss:// to ElastiCache, wss://, S3 over TLS): both
+    // aws-lc-rs and ring are compiled in transitively, so rustls can't
+    // auto-select a provider and would panic at first use without this.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     // JSON-only structured logs — simple, machine-parseable, CAKE-compatible.
+    // If OTEL_EXPORTER_OTLP_ENDPOINT is set, also attach an OpenTelemetry tracing
+    // layer that exports spans via OTLP gRPC alongside the JSON stdout logs.
+    //
+    // Build a single shared Resource (service.name=buzz-relay by default, overridable
+    // via OTEL_SERVICE_NAME) for the trace provider so that Datadog can identify
+    // spans under the correct service identity.
+    let resource = telemetry::service_resource();
+    let tracer_init = telemetry::try_init_tracer(resource.clone());
+    let otel_layer = match &tracer_init {
+        telemetry::TracerInit::Enabled(p) => {
+            use opentelemetry::trace::TracerProvider as _;
+            Some(tracing_opentelemetry::layer().with_tracer(p.tracer("buzz-relay")))
+        }
+        _ => None,
+    };
+
     tracing_subscriber::registry()
         .with(fmt::layer().json().flatten_event(true))
         .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
+        .with(otel_layer)
         .init();
+
+    // Log any exporter-build failure now that the subscriber is installed.
+    if let telemetry::TracerInit::ExporterBuildFailed(ref e) = tracer_init {
+        warn!(error = %e, "Failed to build OTLP trace exporter; distributed tracing disabled");
+    }
 
     info!("Starting buzz-relay");
 
@@ -702,6 +733,34 @@ async fn main() -> anyhow::Result<()> {
     let router = build_router(Arc::clone(&state));
     let health_router = build_health_router(Arc::clone(&state));
 
+    // Pool metrics: periodic background task polling DB + Redis pool stats.
+    {
+        let pool_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_POOL_METRICS_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(10)
+            .max(1); // tokio::time::interval panics on Duration::ZERO
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                let db_stats = pool_state.db.pool_stats();
+                let active = db_stats.size.saturating_sub(db_stats.idle);
+                metrics::gauge!("buzz_db_pool_size").set(db_stats.size as f64);
+                metrics::gauge!("buzz_db_pool_idle").set(db_stats.idle as f64);
+                metrics::gauge!("buzz_db_pool_active").set(active as f64);
+                metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
+
+                let rs = pool_state.redis_pool.status();
+                metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
+                metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
+                metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
+                metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+            }
+        });
+    }
+
     serve(router, health_router, Arc::clone(&state)).await?;
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
@@ -710,6 +769,13 @@ async fn main() -> anyhow::Result<()> {
     audit_shutdown
         .drain(std::time::Duration::from_secs(5))
         .await;
+
+    // Flush pending OTEL spans before exit.
+    if let telemetry::TracerInit::Enabled(tp) = tracer_init {
+        if let Err(e) = tp.shutdown() {
+            tracing::warn!(error = %e, "OTEL tracer provider shutdown error");
+        }
+    }
 
     Ok(())
 }

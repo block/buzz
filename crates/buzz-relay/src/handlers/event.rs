@@ -59,11 +59,19 @@ fn bounded_kind_label(kind: u32) -> String {
 /// fail closed. This is the cluster-wide backstop: even if a stale subscription
 /// survives on another node after an open->private flip, its events are not
 /// delivered here.
+///
+/// `threaded` is an optional visibility read resolved earlier in the same
+/// request (E1 phase-2, §4.8 phase-2 addendum). It is consulted only when its
+/// `(community_id, channel_id)` exactly match this fan-out's — a mismatched or
+/// absent bundle falls back to the fresh fail-closed lookup below, never to
+/// "assume open". Membership checks stay fresh either way; the threaded value
+/// only replaces the visibility SELECT.
 pub async fn filter_fanout_by_access(
     state: &AppState,
     community_id: CommunityId,
     stored_event: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+    threaded: Option<&crate::state::ThreadedChannelVisibility>,
 ) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
     // First enforce the receiver-side tenant label. Subscription indexes are
     // community-scoped, but stale/injected matches and future fan-out helpers
@@ -100,10 +108,21 @@ pub async fn filter_fanout_by_access(
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
-    match state
-        .channel_visibility_cached(community_id, channel_id)
-        .await
-    {
+    // Fence 3 (§4.8 phase-2): the threaded value is used only when it was
+    // resolved under exactly this (community_id, channel_id); anything else
+    // falls through to the fresh lookup. Fence 1: absence of a usable threaded
+    // value is never "open" — it is the same fail-closed path as before.
+    let visibility = match threaded {
+        Some(t) if t.community_id == community_id && t.channel_id == channel_id => {
+            Ok(t.visibility.clone())
+        }
+        _ => {
+            state
+                .channel_visibility_cached(community_id, channel_id, None)
+                .await
+        }
+    };
+    match visibility {
         Ok(v) if v != "private" => return matches,
         Ok(_) => {}
         Err(e) => {
@@ -156,7 +175,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
     stored: &StoredEvent,
 ) {
     let matches = state.sub_registry.fan_out_scoped(community_id, stored);
-    let matches = filter_fanout_by_access(state, community_id, stored, matches).await;
+    let matches = filter_fanout_by_access(state, community_id, stored, matches, None).await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if matches.is_empty() {
         return;
@@ -186,6 +205,7 @@ pub(crate) async fn fan_out_event_to_local_subscribers(
 }
 
 /// Fan out one event received from Redis pub/sub to this relay's local subscribers.
+#[tracing::instrument(skip_all)]
 pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pubsub::ChannelEvent) {
     // The Redis topic carries the tenant-local routing scope explicitly:
     // `Channel(id)` for a per-channel event, `Global` for a channel-less one.
@@ -211,7 +231,7 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     }
 
     let matches = state.sub_registry.fan_out_scoped(community_id, &stored);
-    let matches = filter_fanout_by_access(state, community_id, &stored, matches).await;
+    let matches = filter_fanout_by_access(state, community_id, &stored, matches, None).await;
     metrics::counter!("buzz_multinode_fanout_total").increment(1);
     if matches.is_empty() {
         return;
@@ -240,13 +260,70 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     }
 }
 
-/// Publish a stored event to subscribers and kick off async side effects.
+/// Schedule post-commit delivery/side effects for a stored event.
+///
+/// This intentionally returns after only the bounded audit enqueue has completed:
+/// NIP-01 `OK` means the event was durably accepted, not that Redis publish,
+/// local fan-out, or workflow triggering have completed. Keeping audit enqueue on
+/// the awaited path preserves the bounded-channel backpressure posture when the
+/// audit DB is overloaded; the spawned task still runs the same guarded fan-out
+/// path, Redis publish, `mark_local_event` echo dedupe, and delivery metrics as
+/// the former inline path.
 pub(crate) async fn dispatch_persistent_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     stored_event: &StoredEvent,
     kind_u32: u32,
     actor_pubkey_hex: &str,
+    threaded_visibility: Option<crate::state::ThreadedChannelVisibility>,
+) -> usize {
+    let event_id_hex = stored_event.event.id.to_hex();
+    enqueue_event_created_audit(
+        tenant,
+        state,
+        stored_event,
+        kind_u32,
+        actor_pubkey_hex,
+        &event_id_hex,
+    )
+    .await;
+
+    let tenant = tenant.clone();
+    let state = Arc::clone(state);
+    let stored_event = stored_event.clone();
+    let actor_pubkey_hex = actor_pubkey_hex.to_owned();
+
+    metrics::counter!("buzz_post_commit_dispatch_scheduled_total").increment(1);
+    tokio::spawn(async move {
+        let recipients = dispatch_persistent_event_inner(
+            &tenant,
+            &state,
+            &stored_event,
+            kind_u32,
+            &actor_pubkey_hex,
+            false,
+            threaded_visibility,
+        )
+        .await;
+        debug!(
+            event_id = %event_id_hex,
+            recipients,
+            "post-commit dispatch complete"
+        );
+    });
+
+    0
+}
+
+/// Run post-commit delivery/side effects for a stored event.
+async fn dispatch_persistent_event_inner(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored_event: &StoredEvent,
+    kind_u32: u32,
+    actor_pubkey_hex: &str,
+    enqueue_audit: bool,
+    threaded_visibility: Option<crate::state::ThreadedChannelVisibility>,
 ) -> usize {
     // No `crate::conformance` emit here — the spec doesn't have a
     // separate fan-out action. Acceptance was already recorded at the
@@ -275,7 +352,14 @@ pub(crate) async fn dispatch_persistent_event(
     let matches = state
         .sub_registry
         .fan_out_scoped(tenant.community(), stored_event);
-    let matches = filter_fanout_by_access(state, tenant.community(), stored_event, matches).await;
+    let matches = filter_fanout_by_access(
+        state,
+        tenant.community(),
+        stored_event,
+        matches,
+        threaded_visibility.as_ref(),
+    )
+    .await;
     metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,
@@ -284,8 +368,15 @@ pub(crate) async fn dispatch_persistent_event(
         "Fan-out"
     );
 
-    let event_json = serde_json::to_string(&stored_event.event)
-        .expect("nostr::Event serialization is infallible for well-formed events");
+    let event_json = match serde_json::to_string(&stored_event.event) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(event_id = %event_id_hex, "Failed to serialize event for fan-out: {e}");
+            metrics::counter!("buzz_post_commit_dispatch_errors_total", "stage" => "serialize")
+                .increment(1);
+            return 0;
+        }
+    };
     // For viewer-private snapshots (kind:30622), live fan-out must reach only the
     // owner — a kindless `ids:[…]` subscription can otherwise match it. Pull paths
     // (HTTP /query, WS historical) are gated separately by reader_authorized_for_event.
@@ -331,32 +422,16 @@ pub(crate) async fn dispatch_persistent_event(
     // out-of-band index to feed. The old Typesense `index_event` worker and its
     // `search_index_tx` mpsc are gone with the Typesense backend.
 
-    // Audit via bounded channel (capacity 1000). Uses .send().await so entries
-    // are never silently dropped — backpressure propagates to the event handler
-    // if the queue is full. This is intentional: the audit advisory lock already
-    // serializes writes (at most 1 in-flight), so a full queue means the audit
-    // DB is genuinely overloaded and the relay should slow down rather than
-    // accumulate unbounded in-memory state. DB write failures in the worker are
-    // logged but not retried (same as the previous per-event tokio::spawn).
-    let audit_entry = buzz_audit::NewAuditEntry {
-        community_id: tenant.community(),
-        action: buzz_audit::AuditAction::EventCreated,
-        // Record the *actor* the caller resolved (authenticated principal for
-        // ingest, triggering user for workflow posts), not `stored_event.event
-        // .pubkey`. For relay-signed events (workflow sink, side-effect emits)
-        // the claimed author is the relay key, so deriving from the event would
-        // erase the human behind the action from the audit trail. This mirrors
-        // the pre-rewrite semantics, ported to the raw-bytes column.
-        actor_pubkey: hex::decode(actor_pubkey_hex).ok(),
-        object_id: Some(event_id_hex.clone()),
-        detail: serde_json::json!({
-            "event_kind": kind_u32,
-            "channel_id": stored_event.channel_id,
-        }),
-    };
-    if let Err(e) = state.audit_tx.send(audit_entry).await {
-        error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
-        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    if enqueue_audit {
+        enqueue_event_created_audit(
+            tenant,
+            state,
+            stored_event,
+            kind_u32,
+            actor_pubkey_hex,
+            &event_id_hex,
+        )
+        .await;
     }
 
     // Skip workflow triggering for workflow-execution kinds and relay-signed workflow messages.
@@ -397,15 +472,59 @@ pub(crate) async fn dispatch_persistent_event(
     matches.len()
 }
 
+async fn enqueue_event_created_audit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored_event: &StoredEvent,
+    kind_u32: u32,
+    actor_pubkey_hex: &str,
+    event_id_hex: &str,
+) {
+    // Audit via bounded channel (capacity 1000). Uses .send().await so entries
+    // are never silently dropped — backpressure propagates to the event handler
+    // if the queue is full. This is intentional: the audit advisory lock already
+    // serializes writes (at most 1 in-flight), so a full queue means the audit
+    // DB is genuinely overloaded and the relay should slow down rather than
+    // accumulate unbounded in-memory state. DB write failures in the worker are
+    // logged but not retried (same as the previous per-event tokio::spawn).
+    let audit_entry = buzz_audit::NewAuditEntry {
+        community_id: tenant.community(),
+        action: buzz_audit::AuditAction::EventCreated,
+        // Record the *actor* the caller resolved (authenticated principal for
+        // ingest, triggering user for workflow posts), not `stored_event.event
+        // .pubkey`. For relay-signed events (workflow sink, side-effect emits)
+        // the claimed author is the relay key, so deriving from the event would
+        // erase the human behind the action from the audit trail. This mirrors
+        // the pre-rewrite semantics, ported to the raw-bytes column.
+        actor_pubkey: hex::decode(actor_pubkey_hex).ok(),
+        object_id: Some(event_id_hex.to_owned()),
+        detail: serde_json::json!({
+            "event_kind": kind_u32,
+            "channel_id": stored_event.channel_id,
+        }),
+    };
+    if let Err(e) = state.audit_tx.send(audit_entry).await {
+        error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
+        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    }
+}
+
 /// Handle an EVENT message from a WebSocket connection.
 ///
 /// Extracts auth from the WS connection, dispatches ephemeral events locally,
 /// and delegates persistent events to [`super::ingest::ingest_event`].
+#[tracing::instrument(skip_all, fields(event_id, kind))]
 pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<AppState>) {
     let start = std::time::Instant::now();
     let event_id_hex = event.id.to_hex();
     let kind_u32 = event_kind_u32(&event);
     let kind_str = bounded_kind_label(kind_u32);
+
+    // Record the declared span fields now that we have the values.
+    tracing::Span::current()
+        .record("event_id", event_id_hex.as_str())
+        .record("kind", kind_u32);
+
     debug!(event_id = %event_id_hex, kind = kind_u32, "EVENT");
     metrics::counter!("buzz_events_received_total", "kind" => kind_str.clone()).increment(1);
 
@@ -666,9 +785,14 @@ async fn handle_ephemeral_event(
 
     // Check channel membership before publishing other ephemeral events.
     if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
-        if let Err(msg) =
-            super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes)
-                .await
+        if let Err(msg) = super::ingest::check_channel_membership(
+            &conn.tenant,
+            &state,
+            ch_id,
+            &pubkey_bytes,
+            None,
+        )
+        .await
         {
             conn.send(RelayMessage::ok(event_id_hex, false, &msg));
             return;
@@ -1451,12 +1575,14 @@ mod tests {
             let event_id_hex = event.id.to_hex();
             let stored = StoredEvent::new(event, None);
 
-            super::super::dispatch_persistent_event(
+            super::super::dispatch_persistent_event_inner(
                 &tenant,
                 &state,
                 &stored,
                 KIND_PRESENCE_UPDATE,
                 &actor_hex,
+                true,
+                None,
             )
             .await;
 
@@ -1551,20 +1677,24 @@ mod tests {
                 "test precondition: the two events must have distinct ids"
             );
 
-            super::super::dispatch_persistent_event(
+            super::super::dispatch_persistent_event_inner(
                 &ta,
                 &state,
                 &a_stored,
                 KIND_PRESENCE_UPDATE,
                 &actor_hex,
+                true,
+                None,
             )
             .await;
-            super::super::dispatch_persistent_event(
+            super::super::dispatch_persistent_event_inner(
                 &tb,
                 &state,
                 &b_stored,
                 KIND_PRESENCE_UPDATE,
                 &actor_hex,
+                true,
+                None,
             )
             .await;
 
@@ -1774,6 +1904,7 @@ mod tests {
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 &channel_event(None),
                 matches.clone(),
+                None,
             )
             .await;
             assert_eq!(out, matches);
@@ -1796,6 +1927,7 @@ mod tests {
                 community_id,
                 &channel_event(Some(channel_id)),
                 matches.clone(),
+                None,
             )
             .await;
             assert_eq!(out, matches);
@@ -1833,6 +1965,7 @@ mod tests {
                 community_id,
                 &channel_event(Some(channel_id)),
                 matches,
+                None,
             )
             .await;
             assert_eq!(out, vec![(member, "m".to_string())]);
@@ -1871,12 +2004,119 @@ mod tests {
                 buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                 &stored,
                 matches,
+                None,
             )
             .await;
 
             // Only the author's subscription survives; the non-author and the
             // unauthenticated connection are both dropped.
             assert_eq!(out, vec![(author_conn, "a".to_string())]);
+        }
+
+        // -- E1 phase-2: threaded-visibility fences (§4.8 phase-2 addendum) --
+
+        /// Fence 3: a threaded visibility resolved under a different
+        /// (community, channel) must be ignored — the filter falls back to
+        /// the fresh fail-closed lookup, not the threaded value.
+        #[tokio::test]
+        async fn threaded_visibility_mismatch_falls_back_to_fresh_lookup() {
+            let state = test_state().await;
+            let channel_id = Uuid::new_v4();
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+            // Fresh lookup path resolves private via the fail-safe cache.
+            state
+                .channel_visibility_cache
+                .insert((community_id, channel_id), "private".to_string());
+
+            // Threaded value says "open" but for a DIFFERENT channel.
+            let threaded = crate::state::ThreadedChannelVisibility {
+                community_id,
+                channel_id: Uuid::new_v4(),
+                visibility: "open".to_string(),
+            };
+
+            // Unauthenticated conn: kept on open, dropped on private.
+            let conn = register_conn(&state, None);
+            let matches = vec![(conn, "s".to_string())];
+            let out = filter_fanout_by_access(
+                &state,
+                community_id,
+                &channel_event(Some(channel_id)),
+                matches,
+                Some(&threaded),
+            )
+            .await;
+            assert!(
+                out.is_empty(),
+                "mismatched threaded visibility must not be consulted; \
+                 fresh lookup says private → unauthenticated conn dropped"
+            );
+        }
+
+        /// Matching threaded `private` gates recipients without a DB read,
+        /// identically to the fresh-lookup private path.
+        #[tokio::test]
+        async fn threaded_visibility_private_filters_members_only() {
+            let state = test_state().await;
+            let channel_id = Uuid::new_v4();
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+
+            let member_pk = vec![1u8; 32];
+            let non_member_pk = vec![2u8; 32];
+            state
+                .membership_cache
+                .insert((community_id, channel_id, member_pk.clone()), true);
+            state
+                .membership_cache
+                .insert((community_id, channel_id, non_member_pk.clone()), false);
+
+            let threaded = crate::state::ThreadedChannelVisibility {
+                community_id,
+                channel_id,
+                visibility: "private".to_string(),
+            };
+
+            let member = register_conn(&state, Some(member_pk));
+            let non_member = register_conn(&state, Some(non_member_pk));
+            let matches = vec![(member, "m".to_string()), (non_member, "n".to_string())];
+            let out = filter_fanout_by_access(
+                &state,
+                community_id,
+                &channel_event(Some(channel_id)),
+                matches,
+                Some(&threaded),
+            )
+            .await;
+            assert_eq!(out, vec![(member, "m".to_string())]);
+        }
+
+        /// Matching threaded `open` passes recipients through with no
+        /// visibility SELECT (no visibility cache entry exists and the lazy
+        /// PG pool in `test_state` would error a fresh lookup → fail closed;
+        /// passing through proves the threaded value was used).
+        #[tokio::test]
+        async fn threaded_visibility_open_passes_through() {
+            let state = test_state().await;
+            let channel_id = Uuid::new_v4();
+            let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+
+            let threaded = crate::state::ThreadedChannelVisibility {
+                community_id,
+                channel_id,
+                visibility: "open".to_string(),
+            };
+
+            let conn = register_conn(&state, None);
+            let matches = vec![(conn, "s".to_string())];
+            let out = filter_fanout_by_access(
+                &state,
+                community_id,
+                &channel_event(Some(channel_id)),
+                matches.clone(),
+                Some(&threaded),
+            )
+            .await;
+            assert_eq!(out, matches);
         }
     }
 
@@ -2006,7 +2246,7 @@ mod tests {
             let stored = StoredEvent::new(presence, None);
 
             let matches = vec![(a_socket, "presence".to_string())];
-            let out = filter_fanout_by_access(&state, community_b, &stored, matches).await;
+            let out = filter_fanout_by_access(&state, community_b, &stored, matches, None).await;
 
             // Correct behavior: A-socket dropped because its tenant != B.
             assert!(

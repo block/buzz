@@ -8,6 +8,7 @@ export type TranscriptTurnSegment =
   | {
       kind: "prompt";
       user: Extract<TranscriptItem, { type: "message" }>;
+      systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
       context: Extract<TranscriptItem, { type: "metadata" }> | null;
       setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
     };
@@ -43,6 +44,12 @@ function isPromptContext(
   );
 }
 
+function isSystemPrompt(
+  item: TranscriptItem,
+): item is Extract<TranscriptItem, { type: "metadata" }> {
+  return item.type === "metadata" && item.acpSource === "session/new";
+}
+
 function isSetupLifecycle(
   item: TranscriptItem,
 ): item is Extract<TranscriptItem, { type: "lifecycle" }> {
@@ -57,7 +64,13 @@ type TurnBucket = {
   items: TranscriptItem[];
 };
 
-function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
+function classifyTurnItems(
+  items: TranscriptItem[],
+  externalSystemPrompt: Extract<
+    TranscriptItem,
+    { type: "metadata" }
+  > | null = null,
+): TranscriptTurnSegment[] {
   const userPrompt = items.find(isUserPrompt) ?? null;
   const setupLifecycle = items.filter(isSetupLifecycle);
   const promptContext = items.find(isPromptContext) ?? null;
@@ -79,6 +92,7 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
     {
       kind: "prompt",
       user: userPrompt,
+      systemPrompt: externalSystemPrompt,
       context: promptContext,
       setup: setupLifecycle,
     },
@@ -173,6 +187,11 @@ function getRenderClass(item: TranscriptItem) {
  * Build presentation-only display blocks from normalized transcript items.
  * Raw observer order is preserved in the source items; this only reorders
  * within a turn for user-facing narrative flow.
+ *
+ * System-prompt items (acpSource "session/new") are per-channel singles with
+ * turnId=null. They are injected into the prompt segment of the first turn
+ * that follows them in stream order — placing System prompt between the user
+ * message bubble and the Prompt context sections in the rendered output.
  */
 export function buildTranscriptDisplayBlocks(
   items: TranscriptItem[],
@@ -185,10 +204,22 @@ export function buildTranscriptDisplayBlocks(
     { kind: "single"; item: TranscriptItem } | { kind: "turn"; turnId: string }
   > = [];
 
+  // System-prompt items (turnId=null, acpSource "session/new") accumulate here
+  // until consumed by the first turn that follows them in stream order.
+  let pendingSystemPrompt: Extract<
+    TranscriptItem,
+    { type: "metadata" }
+  > | null = null;
+
   for (const item of items) {
     const turnId = item.turnId;
     if (!turnId) {
-      displayOrder.push({ kind: "single", item });
+      if (isSystemPrompt(item)) {
+        // Hold system-prompt for injection into the next turn's prompt segment.
+        pendingSystemPrompt = item;
+      } else {
+        displayOrder.push({ kind: "single", item });
+      }
       continue;
     }
 
@@ -201,6 +232,9 @@ export function buildTranscriptDisplayBlocks(
     bucket.items.push(item);
   }
 
+  // Track per-turn injected system-prompt so multi-turn streams don't re-inject.
+  const consumedSystemPrompts = new Set<string>();
+
   for (const entry of displayOrder) {
     if (entry.kind === "single") {
       blocks.push({ kind: "single", item: entry.item });
@@ -212,7 +246,22 @@ export function buildTranscriptDisplayBlocks(
       continue;
     }
 
-    const segments = classifyTurnItems(bucket.items);
+    // Inject system-prompt into the first turn that has a user-prompt item.
+    // On subsequent turns, system-prompt stays null (session/new doesn't re-fire).
+    let systemPromptForTurn: Extract<
+      TranscriptItem,
+      { type: "metadata" }
+    > | null = null;
+    if (
+      pendingSystemPrompt &&
+      !consumedSystemPrompts.has(pendingSystemPrompt.id) &&
+      bucket.items.some(isUserPrompt)
+    ) {
+      systemPromptForTurn = pendingSystemPrompt;
+      consumedSystemPrompts.add(pendingSystemPrompt.id);
+    }
+
+    const segments = classifyTurnItems(bucket.items, systemPromptForTurn);
     if (segments.length > 0) {
       blocks.push({
         kind: "turn",
@@ -220,6 +269,16 @@ export function buildTranscriptDisplayBlocks(
         segments,
       });
     }
+  }
+
+  // If system-prompt was never consumed (no session/prompt followed — e.g.
+  // session/new arrived without a subsequent turn, or the stream is still
+  // incomplete), emit it as a standalone single so it remains visible.
+  if (
+    pendingSystemPrompt &&
+    !consumedSystemPrompts.has(pendingSystemPrompt.id)
+  ) {
+    blocks.push({ kind: "single", item: pendingSystemPrompt });
   }
 
   return blocks;
@@ -243,6 +302,9 @@ export function flattenDisplayBlocks(
       } else if (segment.kind === "prompt") {
         result.push(segment.user);
         result.push(...segment.setup);
+        if (segment.systemPrompt) {
+          result.push(segment.systemPrompt);
+        }
         if (segment.context) {
           result.push(segment.context);
         }
