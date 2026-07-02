@@ -6,7 +6,9 @@ use nostr::Filter;
 use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
-use crate::handlers::req::is_author_only_event;
+use crate::handlers::req::{
+    filter_can_match_result_gated_kinds, is_author_only_event, result_gated_count_safe_for_pushdown,
+};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
@@ -100,6 +102,14 @@ pub async fn handle_count(
         // fast-path count_events() cannot be used because it doesn't do
         // per-event author filtering.
         let needs_author_only_filtering = super::req::filter_can_match_author_only_kinds(filter);
+        // Determine if this filter can match result-gated kinds (44200, 30622)
+        // that require a per-event owner check. When the fast SQL path would
+        // count matching rows without calling reader_authorized_for_event, a
+        // non-owner learns the existence of events they are not allowed to see.
+        // The only safe pushdown is when #p is pinned to the authenticated
+        // reader's own pubkey.
+        let needs_result_gated_filtering = filter_can_match_result_gated_kinds(filter)
+            && !result_gated_count_safe_for_pushdown(filter, &authed_pubkey_hex);
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             // Filter targets a specific channel — verify access. Mirrors the WS
@@ -149,6 +159,7 @@ pub async fn handle_count(
             });
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
+                && !needs_result_gated_filtering
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -177,6 +188,12 @@ pub async fn handle_count(
                                 continue;
                             }
                             if is_author_only_event(&se.event, &pubkey_bytes) {
+                                continue;
+                            }
+                            if !buzz_core::filter::reader_authorized_for_event(
+                                &se.event,
+                                &authed_pubkey_hex,
+                            ) {
                                 continue;
                             }
                             total += 1;
@@ -212,6 +229,7 @@ pub async fn handle_count(
             });
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
+                && !needs_result_gated_filtering
             {
                 query.limit = None; // COUNT doesn't need a row limit
                 match state.db.count_events(&query).await {
@@ -240,6 +258,12 @@ pub async fn handle_count(
                                 continue;
                             }
                             if is_author_only_event(&se.event, &pubkey_bytes) {
+                                continue;
+                            }
+                            if !buzz_core::filter::reader_authorized_for_event(
+                                &se.event,
+                                &authed_pubkey_hex,
+                            ) {
                                 continue;
                             }
                             total += 1;
