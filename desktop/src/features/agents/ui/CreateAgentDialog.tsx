@@ -204,8 +204,12 @@ export function CreateAgentDialog({
       requiredCredentialEnvKeys(
         selectedRuntimeId,
         runtimeSupportsLlmProviderSelection(selectedRuntimeId) ? provider : "",
-      ).filter((key) => !fileSatisfiedEnvKeys.includes(key)),
-    [selectedRuntimeId, provider, fileSatisfiedEnvKeys],
+      ).filter(
+        (key) =>
+          !fileSatisfiedEnvKeys.includes(key) &&
+          (globalConfig.env_vars[key] ?? "").length === 0,
+      ),
+    [selectedRuntimeId, provider, fileSatisfiedEnvKeys, globalConfig.env_vars],
   );
 
   // Clear model when provider scope changes, mirroring EditAgentDialog.
