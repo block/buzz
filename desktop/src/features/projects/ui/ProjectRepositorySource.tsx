@@ -5,6 +5,7 @@ import {
   GitBranch,
   GitFork,
   HardDrive,
+  TerminalSquare,
   UploadCloud,
 } from "lucide-react";
 import * as React from "react";
@@ -74,6 +75,7 @@ export function RepositorySourceCard({
   localLabel,
   localPath,
   onBranchChange,
+  onOpenTerminal,
   onPush,
   onSourceChange,
   pushDisabled,
@@ -89,6 +91,7 @@ export function RepositorySourceCard({
   localLabel: string;
   localPath?: string | null;
   onBranchChange: (branch: string) => void;
+  onOpenTerminal?: () => void;
   onPush: () => void;
   onSourceChange: (source: "remote" | "local") => void;
   pushDisabled: boolean;
@@ -105,6 +108,21 @@ export function RepositorySourceCard({
     ? `${status.localBranch ?? "local"} @ ${status.localShortHead}`
     : null;
   const showPushButton = source === "local" && status?.canPush;
+  const terminalLabel = localPath
+    ? "Open in Terminal"
+    : "Clone & open in Terminal";
+  const terminalAction = onOpenTerminal ? (
+    <Button
+      aria-label={terminalLabel}
+      className="h-6 w-6 shrink-0"
+      onClick={onOpenTerminal}
+      size="icon"
+      title={terminalLabel}
+      variant="ghost"
+    >
+      <TerminalSquare className="h-4 w-4" />
+    </Button>
+  ) : null;
   const pushAction = showPushButton ? (
     <Button
       aria-label={pushPending ? "Pushing local commits" : "Push local commits"}
@@ -180,7 +198,12 @@ export function RepositorySourceCard({
         <div className="min-w-0 flex-1">
           {showLocalPath ? (
             <RepositoryPathRow
-              action={pushAction}
+              action={
+                <>
+                  {terminalAction}
+                  {pushAction}
+                </>
+              }
               path={localPath}
               title={
                 localRefLabel ? `Local checkout: ${localRefLabel}` : undefined
@@ -188,8 +211,13 @@ export function RepositorySourceCard({
               type="local"
             />
           ) : cloneUrls.length > 0 ? (
-            cloneUrls.map((url) => (
-              <RepositoryPathRow key={url} path={url} type="remote" />
+            cloneUrls.map((url, index) => (
+              <RepositoryPathRow
+                action={index === 0 ? terminalAction : undefined}
+                key={url}
+                path={url}
+                type="remote"
+              />
             ))
           ) : (
             <div className="text-sm text-muted-foreground">

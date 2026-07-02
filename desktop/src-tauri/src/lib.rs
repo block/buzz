@@ -456,6 +456,7 @@ pub fn run() {
             get_project_repo_sync_status,
             list_project_local_repositories,
             push_project_local_repository,
+            open_project_terminal,
             search_users,
             get_presence,
             get_default_relay_url,

@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   CalendarDays,
   FolderGit2,
@@ -5,6 +6,7 @@ import {
   GitFork,
   MessageSquare,
   MoreHorizontal,
+  TerminalSquare,
   Trash2,
   Users,
 } from "lucide-react";
@@ -64,6 +66,7 @@ import {
 } from "@/features/projects/lib/projectsViewHelpers";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { openProjectTerminal } from "@/shared/api/projectGit";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -298,14 +301,18 @@ function ProjectCardButton({
 
 function ProjectActionsMenu({
   project,
+  hasLocal,
   canDelete,
   disabled,
   onDelete,
+  onOpenTerminal,
 }: {
   project: Project;
+  hasLocal: boolean;
   canDelete: boolean;
   disabled: boolean;
   onDelete: (project: Project) => Promise<void> | void;
+  onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
 
@@ -325,6 +332,16 @@ function ProjectActionsMenu({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-48">
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void onOpenTerminal(project);
+            }}
+          >
+            <TerminalSquare className="h-4 w-4" />
+            {hasLocal ? "Open in Terminal" : "Clone & open in Terminal"}
+          </DropdownMenuItem>
           <DropdownMenuItem
             className="text-destructive focus:text-destructive"
             disabled={!canDelete || disabled}
@@ -384,19 +401,23 @@ function ProjectGridCard({
   people,
   profiles,
   summary,
+  hasLocal,
   canDelete,
   deleteDisabled,
   onDelete,
   onOpen,
+  onOpenTerminal,
 }: {
   project: Project;
   people: string[];
   profiles?: UserProfileLookup;
   summary: ProjectActivitySummary | undefined;
+  hasLocal: boolean;
   canDelete: boolean;
   deleteDisabled: boolean;
   onDelete: (project: Project) => Promise<void> | void;
   onOpen: (project: Project) => void;
+  onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
   return (
     <Card
@@ -430,7 +451,9 @@ function ProjectGridCard({
             <ProjectActionsMenu
               canDelete={canDelete}
               disabled={deleteDisabled}
+              hasLocal={hasLocal}
               onDelete={onDelete}
+              onOpenTerminal={onOpenTerminal}
               project={project}
             />
           </div>
@@ -469,19 +492,23 @@ function ProjectListRow({
   people,
   profiles,
   summary,
+  hasLocal,
   canDelete,
   deleteDisabled,
   onDelete,
   onOpen,
+  onOpenTerminal,
 }: {
   project: Project;
   people: string[];
   profiles?: UserProfileLookup;
   summary: ProjectActivitySummary | undefined;
+  hasLocal: boolean;
   canDelete: boolean;
   deleteDisabled: boolean;
   onDelete: (project: Project) => Promise<void> | void;
   onOpen: (project: Project) => void;
+  onOpenTerminal: (project: Project) => Promise<void> | void;
 }) {
   return (
     <Card
@@ -533,7 +560,9 @@ function ProjectListRow({
           <ProjectActionsMenu
             canDelete={canDelete}
             disabled={deleteDisabled}
+            hasLocal={hasLocal}
             onDelete={onDelete}
+            onOpenTerminal={onOpenTerminal}
             project={project}
           />
         </div>
@@ -728,6 +757,39 @@ export function ProjectsView() {
     [goProject],
   );
 
+  const queryClient = useQueryClient();
+  const reposDir = activeWorkspace?.reposDir;
+  const handleOpenTerminal = React.useCallback(
+    async (project: Project) => {
+      const hasLocal = hasLocalCheckout(project, localRepoNames);
+      const toastId = hasLocal
+        ? undefined
+        : toast.loading(`Cloning ${project.name}…`);
+      try {
+        const result = await openProjectTerminal({
+          reposDir,
+          projectDtag: project.dtag,
+          cloneUrl: project.cloneUrls[0] ?? null,
+          defaultBranch: project.defaultBranch || null,
+        });
+        if (result.cloned) {
+          toast.success(`Cloned to ${result.path}`, { id: toastId });
+          void queryClient.invalidateQueries({
+            queryKey: ["projects", "local-repositories"],
+          });
+        } else if (toastId !== undefined) {
+          toast.dismiss(toastId);
+        }
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to open terminal",
+          { id: toastId },
+        );
+      }
+    },
+    [localRepoNames, queryClient, reposDir],
+  );
+
   const handleDeleteProject = React.useCallback(
     async (project: Project) => {
       try {
@@ -854,9 +916,11 @@ export function ProjectsView() {
                         currentPubkey,
                       )}
                       deleteDisabled={deleteProjectMutation.isPending}
+                      hasLocal={hasLocalCheckout(project, localRepoNames)}
                       key={project.id}
                       onDelete={handleDeleteProject}
                       onOpen={handleOpenProject}
+                      onOpenTerminal={handleOpenTerminal}
                       people={projectPeople(project, summary)}
                       profiles={profiles}
                       project={project}
@@ -877,9 +941,11 @@ export function ProjectsView() {
                         currentPubkey,
                       )}
                       deleteDisabled={deleteProjectMutation.isPending}
+                      hasLocal={hasLocalCheckout(project, localRepoNames)}
                       key={project.id}
                       onDelete={handleDeleteProject}
                       onOpen={handleOpenProject}
+                      onOpenTerminal={handleOpenTerminal}
                       people={projectPeople(project, summary)}
                       profiles={profiles}
                       project={project}

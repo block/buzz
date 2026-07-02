@@ -279,6 +279,32 @@ export async function getProjectRepoSyncStatus(input: {
   return fromRawProjectRepoSyncStatus(status);
 }
 
+type RawProjectTerminalResult = {
+  path: string;
+  cloned: boolean;
+};
+
+export async function openProjectTerminal(input: {
+  reposDir?: string | null;
+  projectDtag: string;
+  cloneUrl?: string | null;
+  defaultBranch?: string | null;
+}): Promise<{ path: string; cloned: boolean }> {
+  const result = await invokeTauri<RawProjectTerminalResult>(
+    "open_project_terminal",
+    {
+      reposDir: input.reposDir ?? null,
+      projectDtag: input.projectDtag,
+      cloneUrl: input.cloneUrl ?? null,
+      defaultBranch: input.defaultBranch ?? null,
+    },
+  );
+  return {
+    path: result.path,
+    cloned: result.cloned,
+  };
+}
+
 export async function pushProjectLocalRepository(input: {
   reposDir?: string | null;
   projectDtag: string;

@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
   ChevronRight,
@@ -44,6 +45,7 @@ import {
   profilePanelViewFromSearch,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { openProjectTerminal } from "@/shared/api/projectGit";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import {
   channelChrome,
@@ -544,6 +546,37 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
     repoSyncStatusQuery,
   ]);
 
+  const queryClient = useQueryClient();
+  const reposDir = activeWorkspace?.reposDir;
+  const handleOpenTerminal = React.useCallback(async () => {
+    if (!project) return;
+    const toastId = hasLocalCheckout
+      ? undefined
+      : toast.loading(`Cloning ${project.name}…`);
+    try {
+      const result = await openProjectTerminal({
+        reposDir,
+        projectDtag: project.dtag,
+        cloneUrl: project.cloneUrls[0] ?? null,
+        defaultBranch: activeBranch,
+      });
+      if (result.cloned) {
+        toast.success(`Cloned to ${result.path}`, { id: toastId });
+        void queryClient.invalidateQueries({
+          queryKey: ["project", project.id],
+        });
+        void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      } else if (toastId !== undefined) {
+        toast.dismiss(toastId);
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to open terminal",
+        { id: toastId },
+      );
+    }
+  }, [activeBranch, hasLocalCheckout, project, queryClient, reposDir]);
+
   if (projectQuery.isLoading) {
     return null;
   }
@@ -764,6 +797,9 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       localRepoSnapshotQuery.data?.path
                     }
                     onBranchChange={setSelectedBranch}
+                    onOpenTerminal={() => {
+                      void handleOpenTerminal();
+                    }}
                     onPush={() => {
                       void handlePushLocalRepo();
                     }}
