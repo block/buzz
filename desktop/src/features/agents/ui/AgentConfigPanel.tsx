@@ -103,27 +103,29 @@ function provenanceSentence(
   origin: ConfigOrigin,
   writeVia: ConfigWriteMechanism,
   configFilePath: string | null,
-): string | null {
+): string {
   switch (origin) {
     case "buzzExplicit":
-      return null;
+      return "Set in Buzz";
     case "personaDefault":
-      return "Persona default";
+      return "Inherited from persona";
     case "runtimeOverride":
       return "Live override (this session only)";
     case "harnessConstraint":
       return "Locked by harness";
     case "envVar": {
       if (writeVia.type === "respawnWithEnvVar") {
-        return `Environment variable (${writeVia.envKey})`;
+        return `From environment variable (${writeVia.envKey})`;
       }
-      return "Environment variable";
+      return "From environment variable";
     }
     case "configFile":
-      return configFilePath ? `Config file (${configFilePath})` : "Config file";
+      return configFilePath
+        ? `From config file (${configFilePath})`
+        : "From config file";
     case "acpConfigOption":
     case "acpNativeRead":
-      return "ACP session";
+      return "From ACP session";
   }
 }
 

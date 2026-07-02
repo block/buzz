@@ -175,9 +175,8 @@ test.describe("config bridge screenshots", () => {
 
     const panel = await openAgentProfileFromChannel(page, "Goose Agent");
 
-    // Buzz-native fields don't need provenance chrome, but this test still needs
-    // a visible folded-panel row before screenshots settle.
-    await expect(panel.getByText("Model").first()).toBeVisible();
+    // The folded config panel: provenance sentences inline under each value.
+    await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
     await settleAnimations(panel);
 
     await panel.screenshot({ path: `${SHOTS}/01-folded-config-panel.png` });
@@ -209,13 +208,14 @@ test.describe("config bridge screenshots", () => {
 
     const panel = await openAgentProfileFromChannel(page, "Multi-Origin Agent");
 
-    // Multiple distinct non-native provenance origins visible at once.
-    await expect(panel.getByText("Persona default")).toBeVisible();
+    // Multiple distinct provenance origins visible at once.
+    await expect(panel.getByText("Set in Buzz").first()).toBeVisible();
+    await expect(panel.getByText("Inherited from persona")).toBeVisible();
     await expect(
-      panel.getByText("Environment variable (GOOSE_MODE)"),
+      panel.getByText("From environment variable (GOOSE_MODE)"),
     ).toBeVisible();
     await expect(
-      panel.getByText("Config file (~/.config/goose/config.yaml)").first(),
+      panel.getByText("From config file (~/.config/goose/config.yaml)").first(),
     ).toBeVisible();
     await settleAnimations(panel);
 

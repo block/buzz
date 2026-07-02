@@ -1373,9 +1373,9 @@ function buildMockConfigSurface(pubkey: string): {
   };
 
   // Mixed-provenance showcase — top-level rows carry different origins so the
-  // panel witnesses tightened provenance labels in one frame: no label for
-  // Buzz-native values, plus "Persona default", "Config file (...)" and
-  // "Environment variable (...)".
+  // panel witnesses distinct provenance labels in one frame: "Set in Buzz",
+  // "Inherited from persona", "From config file (...)" and
+  // "From environment variable (...)".
   const multiOriginSurface = {
     runtimeId: "goose",
     runtimeLabel: "Goose",
