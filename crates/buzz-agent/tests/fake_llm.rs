@@ -957,7 +957,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     let mut saw_usage = false;
     let mut saw_cancel_ok = false;
     let mut saw_prompt_response = false;
-    for _ in 0..20 {
+    for _ in 0..40 {
         let v = h.recv().await;
         if v["id"] == json!(c_id) {
             // cancel acknowledged
@@ -982,7 +982,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                 "expected result or error on prompt response, got: {v}"
             );
         }
-        if saw_usage && saw_prompt_response {
+        if saw_usage && saw_prompt_response && saw_cancel_ok {
             break;
         }
     }
