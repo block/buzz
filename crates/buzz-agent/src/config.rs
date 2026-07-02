@@ -21,7 +21,7 @@ pub enum ThinkingEffort {
 }
 
 impl ThinkingEffort {
-    /// Map level to an Anthropic `budget_tokens` value.
+    /// Map level to an Anthropic `budget_tokens` value for legacy Claude 3.x models.
     pub fn anthropic_budget_tokens(self) -> u32 {
         match self {
             ThinkingEffort::Low => 1_024,
@@ -37,6 +37,47 @@ impl ThinkingEffort {
             ThinkingEffort::Medium => "medium",
             ThinkingEffort::High => "high",
         }
+    }
+}
+
+/// Build the Anthropic thinking/effort request fields for the given model and effort level.
+///
+/// API shape selection (per Anthropic SDK and docs):
+/// - Claude 3.x models: `thinking: {type:"enabled", budget_tokens}` (manual budget).
+///   `budget_tokens` is capped at `max_output_tokens - 1` so it is always strictly less
+///   than `max_tokens` as required by the API.
+/// - Claude 4+ and Sonnet-5+ (modern Claude): `output_config: {effort: "low"|"medium"|"high"}`.
+///   These models use the high-level effort abstraction and may not support manual budgets.
+/// - Unrecognized model: neither field is emitted (safe omit; unknown API shape).
+///
+/// Returns `(thinking_field, output_config_field)` where each is `None` if not applicable.
+pub fn anthropic_thinking_config(
+    effective_model: &str,
+    effort: ThinkingEffort,
+    max_output_tokens: u32,
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    use serde_json::json;
+    // Normalise the model name for matching: strip Databricks gateway prefixes
+    // (e.g. "databricks-claude-opus-4-7" → "claude-opus-4-7").
+    let model = effective_model
+        .strip_prefix("databricks-")
+        .unwrap_or(effective_model);
+
+    if model.starts_with("claude-3") {
+        // Legacy shape: manual budget, must be strictly < max_tokens.
+        let budget = effort
+            .anthropic_budget_tokens()
+            .min(max_output_tokens.saturating_sub(1));
+        (
+            Some(json!({ "type": "enabled", "budget_tokens": budget })),
+            None,
+        )
+    } else if model.starts_with("claude-") {
+        // Modern Claude (4+, sonnet-5, etc.): use output_config.effort.
+        (None, Some(json!({ "effort": effort.openai_effort_str() })))
+    } else {
+        // Unrecognised model name — omit both fields rather than guess.
+        (None, None)
     }
 }
 
@@ -752,5 +793,78 @@ mod tests {
         assert_eq!(ThinkingEffort::Low.openai_effort_str(), "low");
         assert_eq!(ThinkingEffort::Medium.openai_effort_str(), "medium");
         assert_eq!(ThinkingEffort::High.openai_effort_str(), "high");
+    }
+
+    // ---- anthropic_thinking_config helper — per-family tests ----
+
+    #[test]
+    fn anthropic_thinking_config_claude3_emits_budget_tokens() {
+        // Claude 3.x → `thinking.budget_tokens`; capped at max_output_tokens - 1.
+        let (thinking, output_config) =
+            anthropic_thinking_config("claude-3-7-sonnet-20250219", ThinkingEffort::High, 1024);
+        let t = thinking.expect("thinking field must be present for claude-3");
+        assert_eq!(t["type"], "enabled");
+        assert_eq!(t["budget_tokens"], 1023); // capped: min(32768, 1024-1)
+        assert!(
+            output_config.is_none(),
+            "output_config must be absent for claude-3"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_config_claude3_budget_uncapped_when_fits() {
+        // High budget fits comfortably under a large max_output_tokens.
+        let (thinking, _) =
+            anthropic_thinking_config("claude-3-7-sonnet-20250219", ThinkingEffort::High, 65_536);
+        let t = thinking.unwrap();
+        assert_eq!(t["budget_tokens"], 32_768);
+    }
+
+    #[test]
+    fn anthropic_thinking_config_modern_claude_emits_output_config_effort() {
+        // Claude 4+ / sonnet-5+ → `output_config.effort`; no budget_tokens.
+        let (thinking, output_config) =
+            anthropic_thinking_config("claude-opus-4-5", ThinkingEffort::Medium, 32_768);
+        assert!(
+            thinking.is_none(),
+            "thinking must be absent for modern claude"
+        );
+        let oc = output_config.expect("output_config must be present for modern claude");
+        assert_eq!(oc["effort"], "medium");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_claude3() {
+        // Databricks gateway prefixes like "databricks-claude-3-..." must be stripped.
+        let (thinking, output_config) =
+            anthropic_thinking_config("databricks-claude-3-5-sonnet", ThinkingEffort::Low, 8_192);
+        let t = thinking.expect("thinking must be present after stripping databricks- prefix");
+        assert_eq!(t["type"], "enabled");
+        assert!(output_config.is_none());
+    }
+
+    #[test]
+    fn anthropic_thinking_config_databricks_prefix_stripped_for_modern_claude() {
+        // Databricks gateway prefix stripping applies to modern Claude too.
+        let (thinking, output_config) =
+            anthropic_thinking_config("databricks-claude-opus-4-7", ThinkingEffort::High, 32_768);
+        assert!(thinking.is_none());
+        let oc = output_config.expect("output_config must be present for databricks-claude-opus-4");
+        assert_eq!(oc["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_thinking_config_unrecognized_model_omits_both_fields() {
+        // Non-Anthropic model names (gpt-5, llama, etc.) → omit both fields.
+        let (thinking, output_config) =
+            anthropic_thinking_config("gpt-4o-mini", ThinkingEffort::High, 32_768);
+        assert!(
+            thinking.is_none(),
+            "thinking must be absent for non-claude model"
+        );
+        assert!(
+            output_config.is_none(),
+            "output_config must be absent for non-claude model"
+        );
     }
 }

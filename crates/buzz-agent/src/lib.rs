@@ -477,7 +477,13 @@ async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &W
     }
     let mut sessions = app.sessions.lock().await;
     let Some(s) = sessions.get_mut(&p.session_id) else {
-        return reject(wire_tx, id, INVALID_PARAMS, "session/set_model: unknown session").await;
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "session/set_model: unknown session",
+        )
+        .await;
     };
     s.effective_model = Some(p.model_id.clone());
     tracing::info!(
@@ -488,7 +494,10 @@ async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &W
     drop(sessions);
     wire::send(
         wire_tx,
-        wire::ok(id, json!({ "sessionId": p.session_id, "modelId": p.model_id })),
+        wire::ok(
+            id,
+            json!({ "sessionId": p.session_id, "modelId": p.model_id }),
+        ),
     )
     .await;
 }

@@ -74,13 +74,20 @@ impl Llm {
                 let v = self
                     .post_anthropic(
                         cfg,
-                        &anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
+                        &anthropic_body(
+                            cfg,
+                            system_prompt,
+                            history,
+                            tools,
+                            effective_model,
+                            effort,
+                        ),
                     )
                     .await?;
                 parse_anthropic(v)
             }
             Provider::OpenAi | Provider::Databricks => {
-                self.openai_request(cfg, |use_responses| {
+                self.openai_request(cfg, effective_model, |use_responses| {
                     if use_responses {
                         (
                             responses_body(
@@ -110,38 +117,17 @@ impl Llm {
                 .await
             }
             Provider::DatabricksV2 => {
-                self.databricks_v2_request(cfg, |route| match route {
+                self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => (
-                        responses_body(
-                            cfg,
-                            system_prompt,
-                            history,
-                            tools,
-                            effective_model,
-                            effort,
-                        ),
+                        responses_body(cfg, system_prompt, history, tools, effective_model, effort),
                         parse_responses as OpenAiParse,
                     ),
                     DatabricksV2Route::AnthropicMessages => (
-                        anthropic_body(
-                            cfg,
-                            system_prompt,
-                            history,
-                            tools,
-                            effective_model,
-                            effort,
-                        ),
+                        anthropic_body(cfg, system_prompt, history, tools, effective_model, effort),
                         parse_anthropic as OpenAiParse,
                     ),
                     DatabricksV2Route::MlflowChatCompletions => (
-                        openai_body(
-                            cfg,
-                            system_prompt,
-                            history,
-                            tools,
-                            effective_model,
-                            effort,
-                        ),
+                        openai_body(cfg, system_prompt, history, tools, effective_model, effort),
                         parse_openai as OpenAiParse,
                     ),
                 })
@@ -173,7 +159,7 @@ impl Llm {
             }
             Provider::OpenAi | Provider::Databricks => {
                 let r = self
-                    .openai_request(cfg, |use_responses| {
+                    .openai_request(cfg, effective_model, |use_responses| {
                         if use_responses {
                             (
                                 json!({
@@ -204,7 +190,7 @@ impl Llm {
             }
             Provider::DatabricksV2 => {
                 let r = self
-                    .databricks_v2_request(cfg, |route| match route {
+                    .databricks_v2_request(cfg, effective_model, |route| match route {
                         DatabricksV2Route::OpenAiResponses => (
                             json!({
                                 "model": effective_model,
@@ -258,7 +244,12 @@ impl Llm {
     /// host), POST, and on `auto` retry once on Responses if the provider
     /// asks for it. `build` is called with `use_responses` so callers
     /// only construct the body actually needed.
-    async fn openai_request<F>(&self, cfg: &Config, mut build: F) -> Result<LlmResponse, AgentError>
+    async fn openai_request<F>(
+        &self,
+        cfg: &Config,
+        effective_model: &str,
+        mut build: F,
+    ) -> Result<LlmResponse, AgentError>
     where
         F: FnMut(bool) -> (Value, OpenAiParse) + Send,
     {
@@ -268,14 +259,21 @@ impl Llm {
 
         if use_responses {
             let (b, p) = build(true);
-            return p(self.post_openai(cfg, "/responses", &b).await?);
+            return p(self
+                .post_openai(cfg, "/responses", &b, effective_model)
+                .await?);
         }
         let (b, p) = build(false);
-        match self.post_openai(cfg, "/chat/completions", &b).await {
+        match self
+            .post_openai(cfg, "/chat/completions", &b, effective_model)
+            .await
+        {
             Ok(v) => p(v),
             Err(e) if cfg.openai_api == OpenAiApi::Auto && self.try_upgrade(&e) => {
                 let (b, p) = build(true);
-                p(self.post_openai(cfg, "/responses", &b).await?)
+                p(self
+                    .post_openai(cfg, "/responses", &b, effective_model)
+                    .await?)
             }
             Err(e) => Err(e),
         }
@@ -284,15 +282,16 @@ impl Llm {
     async fn databricks_v2_request<F>(
         &self,
         cfg: &Config,
+        effective_model: &str,
         build: F,
     ) -> Result<LlmResponse, AgentError>
     where
         F: FnOnce(DatabricksV2Route) -> (Value, OpenAiParse) + Send,
     {
-        let route = databricks_v2_route_for_model(&cfg.model);
+        let route = databricks_v2_route_for_model(effective_model);
         let (body, parse) = build(route);
         parse(
-            self.post_openai(cfg, databricks_v2_path(route), &body)
+            self.post_openai(cfg, databricks_v2_path(route), &body, effective_model)
                 .await?,
         )
     }
@@ -307,6 +306,7 @@ impl Llm {
         cfg: &Config,
         path: &str,
         body: &Value,
+        effective_model: &str,
     ) -> Result<Value, AgentError> {
         let (url, body_owned);
         let body_ref: &Value = match cfg.provider {
@@ -314,7 +314,7 @@ impl Llm {
                 url = format!(
                     "{}/serving-endpoints/{}/invocations",
                     cfg.base_url.trim_end_matches('/'),
-                    cfg.model
+                    effective_model
                 );
                 body_owned = strip_model(body);
                 &body_owned
@@ -423,10 +423,14 @@ fn anthropic_body(
     let mut body = json!({ "model": effective_model, "max_tokens": cfg.max_output_tokens,
         "system": system_prompt, "messages": messages });
     if let Some(e) = effort {
-        body["thinking"] = json!({
-            "type": "enabled",
-            "budget_tokens": e.anthropic_budget_tokens(),
-        });
+        let (thinking, output_config) =
+            crate::config::anthropic_thinking_config(effective_model, e, cfg.max_output_tokens);
+        if let Some(t) = thinking {
+            body["thinking"] = t;
+        }
+        if let Some(oc) = output_config {
+            body["output_config"] = oc;
+        }
     }
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
@@ -1196,7 +1200,14 @@ mod tests {
 
     #[test]
     fn anthropic_tool_result_preserves_image_block() {
-        let body = anthropic_body(&cfg(Provider::Anthropic), "system", &image_history(), &[], "model", None);
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &image_history(),
+            &[],
+            "model",
+            None,
+        );
         let content = &body["messages"][2]["content"][0]["content"];
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image");
@@ -1275,7 +1286,14 @@ mod tests {
         // function_call item *must* appear in `input[]` before its matching
         // function_call_output, otherwise the API rejects with
         // "No tool call found for call_id ...".
-        let body = responses_body(&cfg_responses(), "system", &tool_call_history(), &[], "model", None);
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &tool_call_history(),
+            &[],
+            "model",
+            None,
+        );
         let input = body["input"].as_array().unwrap();
 
         // [0] user, [1] assistant text, [2] function_call, [3] function_call_output
@@ -1323,7 +1341,14 @@ mod tests {
 
     #[test]
     fn responses_body_image_tool_result_attaches_input_image() {
-        let body = responses_body(&cfg_responses(), "system", &image_history(), &[], "model", None);
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &image_history(),
+            &[],
+            "model",
+            None,
+        );
         let input = body["input"].as_array().unwrap();
         // function_call_output carries the text part; image rides on a
         // trailing user message as `input_image`.
@@ -1450,7 +1475,14 @@ mod tests {
 
     #[test]
     fn openai_tool_result_adds_followup_image_user_message() {
-        let body = openai_body(&cfg(Provider::OpenAi), "system", &image_history(), &[], "model", None);
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &image_history(),
+            &[],
+            "model",
+            None,
+        );
         assert_eq!(body["messages"][3]["role"], "tool");
         assert!(body["messages"][3]["content"]
             .as_str()
@@ -1521,7 +1553,14 @@ mod tests {
                 is_error: false,
             }),
         ];
-        let body = openai_body(&cfg(Provider::OpenAi), "system", &history, &[], "model", None);
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &history,
+            &[],
+            "model",
+            None,
+        );
         let messages = body["messages"].as_array().unwrap();
         // [0] system, [1] user, [2] assistant(tool_calls), [3] tool A, [4] tool B, [5] user(images)
         assert_eq!(messages.len(), 6, "messages: {messages:#?}");
@@ -1559,6 +1598,8 @@ mod tests {
 
     #[test]
     fn anthropic_body_emits_thinking_when_effort_high() {
+        // claude-3.x model → manual budget_tokens shape.
+        // max_output_tokens in cfg() is 1024; High budget (32768) gets capped to 1023.
         let body = anthropic_body(
             &cfg(Provider::Anthropic),
             "system",
@@ -1568,11 +1609,31 @@ mod tests {
             Some(ThinkingEffort::High),
         );
         assert_eq!(body["thinking"]["type"], "enabled");
+        // budget_tokens capped at max_output_tokens - 1 = 1023
+        assert_eq!(body["thinking"]["budget_tokens"], 1023);
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_emits_thinking_high_uncapped_when_budget_fits() {
+        // When max_output_tokens is large enough, budget_tokens is not capped.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 65_536;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-3-7-sonnet-20250219",
+            Some(ThinkingEffort::High),
+        );
         assert_eq!(body["thinking"]["budget_tokens"], 32_768);
     }
 
     #[test]
     fn anthropic_body_emits_thinking_low_budget() {
+        // Low budget (1024) fits inside max_output_tokens (1024) only if strictly <.
+        // min(1024, 1024-1) = 1023 — Low is capped when max_output_tokens == 1024.
         let body = anthropic_body(
             &cfg(Provider::Anthropic),
             "system",
@@ -1581,7 +1642,46 @@ mod tests {
             "claude-3-7-sonnet-20250219",
             Some(ThinkingEffort::Low),
         );
-        assert_eq!(body["thinking"]["budget_tokens"], 1_024);
+        // Low budget is exactly at the boundary — gets capped to max_output_tokens-1.
+        assert_eq!(body["thinking"]["budget_tokens"], 1023);
+    }
+
+    #[test]
+    fn anthropic_body_emits_output_config_effort_for_modern_claude() {
+        // Modern Claude (claude-4+, sonnet-5+) → `output_config.effort`; no budget_tokens.
+        let mut c = cfg(Provider::Anthropic);
+        c.max_output_tokens = 32_768;
+        let body = anthropic_body(
+            &c,
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "claude-opus-4-5",
+            Some(ThinkingEffort::High),
+        );
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be absent for modern claude"
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_body_omits_both_fields_for_unrecognized_model() {
+        // Non-Anthropic models (gpt-5, llama, etc.) → omit both fields rather than guess.
+        let body = anthropic_body(
+            &cfg(Provider::Anthropic),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "gpt-4o",
+            Some(ThinkingEffort::High),
+        );
+        assert!(body.get("thinking").is_none(), "thinking must be absent");
+        assert!(
+            body.get("output_config").is_none(),
+            "output_config must be absent"
+        );
     }
 
     #[test]
@@ -1952,7 +2052,7 @@ mod tests {
         c.base_url = base;
 
         let out = llm
-            .post_openai(&c, "/v1/x", &json!({}))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .expect("retry with fresh token should succeed");
         assert_eq!(out, json!({ "ok": true }));
@@ -1960,7 +2060,10 @@ mod tests {
 
         // Second call's 401 must trigger its own refresh — the guard cannot
         // be a stored flag that an earlier turn already tripped.
-        let out2 = llm.post_openai(&c, "/v1/x", &json!({})).await.unwrap();
+        let out2 = llm
+            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .await
+            .unwrap();
         assert_eq!(out2, json!({ "ok": true }));
         assert_eq!(
             auth.refreshes.load(Ordering::SeqCst),
@@ -1984,7 +2087,10 @@ mod tests {
         let mut c = cfg(Provider::OpenAi);
         c.base_url = base;
 
-        let err = llm.post_openai(&c, "/v1/x", &json!({})).await.unwrap_err();
+        let err = llm
+            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .await
+            .unwrap_err();
         assert!(matches!(err, AgentError::LlmAuth(_)), "got {err:?}");
         assert_eq!(
             auth.refreshes.load(Ordering::SeqCst),
@@ -2009,7 +2115,10 @@ mod tests {
         let mut c = cfg(Provider::OpenAi);
         c.base_url = base;
 
-        let err = llm.post_openai(&c, "/v1/x", &json!({})).await.unwrap_err();
+        let err = llm
+            .post_openai(&c, "/v1/x", &json!({}), "model")
+            .await
+            .unwrap_err();
         assert!(matches!(err, AgentError::LlmAuth(_)), "got {err:?}");
         assert_eq!(
             auth.refreshes.load(Ordering::SeqCst),
@@ -2035,7 +2144,7 @@ mod tests {
         c.base_url = base;
 
         let out = llm
-            .post_openai(&c, "/v1/x", &json!({}))
+            .post_openai(&c, "/v1/x", &json!({}), "model")
             .await
             .expect("retry with fresh token should clear the 403");
         assert_eq!(out, json!({ "ok": true }));

@@ -544,14 +544,33 @@ async fn run_single_prompt(provider: &str, base: &str, model: &str) {
 async fn run_captured_prompt(
     provider: &str,
     model: &str,
-    canned: Vec<serde_json::Value>,
+    llm_canned: Vec<serde_json::Value>,
 ) -> CapturedRequest {
-    let (base, captured) = spawn_capturing_server(canned).await;
+    // session/new triggers model catalog discovery against the same stub server.
+    // Prepend a minimal valid discovery response (empty endpoints list) so the
+    // discovery call is served cleanly and the LLM canned responses follow.
+    // Legacy Databricks discovery hits /api/2.0/serving-endpoints;
+    // Databricks v2 discovery hits /api/ai-gateway/v2/endpoints.
+    let discovery_resp = json!({ "endpoints": [], "next_page_token": null });
+    let mut all_canned = vec![discovery_resp];
+    all_canned.extend(llm_canned);
+
+    let (base, captured) = spawn_capturing_server(all_canned).await;
     run_single_prompt(provider, &base, model).await;
 
+    // Filter out discovery requests — keep only the LLM invocation(s).
+    // Discovery paths: /api/2.0/serving-endpoints, /api/ai-gateway/v2/endpoints*
+    // LLM paths: /serving-endpoints/*, /ai-gateway/anthropic/*, /ai-gateway/openai/*, /ai-gateway/mlflow/*
     let reqs = captured.lock().await;
-    assert_eq!(reqs.len(), 1, "expected exactly one LLM request");
-    reqs[0].clone()
+    let llm_reqs: Vec<_> = reqs
+        .iter()
+        .filter(|r| {
+            !r.path.starts_with("/api/2.0/serving-endpoints")
+                && !r.path.starts_with("/api/ai-gateway/v2/endpoints")
+        })
+        .collect();
+    assert_eq!(llm_reqs.len(), 1, "expected exactly one LLM request");
+    llm_reqs[0].clone()
 }
 
 #[tokio::test]
