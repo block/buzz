@@ -467,7 +467,7 @@ function ProfileLiveActivityEmbed({
     return (
       <section
         aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
-        className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
       >
         <button
@@ -496,7 +496,7 @@ function ProfileLiveActivityEmbed({
           transcriptVariant="compactPreview"
         />
         <div className="pointer-events-none absolute inset-0 z-20">
-          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted via-muted/90 to-transparent px-3 pb-3 pt-24">
+          <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/90 to-transparent px-3 pb-3 pt-24">
             <div className="min-w-0">
               <span className="block text-base font-semibold text-muted-foreground">
                 Latest Activity
@@ -511,7 +511,7 @@ function ProfileLiveActivityEmbed({
   return (
     <section
       aria-label={`Open activity feed. Last live ${formatLastLiveLabel(lastLiveAt, Date.now())}.`}
-      className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl bg-muted text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="relative flex h-56 cursor-pointer flex-col overflow-hidden rounded-2xl border bg-background text-left shadow-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       data-testid={`user-profile-live-activity-${activityAgent.pubkey}`}
     >
       <button
@@ -570,7 +570,7 @@ function ProfileLiveActivityEmbed({
         </CarouselContent>
       </Carousel>
       <div className="pointer-events-none absolute inset-0 z-20">
-        <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-muted via-muted/80 to-transparent px-3 pb-3 pt-16">
+        <div className="absolute inset-x-0 bottom-0 flex flex-col items-start bg-linear-to-t from-background via-background/80 to-transparent px-3 pb-3 pt-16">
           <div className="min-w-0">
             <span className="block text-sm font-semibold text-muted-foreground">
               Latest Activity
