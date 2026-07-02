@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   KIND_GROUPS,
   buildFinalKinds,
+  buildSubscriptionRequest,
   isGroupFullyChecked,
   isGroupIndeterminate,
   parseCustomKinds,
@@ -261,4 +262,94 @@ test("parseCustomKinds_malformedInput_onlyValidReturned", () => {
   const { valid, invalid } = parseCustomKinds("hello 99999 1.5 88888 -2");
   assert.deepEqual(valid, [99999, 88888]);
   assert.deepEqual(invalid, ["hello", "1.5", "-2"]);
+});
+
+// ── buildSubscriptionRequest — six acceptance cases ───────────────────────────
+
+// Helper: get all kinds in a named group
+function kindsOfGroupBySR(label) {
+  const g = KIND_GROUPS.find((g) => g.label === label);
+  if (!g) throw new Error(`group not found: ${label}`);
+  return g.items.map((i) => i.kind);
+}
+
+test("buildSubscriptionRequest_singleKindSelection_exactKindsArray", () => {
+  const req = buildSubscriptionRequest(
+    "channel_h",
+    "channel-abc",
+    new Set([9]),
+    [],
+  );
+  assert.ok(req !== null);
+  assert.equal(req.scopeType, "channel_h");
+  assert.equal(req.scopeValue, "channel-abc");
+  assert.deepEqual(req.kinds, [9]);
+});
+
+test("buildSubscriptionRequest_groupHeaderToggle_allKindsInGroup", () => {
+  const messagesKinds = kindsOfGroupBySR("Messages & posts");
+  const req = buildSubscriptionRequest(
+    "channel_h",
+    "channel-abc",
+    new Set(messagesKinds),
+    [],
+  );
+  assert.ok(req !== null);
+  assert.deepEqual(
+    req.kinds,
+    [...messagesKinds].sort((a, b) => a - b),
+  );
+});
+
+test("buildSubscriptionRequest_groupPlusCustomKind_unionDedupedSorted", () => {
+  const messagesKinds = kindsOfGroupBySR("Messages & posts");
+  const customKinds = [99999, 88888];
+  const req = buildSubscriptionRequest(
+    "channel_h",
+    "channel-abc",
+    new Set(messagesKinds),
+    customKinds,
+  );
+  assert.ok(req !== null);
+  // Must be sorted ascending
+  const sorted = [...req.kinds].sort((a, b) => a - b);
+  assert.deepEqual(req.kinds, sorted, "kinds must be sorted");
+  // Must include all messages kinds and both custom kinds
+  for (const k of messagesKinds) {
+    assert.ok(req.kinds.includes(k), `missing messages kind ${k}`);
+  }
+  assert.ok(req.kinds.includes(99999));
+  assert.ok(req.kinds.includes(88888));
+  // No duplicates
+  assert.equal(req.kinds.length, new Set(req.kinds).size);
+});
+
+test("buildSubscriptionRequest_emptySelectionChannelH_returnsNull", () => {
+  // Empty selection blocks Add — buildSubscriptionRequest returns null
+  const req = buildSubscriptionRequest(
+    "channel_h",
+    "channel-abc",
+    new Set(),
+    [],
+  );
+  assert.equal(req, null);
+});
+
+test("buildSubscriptionRequest_observerSourceFixedKind_exactlyKind24200", () => {
+  const req = buildSubscriptionRequest(
+    "owner_p",
+    "pubkey-abc",
+    new Set(), // checked kinds ignored for owner_p
+    [],
+  );
+  assert.ok(req !== null);
+  assert.equal(req.scopeType, "owner_p");
+  assert.equal(req.scopeValue, "pubkey-abc");
+  assert.deepEqual(req.kinds, [24200]);
+});
+
+test("buildSubscriptionRequest_emptyPubkeyOwnerP_returnsNull", () => {
+  // Empty pubkey (identity not yet loaded) blocks owner_p Add
+  const req = buildSubscriptionRequest("owner_p", "", new Set(), []);
+  assert.equal(req, null);
 });

@@ -1,11 +1,12 @@
 import {
   CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_MESSAGE_EVENT_KINDS,
-  KIND_STREAM_MESSAGE_DIFF,
-  KIND_HUDDLE_STARTED,
+  KIND_AGENT_OBSERVER_FRAME,
+  KIND_HUDDLE_ENDED,
   KIND_HUDDLE_PARTICIPANT_JOINED,
   KIND_HUDDLE_PARTICIPANT_LEFT,
-  KIND_HUDDLE_ENDED,
+  KIND_HUDDLE_STARTED,
+  KIND_STREAM_MESSAGE_DIFF,
   KIND_SYSTEM_MESSAGE,
 } from "@/shared/constants/kinds";
 
@@ -209,4 +210,42 @@ export function toggleKind(
     next.add(kind);
   }
   return next;
+}
+
+// ── Subscription request builder ──────────────────────────────────────────────
+
+export type SubscriptionRequest = {
+  scopeType: "channel_h" | "owner_p";
+  scopeValue: string;
+  kinds: number[];
+};
+
+/**
+ * Build the final subscription request to pass to `createSaveSubscription`.
+ *
+ * - For `owner_p`: kinds is always `[KIND_AGENT_OBSERVER_FRAME]`, scopeValue is
+ *   the identity pubkey.
+ * - For `channel_h`: kinds is the sorted deduped union of checkedKinds and
+ *   customKinds; scopeValue is the channel id.
+ *
+ * Returns `null` when the request would be invalid (empty pubkey for owner_p,
+ * empty channelId or zero kinds for channel_h).
+ */
+export function buildSubscriptionRequest(
+  source: "channel_h" | "owner_p",
+  scopeValue: string,
+  checkedKinds: ReadonlySet<number>,
+  customKinds: ReadonlyArray<number>,
+): SubscriptionRequest | null {
+  if (!scopeValue) return null;
+  if (source === "owner_p") {
+    return {
+      scopeType: "owner_p",
+      scopeValue,
+      kinds: [KIND_AGENT_OBSERVER_FRAME],
+    };
+  }
+  const kinds = buildFinalKinds(checkedKinds, customKinds);
+  if (kinds.length === 0) return null;
+  return { scopeType: "channel_h", scopeValue, kinds };
 }
