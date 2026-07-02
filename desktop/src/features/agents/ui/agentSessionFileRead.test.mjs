@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildFileReadContent } from "./agentSessionFileRead.ts";
+import {
+  buildFileReadContent,
+  buildSkillReadContent,
+} from "./agentSessionFileRead.ts";
 
 const baseDescriptor = {
   renderClass: "file-read",
@@ -66,4 +69,73 @@ test("buildFileReadContent handles empty result text", () => {
     buildFileReadContent(makeTool({ result: "   " }), baseDescriptor),
     null,
   );
+});
+
+const skillDescriptor = {
+  renderClass: "skill-read",
+  label: "Read skill",
+  preview: "block-safe-github",
+  groupKey: "skill:load",
+};
+
+test("buildSkillReadContent returns null for non skill-read render class", () => {
+  assert.equal(
+    buildSkillReadContent(
+      makeTool({
+        toolName: "load_skill",
+        args: { name: "block-safe-github" },
+      }),
+      baseDescriptor,
+    ),
+    null,
+  );
+});
+
+test("buildSkillReadContent maps skill body into file content panel", () => {
+  const content = buildSkillReadContent(
+    makeTool({
+      toolName: "load_skill",
+      args: { name: "block-safe-github" },
+      result:
+        "# Safe GitHub usage at Block\n\nAll Block code must live in org repos.",
+      descriptor: skillDescriptor,
+    }),
+    skillDescriptor,
+  );
+
+  assert.ok(content);
+  assert.equal(content.path, "block-safe-github");
+  assert.equal(content.footerText, "block-safe-github/SKILL.md");
+  assert.equal(content.lines.length, 3);
+  assert.equal(content.lines[0]?.text, "# Safe GitHub usage at Block");
+  assert.equal(
+    content.lines[2]?.text,
+    "All Block code must live in org repos.",
+  );
+});
+
+test("buildSkillReadContent uses the supporting-file path in the footer", () => {
+  const skillRef = "block-safe-github/references/foo.md";
+  const content = buildSkillReadContent(
+    makeTool({
+      toolName: "load_skill",
+      args: { name: skillRef },
+      result: "# Reference\n",
+      descriptor: {
+        ...skillDescriptor,
+        label: "Read skill file",
+        preview: skillRef,
+        groupKey: "skill:load-file",
+      },
+    }),
+    {
+      ...skillDescriptor,
+      label: "Read skill file",
+      preview: skillRef,
+      groupKey: "skill:load-file",
+    },
+  );
+
+  assert.ok(content);
+  assert.equal(content.footerText, skillRef);
 });

@@ -137,6 +137,29 @@ test("buildCompactToolSummary formats read_file path preview", () => {
   assert.ok(summary.fileReadContent);
 });
 
+test("buildCompactToolSummary formats load_skill into skill-read file panel", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "load_skill",
+      args: { name: "block-safe-github" },
+      result: "# Safe GitHub usage at Block\n",
+    }),
+  );
+
+  assert.equal(summary.kind, "skill-read");
+  assert.equal(summary.label, "Read skill");
+  assert.equal(summary.preview, "block-safe-github");
+  assert.deepEqual(summary.action, {
+    verb: "Read",
+    object: "block-safe-github",
+  });
+  assert.ok(summary.fileReadContent);
+  assert.equal(
+    summary.fileReadContent?.footerText,
+    "block-safe-github/SKILL.md",
+  );
+});
+
 test("buildCompactToolSummary formats todo list preview", () => {
   const summary = buildCompactToolSummary(
     makeTool({

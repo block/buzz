@@ -88,6 +88,7 @@ const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
   "relay-op": "Buzz relay op",
   "file-edit": "File edit",
   "file-read": "File read",
+  "skill-read": "Skill read",
   image: "Image",
   shell: "Shell command",
   status: "Status",
@@ -101,6 +102,7 @@ const TOOL_CLASS_LABELS: Record<AgentActivityRenderClass, string> = {
 };
 
 const providers: ToolClassifierProvider[] = [
+  classifyLoadSkillTool,
   classifyDeveloperHarnessTool,
   classifyBuzzTool,
 ];
@@ -139,6 +141,28 @@ export function classifyToolItem(item: ToolItem): AgentActivityDescriptor {
 
 export function renderClassLabel(renderClass: AgentActivityRenderClass) {
   return TOOL_CLASS_LABELS[renderClass];
+}
+
+function classifyLoadSkillTool(
+  input: ToolClassificationInput,
+): AgentActivityDescriptor | null {
+  const isLoadSkill = [input.toolName, input.title, input.buzzToolName].some(
+    (value) => value && normalizeToolNameText(value) === "load_skill",
+  );
+  if (!isLoadSkill) return null;
+
+  const skillRef = getToolString(input.args, ["name"]);
+  const object = skillRef ?? "skill";
+  const isSupportingFile = skillRef?.includes("/") ?? false;
+
+  return {
+    renderClass: "skill-read",
+    label: isSupportingFile ? "Read skill file" : "Read skill",
+    preview: skillRef,
+    action: { verb: "Read", object },
+    source: "harness",
+    groupKey: isSupportingFile ? "skill:load-file" : "skill:load",
+  };
 }
 
 function classifyDeveloperHarnessTool(

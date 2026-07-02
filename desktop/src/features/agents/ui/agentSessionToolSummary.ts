@@ -13,6 +13,7 @@ import {
 } from "./agentSessionFileEditDiff";
 import {
   buildFileReadContent,
+  buildSkillReadContent,
   type FileReadContent,
 } from "./agentSessionFileRead";
 import {
@@ -25,6 +26,7 @@ export type CompactToolKind =
   | "relay-op"
   | "file-edit"
   | "file-read"
+  | "skill-read"
   | "image"
   | "shell"
   | "status"
@@ -68,7 +70,9 @@ export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
         deletions: fileEditDiff.deletions,
       }
     : null;
-  const fileReadContent = buildFileReadContent(item, descriptor);
+  const fileReadContent =
+    buildFileReadContent(item, descriptor) ??
+    buildSkillReadContent(item, descriptor);
   const imageContent = buildImageContent(item, descriptor);
   const shellContent = buildShellContent(item, descriptor);
   const thumbnailSrc = imageContent?.src ?? null;
