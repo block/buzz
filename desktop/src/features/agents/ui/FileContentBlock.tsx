@@ -64,11 +64,13 @@ export function FileContentBlock({
 
   return (
     <div className="flex max-h-64 flex-col overflow-hidden rounded-md border border-border/50 bg-muted/35 text-xs leading-5 text-foreground">
-      <pre className="min-h-0 flex-1 overflow-auto py-2 font-mono">
-        <FileContentLines lines={lines} />
-      </pre>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <pre className="py-2 font-mono">
+          <FileContentLines lines={lines} />
+        </pre>
+      </div>
       <div
-        className="truncate border-t border-border/50 px-3 py-1.5 text-xs font-normal text-muted-foreground/70"
+        className="relative z-10 shrink-0 truncate border-t border-border/50 bg-muted/35 px-3 py-1.5 text-xs font-normal leading-5 text-muted-foreground/70"
         title={footerTitle ?? resolvedFooterText}
       >
         {resolvedFooterText}
