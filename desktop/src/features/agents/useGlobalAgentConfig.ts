@@ -1,11 +1,15 @@
 /**
  * React hook: load the global agent configuration defaults.
  *
- * Fetches once on mount and exposes the config. Error is swallowed and
- * treated as no global config (safe — the absence of a global config is
- * not an error state for callers).
+ * Backed by TanStack Query with a stable query key so the config is fetched
+ * once per QueryClient lifetime and shared across all callers — dialogs always
+ * receive the already-populated value on first render, eliminating the
+ * per-mount IPC race that caused required-env-key rows to be missing on open.
+ *
+ * On fetch error the query falls back to EMPTY_CONFIG (safe — the absence of
+ * a global config is never an error state for callers).
  */
-import * as React from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
@@ -16,31 +20,24 @@ const EMPTY_CONFIG: GlobalAgentConfig = {
   model: null,
 };
 
+export const globalAgentConfigQueryKey = ["globalAgentConfig"] as const;
+
 export function useGlobalAgentConfig(): {
   globalConfig: GlobalAgentConfig;
   isLoading: boolean;
 } {
-  const [globalConfig, setGlobalConfig] =
-    React.useState<GlobalAgentConfig>(EMPTY_CONFIG);
-  const [isLoading, setIsLoading] = React.useState(true);
+  const { data, isPending } = useQuery({
+    queryKey: globalAgentConfigQueryKey,
+    queryFn: getGlobalAgentConfig,
+    // Config is only mutated via setGlobalAgentConfig — treat as stable until
+    // explicitly invalidated by GlobalAgentConfigSettingsCard after a save.
+    staleTime: Number.POSITIVE_INFINITY,
+    // Never show a stale empty flash while a background refetch runs.
+    placeholderData: EMPTY_CONFIG,
+  });
 
-  React.useEffect(() => {
-    let cancelled = false;
-    getGlobalAgentConfig()
-      .then((config) => {
-        if (!cancelled) {
-          setGlobalConfig(config);
-          setIsLoading(false);
-        }
-      })
-      .catch(() => {
-        // Treat load failure as no global config — never block the dialog.
-        if (!cancelled) setIsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return { globalConfig, isLoading };
+  return {
+    globalConfig: data ?? EMPTY_CONFIG,
+    isLoading: isPending,
+  };
 }

@@ -10,11 +10,14 @@
 import { AlertCircle, Check, Loader } from "lucide-react";
 import * as React from "react";
 
+import { useQueryClient } from "@tanstack/react-query";
+
 import {
   getGlobalAgentConfig,
   setGlobalAgentConfig,
 } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
+import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
 import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import {
@@ -49,6 +52,7 @@ export function GlobalAgentConfigSettingsCard() {
   const savedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const queryClient = useQueryClient();
 
   // Load on mount.
   React.useEffect(() => {
@@ -143,6 +147,11 @@ export function GlobalAgentConfigSettingsCard() {
       setConfig(saved);
       setDirty(false);
       setSaveState("saved");
+      // Invalidate the shared TanStack Query cache so all open dialogs that
+      // call useGlobalAgentConfig() pick up the new values immediately.
+      void queryClient.invalidateQueries({
+        queryKey: globalAgentConfigQueryKey,
+      });
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
       savedTimerRef.current = setTimeout(() => setSaveState("idle"), 2500);
     } catch (err) {
