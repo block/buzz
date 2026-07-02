@@ -191,6 +191,7 @@ impl ActionSink for RelayActionSink {
                     &stored_event,
                     kind_u32,
                     &author_pubkey_hex,
+                    None,
                 )
                 .await;
             }

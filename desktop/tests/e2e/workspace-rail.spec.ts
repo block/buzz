@@ -73,6 +73,34 @@ test.describe("workspace rail", () => {
       .toBe(WORKSPACE_B.id);
   });
 
+  test("shows the quiet switch gate, not the boot splash, while switching", async ({
+    page,
+  }) => {
+    // Slow down apply_workspace so the loading phase is observable.
+    await installMockBridge(
+      page,
+      { applyWorkspaceDelayMs: 800 },
+      { skipWorkspaceSeed: true },
+    );
+    await seedWorkspaces(page, [WORKSPACE_A, WORKSPACE_B], WORKSPACE_A.id);
+    await page.goto("/");
+
+    // Cold boot still uses the full splash.
+    await expect(page.getByTestId("app-loading-gate")).toBeVisible();
+    const buttonB = page.getByTestId(`workspace-rail-button-${WORKSPACE_B.id}`);
+    await expect(buttonB).toBeVisible();
+
+    await buttonB.click();
+
+    // The switch renders the quiet gate; the "Setting up your workspace"
+    // splash must not reappear.
+    await expect(page.getByTestId("workspace-switch-gate")).toBeVisible();
+    await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
+
+    // The app settles into the new workspace once apply completes.
+    await expect(buttonB).toHaveAttribute("aria-current", "true");
+  });
+
   test("hides the rail with a single workspace", async ({ page }) => {
     await installMockBridge(page, undefined, { skipWorkspaceSeed: true });
     await seedWorkspaces(page, [WORKSPACE_A], WORKSPACE_A.id);

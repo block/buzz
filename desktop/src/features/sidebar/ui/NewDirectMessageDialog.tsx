@@ -12,7 +12,9 @@ import {
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import {
-  useUserSearchQuery,
+  useFlattenedUserSearchResults,
+  useInfiniteUserSearchQuery,
+  useUserSearchFetchMoreOnScroll,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { truncatePubkey } from "@/features/profile/lib/identity";
@@ -319,11 +321,12 @@ export function NewDirectMessageDialog({
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: open });
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: open });
   const channelsQuery = useChannelsQuery({ enabled: open });
-  const userSearchQuery = useUserSearchQuery(deferredSearchQuery, {
+  const userSearchQuery = useInfiniteUserSearchQuery(deferredSearchQuery, {
     allowEmpty: true,
     enabled: open && !hasReachedRecipientLimit,
     limit: DIRECT_MESSAGE_RECIPIENT_LIMIT,
   });
+  const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const isArchivedDiscovery = useIsArchivedPredicate();
   const searchResults = React.useMemo(() => {
     const candidatesByPubkey = new Map<string, DirectMessageSearchCandidate>();
@@ -384,7 +387,7 @@ export function NewDirectMessageDialog({
       });
     };
 
-    for (const user of userSearchQuery.data ?? []) {
+    for (const user of userSearchResults) {
       addCandidate(
         directMessageCandidateWithAgentMetadata(user, managedAgentsByPubkey),
       );
@@ -430,7 +433,10 @@ export function NewDirectMessageDialog({
       allowEmptyQuery: true,
       candidates: coalescedCandidates,
       getLabel: formatUserName,
-      limit: DIRECT_MESSAGE_RECIPIENT_LIMIT,
+      limit: Math.max(
+        DIRECT_MESSAGE_RECIPIENT_LIMIT,
+        coalescedCandidates.length,
+      ),
       query: deferredSearchQuery,
     });
   }, [
@@ -441,13 +447,17 @@ export function NewDirectMessageDialog({
     managedAgentsQuery.data,
     relayAgentsQuery.data,
     selectedPubkeys,
-    userSearchQuery.data,
+    userSearchResults,
   ]);
   const isDirectoryLoading =
     userSearchQuery.isLoading ||
     managedAgentsQuery.isLoading ||
     relayAgentsQuery.isLoading ||
     channelsQuery.isLoading;
+  const handleDirectoryScroll = useUserSearchFetchMoreOnScroll(
+    userSearchQuery,
+    !hasReachedRecipientLimit,
+  );
 
   const searchOwnerPubkeys = React.useMemo(
     () => [
@@ -699,7 +709,11 @@ export function NewDirectMessageDialog({
               opacity: hasReachedRecipientLimit ? 0 : 1,
             }}
           >
-            <div className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70">
+            <div
+              className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
+              data-testid="new-dm-results"
+              onScroll={handleDirectoryScroll}
+            >
               {searchResults.length > 0 ? (
                 <div>
                   {searchResults.map((user) => {

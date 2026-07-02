@@ -810,7 +810,7 @@ async fn emit_addressable_discovery_event(
         .await?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
-        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex).await;
+        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
     }
     Ok(())
 }
@@ -1826,11 +1826,16 @@ async fn handle_a_tag_deletion(
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                state
+                let channel_id = state
                     .db
                     .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
                     .await
                     .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
+                if let Some(channel_id) = channel_id {
+                    state
+                        .workflow_engine
+                        .invalidate_channel_workflows(tenant.community(), channel_id);
+                }
                 tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
             } else {
                 // Name-based lookup
@@ -1840,13 +1845,18 @@ async fn handle_a_tag_deletion(
                     .await
                 {
                     Ok(Some(wf)) => {
-                        state
+                        let channel_id = state
                             .db
                             .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
                             })?;
+                        if let Some(channel_id) = channel_id {
+                            state
+                                .workflow_engine
+                                .invalidate_channel_workflows(tenant.community(), channel_id);
+                        }
                         tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
                     }
                     Ok(None) => {
@@ -2552,6 +2562,7 @@ pub async fn publish_nip43_membership_list(
             &stored,
             KIND_NIP43_MEMBERSHIP_LIST,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }
@@ -2727,6 +2738,7 @@ pub async fn publish_nipia_archival_list(
             &stored,
             KIND_IA_ARCHIVED_LIST,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }
@@ -2813,6 +2825,7 @@ pub async fn publish_dm_visibility_snapshot(
             &stored,
             KIND_DM_VISIBILITY,
             &relay_pubkey_hex,
+            None,
         )
         .await;
     }
@@ -2876,7 +2889,7 @@ async fn publish_nipia_delta(
         return Ok(());
     }
 
-    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex).await;
+    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
 
     info!(
         target = %target_pubkey_hex,

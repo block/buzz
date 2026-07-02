@@ -868,6 +868,7 @@ function MessageComposerImpl({
               }
             />
             <MentionAutocomplete
+              onFetchMore={mentions.fetchMoreSuggestions}
               onSelect={applyMentionInsert}
               selectedIndex={mentions.mentionSelectedIndex}
               suggestions={mentions.isMentionOpen ? mentions.suggestions : []}

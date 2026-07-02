@@ -18,7 +18,7 @@ import {
   getSharedChannelIds,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
-  useUserSearchQuery,
+  useInfiniteUserSearchQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -145,13 +145,9 @@ export function useMentions(
   const personaMentionMapRef = React.useRef<Map<string, string>>(new Map());
   const previousSuggestionsRef = React.useRef<MentionSuggestion[]>([]);
 
-  const canSearchAllUsers =
-    options?.channelType === "dm" ||
-    options?.channelType === "stream" ||
-    options?.channelType === "forum";
+  void options?.channelType;
   const mentionSearchQuery = mentionQuery?.trim() ?? "";
-  const canSearchGlobalPeople =
-    canSearchAllUsers && mentionSearchQuery.length > 0;
+  const canSearchGlobalPeople = mentionSearchQuery.length > 0;
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey
     ? normalizePubkey(identityQuery.data.pubkey)
@@ -175,11 +171,15 @@ export function useMentions(
     canSearchGlobalPeople &&
     managedAgentDirectoryReady &&
     relayAgentDirectoryReady;
-  const userSearchQuery = useUserSearchQuery(mentionQuery ?? "", {
+  const userSearchQuery = useInfiniteUserSearchQuery(mentionQuery ?? "", {
     allowEmpty: true,
     enabled: canSearchGlobalUsers && mentionQuery !== null,
     limit: MENTION_SUGGESTION_LIMIT,
   });
+  const userSearchResults = React.useMemo(
+    () => userSearchQuery.data?.pages.flatMap((page) => page.users) ?? [],
+    [userSearchQuery.data],
+  );
   const managedAgentNamesByPubkey = React.useMemo(
     () =>
       new Map(
@@ -365,36 +365,34 @@ export function useMentions(
       });
     }
 
-    if (canSearchAllUsers) {
-      for (const agent of relayAgentsQuery.data ?? []) {
-        addCandidate({
-          kind: "identity",
-          pubkey: agent.pubkey,
-          displayName: agent.name,
-          isMember: false,
-          ownerPubkey: null,
-          isAgent: true,
-        });
-      }
+    for (const agent of relayAgentsQuery.data ?? []) {
+      addCandidate({
+        kind: "identity",
+        pubkey: agent.pubkey,
+        displayName: agent.name,
+        isMember: false,
+        ownerPubkey: null,
+        isAgent: true,
+      });
+    }
 
-      for (const agent of managedAgentsQuery.data ?? []) {
-        addCandidate({
-          kind: "identity",
-          pubkey: agent.pubkey,
-          displayName: agent.name,
-          isMember: false,
-          isAgent: true,
-          isManagedAgent: true,
-          personaId: agent.personaId ?? undefined,
-          personaName:
-            personaNameByPubkey.get(normalizePubkey(agent.pubkey)) ?? null,
-          ownerPubkey: currentPubkey,
-        });
-      }
+    for (const agent of managedAgentsQuery.data ?? []) {
+      addCandidate({
+        kind: "identity",
+        pubkey: agent.pubkey,
+        displayName: agent.name,
+        isMember: false,
+        isAgent: true,
+        isManagedAgent: true,
+        personaId: agent.personaId ?? undefined,
+        personaName:
+          personaNameByPubkey.get(normalizePubkey(agent.pubkey)) ?? null,
+        ownerPubkey: currentPubkey,
+      });
     }
 
     if (canSearchGlobalUsers) {
-      for (const user of userSearchQuery.data ?? []) {
+      for (const user of userSearchResults) {
         addCandidate({
           kind: "identity",
           pubkey: user.pubkey,
@@ -445,7 +443,7 @@ export function useMentions(
     );
   }, [
     activePersonas,
-    canSearchAllUsers,
+    userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
     isArchivedDiscovery,
@@ -460,7 +458,6 @@ export function useMentions(
     profiles,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
-    userSearchQuery.data,
   ]);
 
   const ownerPubkeys = React.useMemo(
@@ -566,7 +563,7 @@ export function useMentions(
       mentionQuery,
       activePersonaIds,
     )
-      .slice(0, MENTION_SUGGESTION_LIMIT)
+      .slice(0, Math.max(MENTION_SUGGESTION_LIMIT, mentionCandidates.length))
       .map(({ candidate, label }) => {
         const ownerLabel = candidate.isAgent
           ? formatOwnerLabel(
@@ -605,6 +602,12 @@ export function useMentions(
     ownerProfilesQuery.data?.profiles,
     profiles,
   ]);
+
+  const fetchMoreSuggestions = React.useCallback(() => {
+    if (userSearchQuery.hasNextPage && !userSearchQuery.isFetchingNextPage) {
+      void userSearchQuery.fetchNextPage();
+    }
+  }, [userSearchQuery]);
 
   const suggestions = React.useMemo<MentionSuggestion[]>(() => {
     if (mentionQuery === null) {
@@ -951,6 +954,9 @@ export function useMentions(
     mentionSelectedIndex,
     registerMentionPubkey,
     suggestions,
+    fetchMoreSuggestions,
+    hasMoreSuggestions: Boolean(userSearchQuery.hasNextPage),
+    isFetchingMoreSuggestions: userSearchQuery.isFetchingNextPage,
     updateMentionQuery,
   };
 }
