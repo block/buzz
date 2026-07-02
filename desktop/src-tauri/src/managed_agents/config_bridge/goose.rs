@@ -53,15 +53,21 @@ fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
     if let Some(ref ap) = active_provider {
         extra.insert("active_provider".to_string(), ap.clone());
     }
-    if let Some(host) = yaml_string(&map, "DATABRICKS_HOST")
-        .or_else(|| nested.as_ref().and_then(|n| n.host.clone()))
-    {
+    // Flat DATABRICKS_HOST key — always canonicalize to the literal env-key name
+    // so `file_key_present("DATABRICKS_HOST")` works regardless of active_provider.
+    // This is Will's typical config: flat key, no explicit active_provider.
+    if let Some(flat_host) = yaml_string(&map, "DATABRICKS_HOST") {
+        extra.insert("DATABRICKS_HOST".to_string(), flat_host);
+    } else if let Some(nested_host) = nested.as_ref().and_then(|n| n.host.clone()) {
+        // Nested providers.<name>.host — canonicalize to DATABRICKS_HOST when
+        // the active provider is a databricks variant; otherwise store verbatim
+        // (future provider types may have a different canonical key).
         let host_key = match active_provider.as_deref() {
             Some("databricks_v2") | Some("databricks") => "DATABRICKS_HOST".to_string(),
             Some(p) => format!("{p}.host"),
             None => "provider.host".to_string(),
         };
-        extra.insert(host_key, host);
+        extra.insert(host_key, nested_host);
     }
 
     Some(RuntimeFileConfig {
@@ -267,6 +273,31 @@ GOOSE_TELEMETRY_ENABLED: false
 "#;
         let cfg = parse_goose_config(yaml).unwrap();
         assert_eq!(cfg.provider.as_deref(), Some("databricks"));
+        // The flat DATABRICKS_HOST key must be canonical in extra so that
+        // `file_key_present("DATABRICKS_HOST")` returns true.  This is Will's
+        // typical config — flat key, no active_provider.
+        assert_eq!(
+            cfg.extra.get("DATABRICKS_HOST").map(|s| s.as_str()),
+            Some("https://block-lakehouse-production.cloud.databricks.com/"),
+            "flat DATABRICKS_HOST must be stored as 'DATABRICKS_HOST' in extra"
+        );
+    }
+
+    #[test]
+    fn goose_provider_databricks_flat_host_no_active_provider() {
+        // GOOSE_PROVIDER=databricks + flat DATABRICKS_HOST, no active_provider.
+        // extra["DATABRICKS_HOST"] must be canonical.
+        let yaml = r#"
+GOOSE_PROVIDER: databricks
+DATABRICKS_HOST: https://dbc.example.com
+"#;
+        let cfg = parse_goose_config(yaml).unwrap();
+        assert_eq!(cfg.provider.as_deref(), Some("databricks"));
+        assert_eq!(
+            cfg.extra.get("DATABRICKS_HOST").map(|s| s.as_str()),
+            Some("https://dbc.example.com"),
+            "flat DATABRICKS_HOST must be stored as 'DATABRICKS_HOST' even with GOOSE_PROVIDER set"
+        );
     }
 
     #[test]

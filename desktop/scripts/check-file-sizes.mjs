@@ -92,7 +92,8 @@ const overrides = new Map([
   // (4 new tests in goose_file_config_tests module) + test-determinism fixes
   // for the 3 existing goose tests that previously read real disk config.
   // New file in this PR; queued to split.
-  ["src-tauri/src/managed_agents/readiness.rs", 1096],
+  // +2 readiness integration tests for flat-DATABRICKS_HOST canonicalization fix.
+  ["src-tauri/src/managed_agents/readiness.rs", 1149],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
