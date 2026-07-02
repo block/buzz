@@ -35,6 +35,12 @@ export type BuzzLogoAnimationProps = {
   className?: string;
   fullScreen?: boolean;
   loop?: boolean;
+  /**
+   * When looping, hide the mark for this many seconds between plays. The morph
+   * runs at its native speed, then the mark disappears for the rest window
+   * before the cycle repeats. Only applies when `loop` is true.
+   */
+  loopRestSeconds?: number;
   reverse?: boolean;
   showBackground?: boolean;
   style?: CSSProperties;
@@ -580,11 +586,47 @@ function InkShapes({
   );
 }
 
+/**
+ * Hides the parent group during the rest window of a stretched loop cycle:
+ * fully visible while the morph plays, then a quick fade to invisible for the
+ * remainder of the cycle. SMIL `<animate>` targets its parent element.
+ */
+function RestWindowFade({
+  cycleSeconds,
+  morphSeconds,
+  repeatCount,
+}: {
+  cycleSeconds: number;
+  morphSeconds: number;
+  repeatCount: string;
+}) {
+  const fadeSeconds = 0.15;
+  const visibleEnd = morphSeconds / cycleSeconds;
+  const fadeEnd = Math.min((morphSeconds + fadeSeconds) / cycleSeconds, 1);
+  const keyTimes = ["0", visibleEnd.toFixed(4), fadeEnd.toFixed(4), "1"].join(
+    ";",
+  );
+
+  return (
+    <animate
+      attributeName="opacity"
+      begin="indefinite"
+      calcMode="linear"
+      dur={`${cycleSeconds}s`}
+      fill={repeatCount === LOOP ? "remove" : "freeze"}
+      keyTimes={keyTimes}
+      repeatCount={repeatCount}
+      values="1;1;0;0"
+    />
+  );
+}
+
 export default function BuzzLogoAnimation({
   ariaLabel = "Buzz logo animation",
   className = "",
   fullScreen = true,
   loop = false,
+  loopRestSeconds = 0,
   reverse = false,
   showBackground = true,
   style,
@@ -593,7 +635,21 @@ export default function BuzzLogoAnimation({
 }: BuzzLogoAnimationProps) {
   const markRef = useRef<SVGSVGElement>(null);
   const idSuffix = idPart(useId());
-  const config = VARIANTS[variant] ?? VARIANTS.v8;
+  const baseConfig = VARIANTS[variant] ?? VARIANTS.v8;
+  const restSeconds = loop ? Math.max(loopRestSeconds, 0) : 0;
+  const morphSeconds = Number.parseFloat(baseConfig.duration);
+  const cycleSeconds = morphSeconds + restSeconds;
+  // Stretch the loop period to morph + rest, packing the morph keyframes into
+  // the start of the cycle at native speed. scaleTiming holds the final values
+  // for the remainder; the rest-window opacity animation below hides them.
+  const config =
+    restSeconds > 0
+      ? scaleVariant(
+          baseConfig,
+          `${cycleSeconds}s`,
+          morphSeconds / cycleSeconds,
+        )
+      : baseConfig;
   const animatedConfig = reverse ? reverseVariant(config) : config;
   const repeatCount = loop ? LOOP : "1";
   const maskId = `buzz-logo-cutouts-${idSuffix}`;
@@ -623,7 +679,7 @@ export default function BuzzLogoAnimation({
       animation.beginElement?.();
     });
     svg.unpauseAnimations?.();
-  }, [loop, reverse, textured, variant]);
+  }, [loop, reverse, restSeconds, textured, variant]);
 
   return (
     <div className={classes} style={style} role="img" aria-label={ariaLabel}>
@@ -645,6 +701,13 @@ export default function BuzzLogoAnimation({
           {textured && <TextureFilter id={textureId} texture={texture} />}
         </defs>
         <g filter={textured ? `url(#${textureId})` : undefined}>
+          {restSeconds > 0 ? (
+            <RestWindowFade
+              cycleSeconds={cycleSeconds}
+              morphSeconds={morphSeconds}
+              repeatCount={repeatCount}
+            />
+          ) : null}
           <g mask={`url(#${maskId})`}>
             <InkShapes
               config={animatedConfig}
