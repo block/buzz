@@ -708,3 +708,233 @@ async fn databricks_v2_other_models_route_through_ai_gateway_mlflow_chat() {
         req.body
     );
 }
+
+// ---------- session/set_model integration tests ----------
+
+/// Helper: run initialize + session/new + optional set_model + session/prompt on a
+/// freshly-spawned harness against the given stub server base URL. Returns the
+/// session/prompt response and the session ID so callers can also call set_model.
+async fn run_with_set_model(
+    provider: &str,
+    base: &str,
+    initial_model: &str,
+    switch_to_model: Option<&str>,
+) -> (String, serde_json::Value) {
+    let mut h = AgentHarness::spawn_provider(provider, base, initial_model).await;
+    h.send(
+        "initialize",
+        json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+    )
+    .await;
+    h.recv_for(1).await;
+    h.send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let r = h.recv_for(2).await;
+    let sid = r["result"]["sessionId"].as_str().unwrap().to_string();
+
+    if let Some(new_model) = switch_to_model {
+        h.send(
+            "session/set_model",
+            json!({ "sessionId": sid, "modelId": new_model }),
+        )
+        .await;
+        let set_r = h.recv_for(3).await;
+        // Verify the response carries the expected modelId.
+        assert_eq!(
+            set_r["result"]["modelId"],
+            json!(new_model),
+            "set_model response must echo the new modelId"
+        );
+        h.send(
+            "session/prompt",
+            json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "say ok" }] }),
+        )
+        .await;
+        let prompt_r = h.recv_for(4).await;
+        (sid, prompt_r)
+    } else {
+        h.send(
+            "session/prompt",
+            json!({ "sessionId": sid, "prompt": [{ "type": "text", "text": "say ok" }] }),
+        )
+        .await;
+        let prompt_r = h.recv_for(3).await;
+        (sid, prompt_r)
+    }
+}
+
+/// After session/set_model switches from model A to model B, the next
+/// session/prompt must route to B's Databricks serving-endpoint URL and
+/// strip the `model` field from the body (legacy Databricks behaviour).
+#[tokio::test]
+async fn session_set_model_switches_databricks_legacy_route() {
+    let initial_model = "initial-model";
+    let switched_model = "switched-model";
+
+    // Two canned responses: one for the discovery call (session/new),
+    // one for the LLM call after the switch.
+    let canned = vec![
+        json!({ "endpoints": [], "next_page_token": null }), // discovery
+        json!({                                               // LLM response
+            "id": "x",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        }),
+    ];
+    let (base, captured) = spawn_capturing_server(canned).await;
+    run_with_set_model("databricks", &base, initial_model, Some(switched_model)).await;
+
+    let reqs = captured.lock().await;
+    let llm_reqs: Vec<_> = reqs
+        .iter()
+        .filter(|r| {
+            !r.path.starts_with("/api/2.0/serving-endpoints")
+                && !r.path.starts_with("/api/ai-gateway/v2/endpoints")
+        })
+        .collect();
+    assert_eq!(
+        llm_reqs.len(),
+        1,
+        "expected exactly one LLM request after switch"
+    );
+    let req = &llm_reqs[0];
+
+    // The request must go to the SWITCHED model endpoint, not the initial one.
+    assert_eq!(
+        req.path.as_str(),
+        format!("/serving-endpoints/{switched_model}/invocations"),
+        "Databricks legacy must route to the switched model endpoint"
+    );
+    // The body must not include `model` (Databricks rejects it).
+    assert!(
+        req.body.get("model").is_none(),
+        "request body must NOT include `model` after switch: {:?}",
+        req.body
+    );
+}
+
+/// After session/set_model switches a Databricks v2 session from a GPT-5 model
+/// (OpenAI Responses route) to a Claude model (Anthropic Messages route),
+/// the next prompt must hit the Anthropic AI Gateway path.
+#[tokio::test]
+async fn session_set_model_switches_databricks_v2_route() {
+    let initial_model = "databricks-gpt-5-5"; // → OpenAI Responses
+    let switched_model = "databricks-claude-opus-4-7"; // → Anthropic Messages
+
+    let canned = vec![
+        json!({ "endpoints": [], "next_page_token": null }), // discovery (v2: /api/ai-gateway/v2/endpoints)
+        json!({                                               // LLM response (Anthropic Messages shape)
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "ok" }]
+        }),
+    ];
+    let (base, captured) = spawn_capturing_server(canned).await;
+    run_with_set_model("databricks_v2", &base, initial_model, Some(switched_model)).await;
+
+    let reqs = captured.lock().await;
+    let llm_reqs: Vec<_> = reqs
+        .iter()
+        .filter(|r| {
+            !r.path.starts_with("/api/2.0/serving-endpoints")
+                && !r.path.starts_with("/api/ai-gateway/v2/endpoints")
+        })
+        .collect();
+    assert_eq!(
+        llm_reqs.len(),
+        1,
+        "expected exactly one LLM request after v2 route switch"
+    );
+    let req = &llm_reqs[0];
+
+    assert_eq!(
+        req.path.as_str(),
+        "/ai-gateway/anthropic/v1/messages",
+        "After switching to a Claude model, Databricks v2 must route to Anthropic Messages"
+    );
+    assert_eq!(
+        req.body["model"],
+        json!(switched_model),
+        "body must carry the switched model ID"
+    );
+}
+
+/// session/set_model with an unknown session ID must return an invalid_params
+/// error without touching any LLM endpoint.
+#[tokio::test]
+async fn session_set_model_unknown_session_returns_error() {
+    // Spawn with a single discovery canned response; no LLM response needed.
+    let canned = vec![json!({ "endpoints": [], "next_page_token": null })];
+    let (base, _captured) = spawn_capturing_server(canned).await;
+
+    let mut h = AgentHarness::spawn_provider("databricks", &base, "some-model").await;
+    h.send(
+        "initialize",
+        json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+    )
+    .await;
+    h.recv_for(1).await;
+    h.send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    h.recv_for(2).await;
+
+    // Call set_model with a bogus session ID.
+    h.send(
+        "session/set_model",
+        json!({ "sessionId": "nonexistent-session-id", "modelId": "new-model" }),
+    )
+    .await;
+    let r = h.recv_for(3).await;
+
+    assert!(
+        r.get("error").is_some(),
+        "set_model with unknown session must return an error: {:?}",
+        r
+    );
+    let msg = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("unknown session"),
+        "error message must mention unknown session, got: {msg}"
+    );
+}
+
+/// session/set_model with an empty modelId must return an invalid_params error.
+#[tokio::test]
+async fn session_set_model_empty_model_id_returns_error() {
+    let canned = vec![json!({ "endpoints": [], "next_page_token": null })];
+    let (base, _captured) = spawn_capturing_server(canned).await;
+
+    let mut h = AgentHarness::spawn_provider("databricks", &base, "some-model").await;
+    h.send(
+        "initialize",
+        json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+    )
+    .await;
+    h.recv_for(1).await;
+    h.send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
+    let r = h.recv_for(2).await;
+    let sid = r["result"]["sessionId"].as_str().unwrap().to_string();
+
+    // Empty string modelId.
+    h.send(
+        "session/set_model",
+        json!({ "sessionId": sid, "modelId": "" }),
+    )
+    .await;
+    let r = h.recv_for(3).await;
+
+    assert!(
+        r.get("error").is_some(),
+        "set_model with empty modelId must return an error: {:?}",
+        r
+    );
+    let msg = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("modelId"),
+        "error message must mention modelId, got: {msg}"
+    );
+}

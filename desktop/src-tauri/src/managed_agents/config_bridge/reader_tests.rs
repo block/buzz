@@ -539,9 +539,10 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
 #[test]
 fn buzz_agent_max_output_tokens_from_env_is_buzz_explicit() {
     let mut record = test_record();
-    record
-        .env_vars
-        .insert("BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(), "8192".to_string());
+    record.env_vars.insert(
+        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+        "8192".to_string(),
+    );
     let runtime = buzz_agent_runtime();
 
     let surface = read_config_surface(&record, Some(runtime), None, None);
@@ -598,12 +599,14 @@ fn buzz_agent_max_tokens_absent_when_no_env_var_or_file() {
 #[test]
 fn buzz_agent_max_tokens_env_var_not_double_surfaced_in_advanced() {
     let mut record = test_record();
-    record
-        .env_vars
-        .insert("BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(), "4096".to_string());
-    record
-        .env_vars
-        .insert("BUZZ_AGENT_MAX_CONTEXT_TOKENS".to_string(), "50000".to_string());
+    record.env_vars.insert(
+        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+        "4096".to_string(),
+    );
+    record.env_vars.insert(
+        "BUZZ_AGENT_MAX_CONTEXT_TOKENS".to_string(),
+        "50000".to_string(),
+    );
     let runtime = buzz_agent_runtime();
 
     let surface = read_config_surface(&record, Some(runtime), None, None);
@@ -642,9 +645,10 @@ fn buzz_agent_thinking_effort_from_env_is_buzz_explicit() {
 #[test]
 fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
     let mut record = test_record();
-    record
-        .env_vars
-        .insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "medium".to_string());
+    record.env_vars.insert(
+        "BUZZ_AGENT_THINKING_EFFORT".to_string(),
+        "medium".to_string(),
+    );
     let runtime = buzz_agent_runtime();
 
     let surface = read_config_surface(&record, Some(runtime), None, None);
