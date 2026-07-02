@@ -348,24 +348,6 @@ export function buildOwnerFields({
     });
   }
 
-  if (managedAgent?.model) {
-    fields.push({
-      copyValue: managedAgent.model,
-      displayValue: managedAgent.model,
-      icon: Cpu,
-      label: "Model",
-      testId: "user-profile-model",
-    });
-  } else if (persona?.model) {
-    fields.push({
-      copyValue: persona.model,
-      displayValue: persona.model,
-      icon: Cpu,
-      label: "Model",
-      testId: "user-profile-model",
-    });
-  }
-
   if (managedAgent?.acpCommand) {
     fields.push({
       copyValue: managedAgent.acpCommand,
