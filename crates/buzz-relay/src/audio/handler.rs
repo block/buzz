@@ -86,7 +86,6 @@ pub async fn ws_audio_handler(
                 .into_response();
         }
     };
-
     let permit = match acquire_audio_connection_permit(&state.conn_semaphore) {
         Some(permit) => permit,
         None => {
@@ -98,12 +97,23 @@ pub async fn ws_audio_handler(
                 .into_response();
         }
     };
+    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        &headers,
+        &state.config.corporate_identity,
+    );
 
     // Keep the parser boundary at the largest message this route accepts. The
     // checks in the receive loop still distinguish text from binary policy, but
     // they run after tungstenite has assembled a message.
     limit_audio_websocket(ws).on_upgrade(move |socket| {
-        handle_audio_connection(socket, state, tenant, channel_id, permit)
+        handle_audio_connection(
+            socket,
+            state,
+            tenant,
+            channel_id,
+            permit,
+            corporate_identity_jwt,
+        )
     })
 }
 
@@ -147,6 +157,7 @@ async fn handle_audio_connection(
     tenant: TenantContext,
     channel_id: Uuid,
     _permit: OwnedSemaphorePermit,
+    corporate_identity_jwt: Option<String>,
 ) {
     let cancel = CancellationToken::new();
     let community_id = tenant.community();
@@ -159,7 +170,16 @@ async fn handle_audio_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_audio_connection(socket, run_state, tenant, channel_id, cancel),
+        move || {
+            handle_active_audio_connection(
+                socket,
+                run_state,
+                tenant,
+                channel_id,
+                cancel,
+                corporate_identity_jwt,
+            )
+        },
     )
     .await;
 }
@@ -170,6 +190,7 @@ async fn handle_active_audio_connection(
     tenant: TenantContext,
     channel_id: Uuid,
     cancel: CancellationToken,
+    corporate_identity_jwt: Option<String>,
 ) {
     let (mut ws_send, mut ws_recv) = socket.split();
 
@@ -240,6 +261,26 @@ async fn handle_active_audio_connection(
     let pubkey_hex = pubkey.to_hex();
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
+
+    if let Err(e) = crate::corporate_identity::enforce_corporate_identity(
+        &state,
+        tenant.community(),
+        pubkey,
+        corporate_identity_jwt.as_deref(),
+        auth_tag_json.as_deref(),
+    )
+    .await
+    {
+        warn!(channel_id = %channel_id, pubkey = %pubkey_hex, error = %e, "audio: corporate identity denied");
+        let _ = ws_send
+            .send(WsMessage::Text(
+                serde_json::json!({"type": "error", "message": e.public_message()})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    }
 
     if crate::api::relay_members::enforce_relay_membership(
         &state,

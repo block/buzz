@@ -595,7 +595,6 @@ mod tests {
             .as_str()
             .contains("CREATE TABLE git_repo_names"));
         assert!(!migrations[0].sql.as_str().contains("git_repo_names"));
-
         // Same additive-migration rule for the per-community workspace icon
         // (NIP-11 `icon`): its own version, never folded into 0001.
         assert_eq!(migrations[2].version, 3);
@@ -879,7 +878,6 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
-
         // Use-limited invite links: durable relay_invites table stores only
         // the SHA-256 of an opaque v2 code, scoped by community_id. Never
         // listed in _operator_global_tables — it is community-scoped.
@@ -904,6 +902,17 @@ mod tests {
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
         );
+
+        // Corporate identity bindings are additive and community-scoped.
+        assert_eq!(migrations[25].version, 26);
+        assert!(migrations[25]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_bindings"));
+        assert!(migrations[25]
+            .sql
+            .as_str()
+            .contains("idx_identity_bindings_active_uid"));
     }
 
     #[test]
@@ -1232,6 +1241,7 @@ mod tests {
             "communities",
             "events",
             "channels",
+            "identity_bindings",
             "scheduled_workflow_fires",
             "audit_log",
         ] {

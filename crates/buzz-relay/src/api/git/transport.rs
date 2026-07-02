@@ -210,6 +210,22 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok());
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
+        let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+            &parts.headers,
+            &state.config.corporate_identity,
+        );
+        if let Err(e) = crate::corporate_identity::enforce_corporate_identity(
+            state,
+            tenant.community(),
+            pubkey,
+            identity_jwt.as_deref(),
+            auth_tag,
+        )
+        .await
+        {
+            warn!(pubkey = %pubkey.to_hex(), error = %e, "git: corporate identity denied");
+            return Err((e.status_code(), e.public_message()).into_response());
+        }
         if crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),

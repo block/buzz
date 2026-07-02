@@ -32,6 +32,7 @@ use deadpool_redis;
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
 use crate::connection::ConnectionSubscriptions;
+use crate::corporate_identity::CorporateIdentityService;
 use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
@@ -498,6 +499,8 @@ pub struct AppState {
     pub pubsub: Arc<PubSubManager>,
     /// Authentication service.
     pub auth: Arc<AuthService>,
+    /// Optional corporate identity verifier.
+    pub corporate_identity: Option<Arc<CorporateIdentityService>>,
     /// Full-text search service.
     pub search: Arc<SearchService>,
     /// Registry of active client subscriptions.
@@ -649,6 +652,8 @@ impl AppState {
         let max_connections = config.max_connections;
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
+        let corporate_identity =
+            crate::corporate_identity::service_from_config(&config.corporate_identity);
 
         let audit_arc = audit.into().map(Arc::new);
         let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
@@ -718,6 +723,7 @@ impl AppState {
             audit: audit_arc,
             pubsub,
             auth: Arc::new(auth),
+            corporate_identity,
             search: search_arc,
             sub_registry: Arc::new(SubscriptionRegistry::new()),
             conn_manager: Arc::new(ConnectionManager::new()),
@@ -1356,6 +1362,7 @@ mod tests {
                 "test.local".to_string(),
             ),
             remote_addr: "127.0.0.1:1234".parse().unwrap(),
+            corporate_identity_jwt: None,
             auth_state: RwLock::new(AuthState::Failed),
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             send_tx: tx.clone(),

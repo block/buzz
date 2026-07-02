@@ -27,6 +27,8 @@ pub mod event;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Corporate identity binding persistence.
+pub mod identity_binding;
 /// Embedded database migrations.
 pub mod migration;
 /// Community moderation: reports, bans/timeouts, audit actions.
@@ -1843,6 +1845,36 @@ impl Db {
         limit: u32,
     ) -> Result<Vec<user::UserSearchProfile>> {
         user::search_users(&self.pool, community_id, query, limit).await
+    }
+
+    /// Create or validate a corporate identity binding.
+    pub async fn bind_or_validate_identity(
+        &self,
+        community_id: CommunityId,
+        uid: &str,
+        pubkey: &[u8],
+        display_name: Option<&str>,
+        source: &str,
+    ) -> Result<identity_binding::BindIdentityResult> {
+        identity_binding::bind_or_validate_identity(
+            &self.pool,
+            community_id,
+            uid,
+            pubkey,
+            display_name,
+            source,
+        )
+        .await
+    }
+
+    /// Return the active corporate identity binding for `pubkey`, if any.
+    pub async fn get_active_identity_binding_by_pubkey(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Option<identity_binding::IdentityBinding>> {
+        identity_binding::get_active_identity_binding_by_pubkey(&self.pool, community_id, pubkey)
+            .await
     }
 
     /// Atomically set agent owner — only if no owner is currently assigned.

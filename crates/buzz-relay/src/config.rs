@@ -13,6 +13,13 @@ use tracing::warn;
 /// NIP-44 encryption overhead.
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 512 * 1024;
 
+/// Default header carrying a corporate identity JWT.
+pub const DEFAULT_CORPORATE_IDENTITY_JWT_HEADER: &str = "x-forwarded-identity-token";
+/// Default JWT claim used as the stable corporate uid.
+pub const DEFAULT_CORPORATE_IDENTITY_UID_CLAIM: &str = "sub";
+/// Default JWT claim displayed as the verified corporate identity.
+pub const DEFAULT_CORPORATE_IDENTITY_DISPLAY_CLAIM: &str = "email";
+
 /// Errors that can occur while loading relay configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -44,6 +51,50 @@ pub struct JoinPolicyConfig {
     pub age_attestation_required: bool,
     /// Content-derived identifier binding receipts to the exact policy revision.
     pub version: String,
+}
+
+/// Source-neutral corporate identity configuration.
+///
+/// The relay does not care whether the JWT was injected by a trusted proxy or
+/// attached by a first-party client. It only validates the JWT and binds the
+/// configured uid claim to the authenticated Nostr pubkey after NIP proof.
+#[derive(Debug, Clone)]
+pub struct CorporateIdentityConfig {
+    /// Whether every authenticated request must satisfy corporate identity.
+    pub require: bool,
+    /// Header containing the corporate identity JWT.
+    pub jwt_header: String,
+    /// Allow agents without JWTs to pass the corporate identity gate through
+    /// NIP-OA when their owner pubkey already has an active identity binding.
+    pub allow_delegation: bool,
+    /// JWKS URI used to verify JWT signatures.
+    pub jwks_uri: String,
+    /// Expected JWT issuer.
+    pub issuer: String,
+    /// Expected JWT audience.
+    pub audience: String,
+    /// Claim name used as Buzz's stable corporate uid.
+    pub uid_claim: String,
+    /// Claim name used for verified display.
+    pub display_claim: String,
+    /// Optional claim name carrying a hex pubkey or `npub1...`.
+    pub npub_claim: Option<String>,
+}
+
+impl Default for CorporateIdentityConfig {
+    fn default() -> Self {
+        Self {
+            require: false,
+            jwt_header: DEFAULT_CORPORATE_IDENTITY_JWT_HEADER.to_string(),
+            allow_delegation: true,
+            jwks_uri: String::new(),
+            issuer: String::new(),
+            audience: String::new(),
+            uid_claim: DEFAULT_CORPORATE_IDENTITY_UID_CLAIM.to_string(),
+            display_claim: DEFAULT_CORPORATE_IDENTITY_DISPLAY_CLAIM.to_string(),
+            npub_claim: None,
+        }
+    }
 }
 
 /// Relay runtime configuration, loaded from environment variables.
@@ -190,6 +241,9 @@ pub struct Config {
     ///
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
+
+    /// Corporate identity verification and uid/pubkey binding.
+    pub corporate_identity: CorporateIdentityConfig,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -408,6 +462,77 @@ fn ensure_git_path(
     Ok(git_repo_path)
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn env_trimmed(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn load_corporate_identity_config() -> Result<CorporateIdentityConfig, ConfigError> {
+    let mut config = CorporateIdentityConfig::default();
+    config.require = env_bool("BUZZ_REQUIRE_CORPORATE_IDENTITY", config.require);
+    config.jwt_header = env_trimmed("BUZZ_CORPORATE_IDENTITY_JWT_HEADER")
+        .unwrap_or_else(|| config.jwt_header.clone())
+        .to_ascii_lowercase();
+    config.allow_delegation = env_bool(
+        "BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION",
+        config.allow_delegation,
+    );
+    config.jwks_uri =
+        env_trimmed("BUZZ_CORPORATE_IDENTITY_JWKS_URI").unwrap_or_else(|| config.jwks_uri.clone());
+    config.issuer =
+        env_trimmed("BUZZ_CORPORATE_IDENTITY_ISSUER").unwrap_or_else(|| config.issuer.clone());
+    config.audience =
+        env_trimmed("BUZZ_CORPORATE_IDENTITY_AUDIENCE").unwrap_or_else(|| config.audience.clone());
+    config.uid_claim = env_trimmed("BUZZ_CORPORATE_IDENTITY_UID_CLAIM")
+        .unwrap_or_else(|| config.uid_claim.clone());
+    config.display_claim = env_trimmed("BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM")
+        .unwrap_or_else(|| config.display_claim.clone());
+    config.npub_claim = env_trimmed("BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM");
+
+    if config.require {
+        let mut missing = Vec::new();
+        if config.jwt_header.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_JWT_HEADER");
+        }
+        if config.jwks_uri.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_JWKS_URI");
+        }
+        if config.issuer.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_ISSUER");
+        }
+        if config.audience.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_AUDIENCE");
+        }
+        if config.uid_claim.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_UID_CLAIM");
+        }
+        if config.display_claim.is_empty() {
+            missing.push("BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM");
+        }
+        if !missing.is_empty() {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_REQUIRE_CORPORATE_IDENTITY=true but required corporate identity config is missing: {}",
+                missing.join(", ")
+            )));
+        }
+    }
+
+    Ok(config)
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -534,6 +659,8 @@ impl Config {
         let allow_nip_oa_auth = std::env::var("BUZZ_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+
+        let corporate_identity = load_corporate_identity_config()?;
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -913,6 +1040,7 @@ impl Config {
             relay_operator_api_origin,
             relay_operator_pubkeys,
             allow_nip_oa_auth,
+            corporate_identity,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -949,9 +1077,26 @@ mod tests {
     // value set by `invalid_bind_addr_returns_error`, causing a flaky failure.
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn clear_corporate_identity_env() {
+        for name in [
+            "BUZZ_REQUIRE_CORPORATE_IDENTITY",
+            "BUZZ_CORPORATE_IDENTITY_JWT_HEADER",
+            "BUZZ_ALLOW_CORPORATE_IDENTITY_DELEGATION",
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "BUZZ_CORPORATE_IDENTITY_ISSUER",
+            "BUZZ_CORPORATE_IDENTITY_AUDIENCE",
+            "BUZZ_CORPORATE_IDENTITY_UID_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM",
+            "BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
     #[test]
     fn defaults_are_valid() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
         let config = Config::from_env().expect("default config");
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
@@ -997,6 +1142,59 @@ mod tests {
         assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
+        );
+        assert!(
+            !config.corporate_identity.require,
+            "corporate identity should default to disabled"
+        );
+        assert_eq!(
+            config.corporate_identity.jwt_header,
+            DEFAULT_CORPORATE_IDENTITY_JWT_HEADER
+        );
+        assert!(
+            config.corporate_identity.allow_delegation,
+            "corporate identity delegation should default to true for agents"
+        );
+    }
+
+    #[test]
+    fn corporate_identity_requires_complete_verifier_config() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_REQUIRE_CORPORATE_IDENTITY", "true");
+
+        let err = Config::from_env().expect_err("incomplete corporate identity config");
+        let msg = err.to_string();
+        clear_corporate_identity_env();
+
+        assert!(msg.contains("BUZZ_CORPORATE_IDENTITY_JWKS_URI"));
+        assert!(msg.contains("BUZZ_CORPORATE_IDENTITY_ISSUER"));
+        assert!(msg.contains("BUZZ_CORPORATE_IDENTITY_AUDIENCE"));
+    }
+
+    #[test]
+    fn corporate_identity_config_can_be_enabled() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_corporate_identity_env();
+        std::env::set_var("BUZZ_REQUIRE_CORPORATE_IDENTITY", "true");
+        std::env::set_var(
+            "BUZZ_CORPORATE_IDENTITY_JWKS_URI",
+            "https://idp.example/.well-known/jwks.json",
+        );
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_ISSUER", "https://idp.example");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_AUDIENCE", "buzz-relay");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_UID_CLAIM", "employee_id");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_DISPLAY_CLAIM", "email");
+        std::env::set_var("BUZZ_CORPORATE_IDENTITY_NPUB_CLAIM", "buzz_npub");
+
+        let config = Config::from_env().expect("corporate identity config");
+        clear_corporate_identity_env();
+
+        assert!(config.corporate_identity.require);
+        assert_eq!(config.corporate_identity.uid_claim, "employee_id");
+        assert_eq!(
+            config.corporate_identity.npub_claim.as_deref(),
+            Some("buzz_npub")
         );
     }
 

@@ -181,6 +181,40 @@ CREATE UNIQUE INDEX idx_users_nip05 ON users (community_id, lower(nip05_handle))
 CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
     WHERE okta_user_id IS NOT NULL;
 
+-- ── Corporate identity bindings ──────────────────────────────────────────────
+-- Conformance: corporate identity is community-scoped. A corporate uid is the
+-- stable product/user-management identity; a Nostr pubkey is the protocol
+-- credential currently bound to it. This table is intentionally a binding
+-- foundation, not a full grant/session lifecycle model. Revocation columns are
+-- reserved for follow-up admin/rotation flows, while PR1 only creates or
+-- validates active bindings during existing auth paths.
+
+CREATE TABLE identity_bindings (
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    uid             TEXT NOT NULL,
+    pubkey          BYTEA NOT NULL,
+    display_name    TEXT,
+    source          TEXT NOT NULL CHECK (source IN ('jwt_npub', 'db_binding')),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at      TIMESTAMPTZ,
+    revoked_by      BYTEA,
+    revoked_reason  TEXT,
+    CONSTRAINT chk_identity_bindings_uid_not_empty CHECK (length(uid) > 0),
+    CONSTRAINT chk_identity_bindings_pubkey_len CHECK (length(pubkey) = 32),
+    CONSTRAINT chk_identity_bindings_revoked_by_len CHECK (revoked_by IS NULL OR length(revoked_by) = 32)
+);
+
+CREATE UNIQUE INDEX idx_identity_bindings_active_uid
+    ON identity_bindings (community_id, uid)
+    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX idx_identity_bindings_active_pubkey
+    ON identity_bindings (community_id, pubkey)
+    WHERE revoked_at IS NULL;
+CREATE INDEX idx_identity_bindings_pubkey
+    ON identity_bindings (community_id, pubkey);
+
 -- ── Events (partitioned by month on created_at) ──────────────────────────────
 -- Conformance: "Channel-less global events and DMs". `community_id` leads the
 -- PK and every hot-path index. Partition stays BY RANGE (created_at) — the

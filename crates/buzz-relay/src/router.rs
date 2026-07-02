@@ -310,6 +310,10 @@ async fn nip11_or_ws_handler(
                 .into_response();
         }
     };
+    let corporate_identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+        &headers,
+        &state.config.corporate_identity,
+    );
 
     let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
@@ -324,7 +328,9 @@ async fn nip11_or_ws_handler(
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    handle_connection(socket, state, addr, tenant, corporate_identity_jwt)
+                })
                 .into_response()
         }
         Err(_) => {

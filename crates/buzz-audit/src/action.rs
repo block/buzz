@@ -28,6 +28,10 @@ pub enum AuditAction {
     RateLimitExceeded,
     /// A media file was uploaded via the Blossom endpoint.
     MediaUploaded,
+    /// A corporate identity binding was created.
+    CorporateIdentityBindingCreated,
+    /// A corporate identity binding attempt conflicted with an active binding.
+    CorporateIdentityBindingConflict,
 }
 
 impl AuditAction {
@@ -45,6 +49,8 @@ impl AuditAction {
             Self::AuthFailure => "auth_failure",
             Self::RateLimitExceeded => "rate_limit_exceeded",
             Self::MediaUploaded => "media_uploaded",
+            Self::CorporateIdentityBindingCreated => "corporate_identity_binding_created",
+            Self::CorporateIdentityBindingConflict => "corporate_identity_binding_conflict",
         }
     }
 
@@ -60,6 +66,8 @@ impl AuditAction {
         Self::AuthFailure,
         Self::RateLimitExceeded,
         Self::MediaUploaded,
+        Self::CorporateIdentityBindingCreated,
+        Self::CorporateIdentityBindingConflict,
     ];
 }
 

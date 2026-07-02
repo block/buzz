@@ -208,6 +208,27 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         // media). On open relays (membership disabled) any valid Blossom signer
         // may upload, matching the WS door's admission policy.
         let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+        let identity_jwt = crate::corporate_identity::identity_jwt_from_headers(
+            headers,
+            &state.config.corporate_identity,
+        );
+        crate::corporate_identity::enforce_corporate_identity(
+            state,
+            tenant.community(),
+            auth_event.pubkey,
+            identity_jwt.as_deref(),
+            auth_tag,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(pubkey = %auth_event.pubkey.to_hex(), error = %e, "media: corporate identity denied");
+            if e.status_code() == StatusCode::UNAUTHORIZED {
+                MediaError::Unauthorized
+            } else {
+                MediaError::RelayMembershipRequired
+            }
+        })?;
+
         crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),

@@ -183,6 +183,33 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             }
 
+            match crate::corporate_identity::enforce_corporate_identity(
+                &state,
+                conn.tenant.community(),
+                pubkey,
+                conn.corporate_identity_jwt.as_deref(),
+                auth_tag_json.as_deref(),
+            )
+            .await
+            {
+                Ok(crate::corporate_identity::CorporateIdentityDecision::Delegated {
+                    owner_pubkey,
+                }) => {
+                    auth_ctx.agent_owner_pubkey = Some(owner_pubkey);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(conn_id = %conn_id, pubkey = %pubkey.to_hex(), error = %e, "corporate identity denied");
+                    *conn.auth_state.write().await = AuthState::Failed;
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        &format!("restricted: {}", e.public_message()),
+                    ));
+                    return;
+                }
+            }
+
             // Pubkey allowlist gate — only for pubkey-only auth.
             if state.config.pubkey_allowlist_enabled
                 && auth_ctx.auth_method == buzz_auth::AuthMethod::Nip42

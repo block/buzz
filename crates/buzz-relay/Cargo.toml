@@ -37,6 +37,7 @@ tower-http = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+jsonwebtoken = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
