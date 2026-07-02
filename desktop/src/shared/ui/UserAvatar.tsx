@@ -6,9 +6,10 @@ import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 
-type UserAvatarSize = "xs" | "sm" | "md";
+type UserAvatarSize = "2xs" | "xs" | "sm" | "md";
 
 const sizeClasses: Record<UserAvatarSize, string> = {
+  "2xs": "h-4 w-4 text-3xs",
   xs: "h-5 w-5 text-3xs",
   sm: "h-6 w-6 text-2xs",
   md: "h-9 w-9 text-xs",
@@ -67,7 +68,10 @@ export function UserAvatar({
             : "bg-secondary text-secondary-foreground",
         )}
         data-testid={testId ? `${testId}-fallback` : undefined}
-        delayMs={200}
+        // The delay exists to avoid an initials flash while an image loads.
+        // With no image source there is nothing to wait for — render the
+        // initials immediately or the avatar paints as an empty box.
+        delayMs={src ? 200 : undefined}
       >
         {initials}
       </AvatarFallback>

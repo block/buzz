@@ -418,3 +418,27 @@ export function useUpdateProfileMutation() {
     },
   });
 }
+
+/**
+ * Second-level profile fetch for agent owners: agents declare a NIP-OA
+ * `ownerPubkey`, but the owner may be neither an author nor a member of the
+ * room, so the first users batch misses them. Their profile feeds the inline
+ * owner avatar that disambiguates same-named agents.
+ */
+export function useAgentOwnerProfilesQuery(
+  profiles: UsersBatchResponse["profiles"] | undefined,
+) {
+  const ownerPubkeys = React.useMemo(() => {
+    const pubkeys = new Set<string>();
+    for (const profile of Object.values(profiles ?? {})) {
+      if (profile.ownerPubkey) {
+        pubkeys.add(profile.ownerPubkey.toLowerCase());
+      }
+    }
+    return [...pubkeys];
+  }, [profiles]);
+
+  return useUsersBatchQuery(ownerPubkeys, {
+    enabled: ownerPubkeys.length > 0,
+  });
+}

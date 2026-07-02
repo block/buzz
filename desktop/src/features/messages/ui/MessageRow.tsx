@@ -4,7 +4,10 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  truncatePubkey,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -418,6 +421,40 @@ export const MessageRow = React.memo(
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
 
+    // "Username's {agentname}." — popover identity for same-named agents.
+    const agentOwnerLabel = message.agentOwner
+      ? `${
+          message.agentOwner.displayName?.trim() ||
+          truncatePubkey(message.agentOwner.pubkey)
+        }'s ${message.author}.`
+      : undefined;
+
+    // Inline owner avatar disambiguating agents whose display name collides
+    // with another agent in this room. h-4 matches the header's leading-4
+    // line box, so the row height stays untouched; self-center keeps it off
+    // the baseline (baseline-aligning a replaced box would grow the line).
+    const agentOwnerAvatarNode = message.agentOwner ? (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            className="flex shrink-0 self-center"
+            data-testid="message-agent-owner-avatar"
+          >
+            <UserAvatar
+              avatarUrl={message.agentOwner.avatarUrl}
+              displayName={
+                message.agentOwner.displayName?.trim() ||
+                truncatePubkey(message.agentOwner.pubkey)
+              }
+              size="2xs"
+              testId="message-agent-owner-avatar"
+            />
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>{agentOwnerLabel}</TooltipContent>
+      </Tooltip>
+    ) : null;
+
     const actionBarNode = (
       <div
         className={cn(
@@ -499,6 +536,7 @@ export const MessageRow = React.memo(
             pubkey={message.pubkey}
             role={profilePopoverRole}
             botIdenticonValue={message.author}
+            displayNameOverride={agentOwnerLabel}
           >
             <button
               className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
@@ -510,6 +548,7 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
+        {agentOwnerAvatarNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&
         message.personaDisplayName !== message.author ? (
@@ -785,6 +824,12 @@ export const MessageRow = React.memo(
     prev.message.tags === next.message.tags &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
+    // Field-wise: agentOwner is rebuilt each formatter pass, so reference
+    // equality would defeat the memo for disambiguated rows.
+    prev.message.agentOwner?.pubkey === next.message.agentOwner?.pubkey &&
+    prev.message.agentOwner?.displayName ===
+      next.message.agentOwner?.displayName &&
+    prev.message.agentOwner?.avatarUrl === next.message.agentOwner?.avatarUrl &&
     prev.agentPubkeys === next.agentPubkeys &&
     prev.collapseDepthGuideActions === next.collapseDepthGuideActions &&
     prev.collapseDescendantsLabel === next.collapseDescendantsLabel &&

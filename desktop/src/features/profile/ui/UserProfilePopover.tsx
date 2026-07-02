@@ -58,6 +58,11 @@ type UserProfilePopoverProps = {
   role?: string;
   /** Value used to generate the BotIdenticon glyph (typically the author name). */
   botIdenticonValue?: string;
+  /**
+   * Replaces the resolved display name in the popover header. Used to
+   * disambiguate same-named agents ("Username's {agentname}.").
+   */
+  displayNameOverride?: string;
 };
 
 const HOVER_OPEN_DELAY_MS = 500;
@@ -169,6 +174,7 @@ export function UserProfilePopover({
   enableProfilePanel = true,
   role,
   botIdenticonValue,
+  displayNameOverride,
 }: UserProfilePopoverProps) {
   const [open, setOpen] = React.useState(false);
   const [pendingAction, setPendingAction] = React.useState<
@@ -222,7 +228,8 @@ export function UserProfilePopover({
       relayAgentsQuery.isPending ||
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
-  const displayName = profile?.displayName ?? truncatePubkey(pubkey);
+  const displayName =
+    displayNameOverride ?? profile?.displayName ?? truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows

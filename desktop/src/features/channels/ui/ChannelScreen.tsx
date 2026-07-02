@@ -50,7 +50,10 @@ import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAnces
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
+import {
+  useAgentOwnerProfilesQuery,
+  useUsersBatchQuery,
+} from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
@@ -347,6 +350,11 @@ export function ChannelScreen({
       (messageProfilePubkeys.length > 0 &&
         (messageProfilesQuery.isPending ||
           messageProfilesQuery.isPlaceholderData)));
+  // Owners referenced by agent profiles (NIP-OA ownerPubkey) are a
+  // second-level fetch; see useAgentOwnerProfilesQuery.
+  const agentOwnerProfilesQuery = useAgentOwnerProfilesQuery(
+    messageProfilesQuery.data?.profiles,
+  );
   const {
     agentSessionCandidates,
     botTypingEntries,
@@ -387,7 +395,12 @@ export function ChannelScreen({
   const messageProfiles = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(
-        messageProfilesQuery.data?.profiles,
+        {
+          // Owner profiles first: an owner who also authored messages keeps
+          // their richer first-batch entry.
+          ...agentOwnerProfilesQuery.data?.profiles,
+          ...messageProfilesQuery.data?.profiles,
+        },
         currentProfile,
       ) ?? {};
     return mergeAgentNamesIntoProfiles(
@@ -397,6 +410,7 @@ export function ChannelScreen({
       currentPubkey,
     );
   }, [
+    agentOwnerProfilesQuery.data?.profiles,
     currentProfile,
     currentPubkey,
     managedAgents,

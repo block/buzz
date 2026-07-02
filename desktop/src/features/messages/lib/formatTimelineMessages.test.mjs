@@ -512,3 +512,155 @@ test("CHANNEL_TIMELINE_CONTENT_KINDS matches isTimelineContentEvent", () => {
     );
   }
 });
+
+// --- agentOwner: duplicate-agent-name disambiguation ---------------------
+
+const OWNER_PUBKEY =
+  "3333333333333333333333333333333333333333333333333333333333333333";
+const AGENT_PUBKEY_A =
+  "4444444444444444444444444444444444444444444444444444444444444444";
+const AGENT_PUBKEY_B =
+  "5555555555555555555555555555555555555555555555555555555555555555";
+
+function botMember(pubkey, displayName) {
+  return {
+    pubkey,
+    role: "bot",
+    isAgent: true,
+    joinedAt: "2026-01-01T00:00:00Z",
+    displayName,
+  };
+}
+
+function agentProfiles() {
+  return {
+    [AGENT_PUBKEY_A]: {
+      displayName: "Bart",
+      avatarUrl: null,
+      nip05Handle: null,
+      ownerPubkey: OWNER_PUBKEY,
+      isAgent: true,
+    },
+    [AGENT_PUBKEY_B]: {
+      displayName: "Bart",
+      avatarUrl: null,
+      nip05Handle: null,
+      ownerPubkey: PUBKEY_B,
+      isAgent: true,
+    },
+    [OWNER_PUBKEY]: {
+      displayName: "Taylor",
+      avatarUrl: "https://example.com/taylor.png",
+      nip05Handle: null,
+      ownerPubkey: null,
+    },
+  };
+}
+
+test("agentOwner set when two agents share a display name", () => {
+  const [message] = formatTimelineMessages(
+    [streamMessage({ pubkey: AGENT_PUBKEY_A })],
+    null,
+    undefined,
+    null,
+    agentProfiles(),
+    [botMember(AGENT_PUBKEY_A, "Bart"), botMember(AGENT_PUBKEY_B, "Bart")],
+  );
+  assert.deepEqual(message.agentOwner, {
+    pubkey: OWNER_PUBKEY,
+    displayName: "Taylor",
+    avatarUrl: "https://example.com/taylor.png",
+  });
+});
+
+test("agentOwner omitted for a uniquely named agent", () => {
+  const profiles = agentProfiles();
+  profiles[AGENT_PUBKEY_B] = {
+    ...profiles[AGENT_PUBKEY_B],
+    displayName: "Lisa",
+  };
+  const [message] = formatTimelineMessages(
+    [streamMessage({ pubkey: AGENT_PUBKEY_A })],
+    null,
+    undefined,
+    null,
+    profiles,
+    [botMember(AGENT_PUBKEY_A, "Bart"), botMember(AGENT_PUBKEY_B, "Lisa")],
+  );
+  assert.equal(message.agentOwner, undefined);
+});
+
+test("agentOwner omitted for human authors even on name collision", () => {
+  const profiles = agentProfiles();
+  profiles[PUBKEY_A] = {
+    displayName: "Bart",
+    avatarUrl: null,
+    nip05Handle: null,
+    ownerPubkey: null,
+  };
+  const [message] = formatTimelineMessages(
+    [streamMessage({ pubkey: PUBKEY_A })],
+    null,
+    undefined,
+    null,
+    profiles,
+    [
+      { ...botMember(PUBKEY_A, "Bart"), role: "member", isAgent: false },
+      botMember(AGENT_PUBKEY_A, "Bart"),
+      botMember(AGENT_PUBKEY_B, "Bart"),
+    ],
+  );
+  assert.equal(message.agentOwner, undefined);
+});
+
+test("agentOwner omitted when the agent has no ownerPubkey", () => {
+  const profiles = agentProfiles();
+  profiles[AGENT_PUBKEY_A] = {
+    ...profiles[AGENT_PUBKEY_A],
+    ownerPubkey: null,
+  };
+  const [message] = formatTimelineMessages(
+    [streamMessage({ pubkey: AGENT_PUBKEY_A })],
+    null,
+    undefined,
+    null,
+    profiles,
+    [botMember(AGENT_PUBKEY_A, "Bart"), botMember(AGENT_PUBKEY_B, "Bart")],
+  );
+  assert.equal(message.agentOwner, undefined);
+});
+
+test("agentOwner falls back to null profile fields for unknown owner", () => {
+  const profiles = agentProfiles();
+  delete profiles[OWNER_PUBKEY];
+  const [message] = formatTimelineMessages(
+    [streamMessage({ pubkey: AGENT_PUBKEY_A })],
+    null,
+    undefined,
+    null,
+    profiles,
+    [botMember(AGENT_PUBKEY_A, "Bart"), botMember(AGENT_PUBKEY_B, "Bart")],
+  );
+  assert.deepEqual(message.agentOwner, {
+    pubkey: OWNER_PUBKEY,
+    displayName: null,
+    avatarUrl: null,
+  });
+});
+
+test("agent name matching is case-insensitive", () => {
+  const profiles = agentProfiles();
+  profiles[AGENT_PUBKEY_B] = {
+    ...profiles[AGENT_PUBKEY_B],
+    displayName: "bart",
+  };
+  const [message] = formatTimelineMessages(
+    [streamMessage({ pubkey: AGENT_PUBKEY_A })],
+    null,
+    undefined,
+    null,
+    profiles,
+    [botMember(AGENT_PUBKEY_A, "Bart"), botMember(AGENT_PUBKEY_B, "bart")],
+  );
+  assert.equal(message.agentOwner?.pubkey, OWNER_PUBKEY);
+});

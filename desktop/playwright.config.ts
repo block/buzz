@@ -64,6 +64,7 @@ export default defineConfig({
         "**/timeline-no-shift.spec.ts",
         "**/human-edit-agent-content.spec.ts",
         "**/reaction-order.spec.ts",
+        "**/duplicate-agent-avatars.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

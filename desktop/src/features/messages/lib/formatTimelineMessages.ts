@@ -196,6 +196,30 @@ export function formatTimelineMessages(
       roleByPubkey.set(member.pubkey.toLowerCase(), member.role);
     }
   }
+  // Agent display names that appear more than once among this room's agent
+  // members. Messages from these agents get an inline owner avatar so humans
+  // can tell same-named clones apart.
+  const duplicateAgentNames = (() => {
+    const counts = new Map<string, number>();
+    for (const member of members ?? []) {
+      if (!member.isAgent && member.role !== "bot") {
+        continue;
+      }
+      const name = (
+        profiles?.[member.pubkey.toLowerCase()]?.displayName?.trim() ||
+        member.displayName?.trim() ||
+        ""
+      ).toLowerCase();
+      if (!name) {
+        continue;
+      }
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    return new Set(
+      [...counts].filter(([, count]) => count > 1).map(([name]) => name),
+    );
+  })();
+
   const deletedEventIds = new Set<string>();
   for (const event of events) {
     // Both kind:5 and kind:9005 are deletion markers; mirror the relay.
@@ -412,6 +436,26 @@ export function formatTimelineMessages(
     const thread = getThreadReference(event.tags);
     const edit = editsByTargetId.get(event.id);
     const role = roleByPubkey.get(authorPubkey.toLowerCase());
+    const authorProfile = profiles?.[authorPubkey.toLowerCase()];
+    const agentOwner = (() => {
+      const isAgentAuthor = role === "bot" || authorProfile?.isAgent === true;
+      if (
+        !isAgentAuthor ||
+        !duplicateAgentNames.has(author.trim().toLowerCase())
+      ) {
+        return undefined;
+      }
+      const ownerPubkey = authorProfile?.ownerPubkey;
+      if (!ownerPubkey) {
+        return undefined;
+      }
+      const ownerProfile = profiles?.[ownerPubkey.toLowerCase()];
+      return {
+        pubkey: ownerPubkey,
+        displayName: ownerProfile?.displayName ?? null,
+        avatarUrl: ownerProfile?.avatarUrl ?? null,
+      };
+    })();
     return {
       id: event.id,
       renderKey: event.localKey ?? event.id,
@@ -429,6 +473,7 @@ export function formatTimelineMessages(
         role === "bot"
           ? personaLookup?.get(authorPubkey.toLowerCase())
           : undefined,
+      agentOwner,
       respondTo:
         role === "bot"
           ? respondToLookup?.get(authorPubkey.toLowerCase())
